@@ -1,3 +1,5 @@
+> 博客地址：https://vaala.cat/posts/vibe-ai-gateway-oss/
+
 # AI Gateway
 
 分布式 AI API 网关，采用控制平面（master）+ 数据平面（agent）架构，提供 OpenAI 兼容的 `/v1/*` 转发能力，内置管理 API 与 Web UI，单二进制部署。
@@ -61,10 +63,10 @@
 
 ### 部署拓扑
 
-| 拓扑 | 优点 | 缺点 | 适用场景 |
-|------|------|------|----------|
-| 单节点（master + 内置 agent） | 部署最简；单容器即可运行 | 控制面与数据面共享资源；单点故障 | PoC、测试、小规模生产 |
-| 多节点（master + 外置 agent） | 数据面可水平扩展；故障域隔离 | 运维复杂度更高；需要注册/凭据管理 | 中大规模生产、多地域 |
+| 拓扑                          | 优点                         | 缺点                              | 适用场景              |
+| ----------------------------- | ---------------------------- | --------------------------------- | --------------------- |
+| 单节点（master + 内置 agent） | 部署最简；单容器即可运行     | 控制面与数据面共享资源；单点故障  | PoC、测试、小规模生产 |
+| 多节点（master + 外置 agent） | 数据面可水平扩展；故障域隔离 | 运维复杂度更高；需要注册/凭据管理 | 中大规模生产、多地域  |
 
 ## 快速开始
 
@@ -137,7 +139,7 @@ cd web && pnpm install && pnpm dev
 
 站在以下工作的肩膀上：
 
-- **[new-api](https://github.com/QuantumNous/new-api)**（作者 [@QuantumNous](https://github.com/QuantumNous)）— 适配器、50+ 上游 provider 常量、模型拉取协议以及 token 计数工具均通过 `github.com/QuantumNous/new-api` 复用而来。没有这份前期工作，"开箱即用支持 50+ provider" 是不可能的。向 new-api 的维护者与所有贡献者致以诚挚的感谢。
+- **[new-api](https://github.com/QuantumNous/new-api)**（作者 [@QuantumNous](https://github.com/QuantumNous)）— Legacy适配器、50+ 上游 provider 常量、模型拉取协议以及 token 计数工具均通过 `github.com/QuantumNous/new-api` 复用而来。没有这份前期工作，"开箱即用支持 50+ provider" 是不可能的。向 new-api 的维护者与所有贡献者致以诚挚的感谢。
 
 ## 许可证
 

@@ -1,3 +1,5 @@
+> My Blog: https://vaala.cat/posts/vibe-ai-gateway-oss/
+
 # AI Gateway
 
 A distributed AI API gateway with a control-plane/data-plane architecture. Provides OpenAI-compatible `/v1/*` relay endpoints, built-in management APIs, Web UI, and single-binary deployment.
@@ -61,9 +63,9 @@ A distributed AI API gateway with a control-plane/data-plane architecture. Provi
 
 ### Deployment Topologies
 
-| Topology | Pros | Cons | Use Case |
-|----------|------|------|----------|
-| Single node (master + embedded agent) | Simplest setup; one container | Shared resources; single point of failure | PoC, testing, small production |
+| Topology                              | Pros                                                  | Cons                                        | Use Case                              |
+| ------------------------------------- | ----------------------------------------------------- | ------------------------------------------- | ------------------------------------- |
+| Single node (master + embedded agent) | Simplest setup; one container                         | Shared resources; single point of failure   | PoC, testing, small production        |
 | Multi-node (master + external agents) | Horizontal scaling; fault isolation; geo-distribution | Higher ops complexity; enrollment lifecycle | Medium/large production, multi-region |
 
 ## Quick Start
@@ -133,7 +135,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR
 
 ## Acknowledgments
 
-This project stands on the shoulders of:
+This project supports native code (purely self-developed, supporting chat, response, and messages protocols), while other protocols are supported by the new-api channel.
+
+It builds upon the work of the following:
 
 - **[new-api](https://github.com/QuantumNous/new-api)** by [@QuantumNous](https://github.com/QuantumNous) — the legacy channel adaptor, 50+ upstream provider constants, model-fetch protocols, and token-counting utilities are reused via `github.com/QuantumNous/new-api`. Without this prior work, out-of-the-box support for 50+ providers would not be feasible. Sincere thanks to the new-api maintainers and contributors.
 
