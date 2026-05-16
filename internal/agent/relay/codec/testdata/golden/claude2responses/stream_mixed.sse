@@ -1,0 +1,39 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fb02bd4ae552dd5435d708fa","object":"","status":"in_progress","output":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_fb02bd4ae552dd5435d708fa","object":"","status":"in_progress","output":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"message","id":"item_fb02bd4ae552dd5435d708fa","status":"in_progress","role":"assistant"},"output_index":0}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"output_text"},"output_index":0,"content_index":0,"item_id":"item_fb02bd4ae552dd5435d708fa"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":4,"delta":{"type":"text_delta","text":"Let me check."},"output_index":0,"content_index":0,"item_id":"item_fb02bd4ae552dd5435d708fa"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":5,"item":{"type":"function_call","id":"fc_toolu_01","status":"in_progress","call_id":"toolu_01","name":"get_weather"},"output_index":1}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":6,"delta":{"type":"text_delta","text":"{\"city\":\"Tokyo\"}"},"output_index":1,"item_id":"fc_toolu_01"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":7,"output_index":1,"item_id":"fc_toolu_01","arguments":"{\"city\":\"Tokyo\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":8,"item":{"type":"function_call","id":"fc_toolu_01","status":"completed","call_id":"toolu_01","name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"},"output_index":1}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","sequence_number":9,"delta":{"type":"text_done","text":"Let me check."},"output_index":0,"content_index":0,"item_id":"item_fb02bd4ae552dd5435d708fa"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":10,"part":{"type":"output_text","text":"Let me check."},"output_index":0,"content_index":0,"item_id":"item_fb02bd4ae552dd5435d708fa"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":11,"item":{"type":"message","id":"item_fb02bd4ae552dd5435d708fa","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Let me check."}]},"output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":12,"response":{"id":"resp_fb02bd4ae552dd5435d708fa","object":"","status":"completed","output":null,"usage":{"input_tokens":30,"output_tokens":25,"total_tokens":55}}}
+

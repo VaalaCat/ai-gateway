@@ -1,0 +1,7 @@
+{
+  "model": "gpt-5",
+  "messages": [{"role":"user","content":"Hello"}],
+  "tools": [
+    {"type":"function","function":{"name":"get_weather","description":"get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}}}}}
+  ]
+}

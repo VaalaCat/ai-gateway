@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-20250514","max_tokens":1024,"system":[{"type":"text","text":"You are a helpful assistant."},{"type":"text","text":"Always respond in JSON format."}],"messages":[{"role":"user","content":"Hello"}]}

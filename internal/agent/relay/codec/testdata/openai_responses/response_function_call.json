@@ -1,0 +1,1 @@
+{"id":"resp_abc456","object":"response","model":"gpt-4o","output":[{"type":"function_call","id":"fc_call_abc","call_id":"call_abc","name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"}],"usage":{"input_tokens":50,"output_tokens":20,"total_tokens":70}}

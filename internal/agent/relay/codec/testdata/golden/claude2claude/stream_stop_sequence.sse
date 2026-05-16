@@ -1,0 +1,18 @@
+event: message_start
+data: {"message":{"content":[],"id":"msg_1a0db5a41742095191b5d464","model":"","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
+
+event: content_block_start
+data: {"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"}
+
+event: content_block_delta
+data: {"delta":{"text":"Some text before stop","type":"text_delta"},"index":0,"type":"content_block_delta"}
+
+event: content_block_stop
+data: {"index":0,"type":"content_block_stop"}
+
+event: message_delta
+data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"input_tokens":10,"output_tokens":8}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

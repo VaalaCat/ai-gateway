@@ -1,0 +1,18 @@
+{
+  "model": "deepseek-v4-pro",
+  "instructions": "You are a coding agent.",
+  "stream": true,
+  "input": [
+    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "write a readme"}]},
+    {"type": "function_call", "call_id": "call_abc", "name": "exec_command", "arguments": "{\"cmd\":\"cat README.md\"}"},
+    {"type": "function_call_output", "call_id": "call_abc", "output": "FILE_NOT_FOUND"},
+    {"type": "function_call", "call_id": "call_def", "name": "apply_patch", "arguments": "{\"command\":\"...\"}"},
+    {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "README is missing; I'll write one now."}]},
+    {"type": "function_call_output", "call_id": "call_def", "output": "unsupported call: apply_patch"}
+  ],
+  "tools": [
+    {"type": "function", "name": "exec_command", "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}},
+    {"type": "function", "name": "apply_patch", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}
+  ],
+  "tool_choice": "auto"
+}

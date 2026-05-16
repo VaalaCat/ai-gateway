@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-20250514","max_tokens":16000,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"Solve this step by step: What is 2^10?"},{"role":"assistant","content":[{"type":"thinking","thinking":"Let me calculate 2^10 step by step..."},{"type":"text","text":"2^10 = 1024"}]},{"role":"user","content":"Now what is 2^20?"}]}

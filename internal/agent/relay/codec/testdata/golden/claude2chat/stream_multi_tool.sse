@@ -1,0 +1,22 @@
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"content":"I'll check both."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_01AAA","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"location\": \"SF\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"toolu_01BBB","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"name":"","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"name":"","arguments":"{\"location\": \"NYC\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-0a32d7ca45acd72086b52543","object":"chat.completion.chunk","created":1777094726,"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":80,"total_tokens":130}}
+
+data: [DONE]
+

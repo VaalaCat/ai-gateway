@@ -1,0 +1,8 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_fail","object":"response","created_at":1700000000,"status":"in_progress","model":"gpt-4o","output":[],"usage":null},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_fail","object":"response","created_at":1700000000,"status":"in_progress","output":[]},"sequence_number":1}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_fail","object":"response","created_at":1700000000,"status":"failed","error":{"type":"server_error","message":"Internal server error"},"output":[],"usage":null},"sequence_number":2}

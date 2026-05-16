@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk","created":1700000000,"model":"o4-mini","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk","created":1700000000,"model":"o4-mini","choices":[{"index":0,"delta":{"content":"Why did the chicken cross the road?"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk","created":1700000000,"model":"o4-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk","created":1700000000,"model":"o4-mini","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":148,"total_tokens":158}}
+
+data: [DONE]
+

@@ -1,0 +1,9 @@
+{
+  "model": "claude-sonnet-4-20250514",
+  "max_tokens": 64,
+  "messages": [{"role":"user","content":"Hello"}],
+  "tools": [
+    {"name":"get_weather","description":"get weather","input_schema":{"type":"object","properties":{"location":{"type":"string"}}}},
+    {"type":"web_search_20250305","name":"web_search","max_uses":3}
+  ]
+}

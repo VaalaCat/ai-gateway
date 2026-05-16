@@ -1,0 +1,1 @@
+{"model":"claude-sonnet-4-20250514","max_tokens":1024,"messages":[{"role":"user","content":"What is the weather in Tokyo?"}],"tools":[{"name":"get_weather","description":"Get current weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],"tool_choice":{"type":"auto"}}

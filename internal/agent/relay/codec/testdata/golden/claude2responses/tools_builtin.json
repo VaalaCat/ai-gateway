@@ -1,0 +1,3 @@
+[
+  {"type":"function","name":"get_weather","description":"get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}}}}
+]

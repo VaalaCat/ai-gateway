@@ -1,0 +1,30 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_70a1f4fccd303c2b41853dae","object":"","status":"in_progress","output":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_70a1f4fccd303c2b41853dae","object":"","status":"in_progress","output":null}}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","sequence_number":2,"delta":{"type":"text_delta","text":"Let me analyze this step by step."}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":3,"item":{"type":"message","id":"item_70a1f4fccd303c2b41853dae","status":"in_progress","role":"assistant"},"output_index":0}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":4,"part":{"type":"output_text"},"output_index":0,"content_index":0,"item_id":"item_70a1f4fccd303c2b41853dae"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":5,"delta":{"type":"text_delta","text":"The answer is 42."},"output_index":0,"content_index":0,"item_id":"item_70a1f4fccd303c2b41853dae"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","sequence_number":6,"delta":{"type":"text_done","text":"The answer is 42."},"output_index":0,"content_index":0,"item_id":"item_70a1f4fccd303c2b41853dae"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":7,"part":{"type":"output_text","text":"The answer is 42."},"output_index":0,"content_index":0,"item_id":"item_70a1f4fccd303c2b41853dae"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":8,"item":{"type":"message","id":"item_70a1f4fccd303c2b41853dae","status":"completed","role":"assistant","content":[{"type":"output_text","text":"The answer is 42."}]},"output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":9,"response":{"id":"resp_70a1f4fccd303c2b41853dae","object":"","status":"completed","output":null,"usage":{"input_tokens":20,"output_tokens":30,"total_tokens":50}}}
+

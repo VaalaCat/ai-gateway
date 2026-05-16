@@ -1,0 +1,24 @@
+{
+  "model": "gpt-4o",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "Hello"}
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "echo",
+      "description": "Echo input",
+      "parameters": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"]
+      }
+    }
+  ]
+}

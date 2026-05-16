@@ -1,0 +1,11 @@
+services:
+  ai-gateway-agent:
+    image: ${AI_GATEWAY_IMAGE:-ai-gateway:latest}
+    container_name: ai-gateway-agent
+    restart: unless-stopped
+    command: ["agent", "--config", "/app/agent.yaml"]
+    depends_on:
+      - ai-gateway
+    volumes:
+      - ./deploy/agent.yaml:/app/agent.yaml:ro
+      - ./agent-data:/data

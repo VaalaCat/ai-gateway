@@ -1,0 +1,4 @@
+[
+  {"type":"function","name":"get_weather","description":"get weather","parameters":{"type":"object","properties":{"location":{"type":"string"}}}},
+  {"type":"web_search","external_web_access":false}
+]

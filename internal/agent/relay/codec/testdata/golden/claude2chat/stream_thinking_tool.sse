@@ -1,0 +1,18 @@
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"reasoning_content":"I need to call the weather API."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"content":"Let me check the weather."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_01CCC","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"{\"location\": \"Paris\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-6c6938d8287d39990382f953","object":"chat.completion.chunk","created":1777094726,"choices":[],"usage":{"prompt_tokens":30,"completion_tokens":60,"total_tokens":90}}
+
+data: [DONE]
+

@@ -1,0 +1,32 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_03","object":"response","created_at":1700000000,"status":"in_progress","model":"gpt-4o","output":[],"usage":null},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_03","object":"response","created_at":1700000000,"status":"in_progress","output":[]},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_01","type":"function_call","status":"in_progress","name":"get_weather","call_id":"call_abc","arguments":""},"sequence_number":2}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_01","output_index":0,"delta":"{\"location\": \"SF\"}","sequence_number":3}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"fc_01","output_index":0,"arguments":"{\"location\": \"SF\"}","name":"get_weather","sequence_number":4}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_01","type":"function_call","status":"completed","name":"get_weather","arguments":"{\"location\": \"SF\"}","call_id":"call_abc"},"sequence_number":5}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_02","type":"function_call","status":"in_progress","name":"get_weather","call_id":"call_def","arguments":""},"sequence_number":6}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_02","output_index":1,"delta":"{\"location\": \"NYC\"}","sequence_number":7}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"fc_02","output_index":1,"arguments":"{\"location\": \"NYC\"}","name":"get_weather","sequence_number":8}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_02","type":"function_call","status":"completed","name":"get_weather","arguments":"{\"location\": \"NYC\"}","call_id":"call_def"},"sequence_number":9}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_03","object":"response","created_at":1700000000,"status":"completed","model":"gpt-4o","output":[{"id":"fc_01","type":"function_call","status":"completed","name":"get_weather","arguments":"{\"location\": \"SF\"}","call_id":"call_abc"},{"id":"fc_02","type":"function_call","status":"completed","name":"get_weather","arguments":"{\"location\": \"NYC\"}","call_id":"call_def"}],"usage":{"input_tokens":30,"input_tokens_details":{"cached_tokens":0},"output_tokens":25,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":55}},"sequence_number":10}

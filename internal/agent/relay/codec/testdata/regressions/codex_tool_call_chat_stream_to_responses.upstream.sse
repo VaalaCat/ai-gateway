@@ -1,0 +1,24 @@
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","content":null}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"The user is asking"}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":" about system load."}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_00_N004LkQOxnskHCBWvmvpsp3E","type":"function","function":{"name":"exec_command","arguments":""}}]}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\""}}]}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"cmd"}}]}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\":\""}}]}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"upt"}}]}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ime"}}]}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]}}]}
+
+data: {"id":"chatcmpl-codex001","object":"chat.completion.chunk","created":1777087450,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":118,"completion_tokens":111,"total_tokens":229}}
+
+data: [DONE]
+

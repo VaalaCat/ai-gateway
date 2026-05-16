@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-7a2f10a6e4638df08a3b4e74","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-7a2f10a6e4638df08a3b4e74","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello! How can I help?"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-7a2f10a6e4638df08a3b4e74","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-7a2f10a6e4638df08a3b4e74","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-7a2f10a6e4638df08a3b4e74","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30,"prompt_tokens_details":{"cached_tokens":5}}}
+
+data: [DONE]
+

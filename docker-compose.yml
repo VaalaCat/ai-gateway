@@ -1,0 +1,11 @@
+services:
+  ai-gateway:
+    image: ${AI_GATEWAY_IMAGE:-ai-gateway:latest}
+    container_name: ai-gateway
+    restart: unless-stopped
+    command: ["master", "--config", "/app/config.yaml"]
+    ports:
+      - "8140:8140"
+    volumes:
+      - ./deploy/config.yaml:/app/config.yaml:ro
+      - ./data:/data

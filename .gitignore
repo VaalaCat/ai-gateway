@@ -1,0 +1,20 @@
+# Runtime data
+data/
+config.yaml
+
+# Build artifacts
+ai-gateway
+web/dist/
+web/node_modules/
+
+# Temp
+tmp/
+
+# IDE / tooling
+.claude/
+.superpowers/
+.vscode/
+
+# Internal docs (not published)
+docs/plans/
+docs/refs/

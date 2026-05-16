@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        run: pnpm install
+        working-directory: web
+
+      - name: Build frontend
+        run: pnpm build
+        working-directory: web
+
+      - name: Run tests
+        run: go test ./... -count=1 -timeout=120s
+        env:
+          CGO_ENABLED: '0'

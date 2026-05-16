@@ -1,0 +1,9 @@
+event: message_start
+data: {"message":{"content":[],"id":"msg_dd7685f6f3fa1203f79061b9","model":"","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
+
+event: message_delta
+data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"input_tokens":10,"output_tokens":0}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

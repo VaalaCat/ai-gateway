@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-048c746fd3872ad3e6f49e5c","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-048c746fd3872ad3e6f49e5c","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-048c746fd3872ad3e6f49e5c","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"refusal":"I cannot assist with that."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-048c746fd3872ad3e6f49e5c","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

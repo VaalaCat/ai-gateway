@@ -1,0 +1,12 @@
+builds:
+  - id: ai-gateway
+    main: ./cmd
+    env:
+      - GOCACHE=/tmp/ko-gocache
+    ldflags:
+      - -s
+      - -w
+
+defaultPlatforms:
+  - linux/arm64
+  - linux/amd64

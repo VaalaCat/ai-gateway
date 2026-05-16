@@ -1,0 +1,77 @@
+{
+  "model": "gpt-5.3-codex",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "<system-reminder>\nSkills available.\n</system-reminder>"
+        },
+        {
+          "type": "text",
+          "text": "<system-reminder>\nToday is 2026-04-14.\n</system-reminder>"
+        },
+        {
+          "type": "text",
+          "text": "当前系统，压力如何",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    }
+  ],
+  "system": [
+    {
+      "type": "text",
+      "text": "x-anthropic-billing-header: test"
+    },
+    {
+      "type": "text",
+      "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    },
+    {
+      "type": "text",
+      "text": "You are an interactive agent that helps users with software engineering tasks.",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "Bash",
+      "description": "Execute bash commands",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {"type": "string"}
+        },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "Read",
+      "description": "Read a file",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {"type": "string"}
+        },
+        "required": ["file_path"]
+      }
+    }
+  ],
+  "metadata": {
+    "user_id": "test-user"
+  },
+  "max_tokens": 32000,
+  "thinking": {
+    "type": "adaptive"
+  },
+  "stream": true
+}

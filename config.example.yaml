@@ -1,0 +1,32 @@
+log_level: info
+
+master:
+  listen: ":8140"
+  db_path: "./data/master.db"
+  jwt_secret: "replace-me"
+  enrollment_token_ttl: 3600
+  admin_user: "admin"
+  admin_password: "change-this-password"
+  # 允许通过浏览器进入 OAuth 流程的对外 origin 列表（http(s)://host[:port]）。
+  # 请求的 Host（含 X-Forwarded-Host）必须命中其中一条；命中条作为 redirect_uri origin。
+  # 列表为空时回退到从 listen 推断 origin，仅适合本地开发。
+  # 每条 origin 都需要在对应 IdP 端注册为允许的 redirect_uri：
+  # ${origin}/api/oauth/<provider>/callback
+  public_base_urls:
+    - "http://localhost:8140"
+
+agent:
+  listen: ":8139"
+  master_url: "http://127.0.0.1:8140"
+  enrollment_token: ""
+  credentials_file: "./data/agent_credentials.json"
+
+# Optional advanced tuning. Omit this entire block unless you need to tune
+# runtime behavior explicitly.
+# runtime:
+#   relay_timeout: 300
+#   full_sync_interval: 300
+#   report_buffer_size: 1000
+#   report_flush_interval: 5
+#   heartbeat_interval: 30
+#   retry_max: 5

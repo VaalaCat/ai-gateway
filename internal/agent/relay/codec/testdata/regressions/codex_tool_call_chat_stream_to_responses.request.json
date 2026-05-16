@@ -1,0 +1,32 @@
+{
+  "model": "deepseek-v4-pro",
+  "instructions": "You are Codex, a coding agent. [TRUNCATED for fixture brevity — original was ~50KB Codex CLI system prompt]",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "What is the current system load?"}
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a shell command and return output.",
+      "strict": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cmd": {"type": "string", "description": "Shell command to execute."}
+        },
+        "required": ["cmd"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": false,
+  "stream": true
+}

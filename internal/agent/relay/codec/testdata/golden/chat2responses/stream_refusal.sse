@@ -1,0 +1,9 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_578a789dac7f36ccda03cd41","object":"","status":"in_progress","output":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_578a789dac7f36ccda03cd41","object":"","status":"in_progress","output":null}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_578a789dac7f36ccda03cd41","object":"","model":"gpt-4o","status":"completed","output":null}}
+

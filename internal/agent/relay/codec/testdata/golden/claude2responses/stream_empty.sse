@@ -1,0 +1,9 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_d9d9a44691b955ada6e0e334","object":"","status":"in_progress","output":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_d9d9a44691b955ada6e0e334","object":"","status":"in_progress","output":null}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_d9d9a44691b955ada6e0e334","object":"","status":"completed","output":null,"usage":{"input_tokens":10,"output_tokens":0,"total_tokens":10}}}
+

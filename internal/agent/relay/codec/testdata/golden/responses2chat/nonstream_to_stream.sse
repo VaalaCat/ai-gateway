@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-c5cc08d29f8bbcfbe88c8110","object":"chat.completion.chunk","created":1777094726,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-c5cc08d29f8bbcfbe88c8110","object":"chat.completion.chunk","created":1777094726,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello! How can I help?"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-c5cc08d29f8bbcfbe88c8110","object":"chat.completion.chunk","created":1777094726,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-c5cc08d29f8bbcfbe88c8110","object":"chat.completion.chunk","created":1777094726,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}
+
+data: [DONE]
+

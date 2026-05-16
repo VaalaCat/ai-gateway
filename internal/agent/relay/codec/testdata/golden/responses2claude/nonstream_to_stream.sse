@@ -1,0 +1,18 @@
+event: message_start
+data: {"message":{"content":[],"id":"msg_b1ed02f2f2bce4b9a7f44866","model":"gpt-4o","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
+
+event: content_block_start
+data: {"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"}
+
+event: content_block_delta
+data: {"delta":{"text":"Hello! How can I help?","type":"text_delta"},"index":0,"type":"content_block_delta"}
+
+event: content_block_stop
+data: {"index":0,"type":"content_block_stop"}
+
+event: message_delta
+data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"input_tokens":20,"output_tokens":10}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

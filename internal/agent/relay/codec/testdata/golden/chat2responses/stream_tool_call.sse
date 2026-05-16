@@ -1,0 +1,24 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_fab9328a55f7b7f9e0f33e6c","object":"","status":"in_progress","output":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_fab9328a55f7b7f9e0f33e6c","object":"","status":"in_progress","output":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"function_call","id":"fc_call_abc","status":"in_progress","call_id":"call_abc","name":"get_weather"},"output_index":0}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"delta":{"type":"text_delta","text":"{\"city\":"},"output_index":0,"item_id":"fc_call_abc"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":4,"delta":{"type":"text_delta","text":"\"Tokyo\"}"},"output_index":0,"item_id":"fc_call_abc"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":5,"output_index":0,"item_id":"fc_call_abc","arguments":"{\"city\":\"Tokyo\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":6,"item":{"type":"function_call","id":"fc_call_abc","status":"completed","call_id":"call_abc","name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"},"output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp_fab9328a55f7b7f9e0f33e6c","object":"","model":"gpt-4o","status":"completed","output":null,"usage":{"input_tokens":50,"output_tokens":20,"total_tokens":70}}}
+

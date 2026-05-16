@@ -1,0 +1,33 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_cc19a037eafab177ccbfdd8b","object":"","status":"in_progress","output":null}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_cc19a037eafab177ccbfdd8b","object":"","status":"in_progress","output":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"function_call","id":"fc_call_abc","status":"in_progress","call_id":"call_abc","name":"get_weather"},"output_index":0}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"delta":{"type":"text_delta","text":"{\"city\":\"Tokyo\"}"},"output_index":0,"item_id":"fc_call_abc"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":4,"item":{"type":"function_call","id":"fc_call_def","status":"in_progress","call_id":"call_def","name":"get_weather"},"output_index":1}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":5,"delta":{"type":"text_delta","text":"{\"city\":\"London\"}"},"output_index":1,"item_id":"fc_call_def"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":6,"output_index":0,"item_id":"fc_call_abc","arguments":"{\"city\":\"Tokyo\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":7,"item":{"type":"function_call","id":"fc_call_abc","status":"completed","call_id":"call_abc","name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"},"output_index":0}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":8,"output_index":1,"item_id":"fc_call_def","arguments":"{\"city\":\"London\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":9,"item":{"type":"function_call","id":"fc_call_def","status":"completed","call_id":"call_def","name":"get_weather","arguments":"{\"city\":\"London\"}"},"output_index":1}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":10,"response":{"id":"resp_cc19a037eafab177ccbfdd8b","object":"","model":"gpt-4o","status":"completed","output":null,"usage":{"input_tokens":30,"output_tokens":20,"total_tokens":50}}}
+

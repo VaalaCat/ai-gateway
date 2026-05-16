@@ -1,0 +1,32 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_0ca77e5143f1","object":"response","created_at":1776143751,"status":"in_progress","model":"gpt-5.3-codex","output":[],"usage":null},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_0ca77e5143f1","object":"response","created_at":1776143751,"status":"in_progress","output":[]},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"msg_0ca77e51","type":"message","status":"in_progress","content":[],"role":"assistant"},"output_index":0,"sequence_number":2}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","content_index":0,"item_id":"msg_0ca77e51","output_index":0,"part":{"type":"output_text","annotations":[],"text":""},"sequence_number":3}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":"系统运行","item_id":"msg_0ca77e51","output_index":0,"sequence_number":4}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":"正常，","item_id":"msg_0ca77e51","output_index":0,"sequence_number":5}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":"无异常。","item_id":"msg_0ca77e51","output_index":0,"sequence_number":6}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_0ca77e51","output_index":0,"text":"系统运行正常，无异常。","sequence_number":7}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","content_index":0,"item_id":"msg_0ca77e51","output_index":0,"part":{"type":"output_text","annotations":[],"text":"系统运行正常，无异常。"},"sequence_number":8}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_0ca77e51","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"text":"系统运行正常，无异常。"}],"role":"assistant"},"sequence_number":9}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_0ca77e5143f1","object":"response","created_at":1776143751,"status":"completed","model":"gpt-5.3-codex","output":[{"id":"msg_0ca77e51","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"text":"系统运行正常，无异常。"}],"role":"assistant"}],"usage":{"input_tokens":4391,"input_tokens_details":{"cached_tokens":10752},"output_tokens":107,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":4498}},"sequence_number":10}

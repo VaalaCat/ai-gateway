@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-ce4560ead178dbe3dc9b4e8b","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ce4560ead178dbe3dc9b4e8b","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"reasoning_content":"Let me analyze this step by step."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ce4560ead178dbe3dc9b4e8b","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{"content":"The answer is 42."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ce4560ead178dbe3dc9b4e8b","object":"chat.completion.chunk","created":1777094726,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-ce4560ead178dbe3dc9b4e8b","object":"chat.completion.chunk","created":1777094726,"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":30,"total_tokens":50}}
+
+data: [DONE]
+

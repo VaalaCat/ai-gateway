@@ -1,0 +1,1 @@
+{"id":"resp_abc123","object":"response","model":"gpt-4o","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help?"}]}],"usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30}}

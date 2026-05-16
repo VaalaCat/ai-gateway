@@ -1,0 +1,20 @@
+{
+  "model": "deepseek-r1",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "echo",
+        "description": "Echo input",
+        "parameters": {
+          "type": "object",
+          "properties": {"text": {"type": "string"}},
+          "required": ["text"]
+        }
+      }
+    }
+  ]
+}
