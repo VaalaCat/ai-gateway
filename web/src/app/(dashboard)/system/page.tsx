@@ -78,12 +78,26 @@ export default function SystemMaintenancePage() {
   const displayProxyUrl = proxyUrlInput ?? currentProxyUrl;
   const proxyHasChanges = displayProxyUrl !== currentProxyUrl;
 
+  const currentRegistrationEnabled =
+    settings?.settings?.registration_enabled === "true";
+  const [registrationInput, setRegistrationInput] = useState<boolean | null>(
+    null,
+  );
+  const displayRegistrationEnabled =
+    registrationInput ?? currentRegistrationEnabled;
+  const registrationHasChanges =
+    displayRegistrationEnabled !== currentRegistrationEnabled;
+
   const currentAutoCreate = settings?.settings?.oauth_auto_create === "true";
   const [autoCreateInput, setAutoCreateInput] = useState<boolean | null>(null);
   const displayAutoCreate = autoCreateInput ?? currentAutoCreate;
   const autoCreateHasChanges = displayAutoCreate !== currentAutoCreate;
 
-  const hasChanges = traceHasChanges || proxyHasChanges || autoCreateHasChanges;
+  const hasChanges =
+    traceHasChanges ||
+    proxyHasChanges ||
+    registrationHasChanges ||
+    autoCreateHasChanges;
 
   const handleSaveSettings = () => {
     const updates: Record<string, string> = {};
@@ -92,6 +106,9 @@ export default function SystemMaintenancePage() {
     }
     if (proxyHasChanges) {
       updates.proxy_url = displayProxyUrl;
+    }
+    if (registrationHasChanges) {
+      updates.registration_enabled = String(displayRegistrationEnabled);
     }
     if (autoCreateHasChanges) {
       updates.oauth_auto_create = String(displayAutoCreate);
@@ -105,6 +122,7 @@ export default function SystemMaintenancePage() {
           toast.success(t("settingsSaved"));
           setTraceMaxBodyKB(null);
           setProxyUrlInput(null);
+          setRegistrationInput(null);
           setAutoCreateInput(null);
         },
         onError: () => {
@@ -271,6 +289,18 @@ export default function SystemMaintenancePage() {
               value={displayProxyUrl}
               onChange={(e) => setProxyUrlInput(e.target.value)}
               className="max-w-md"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <Label>{t("registrationEnabled")}</Label>
+              <p className="text-sm text-muted-foreground">
+                {t("registrationEnabledDesc")}
+              </p>
+            </div>
+            <Switch
+              checked={displayRegistrationEnabled}
+              onCheckedChange={(v) => setRegistrationInput(v)}
             />
           </div>
           <div className="flex items-center justify-between gap-4">
