@@ -6,10 +6,12 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -19,14 +21,47 @@ var _ app.Settler = (*Settler)(nil)
 
 const quotaPerDollar = 100_000 // 1 dollar = 100,000 internal units
 
+// UsageAggregator is the narrow contract settler uses to hand off post-commit
+// aggregation. Production implementation is *billing.Aggregator; tests inject
+// mocks. Submit is called AFTER the settler transaction commits; never call
+// it before commit (a rollback would leave the aggregator with phantom counts).
+type UsageAggregator interface {
+	Submit(log *models.UsageLog)
+}
+
+// noopAggregator is the zero-value backing for NewSettler (T2.8 legacy
+// callers that haven't migrated to NewSettlerWithAggregator). Production
+// always supplies a real aggregator via NewSettlerWithAggregator in
+// master/server.go (T2.9).
+type noopAggregator struct{}
+
+func (noopAggregator) Submit(*models.UsageLog) {}
+
 type Settler struct {
-	App    dao.AppProvider
-	Bus    app.EventBus
-	Logger *zap.Logger
+	App        dao.AppProvider
+	Bus        app.EventBus
+	Logger     *zap.Logger
+	Aggregator UsageAggregator
 }
 
 func NewSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger) *Settler {
-	return &Settler{App: application, Bus: bus, Logger: logger}
+	return NewSettlerWithAggregator(application, bus, logger, noopAggregator{})
+}
+
+// NewSettlerWithAggregator constructs a Settler that hands off post-commit
+// aggregation to the supplied UsageAggregator. agg MUST be non-nil; callers
+// that want to disable aggregation should use NewSettler (which wires
+// noopAggregator).
+func NewSettlerWithAggregator(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg UsageAggregator) *Settler {
+	if agg == nil {
+		agg = noopAggregator{}
+	}
+	return &Settler{
+		App:        application,
+		Bus:        bus,
+		Logger:     logger,
+		Aggregator: agg,
+	}
 }
 
 // Start subscribes to usage.reported events
@@ -86,14 +121,28 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 	}
 
 	totalCost := inputCost + outputCost + cacheReadCost + cacheWriteCost
+
+	// BYOK billing mode: adjust per-bucket costs (free → zero, service_fee → ratio).
+	// Daily rollups are always written regardless of mode—BYOK users still need
+	// per-channel/per-token usage stats in their portal even when costs are zero.
+	inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, byokMode :=
+		s.applyByokBillingMode(q, entry, inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost)
+	// 仅对 BYOK ("private") 行 +1。byokMode 为 "" 表示非 private 行，跳过 metric。
+	if byokMode != "" {
+		metrics.BYOKRequestTotal.WithLabelValues(entry.OwnerType, entry.ModelName).Inc()
+	}
+
 	channelName, channelType := parseChannelSnapshot(entry.Other)
 
 	log := models.UsageLog{
 		UserID:           entry.UserID,
 		TokenID:          entry.TokenID,
 		ChannelID:        entry.ChannelID,
+		PrivateChannelID: entry.PrivateChannelID,
+		OwnerType:        entry.OwnerType,
 		AgentID:          agentID,
 		ModelName:        entry.ModelName,
+		CreatedAt:        entry.Timestamp,
 		PromptTokens:     entry.PromptTokens,
 		CompletionTokens: entry.CompletionTokens,
 		InputCost:        inputCost,
@@ -127,14 +176,17 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 	}
 
 	var depleted bool
+	var inserted bool
 	err = dao.RunInTx(daoCtx, func(txCtx dao.Context) error {
 		m := dao.NewAdminMutation(txCtx)
 		if err := m.UsageLog().Create(&log); err != nil {
 			if isDuplicateRequestIDError(err) {
+				// inserted stays false; do NOT Submit a duplicate to aggregator.
 				return nil
 			}
 			return err
 		}
+		inserted = true
 
 		// Write trace data if present (any request with trace enabled or errors)
 		if entry.TraceData != "" {
@@ -159,12 +211,6 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 				zap.String("token_name", entry.TokenName),
 				zap.Int64("total_cost", totalCost),
 			}
-			if err := m.Billing().UpsertTokenDaily(&log); err != nil {
-				return err
-			}
-			if err := m.Billing().UpsertChannelDaily(&log); err != nil {
-				return err
-			}
 			if entry.TokenName == "__system_test__" {
 				s.Logger.Info("skipping quota deduction for ownerless system test usage", logFields...)
 			} else {
@@ -173,14 +219,8 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 			return nil
 		}
 
-		if err := m.Billing().UpsertTokenDaily(&log); err != nil {
-			return err
-		}
-		if err := m.Billing().UpsertChannelDaily(&log); err != nil {
-			return err
-		}
-
-		// Deduct user quota
+		// Deduct user quota. BYOK free mode lands here with totalCost=0 and
+		// naturally short-circuits.
 		if totalCost > 0 {
 			remaining, err := m.User().DeductQuota(entry.UserID, totalCost)
 			if err != nil {
@@ -192,6 +232,15 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 	})
 	if err != nil {
 		return err
+	}
+
+	// Aggregation moves OUT of the tx: settler's tx is now UsageLog + trace +
+	// DeductQuota only. Hand the committed log to the in-memory aggregator
+	// for batched 3-table upsert. Must be after commit so a rollback can't
+	// leave the aggregator double-counting. Skip on duplicate-request-id
+	// short-circuit (inserted=false) to avoid over-counting retries.
+	if inserted {
+		s.Aggregator.Submit(&log)
 	}
 
 	// Event OUTSIDE transaction
@@ -232,3 +281,40 @@ func isDuplicateRequestIDError(err error) bool {
 	return (strings.Contains(lower, "unique") || strings.Contains(lower, "duplicate")) &&
 		(strings.Contains(lower, "request_id") || strings.Contains(lower, "idx_usage_logs_request_id"))
 }
+
+// applyByokBillingMode adjusts per-bucket costs by the configured BYOK billing
+// mode when entry.OwnerType == "private":
+//   - "free" (default): all costs zeroed. Daily rollups are still written so the
+//     BYOK user sees request/token counts in their portal; quota deduction is
+//     naturally skipped because totalCost=0 fails the `if totalCost > 0` guard
+//     in settleOne.
+//   - "service_fee": each bucket multiplied by byok_service_fee_ratio.
+//
+// Non-private entries are passed through unchanged with mode="" so callers can
+// distinguish "not a BYOK row" from a BYOK row in a specific mode.
+func (s *Settler) applyByokBillingMode(q dao.AdminQuery, entry protocol.UsageLogEntry,
+	inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost int64) (
+	adjInput, adjOutput, adjCacheRead, adjCacheWrite, adjTotal int64, mode string) {
+
+	if entry.OwnerType != "private" {
+		return inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, ""
+	}
+
+	mode = q.Setting().LookupString(consts.SettingKeyBYOKBillingMode, consts.BYOKDefaultBillingMode)
+	if mode == consts.BYOKBillingModeServiceFee {
+		ratio := q.Setting().LookupFloat(consts.SettingKeyBYOKServiceFeeRatio, consts.BYOKDefaultServiceFeeRatioFloat)
+		// Truncate each bucket independently, then recompute total as their
+		// sum so that total_cost == input + output + cache_read + cache_write
+		// holds exactly. Discounting the original total separately would drift
+		// by one due to float64→int64 truncation.
+		adjInput = int64(float64(inputCost) * ratio)
+		adjOutput = int64(float64(outputCost) * ratio)
+		adjCacheRead = int64(float64(cacheReadCost) * ratio)
+		adjCacheWrite = int64(float64(cacheWriteCost) * ratio)
+		adjTotal = adjInput + adjOutput + adjCacheRead + adjCacheWrite
+		return adjInput, adjOutput, adjCacheRead, adjCacheWrite, adjTotal, mode
+	}
+	// free / unknown mode: zero all costs.
+	return 0, 0, 0, 0, 0, mode
+}
+

@@ -4,6 +4,16 @@ master:
   listen: ":8140"
   db_path: "./data/master.db"
   jwt_secret: "replace-me"
+  # (Recommended for production) BYOK encryption KEK, base64-encoded 32 random bytes.
+  # Omit only for dev / single-instance deployments — we then fall back to
+  # HKDF-SHA256(jwt_secret, info="byok-kek-v1").
+  # Production should set this explicitly because:
+  #   - HKDF couples jwt_secret to the BYOK KEK; leaking jwt_secret then leaks
+  #     every BYOK ciphertext too (single point of failure).
+  #   - Rotating jwt_secret invalidates every stored BYOK ciphertext (forces
+  #     all users to re-enter their keys).
+  # Generate: openssl rand -base64 32
+  # byok_kek: ""
   enrollment_token_ttl: 3600
   admin_user: "admin"
   admin_password: "change-this-password"

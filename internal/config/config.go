@@ -30,6 +30,7 @@ type MasterConfig struct {
 	Listen             string   `mapstructure:"listen"`
 	DBPath             string   `mapstructure:"db_path"`
 	JWTSecret          string   `mapstructure:"jwt_secret"`
+	BYOKKEK            string   `mapstructure:"byok_kek"` // base64 32B; empty → HKDF derive from JWTSecret
 	EnrollmentTokenTTL int      `mapstructure:"enrollment_token_ttl"`
 	AdminUser          string   `mapstructure:"admin_user"`
 	AdminPassword      string   `mapstructure:"admin_password"`
@@ -61,10 +62,11 @@ type AgentConfig struct {
 
 // AgentCacheConfig 控制 agent 端 LRU 缓存的容量与负缓存 TTL。
 type AgentCacheConfig struct {
-	TokenCapacity        int `mapstructure:"token_capacity"`
-	UserCapacity         int `mapstructure:"user_capacity"`
-	UserRoutingsCapacity int `mapstructure:"user_routings_capacity"`
-	NegativeTTLSeconds   int `mapstructure:"negative_ttl_seconds"`
+	TokenCapacity           int `mapstructure:"token_capacity"`
+	UserCapacity            int `mapstructure:"user_capacity"`
+	UserRoutingsCapacity    int `mapstructure:"user_routings_capacity"`
+	PrivateChannelsCapacity int `mapstructure:"private_channels_capacity"`
+	NegativeTTLSeconds      int `mapstructure:"negative_ttl_seconds"`
 }
 
 type RelayConfig struct {

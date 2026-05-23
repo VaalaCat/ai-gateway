@@ -17,7 +17,8 @@ import {
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { MessageList } from "@/components/playground/message-list";
 import { SSEViewer } from "@/components/playground/sse-viewer";
-import { useTokens } from "@/lib/api/tokens";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
+import { useToken } from "@/lib/api/tokens";
 import { CHAT_ROLES, HTTP_HEADERS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -92,7 +93,6 @@ async function streamChat(
 
 function SettingsPanel({
   t,
-  tokensData,
   selectedTokenId,
   setSelectedTokenId,
   manualKey,
@@ -116,7 +116,6 @@ function SettingsPanel({
   setRequestJson,
 }: {
   t: ReturnType<typeof useTranslations<"playground">>;
-  tokensData: { data?: { id: number; name: string; key: string }[] } | undefined;
   selectedTokenId: string;
   setSelectedTokenId: (v: string) => void;
   manualKey: string;
@@ -153,15 +152,12 @@ function SettingsPanel({
             className="h-8 text-sm"
           />
         ) : (
-          <SearchableSelect
+          <EntityPicker
+            entity="token"
             value={selectedTokenId}
             onChange={setSelectedTokenId}
             placeholder={t("selectToken")}
-            searchPlaceholder={t("selectToken")}
-            items={(tokensData?.data ?? []).map((token) => ({
-              value: String(token.id),
-              label: token.name || `Token #${token.id}`,
-            }))}
+            className="w-full h-8"
           />
         )}
         <button
@@ -272,16 +268,16 @@ export default function PlaygroundPage() {
   const endpoint = typeof window !== "undefined" ? window.location.origin : "";
 
   // Token
-  const { data: tokensData } = useTokens({ page_size: 100 });
   const [selectedTokenId, setSelectedTokenId] = useUserPref<string>(
     "playground-token-id",
     "",
   );
+  const { data: selectedToken } = useToken(
+    selectedTokenId ? Number(selectedTokenId) : 0,
+  );
   const [manualKey, setManualKey] = useState("");
   const [useManualKey, setUseManualKey] = useState(false);
-  const apiKey = useManualKey
-    ? manualKey
-    : tokensData?.data?.find((tok) => String(tok.id) === selectedTokenId)?.key ?? "";
+  const apiKey = useManualKey ? manualKey : selectedToken?.key ?? "";
 
   // Model & params
   const [model, setModel] = useUserPref<string>("playground-model", "");
@@ -422,7 +418,7 @@ export default function PlaygroundPage() {
   );
 
   const settingsProps = {
-    t, tokensData, selectedTokenId, setSelectedTokenId,
+    t, selectedTokenId, setSelectedTokenId,
     manualKey, setManualKey, useManualKey, setUseManualKey,
     requestTab, setRequestTab, model, setModel,
     manualModelInput, setManualModelInput, availableModels, systemPrompt, setSystemPrompt,

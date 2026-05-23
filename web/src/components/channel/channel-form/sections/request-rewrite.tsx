@@ -11,9 +11,14 @@ import { ChannelForm } from "../types";
 export interface RequestRewriteSectionProps {
   form: ChannelForm;
   setForm: (next: ChannelForm) => void;
+  hiddenFields?: ReadonlySet<keyof ChannelForm>;
 }
 
-export function RequestRewriteSection({ form, setForm }: RequestRewriteSectionProps) {
+export function RequestRewriteSection({
+  form,
+  setForm,
+  hiddenFields,
+}: RequestRewriteSectionProps) {
   const t = useTranslations("channels");
 
   return (
@@ -58,17 +63,19 @@ export function RequestRewriteSection({ form, setForm }: RequestRewriteSectionPr
       </div>
 
       {/* Proxy URL */}
-      <div className="space-y-2">
-        <Label>
-          {t("proxy")}
-          <FieldTip text={t("proxyTip")} />
-        </Label>
-        <Input
-          value={form.proxy_url}
-          onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
-          placeholder="http://proxy:8080"
-        />
-      </div>
+      {!hiddenFields?.has("proxy_url") && (
+        <div className="space-y-2">
+          <Label>
+            {t("proxy")}
+            <FieldTip text={t("proxyTip")} />
+          </Label>
+          <Input
+            value={form.proxy_url}
+            onChange={(e) => setForm({ ...form, proxy_url: e.target.value })}
+            placeholder="http://proxy:8080"
+          />
+        </div>
+      )}
 
       {/* Param Override */}
       <JsonField
@@ -80,13 +87,15 @@ export function RequestRewriteSection({ form, setForm }: RequestRewriteSectionPr
       />
 
       {/* Header Override */}
-      <JsonField
-        label={t("headerOverride")}
-        value={form.header_override}
-        onChange={(v) => setForm({ ...form, header_override: v })}
-        placeholder='{"X-Custom": "value"}'
-        tip={<FieldTip text={t("headerOverrideTip")} />}
-      />
+      {!hiddenFields?.has("header_override") && (
+        <JsonField
+          label={t("headerOverride")}
+          value={form.header_override}
+          onChange={(v) => setForm({ ...form, header_override: v })}
+          placeholder='{"X-Custom": "value"}'
+          tip={<FieldTip text={t("headerOverrideTip")} />}
+        />
+      )}
 
       {/* Status Code Mapping */}
       <JsonField

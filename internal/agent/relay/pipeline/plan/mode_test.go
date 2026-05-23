@@ -15,10 +15,7 @@ import (
 
 // TestModePicker_Legacy: success — channel 显式 UseLegacyAdaptor → legacy。
 func TestModePicker_Legacy(t *testing.T) {
-	ch := &models.Channel{
-		Type:             consts.ChannelTypeOpenAI,
-		UseLegacyAdaptor: true,
-	}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI, UseLegacyAdaptor: true}}
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
 	if got != state.ModeLegacy {
 		t.Errorf("UseLegacyAdaptor=true → legacy, got %q", got)
@@ -27,7 +24,7 @@ func TestModePicker_Legacy(t *testing.T) {
 
 // TestModePicker_LegacyUnknownProtocol: success — inbound Unknown → 没 native codec，回退 legacy。
 func TestModePicker_LegacyUnknownProtocol(t *testing.T) {
-	ch := &models.Channel{Type: consts.ChannelTypeOpenAI}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI}}
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolUnknown)
 	if got != state.ModeLegacy {
 		t.Errorf("ProtocolUnknown → legacy, got %q", got)
@@ -36,10 +33,10 @@ func TestModePicker_LegacyUnknownProtocol(t *testing.T) {
 
 // TestModePicker_Passthrough: success — channel PassthroughEnabled + inbound == outbound → passthrough。
 func TestModePicker_Passthrough(t *testing.T) {
-	ch := &models.Channel{
+	ch := &models.Channel{ChannelCore: models.ChannelCore{
 		Type:               consts.ChannelTypeOpenAI, // ChannelTypeToProtocol → OpenAIChat
 		PassthroughEnabled: true,
-	}
+	}}
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
 	if got != state.ModePassthrough {
 		t.Errorf("Passthrough channel + inbound==outbound → passthrough, got %q", got)
@@ -48,7 +45,7 @@ func TestModePicker_Passthrough(t *testing.T) {
 
 // TestModePicker_NativeDefault: success — 普通 OpenAI channel → native。
 func TestModePicker_NativeDefault(t *testing.T) {
-	ch := &models.Channel{Type: consts.ChannelTypeOpenAI}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI}}
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
 	if got != state.ModeNative {
 		t.Errorf("default OpenAI channel → native, got %q", got)
@@ -58,11 +55,7 @@ func TestModePicker_NativeDefault(t *testing.T) {
 // TestModePicker_LegacyOverPassthrough: boundary — 两个标志同时 set，legacy 优先。
 // 复刻原 (*Handler) 顺序：shouldUseLegacy 先判，true 就直接返回。
 func TestModePicker_LegacyOverPassthrough(t *testing.T) {
-	ch := &models.Channel{
-		Type:               consts.ChannelTypeOpenAI,
-		UseLegacyAdaptor:   true,
-		PassthroughEnabled: true,
-	}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI, UseLegacyAdaptor: true, PassthroughEnabled: true}}
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
 	if got != state.ModeLegacy {
 		t.Errorf("legacy should win over passthrough, got %q", got)
@@ -82,10 +75,10 @@ func TestModePicker_NilChannel(t *testing.T) {
 // PassthroughEnabled=true 但 inbound != outbound 协议（Claude inbound + OpenAI channel），
 // shouldPassthrough 返 false → 走 native。
 func TestModePicker_PassthroughOnlyWhenProtoMatches(t *testing.T) {
-	ch := &models.Channel{
+	ch := &models.Channel{ChannelCore: models.ChannelCore{
 		Type:               consts.ChannelTypeOpenAI, // outbound 会被协商成 OpenAIChat
 		PassthroughEnabled: true,
-	}
+	}}
 	// Claude inbound + OpenAI channel → outbound = OpenAIChat ≠ Claude → not passthrough
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolClaude)
 	if got != state.ModeNative {
@@ -113,11 +106,7 @@ func TestShouldPassthrough(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ch := &models.Channel{
-				PassthroughEnabled: tt.passthrough,
-				SupportedAPITypes:  tt.supported,
-				Type:               tt.channelType,
-			}
+			ch := &models.Channel{ChannelCore: models.ChannelCore{PassthroughEnabled: tt.passthrough, SupportedAPITypes: tt.supported, Type: tt.channelType}}
 			got := shouldPassthrough(ch, tt.inbound, "")
 			if got != tt.want {
 				t.Errorf("shouldPassthrough = %v, want %v", got, tt.want)

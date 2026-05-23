@@ -152,6 +152,24 @@ export function ProtocolBehaviorSection({ form, setForm }: ProtocolBehaviorSecti
             </SelectContent>
           </Select>
         </div>
+
+        <div className="flex items-center justify-between rounded-md border p-3">
+          <div className="space-y-0.5">
+            <Label htmlFor="system_prompt_in_input">
+              {t("fieldSystemPromptInInput")}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {t("fieldSystemPromptInInputHint")}
+            </p>
+          </div>
+          <Switch
+            id="system_prompt_in_input"
+            checked={form.system_prompt_in_input}
+            onCheckedChange={(v) =>
+              setForm({ ...form, system_prompt_in_input: v })
+            }
+          />
+        </div>
       </CollapsibleContent>
     </Collapsible>
   );

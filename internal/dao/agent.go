@@ -1,6 +1,9 @@
 package dao
 
-import "github.com/VaalaCat/ai-gateway/internal/models"
+import (
+	"github.com/VaalaCat/ai-gateway/internal/models"
+	"gorm.io/gorm"
+)
 
 type AdminAgentQuery interface {
 	GetByID(id uint) (*models.Agent, error)
@@ -15,6 +18,7 @@ type AdminAgentMutation interface {
 	Update(id uint, updates map[string]any) error
 	Delete(id uint) error
 	UpdateLastSeen(agentID string, lastSeen int64) error
+	BatchUpdateLastSeen(updates map[string]int64) error
 	UpdateHTTPAddresses(agentID string, addresses string) error
 }
 
@@ -81,4 +85,24 @@ func (m *adminAgentMutation) UpdateLastSeen(agentID string, lastSeen int64) erro
 
 func (m *adminAgentMutation) UpdateHTTPAddresses(agentID string, addresses string) error {
 	return m.ctx.GetDB().Model(&models.Agent{}).Where("agent_id = ?", agentID).Update("http_addresses", addresses).Error
+}
+
+// BatchUpdateLastSeen updates multiple agents' last_seen in a single transaction.
+// Returns nil immediately when updates is empty.
+// Unknown agent_ids do not return an error (affected=0).
+// Cross-dialect compatible (MySQL/PG/sqlite); O(n) with n updates per call.
+func (m *adminAgentMutation) BatchUpdateLastSeen(updates map[string]int64) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	return m.ctx.GetDB().Transaction(func(tx *gorm.DB) error {
+		for agentID, ts := range updates {
+			if err := tx.Model(&models.Agent{}).
+				Where("agent_id = ?", agentID).
+				Update("last_seen", ts).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

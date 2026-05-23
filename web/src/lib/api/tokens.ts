@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { UseQueryOptions } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
 import type { Token, PaginatedResponse, PaginatedParams } from "@/lib/types";
 
@@ -8,10 +9,12 @@ export function useTokens(
     status?: number;
     search?: string;
   } = {},
+  options?: Omit<UseQueryOptions<PaginatedResponse<Token>>, "queryKey" | "queryFn">,
 ) {
   return useQuery({
     queryKey: ["tokens", params],
     queryFn: () => api.get<PaginatedResponse<Token>>(`/tokens${buildQuery(params)}`),
+    ...options,
   });
 }
 

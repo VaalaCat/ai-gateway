@@ -22,6 +22,8 @@ interface DateRangeInputsProps {
   onStartDateChange: (date: string) => void;
   onEndDateChange: (date: string) => void;
   labels?: { start?: string; end?: string };
+  /** 紧凑模式：不渲染 Label，用 placeholder 表达字段含义（toolbar 内用）。 */
+  compact?: boolean;
 }
 
 function parseDate(value: string): Date | undefined {
@@ -39,53 +41,60 @@ function DatePicker({
   label,
   placeholder,
   disabled,
+  compact,
 }: {
   value: string;
   onChange: (value: string) => void;
   label: string;
   placeholder: string;
   disabled?: DateBefore | DateAfter;
+  compact?: boolean;
 }) {
   const selected = parseDate(value);
 
+  const trigger = (
+    <div className="flex items-center gap-1">
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            variant="outline"
+            className={cn(
+              "w-full sm:w-[160px] justify-start text-left font-normal text-body",
+              !selected && "text-muted-foreground"
+            )}
+          >
+            <CalendarIcon className="mr-2 size-4" />
+            {selected ? format(selected, "yyyy-MM-dd") : compact ? label : placeholder}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-auto p-0" align="start">
+          <Calendar
+            mode="single"
+            selected={selected}
+            onSelect={(day) => onChange(day ? formatDateStr(day) : "")}
+            disabled={disabled}
+            autoFocus
+          />
+        </PopoverContent>
+      </Popover>
+      {selected && (
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={() => onChange("")}
+          className="text-muted-foreground"
+        >
+          <X />
+        </Button>
+      )}
+    </div>
+  );
+
+  if (compact) return trigger;
   return (
     <div className="space-y-1">
       <Label>{label}</Label>
-      <div className="flex items-center gap-1">
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button
-              variant="outline"
-              className={cn(
-                "w-[160px] justify-start text-left font-normal",
-                !selected && "text-muted-foreground"
-              )}
-            >
-              <CalendarIcon className="mr-2 size-4" />
-              {selected ? format(selected, "yyyy-MM-dd") : placeholder}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-auto p-0" align="start">
-            <Calendar
-              mode="single"
-              selected={selected}
-              onSelect={(day) => onChange(day ? formatDateStr(day) : "")}
-              disabled={disabled}
-              autoFocus
-            />
-          </PopoverContent>
-        </Popover>
-        {selected && (
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            onClick={() => onChange("")}
-            className="text-muted-foreground"
-          >
-            <X />
-          </Button>
-        )}
-      </div>
+      {trigger}
     </div>
   );
 }
@@ -96,6 +105,7 @@ export function DateRangeInputs({
   onStartDateChange,
   onEndDateChange,
   labels,
+  compact,
 }: DateRangeInputsProps) {
   const tc = useTranslations("common");
   const tb = useTranslations("billing");
@@ -105,14 +115,20 @@ export function DateRangeInputs({
   const isInvalid = !!(startDate && endDate && startDate > endDate);
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-end gap-4">
+    <div className={cn(compact ? "" : "space-y-2")}>
+      <div
+        className={cn(
+          "flex flex-col gap-3 sm:flex-row",
+          compact ? "sm:items-center sm:gap-2" : "sm:items-end sm:gap-4",
+        )}
+      >
         <DatePicker
           value={startDate}
           onChange={onStartDateChange}
           label={labels?.start ?? tb("startDate")}
           placeholder={tc("selectDate")}
           disabled={endParsed ? { after: endParsed } : undefined}
+          compact={compact}
         />
         <DatePicker
           value={endDate}
@@ -120,9 +136,10 @@ export function DateRangeInputs({
           label={labels?.end ?? tb("endDate")}
           placeholder={tc("selectDate")}
           disabled={startParsed ? { before: startParsed } : undefined}
+          compact={compact}
         />
       </div>
-      {isInvalid && (
+      {isInvalid && !compact && (
         <p className="text-sm text-destructive">{tc("dateRangeError")}</p>
       )}
     </div>

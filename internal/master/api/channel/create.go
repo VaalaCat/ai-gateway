@@ -12,17 +12,26 @@ import (
 
 func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.Channel], error) {
 	channel := models.Channel{
-		Name: req.Name, Type: req.Type, Key: req.Key, BaseURL: req.BaseURL,
-		Models: req.Models, ModelMapping: req.ModelMapping, Weight: req.Weight,
-		Priority: req.Priority, Status: 1, UseLegacyAdaptor: req.UseLegacyAdaptor,
-		SupportedAPITypes: req.SupportedAPITypes,
-		Endpoints:         req.Endpoints, PassthroughEnabled: req.PassthroughEnabled,
-		SystemPrompt: req.SystemPrompt, ProxyURL: req.ProxyURL,
-		ParamOverride: req.ParamOverride, HeaderOverride: req.HeaderOverride,
-		Tag: req.Tag, Remark: req.Remark,
-		Setting: req.Setting, Organization: req.Organization, ApiVersion: req.ApiVersion,
-		TestModel: req.TestModel, AutoBan: req.AutoBan,
-		StatusCodeMapping: req.StatusCodeMapping, OtherSettings: req.OtherSettings,
+		ChannelCore: models.ChannelCore{
+			Name: req.Name, Type: req.Type, BaseURL: req.BaseURL,
+			Weight:   req.Weight,
+			Priority: req.Priority, Status: 1, UseLegacyAdaptor: req.UseLegacyAdaptor,
+			SupportedAPITypes:  req.SupportedAPITypes,
+			Endpoints:          req.Endpoints,
+			PassthroughEnabled: req.PassthroughEnabled,
+			SystemPrompt:       req.SystemPrompt,
+			ParamOverride:      req.ParamOverride,
+			Remark:             req.Remark,
+			Setting:            req.Setting, Organization: req.Organization, ApiVersion: req.ApiVersion,
+			TestModel: req.TestModel, AutoBan: req.AutoBan,
+			StatusCodeMapping: req.StatusCodeMapping, OtherSettings: req.OtherSettings,
+		},
+		Key:            req.Key,
+		Models:         req.Models,
+		ModelMapping:   req.ModelMapping,
+		ProxyURL:       req.ProxyURL,
+		HeaderOverride: req.HeaderOverride,
+		Tag:            req.Tag,
 	}
 	if channel.Weight == 0 {
 		channel.Weight = 1

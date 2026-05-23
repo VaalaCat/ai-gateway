@@ -34,6 +34,23 @@ type TokenDailyResponse struct {
 	Items []dao.TokenBillingDailyItem `json:"items"`
 }
 
+// InsightsRequest 是 /v1/billing/insights 入参。
+// start/end 为 unix 秒, end 缺省 now, start 缺省 end-86400;
+// gran 缺省 "day"; stack 缺省 "model" (Phase 1 仅支持 model, 其它值静默回退为 model)。
+type InsightsRequest struct {
+	Start int64  `form:"start"`
+	End   int64  `form:"end"`
+	Gran  string `form:"gran"`
+	Stack string `form:"stack"`
+}
+
+// InsightsResponse 是 /v1/billing/insights 返回。
+// CostTrendStacked 是 (time-bucket × model) 的堆叠成本; CacheSaving 是缓存节省概览。
+type InsightsResponse struct {
+	CostTrendStacked dao.CostTrendStacked `json:"cost_trend_stacked"`
+	CacheSaving      dao.CacheSaving      `json:"cache_saving"`
+}
+
 func parseOptionalUint(raw string) (*uint, error) {
 	if raw == "" {
 		return nil, nil

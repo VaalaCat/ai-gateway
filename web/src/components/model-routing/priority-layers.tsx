@@ -182,7 +182,7 @@ function ErrorBadge({ error }: { error: RoutingPreviewNode["error"] }) {
   if (!error) return null;
   const cfg = ERROR_BADGE[error];
   return (
-    <Badge variant={cfg.variant} className="text-[10px] shrink-0">
+    <Badge variant={cfg.variant} className="text-2xs shrink-0">
       {t(cfg.i18nKey)}
     </Badge>
   );

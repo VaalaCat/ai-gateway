@@ -1,6 +1,9 @@
 package plan
 
-import "github.com/VaalaCat/ai-gateway/internal/models"
+import (
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/models"
+)
 
 // FilterByAllowedChannels returns only the channels whose ID appears in allowed.
 // nil/empty allowed → input is returned unchanged ("no whitelist" semantics).
@@ -21,6 +24,27 @@ func FilterByAllowedChannels(channels []*models.Channel, allowed []uint) []*mode
 	for _, ch := range channels {
 		if _, ok := set[ch.ID]; ok {
 			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// filterScoredByAllowedChannels 是 FilterByAllowedChannels 的 ScoredCandidate 版本。
+// 行为：保留所有 SourcePrivate candidate（不受白名单约束）+ 仅保留 ID ∈ allowed 的
+// SourceAdmin candidate。
+func filterScoredByAllowedChannels(cands []ScoredCandidate, allowed []uint) []ScoredCandidate {
+	set := make(map[uint]struct{}, len(allowed))
+	for _, id := range allowed {
+		set[id] = struct{}{}
+	}
+	out := make([]ScoredCandidate, 0, len(cands))
+	for _, sc := range cands {
+		if sc.Source == state.SourcePrivate {
+			out = append(out, sc)
+			continue
+		}
+		if _, ok := set[sc.Channel.ID]; ok {
+			out = append(out, sc)
 		}
 	}
 	return out

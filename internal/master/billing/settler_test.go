@@ -2,13 +2,16 @@ package billing
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gorm.io/gorm"
@@ -27,6 +30,48 @@ func setupTestDB(t *testing.T) (*gorm.DB, *testAppProvider) {
 	}
 	models.AutoMigrate(db)
 	return db, &testAppProvider{db: db}
+}
+
+// mockAggregator records every Submit invocation so tests can assert on
+// post-commit handoff semantics without exercising real dao writes.
+type mockAggregator struct {
+	mu      sync.Mutex
+	submits []models.UsageLog
+}
+
+func (m *mockAggregator) Submit(log *models.UsageLog) {
+	if log == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.submits = append(m.submits, *log)
+}
+
+func (m *mockAggregator) snapshot() []models.UsageLog {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]models.UsageLog, len(m.submits))
+	copy(cp, m.submits)
+	return cp
+}
+
+// syncAggregator drives the three dao upserts synchronously per-Submit. It
+// preserves the pre-T2.8 per-log inline rollup behavior for tests whose
+// assertions read token_daily_billings / channel_daily_billings rows directly.
+// Production code uses the real *billing.Aggregator (batched flush).
+type syncAggregator struct {
+	app dao.AppProvider
+}
+
+func (s *syncAggregator) Submit(log *models.UsageLog) {
+	if log == nil {
+		return
+	}
+	m := dao.NewAdminMutation(dao.NewContext(s.app))
+	_ = m.Billing().UpsertTokenDaily(log)
+	_ = m.Billing().UpsertChannelDaily(log)
+	_ = m.Billing().UpsertHourlyBucket(log)
 }
 
 func TestSettleUsage(t *testing.T) {
@@ -415,10 +460,10 @@ func TestSettler_WritesBillingRollups(t *testing.T) {
 
 	db.Create(&models.User{Username: "billing-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.Token{UserID: 1, Key: "sk-billing", Name: "primary-key", Status: 1, ExpiredAt: -1})
-	db.Create(&models.Channel{Name: "openai-primary", Type: 1, Key: "sk-upstream", Status: 1})
+	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-rollup-1",
@@ -491,10 +536,10 @@ func TestSettler_TracksFailedRequests(t *testing.T) {
 
 	db.Create(&models.User{Username: "billing-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.Token{UserID: 1, Key: "sk-billing", Name: "primary-key", Status: 1, ExpiredAt: -1})
-	db.Create(&models.Channel{Name: "openai-primary", Type: 1, Key: "sk-upstream", Status: 1})
+	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:    "req-rollup-failed-1",
@@ -702,7 +747,7 @@ func TestSettler_IgnoresDuplicateRequestID(t *testing.T) {
 
 	db.Create(&models.User{Username: "billing-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.Token{UserID: 1, Key: "sk-billing", Name: "primary-key", Status: 1, ExpiredAt: -1})
-	db.Create(&models.Channel{Name: "openai-primary", Type: 1, Key: "sk-upstream", Status: 1})
+	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
 	entry := protocol.UsageLogEntry{
@@ -719,7 +764,7 @@ func TestSettler_IgnoresDuplicateRequestID(t *testing.T) {
 		Timestamp:        time.Now().Unix(),
 	}
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{entry})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{entry})
 
@@ -762,4 +807,223 @@ func TestSettler_IgnoresDuplicateRequestID(t *testing.T) {
 	if channelDaily.RequestCount != 1 {
 		t.Fatalf("request_count = %d, want 1", channelDaily.RequestCount)
 	}
+}
+
+// TestSettler_SubmitsToAggregatorAfterCommit 验证 T2.8 的核心契约：settler
+// 事务提交后才把 UsageLog 交给注入的 UsageAggregator，且重复 request_id
+// 不会重复 Submit（去重短路在事务内 return nil 时 inserted 仍为 false）。
+func TestSettler_SubmitsToAggregatorAfterCommit(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	bus := eventbus.NewMemoryBus()
+	logger := zap.NewNop()
+
+	db.Create(&models.User{Username: "agg-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
+	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+	mockAgg := &mockAggregator{}
+	settler := NewSettlerWithAggregator(appProv, bus, logger, mockAgg)
+
+	// success: 第一次 settle → aggregator 收到 1 条
+	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
+		RequestID:        "req-agg-1",
+		UserID:           1,
+		TokenID:          1,
+		ChannelID:        1,
+		ModelName:        "gpt-4o",
+		PromptTokens:     100,
+		CompletionTokens: 50,
+		Status:           1,
+		Timestamp:        time.Now().Unix(),
+	}})
+	submits := mockAgg.snapshot()
+	require.Len(t, submits, 1, "first settle should Submit once")
+	require.Equal(t, "req-agg-1", submits[0].RequestID)
+	require.Equal(t, uint(1), submits[0].UserID)
+
+	// 同 RequestID 第二次 → 去重，aggregator NOT 再 Submit
+	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
+		RequestID:        "req-agg-1",
+		UserID:           1,
+		TokenID:          1,
+		ChannelID:        1,
+		ModelName:        "gpt-4o",
+		PromptTokens:     100,
+		CompletionTokens: 50,
+		Status:           1,
+		Timestamp:        time.Now().Unix(),
+	}})
+	require.Len(t, mockAgg.snapshot(), 1, "duplicate RequestID must NOT re-Submit")
+
+	// ownerless usage 仍 Submit（聚合不区分 owner-less，只关心是否成功落 UsageLog）
+	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
+		RequestID:        "req-agg-2",
+		UserID:           0,
+		TokenID:          1,
+		ChannelID:        1,
+		ModelName:        "gpt-4o",
+		PromptTokens:     50,
+		CompletionTokens: 0,
+		Status:           1,
+		TokenName:        "anon",
+		Timestamp:        time.Now().Unix(),
+	}})
+	submits = mockAgg.snapshot()
+	require.Len(t, submits, 2, "ownerless usage must also Submit")
+	require.Equal(t, "req-agg-2", submits[1].RequestID)
+	require.Equal(t, uint(0), submits[1].UserID)
+}
+
+// TestSettler_BehaviorEquivalentToLegacy 验证 T2 重构核心契约：把同一批
+// UsageLogEntry 跑两遍——
+//
+//	Path A: settler + *billing.Aggregator (T2.6 批量 flush)
+//	Path B: settler + syncAggregator      (T2.8 legacy 行为, 每条 log 即时调 dao 单行 upsert)
+//
+// flush 之后比较 token_daily_billings / channel_daily_billings /
+// usage_hourly_buckets 三张 rollup 表逐行相等 (zero-out 掉自动时间戳)。
+func TestSettler_BehaviorEquivalentToLegacy(t *testing.T) {
+	logger := zap.NewNop()
+
+	// --- Path A: aggregator-based ---
+	dbA, appA := setupTestDB(t)
+	busA := eventbus.NewMemoryBus()
+
+	dbA.Create(&models.User{Username: "ua", Password: "x", Role: 1, Status: 1, Quota: 1_000_000})
+	dbA.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+	agg := NewAggregator(appA, zap.NewNop(), AggregatorOptions{})
+	agg.SetFlushFns(
+		func(rows []dao.TokenDailyRow) error {
+			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertTokenDaily(rows)
+		},
+		func(rows []dao.ChannelDailyRow) error {
+			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertChannelDaily(rows)
+		},
+		func(rows []dao.HourlyBucketRow) error {
+			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertHourlyBucket(rows)
+		},
+	)
+	settlerA := NewSettlerWithAggregator(appA, busA, logger, agg)
+
+	// --- Path B: legacy (syncAggregator drives per-log UpsertXxx) ---
+	dbB, appB := setupTestDB(t)
+	busB := eventbus.NewMemoryBus()
+	dbB.Create(&models.User{Username: "ub", Password: "x", Role: 1, Status: 1, Quota: 1_000_000})
+	dbB.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+	settlerB := NewSettlerWithAggregator(appB, busB, logger, &syncAggregator{app: appB})
+
+	// --- Mixed inputs covering edge cases ---
+	// 用固定的 ts 避免两次跑出现在不同分钟/小时窗口的边界 flake。
+	now := time.Now().Unix()
+	entries := []protocol.UsageLogEntry{
+		// success stream
+		{
+			RequestID: "r-stream-success", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "gpt-4o",
+			PromptTokens: 100, CompletionTokens: 50, Status: 1, IsStream: true,
+			FirstResponseMs: 300, Duration: 2200,
+			InboundDecodeMs: 5, UpstreamDispatchMs: 6, UpstreamDecodeMs: 7, OutboundEncodeMs: 8, ClientEncodeMs: 9,
+			Timestamp: now,
+		},
+		// failed
+		{
+			RequestID: "r-failed", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "gpt-4o",
+			PromptTokens: 50, Status: 0,
+			Timestamp: now,
+		},
+		// non-stream success
+		{
+			RequestID: "r-nonstream", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "gpt-4o",
+			PromptTokens: 200, CompletionTokens: 100, Status: 1, IsStream: false,
+			InboundDecodeMs: 10, OutboundEncodeMs: 20,
+			Timestamp: now,
+		},
+		// different token same user
+		{
+			RequestID: "r-other-token", UserID: 1, TokenID: 2, ChannelID: 1, ModelName: "gpt-4o",
+			PromptTokens: 75, CompletionTokens: 25, Status: 1,
+			Timestamp: now,
+		},
+		// different channel same user/token
+		{
+			RequestID: "r-other-channel", UserID: 1, TokenID: 1, ChannelID: 2, ModelName: "gpt-4o",
+			PromptTokens: 30, CompletionTokens: 15, Status: 1,
+			Timestamp: now,
+		},
+	}
+
+	settlerA.Settle(context.Background(), "agent-x", entries)
+	settlerB.Settle(context.Background(), "agent-x", entries)
+
+	// Path A: flush aggregator into DB
+	require.NoError(t, agg.Flush())
+
+	// --- Compare each rollup table row-by-row ---
+	var tokA, tokB []models.TokenDailyBilling
+	require.NoError(t, dbA.Order("date, user_id, token_id").Find(&tokA).Error)
+	require.NoError(t, dbB.Order("date, user_id, token_id").Find(&tokB).Error)
+	require.Equal(t, len(tokB), len(tokA), "token_daily row count")
+	for i := range tokB {
+		// Ignore CreatedAt/UpdatedAt: autoCreateTime/autoUpdateTime differ
+		// across the two sequential settle calls; behavior equivalence is
+		// about counter math + dimension keys, not wall-clock.
+		// Also zero ID since the two DBs are independent.
+		tokA[i].ID, tokB[i].ID = 0, 0
+		tokA[i].CreatedAt, tokB[i].CreatedAt = 0, 0
+		tokA[i].UpdatedAt, tokB[i].UpdatedAt = 0, 0
+		require.Equal(t, tokB[i], tokA[i], "token_daily row %d", i)
+	}
+
+	var chA, chB []models.ChannelDailyBilling
+	require.NoError(t, dbA.Order("date, channel_id, private_channel_id").Find(&chA).Error)
+	require.NoError(t, dbB.Order("date, channel_id, private_channel_id").Find(&chB).Error)
+	require.Equal(t, len(chB), len(chA), "channel_daily row count")
+	for i := range chB {
+		chA[i].ID, chB[i].ID = 0, 0
+		chA[i].CreatedAt, chB[i].CreatedAt = 0, 0
+		chA[i].UpdatedAt, chB[i].UpdatedAt = 0, 0
+		require.Equal(t, chB[i], chA[i], "channel_daily row %d", i)
+	}
+
+	var hA, hB []models.UsageHourlyBucket
+	require.NoError(t, dbA.Order("date, hour, channel_id, private_channel_id, model_name, agent_id").Find(&hA).Error)
+	require.NoError(t, dbB.Order("date, hour, channel_id, private_channel_id, model_name, agent_id").Find(&hB).Error)
+	require.Equal(t, len(hB), len(hA), "hourly_bucket row count")
+	for i := range hB {
+		hA[i].ID, hB[i].ID = 0, 0
+		hA[i].CreatedAt, hB[i].CreatedAt = 0, 0
+		hA[i].UpdatedAt, hB[i].UpdatedAt = 0, 0
+		require.Equal(t, hB[i], hA[i], "hourly_bucket row %d", i)
+	}
+}
+
+// TestSettler_NilAggregatorFallsBackToNoop 验证 NewSettlerWithAggregator(nil)
+// 不会 panic：构造函数会把 nil 替换为 noopAggregator。
+func TestSettler_NilAggregatorFallsBackToNoop(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	bus := eventbus.NewMemoryBus()
+	logger := zap.NewNop()
+
+	db.Create(&models.User{Username: "nil-agg-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
+	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+	settler := NewSettlerWithAggregator(appProv, bus, logger, nil)
+	require.NotNil(t, settler.Aggregator, "nil aggregator must fall back to noopAggregator")
+
+	// settle 不应 panic
+	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
+		RequestID:        "req-nil-agg-1",
+		UserID:           1,
+		TokenID:          1,
+		ChannelID:        1,
+		ModelName:        "gpt-4o",
+		PromptTokens:     10,
+		CompletionTokens: 5,
+		Status:           1,
+		Timestamp:        time.Now().Unix(),
+	}})
+
+	var count int64
+	db.Model(&models.UsageLog{}).Where("request_id = ?", "req-nil-agg-1").Count(&count)
+	require.Equal(t, int64(1), count, "usage log should still be created")
 }

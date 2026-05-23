@@ -1,12 +1,16 @@
 package relay
 
 import (
+	"errors"
+
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/ctxbuild"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/exec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/publish"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
@@ -67,7 +71,13 @@ func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher stat
 	}
 
 	h.planner = plan.NewSolver()
-	h.executor = &exec.Executor{Dispatcher: dispatcher}
+	var sleepReader exec.SleepReader
+	if agentApp != nil {
+		if c := agentApp.GetCache(); c != nil {
+			sleepReader = c
+		}
+	}
+	h.executor = &exec.Executor{Dispatcher: dispatcher, Sleep: sleepReader}
 	h.publisher = publish.NewPublisher(bus, logger)
 	return h
 }
@@ -139,7 +149,8 @@ func (h *Handler) newRelayContext(c *gin.Context) *state.RelayContext {
 //   - 已被 forwarder 接管 → 跳过；
 //   - backend 已 Written（流式开始/部分写过 body） → 跳过，避免双写；
 //   - 无错 → 200 已由 backend 写完，跳过；
-//   - 有错 → 用 state.StatusFromState 映射状态码 + JSON error body。
+//   - 有错且是 *common.UpstreamError → 把上游原始 body + status 透传给客户端；
+//   - 其它有错 → 用 state.StatusFromState 映射状态码 + JSON error body。
 func (h *Handler) writeResponse(rctx *state.RelayContext) {
 	if rctx.State.Forwarded {
 		return
@@ -148,6 +159,30 @@ func (h *Handler) writeResponse(rctx *state.RelayContext) {
 		return
 	}
 	if rctx.State.Err == nil {
+		return
+	}
+	// Path B (spec §3.2): Executor 在终止 attempt 链时统一处理 UpstreamError。
+	// 4xx 错误（含 invalid_request_error 短路）把上游原始 status + header + body
+	// 原样写回客户端，让调用方拿到真实错误码（如 429 rate limit）。
+	// 5xx 错误继续走 StatusFromState 返回 502 BadGateway（避免泄露后端实现细节，
+	// 与 TestTrace_500Error / TestRelay_RoutingExhausted_404 等现有契约保持一致）。
+	var upErr *common.UpstreamError
+	if errors.As(rctx.State.Err, &upErr) && upErr.Status >= 400 && upErr.Status < 500 {
+		// 转发上游响应 header（如 Retry-After / X-RateLimit-* 等），
+		// 但不转发 Content-Encoding / Content-Length（与 passthrough 2xx 路径对齐）。
+		for k, vals := range upErr.Header {
+			if k == "Content-Encoding" || k == "Content-Length" {
+				continue
+			}
+			for _, v := range vals {
+				rctx.Writer.Header().Add(k, v)
+			}
+		}
+		if rctx.Writer.Header().Get(consts.HeaderContentType) == "" {
+			rctx.Writer.Header().Set(consts.HeaderContentType, consts.ContentTypeJSON)
+		}
+		rctx.Writer.WriteHeader(upErr.Status)
+		rctx.Writer.Write(upErr.Body) //nolint:errcheck
 		return
 	}
 	code, msg := state.StatusFromState(rctx)

@@ -25,6 +25,7 @@ type AdminUserQuery interface {
 	GetByEmail(email string) (*models.User, error)
 	List(opts ListOptions, filter UserListFilter) ([]models.User, int64, error)
 	ListWithGroup(opts ListOptions, filter UserListFilter) ([]UserListRow, int64, error)
+	ListByGroupIDs(groupIDs []uint) ([]models.User, error)
 }
 
 type AdminUserMutation interface {
@@ -68,6 +69,15 @@ func (q *adminUserQuery) GetByID(id uint) (*models.User, error) {
 	var user models.User
 	err := q.ctx.GetDB().First(&user, id).Error
 	return &user, err
+}
+
+func (q *adminUserQuery) ListByGroupIDs(groupIDs []uint) ([]models.User, error) {
+	if len(groupIDs) == 0 {
+		return nil, nil
+	}
+	var rows []models.User
+	err := q.ctx.GetDB().Where("group_id IN ?", groupIDs).Find(&rows).Error
+	return rows, err
 }
 
 func (q *adminUserQuery) GetByUsername(username string) (*models.User, error) {

@@ -2,6 +2,7 @@
   "common": {
     "save": "Save",
     "cancel": "Cancel",
+    "more": "More",
     "delete": "Delete",
     "edit": "Edit",
     "create": "Create",
@@ -27,7 +28,21 @@
     "perPage": "{size} per page",
     "columns": "Columns",
     "selectDate": "Select date",
-    "dateRangeError": "Start date must be before end date"
+    "dateRangeError": "Start date must be before end date",
+    "shared": "Shared",
+    "relayStage": {
+      "inbound_decode": "Inbound decode",
+      "outbound_encode": "Outbound encode",
+      "upstream_dispatch": "Upstream dispatch",
+      "upstream_status": "Upstream status",
+      "upstream_decode": "Upstream decode",
+      "client_encode": "Client encode",
+      "internal": "Internal"
+    },
+    "adminScope": {
+      "self": "Mine",
+      "global": "All"
+    }
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -41,6 +56,8 @@
     "agentRoutes": "Agent Routes",
     "modelRoutings": "Model Routings",
     "myModelRoutings": "My Routings",
+    "byok": "BYOK",
+    "byokAdmin": "BYOK",
     "monitoring": "Monitoring",
     "logs": "Logs",
     "maintenance": "Maintenance",
@@ -82,7 +99,37 @@
     "trend": "Usage Trend",
     "myTokens": "My Tokens",
     "myRequests": "My Requests",
-    "myCost": "My Cost"
+    "myCost": "My Cost",
+    "kpi": {
+      "requests": "Requests",
+      "cost": "Cost",
+      "tokens": "Tokens",
+      "users": "Users",
+      "successRate": "Success rate",
+      "quota": "Quota"
+    },
+    "leaderboard": {
+      "byUsers": "Top users",
+      "byModels": "Top models",
+      "byChannels": "Top channels",
+      "by": {
+        "cost": "By cost",
+        "requests": "By requests",
+        "tokens": "By tokens",
+        "tps": "By TPS",
+        "ttft": "By TTFT"
+      }
+    },
+    "trendCard": {
+      "title": "Trend"
+    },
+    "modelDist": {
+      "title": "Model distribution"
+    },
+    "speed": {
+      "modelTitle": "Model speed",
+      "channelTitle": "Channel speed"
+    }
   },
   "users": {
     "title": "User Management",
@@ -126,7 +173,8 @@
     "groupPlaceholder": "Select group",
     "groupEmpty": "No matching groups",
     "groupSelectLoadFailed": "Load failed, click to retry",
-    "targetUserNotInPage": "Target user is not on this page; use search to locate"
+    "targetUserNotInPage": "Target user is not on this page; use search to locate",
+    "filterByRole": "Filter by role"
   },
   "userGroups": {
     "title": "User Groups",
@@ -170,6 +218,41 @@
     "clear": "Clear",
     "empty": "No matching user",
     "moreHint": "Showing first 50, type to search more"
+  },
+  "tokenPicker": {
+    "all": "All tokens",
+    "search": "Search token name",
+    "searchGlobal": "Search tokens across all users",
+    "clear": "Clear",
+    "empty": "No matching token",
+    "emptyGlobal": "No matches. Try searching by name or ID",
+    "moreHint": "Showing first 50, type to search more",
+    "crossScopeNotice": "Viewing tokens across all users"
+  },
+  "byokChannelPicker": {
+    "all": "All BYOK channels",
+    "search": "Search BYOK channel name",
+    "searchGlobal": "Search BYOK channels across all users",
+    "clear": "Clear",
+    "empty": "No matching channel",
+    "emptyGlobal": "No matches. Try searching by name or ID",
+    "moreHint": "Showing first 50, type to search more",
+    "crossScopeNotice": "Viewing BYOK channels across all users"
+  },
+  "entityPicker": {
+    "searchPlaceholder": "Search…",
+    "noResults": "No results",
+    "loading": "Loading…",
+    "clear": "Clear",
+    "placeholder": {
+      "token": "Select token",
+      "user": "Select user",
+      "user-group": "Select user group",
+      "byok-channel": "Select BYOK channel",
+      "channel": "Select channel",
+      "model": "Select model",
+      "agent": "Select agent"
+    }
   },
   "tokens": {
     "title": "Token Management",
@@ -237,7 +320,30 @@
     "rebuildConfirm": "Confirm Rebuild",
     "rebuildSuccess": "Rebuild completed, replayed {count} logs",
     "rebuildFailed": "Rebuild failed",
-    "rebuildDateRequired": "At least one date is required"
+    "rebuildCanceled": "Rebuild canceled",
+    "rebuildEntryRunningSingle": "Rebuilding · {pct}%",
+    "rebuildEntryRunningMulti": "Rebuilding · {count} jobs",
+    "rebuildPickerTitle": "In-progress rebuilds",
+    "rebuildPickerHint": "{count} jobs are running. Pick one to view progress, or start a new rebuild.",
+    "rebuildPickerNew": "New rebuild",
+    "rebuildJobLost": "Job lost (service may have restarted); please retrigger",
+    "rebuildRunning": "Rebuild in progress",
+    "rebuildRunInBackground": "Run in background",
+    "rebuildSlicesDone": "{done}/{total} hour slices done",
+    "rebuildLogsReplayed": "{count} logs replayed",
+    "rebuildDateRequired": "At least one date is required",
+    "costTrend": "Cost trend",
+    "cacheSaving": {
+      "title": "Cache saving",
+      "label": "cache hit",
+      "savedTokens": "Saved tokens: {n}",
+      "savedCost": "Saved cost: {n}"
+    },
+    "kpi": {
+      "cacheHit": "Cache hit",
+      "cacheSubFull": "Saved {n} · read {r} · write {w}"
+    },
+    "spark24h": "24h"
   },
   "channels": {
     "title": "Channel Management",
@@ -413,6 +519,8 @@
     "sectionEndpoints": "Endpoint Configuration",
     "sectionProtocolBehavior": "Protocol Behavior",
     "sectionProtocolBehaviorDescription": "Claude/OpenAI protocol-layer switches",
+    "fieldSystemPromptInInput": "Inject system prompt into user message",
+    "fieldSystemPromptInInputHint": "For models without system role support; off by default",
     "sectionRequestRewrite": "Request Rewrite",
     "sectionRequestRewriteDescription": "Headers, params, system prompt, proxy, status code mapping",
     "sectionRouteRoles": "Routes / Roles",
@@ -426,6 +534,8 @@
     "updateSuccess": "Channel updated",
     "createTitle": "New Channel",
     "editTitle": "Edit Channel",
+    "createDescription": "Configure an upstream LLM channel: protocol, models, and routing roles.",
+    "editDescription": "Adjust the protocol, models, and routing for this channel.",
     "endpointPath": "Path",
     "endpointPathTip": "Relative URL path appended to Base URL. The full request URL is displayed below.",
     "endpointPreview": "Full URL",
@@ -455,6 +565,7 @@
     "fetchModelsTitle": "Select Models from Upstream",
     "searchModels": "Search models...",
     "selectAll": "Select All",
+    "addModelsCount": "Add ({count})",
     "addSelectedModels": "Add Selected",
     "nModels": "{count} models",
     "nSelected": "{count} selected",
@@ -491,7 +602,11 @@
     "agentSelector": "Test Agent",
     "agentSelectorTip": "Select which agent to run this test on. Leave empty for local test.",
     "localTest": "Local (Embedded)",
-    "agentRouteCreateHint": "Save the channel first to assign agent routes"
+    "agentRouteCreateHint": "Save the channel first to assign agent routes",
+    "filterByType": "Filter by type",
+    "filterByStatus": "Filter by status",
+    "enabled": "Enabled",
+    "disabled": "Disabled"
   },
   "models": {
     "title": "Model Configuration",
@@ -611,12 +726,23 @@
     "loadingDetail": "Loading...",
     "fullSync": "Full Sync",
     "fullSyncAll": "Sync All Online",
+    "viewCache": "View Cache",
     "fullSyncSelected": "Sync Selected ({count})",
     "fullSyncSuccess": "{count} succeeded",
     "fullSyncFailed": "{count} failed",
     "fullSyncOffline": "Agent is offline",
     "syncing": "Syncing...",
-    "agentSectionTitle": "Cache"
+    "agentSectionTitle": "Cache",
+    "cacheTitle": "Cache Monitoring",
+    "cacheSubtitle": "LRU cache runtime status across all agents",
+    "lastUpdated": "Last updated",
+    "refresh": "Refresh",
+    "clusterAggregate": "Cluster Aggregate",
+    "perAgent": "Per-Agent",
+    "noData": "No data",
+    "filterByStatus": "Filter by status",
+    "statusOnline": "Online",
+    "statusOffline": "Offline"
   },
   "logs": {
     "title": "Usage Logs",
@@ -667,7 +793,18 @@
     "outboundBody": "Outbound Body",
     "responseHeaders": "Response Headers",
     "responseBody": "Response Body",
-    "clientResponseBody": "Client Response Body"
+    "clientResponseBody": "Client Response Body",
+    "channelName": "Channel",
+    "filterPrivateChannel": "BYOK channel",
+    "byokBadge": "BYOK",
+    "kpi": {
+      "total": "Total",
+      "failed": "Failed",
+      "failedRate": "Failed rate",
+      "p95": "P95",
+      "slowest": "Slowest"
+    },
+    "errorByStage": "Errors by stage"
   },
   "playground": {
     "title": "Playground",
@@ -732,14 +869,12 @@
     "create": "+ New routing",
     "editTitle": "Edit routing",
     "newTitle": "New routing",
-
     "scope": {
       "label": "Scope",
       "global": "Global",
       "user": "User",
       "all": "All"
     },
-
     "cols": {
       "name": "Name",
       "scope": "Scope",
@@ -749,28 +884,25 @@
       "enabled": "Enabled",
       "updated": "Updated"
     },
-
     "filters": {
       "searchPlaceholder": "Search by name…",
-      "userIdPlaceholder": "User ID"
+      "userIdPlaceholder": "User ID",
+      "filterByScope": "Filter by scope",
+      "filterByUser": "Filter by user"
     },
-
     "actions": {
       "edit": "Edit",
       "delete": "Delete"
     },
-
     "delete": {
       "confirm": "Delete routing {name}?",
       "blockedReferenced": "Cannot delete: referenced by {refs}"
     },
-
     "empty": {
       "title": "No routings yet",
       "desc": "Create a routing to load-balance multiple models behind one name",
       "cta": "+ Create your first routing"
     },
-
     "errors": {
       "duplicateName": "A routing with this name already exists in this scope",
       "invalidRef": "Reference '{ref}' does not exist",
@@ -780,14 +912,12 @@
       "nameContainsComma": "Name cannot contain comma",
       "referencedBy": "Referenced by: {refs}"
     },
-
     "section": {
       "basic": "Basic",
       "basicDesc": "Name, scope, visibility",
       "members": "Members",
       "membersDesc": "Aggregate up to 32 references"
     },
-
     "field": {
       "name": "Name",
       "namePlaceholder": "e.g. smart-large",
@@ -802,7 +932,6 @@
       "noTokensTitle": "At least one token is required",
       "goToTokens": "Go to tokens"
     },
-
     "members": {
       "refLabel": "Reference",
       "priorityLabel": "Priority",
@@ -822,7 +951,6 @@
       "staleRef": "Not accessible by current token",
       "emptyCandidates": "No accessible models or routings"
     },
-
     "preview": {
       "title": "Live preview",
       "placeholderHint": "Add at least one member to see a live preview.",
@@ -840,7 +968,6 @@
       "empty": "Add a member to see how traffic flows",
       "fail": "Preview unavailable"
     },
-
     "saveBar": {
       "unsaved": "Unsaved changes"
     }
@@ -874,7 +1001,10 @@
     "ruleAdded": "Route rule added",
     "deleteFailed": "Delete failed",
     "addFailed": "Add failed",
-    "targetValueRequired": "Please fill in the target value"
+    "targetValueRequired": "Please fill in the target value",
+    "filterBySourceType": "Filter by source type",
+    "sourceToken": "Token",
+    "sourceChannel": "Channel"
   },
   "tokenTemplates": {
     "title": "Token Templates",
@@ -884,6 +1014,9 @@
     "expiryDays": "Expiry Days",
     "expiryDaysHint": "-1 means never expires",
     "status": "Status",
+    "statusEnabled": "Enabled",
+    "statusDisabled": "Disabled",
+    "filterByStatus": "Filter by status",
     "create": "Create Template",
     "edit": "Edit Template",
     "noExpiry": "Never",
@@ -944,6 +1077,8 @@
     "cleanupTarget": "Target",
     "traceData": "Trace Data",
     "logData": "Log Data",
+    "hourlyBucketData": "Hourly buckets (only last 7 days visible)",
+    "cleanupHourlyHint": "Suggested retention for hourly buckets: 14 days (hour-grain queries only see last 7 days; +7 day buffer)",
     "retainDays": "Retain Days",
     "preview": "Preview",
     "totalRecords": "Total Records",
@@ -971,7 +1106,10 @@
     "registrationEnabled": "Allow password-based registration",
     "registrationEnabledDesc": "When enabled, the login page shows a sign-up entry and users can create accounts with username and password; when disabled, only admin-created accounts or SSO flows can create users.",
     "oauthAutoCreate": "Auto-create account on first SSO sign-in",
-    "oauthAutoCreateDesc": "When enabled, unbound SSO identities are shown a choice page to create a new account or bind an existing one. When disabled, only binding is allowed."
+    "oauthAutoCreateDesc": "When enabled, unbound SSO identities are shown a choice page to create a new account or bind an existing one. When disabled, only binding is allowed.",
+    "fallbackSleep": "Fallback interval (ms)",
+    "fallbackSleepDesc": "Wait time before switching to next channel on failure (ms), 0..60000",
+    "fallbackSleepRangeError": "Fallback interval must be between 0 and 60000 ms"
   },
   "tokenDetail": {
     "tokenInfo": "Token info",
@@ -1005,13 +1143,8 @@
     "fieldUpdated": "Updated"
   },
   "monitoring": {
-    "title": "Cache Monitoring",
-    "subtitle": "LRU cache runtime status across all agents",
-    "refresh": "Refresh",
-    "lastUpdated": "Last updated",
-    "clusterAggregate": "Cluster Aggregate",
-    "perAgent": "Per-Agent",
-    "noData": "No data",
+    "title": "Monitoring",
+    "subtitle": "Cluster health, traffic and error overview",
     "tableEntity": "Entity",
     "tableHitRate": "Hit %",
     "tableNegative": "Negative",
@@ -1019,7 +1152,39 @@
     "tableSizeCap": "Size / Cap",
     "tableUtil": "Util",
     "online": "Online",
-    "offline": "Offline"
+    "offline": "Offline",
+    "ring": {
+      "success": "Success rate",
+      "agents": "Agents online",
+      "tps": "TPS",
+      "requests": "Requests"
+    },
+    "channels": {
+      "title": "Channels",
+      "name": "Name",
+      "requests": "Requests",
+      "errorRatio": "Error %",
+      "ttft": "TTFT",
+      "tps": "TPS",
+      "p95": "P95",
+      "spark24h": "24h"
+    },
+    "agents": {
+      "title": "Agents",
+      "online": "Online",
+      "offline": "Offline"
+    },
+    "errors": {
+      "title": "Errors",
+      "byStage": "Errors by stage",
+      "byChannel": "Errors by channel"
+    },
+    "range": {
+      "day": "Day",
+      "hour": "Hour",
+      "hourWindowClamped": "Window auto-clamped to the last 7 days (hour-granularity max)"
+    },
+    "noData": "No data"
   },
   "oauth": {
     "loginWith": "Sign in with {provider}",
@@ -1088,5 +1253,255 @@
       "scopes": "Scopes",
       "iconUrl": "Icon URL"
     }
+  },
+  "byok": {
+    "title": "BYOK Channels",
+    "description": "Bring your own provider API key for direct billing on your account.",
+    "create": "New",
+    "edit": "Edit",
+    "delete": "Delete",
+    "test": "Test",
+    "search": "Search by name or model",
+    "searchNameOrModel": "Search by name or model",
+    "filterByType": "Filter by type",
+    "filterByStatus": "Filter by status",
+    "statusEnabled": "Enabled",
+    "statusDisabled": "Disabled",
+    "name": "Name",
+    "type": "Provider",
+    "key": "API Key",
+    "resetKey": "Reset Key",
+    "resetKeyPlaceholder": "(leave empty to keep existing) — current ****{last4}",
+    "keyLast4": "Key (last 4)",
+    "baseUrl": "Base URL",
+    "baseUrlHint": "Leave empty to use provider default",
+    "models": "Models",
+    "modelsNone": "No models registered",
+    "catalog": {
+      "browseButton": "Browse Catalog",
+      "dialogTitle": "Select from Available Models",
+      "empty": "No models available. Ask your admin to register one."
+    },
+    "weight": "Weight",
+    "priority": "Priority",
+    "status": "Status",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "advanced": "Advanced",
+    "organization": "Organization",
+    "apiVersion": "API Version",
+    "systemPrompt": "System Prompt",
+    "tag": "Tag",
+    "remark": "Remark",
+    "createdAt": "Created at",
+    "loadBalancing": "Load balancing",
+    "endpointChat": "Chat",
+    "endpointResp": "Resp",
+    "endpointClaude": "Claude",
+    "expandedEndpoints": "Endpoints",
+    "modelMapping": "Model mapping",
+    "expandedConfig": "Configuration",
+    "configPassthrough": "Passthrough",
+    "testModel": "Test model",
+    "yes": "Yes",
+    "no": "No",
+    "modeLegacy": "Legacy mode",
+    "testSuccessWithTime": "Test ok ({time}s)",
+    "testFailedWithError": "Test failed: {error}",
+    "cancel": "Cancel",
+    "save": "Save",
+    "create_action": "Create",
+    "newSheetTitle": "New BYOK Channel",
+    "editSheetTitle": "Edit BYOK Channel",
+    "sheetDescription": "Bring your own provider API key. Models must be a subset of the gateway's registered model list.",
+    "actions": "Actions",
+    "emptyState": "No BYOK channels. Click \"New\" to add one.",
+    "deleteConfirm": "Delete BYOK channel \"{name}\"?",
+    "deleteDescription": "This will permanently remove the BYOK channel and its API key. This action cannot be undone.",
+    "testOk": "Test OK — {status} in {ms}ms",
+    "testFail": "Test failed — {status} {detail}",
+    "savedToast": "Saved",
+    "createdToast": "Created",
+    "updatedToast": "Updated",
+    "deletedToast": "Deleted",
+    "saveFailedToast": "Save failed",
+    "deleteFailedToast": "Delete failed",
+    "testFailedToast": "Test failed",
+    "notFound": "BYOK channel not found",
+    "loading": "Loading…",
+    "last4Label": "Last 4:",
+    "usageStats": "Usage Stats",
+    "stats": {
+      "title": "BYOK Usage",
+      "description": "Usage statistics from your private-channel requests. By default, BYOK requests do not deduct your gateway quota.",
+      "back": "Back",
+      "totalRequests": "Total Requests",
+      "totalRequestsDesc": "Requests routed through your BYOK channels",
+      "serviceCost": "Service Cost",
+      "serviceCostDesc": "Quota cost in service-fee mode (zero in free mode)",
+      "rangeLast7": "Last 7 days",
+      "rangeLast30": "Last 30 days",
+      "rangeAll": "All time",
+      "successRate": "Success Rate",
+      "totalTokens": "Total Tokens",
+      "totalCost": "Total Cost",
+      "trendTitle": "Daily requests",
+      "trendEmpty": "No usage in the selected range",
+      "byChannelTitle": "By Channel",
+      "byChannelEmpty": "No per-channel usage yet",
+      "byModelTitle": "By Model",
+      "byModelEmpty": "No per-model usage yet",
+      "tableChannelName": "Channel",
+      "tableModelName": "Model",
+      "tableRequests": "Requests",
+      "tableSuccessRate": "Success",
+      "tableTokens": "Tokens",
+      "tableCost": "Cost",
+      "chartRequests": "Requests",
+      "chartTokens": "Tokens",
+      "chartCost": "Cost",
+      "breakdownPromptTokens": "Input tokens",
+      "breakdownCompletionTokens": "Output tokens",
+      "breakdownCacheRead": "Cache read",
+      "breakdownCacheWrite": "Cache write",
+      "chartAllHidden": "All series hidden — click the legend to restore",
+      "viewLogs": "View related logs",
+      "chartInputCost": "Input cost",
+      "chartOutputCost": "Output cost"
+    },
+    "profileCard": {
+      "title": "BYOK",
+      "descriptionEmpty": "Bring your own provider API key for direct billing on your account",
+      "descriptionCount": "You have {count} private channels configured",
+      "manage": "Manage",
+      "usage": "Usage"
+    },
+    "settings": {
+      "title": "BYOK Settings",
+      "description": "Control whether end users can bring their own provider API keys, and which base URLs are allowed.",
+      "globallyEnabled": "Globally enabled",
+      "globallyEnabledDesc": "When off, all BYOK creation/use is disabled across the gateway.",
+      "maxChannels": "Max private channels per user (global default)",
+      "maxChannelsDesc": "User groups can override this individually.",
+      "billingMode": "Billing mode",
+      "billingFree": "Free (no quota deduction)",
+      "billingServiceFee": "Service fee (discounted cost)",
+      "feeRatio": "Service fee ratio (0..1)",
+      "feeRatioDesc": "BYOK costs are multiplied by this ratio (e.g., 0.1 = 10% of admin-channel cost).",
+      "allowlist": "BaseURL allowlist",
+      "systemRecommended": "System recommended (read-only, updated with each release)",
+      "systemNone": "No system URLs configured",
+      "customAdditions": "Custom additions",
+      "customNone": "No custom URLs added",
+      "add": "Add",
+      "savedToast": "BYOK settings saved",
+      "saveFailedToast": "Save failed",
+      "duplicateToast": "Already in list",
+      "saveButton": "Save BYOK Settings",
+      "deleteBaseURLTitle": "Remove this BaseURL prefix?",
+      "deleteBaseURLChecking": "Checking how many channels use this prefix…",
+      "deleteBaseURLSafe": "No existing channels use this prefix. Removing it is safe.",
+      "deleteBaseURLWarning": "{count} existing private channel(s) currently use this prefix. After removal you must still click Save to commit the change; once saved, the next time those owners try to edit their channel the BaseURL will fail validation.",
+      "deleteBaseURLTruncated": "(showing first {shown} of {total})",
+      "deleteBaseURLColOwner": "Owner ID",
+      "deleteBaseURLColChannel": "Channel name",
+      "deleteBaseURLConfirm": "Remove anyway"
+    },
+    "groupCard": {
+      "title": "BYOK (Bring Your Own Key)",
+      "enabledLabel": "BYOK enabled",
+      "enabledDesc": "Defers to the global BYOK switch by default. Turn on \"Use group-specific value\" to control it here for this group.",
+      "useOverride": "Use group-specific value (override global)",
+      "maxLabel": "Max private channels per user",
+      "maxDesc": "Defers to the global per-user limit by default. Turn on \"Use group-specific value\" to apply the number above.",
+      "savedToast": "BYOK group settings saved",
+      "saveFailedToast": "Save failed",
+      "saveButton": "Save BYOK Settings"
+    },
+    "admin": {
+      "title": "All BYOK Channels",
+      "description": "Cross-user view of all private channels. Plaintext API keys are never shown.",
+      "filteredBy": "Filtering by owner_id={id}",
+      "filterByOwner": "Filter by owner",
+      "owner": "Owner",
+      "created": "Created",
+      "forceDisable": "Force Disable",
+      "disabledLabel": "Disabled",
+      "confirmTitle": "Force disable this BYOK channel?",
+      "confirmDesc": "The owner will need to re-enable it themselves. Active requests using this channel will fail.",
+      "disabledToast": "Channel disabled",
+      "disableFailedToast": "Disable failed",
+      "emptyState": "No channels found.",
+      "viewChannels": "View BYOK Channels"
+    },
+    "errors": {
+      "quotaDisabled": "BYOK channel quota is disabled by your admin",
+      "quotaReached": "BYOK channel quota {limit} reached",
+      "privateChannelNotOwned": "Not authorized for this BYOK channel"
+    }
+  },
+  "observability": {
+    "header": {
+      "gran": {
+        "day": "Day",
+        "hour": "Hour"
+      },
+      "refresh": "Refresh"
+    },
+    "range": {
+      "daysExceedHourLimit": "Range exceeds 7 days for hour granularity",
+      "day": "Day",
+      "hour": "Hour",
+      "hourWindowClamped": "Window clamped to last 7 days (hour granularity limit)"
+    },
+    "banner": {
+      "hourlyDataStartsFrom": "Hourly data starts from {date}. Use day granularity for older periods."
+    }
+  },
+  "insights": {
+    "title": {
+      "agent": "Agent insight",
+      "channel": "Channel insight",
+      "model": "Model insight",
+      "user": "User insight",
+      "token": "Token insight"
+    },
+    "section": {
+      "summary": "Summary",
+      "trend": "Trend",
+      "stageLatency": "Stage latency",
+      "breakdown": "Breakdown",
+      "errors": "Recent errors",
+      "noErrors": "No recent errors",
+      "errorCol": {
+        "time": "Time",
+        "stage": "Stage",
+        "channel": "Channel",
+        "model": "Model",
+        "message": "Message"
+      }
+    },
+    "header": {
+      "lastSeen": "last seen"
+    },
+    "kpi": {
+      "requests": "Requests",
+      "cost": "Cost",
+      "tokens": "Tokens",
+      "ttftP95": "TTFT p95",
+      "tpsAvg": "TPS avg",
+      "successRate": "Success rate"
+    },
+    "breakdown": {
+      "model": "By model",
+      "channel": "By channel",
+      "agent": "By agent",
+      "user": "By user",
+      "token": "By token"
+    },
+    "missingId": "Missing id parameter",
+    "unknownType": "Unknown entity type: {type}",
+    "loading": "Loading...",
+    "notImplemented": "Insight type not implemented yet"
   }
 }

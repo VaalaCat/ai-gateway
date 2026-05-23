@@ -8,6 +8,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { ModelMappingInput } from "@/components/ui/model-mapping-input";
 import { ModelSelectorPanel } from "@/components/business/model-selector-panel";
 import { FetchModelsButton } from "@/components/business/fetch-models-button";
+import { CatalogPickerDialog } from "@/components/business/catalog-picker-dialog";
 import { FieldTip } from "@/components/business/field-tip";
 import { ChannelForm } from "../types";
 import { parseSetting } from "../utils";
@@ -16,11 +17,97 @@ export interface ModelsSectionProps {
   form: ChannelForm;
   setForm: (next: ChannelForm) => void;
   agentId?: string;
+  useModelsCatalog?: () => { data: string[] | undefined };
 }
 
-export function ModelsSection({ form, setForm, agentId }: ModelsSectionProps) {
-  const t = useTranslations("channels");
+export function ModelsSection({
+  form,
+  setForm,
+  agentId,
+  useModelsCatalog,
+}: ModelsSectionProps) {
+  if (useModelsCatalog) {
+    return (
+      <CatalogModelsBlock
+        form={form}
+        setForm={setForm}
+        useModelsCatalog={useModelsCatalog}
+      />
+    );
+  }
+  return <AdminFetchModelsBlock form={form} setForm={setForm} agentId={agentId} />;
+}
 
+function splitModels(models: string): string[] {
+  return models ? models.split(",").map((s) => s.trim()).filter(Boolean) : [];
+}
+
+interface CatalogModelsBlockProps {
+  form: ChannelForm;
+  setForm: (next: ChannelForm) => void;
+  useModelsCatalog: () => { data: string[] | undefined };
+}
+
+function CatalogModelsBlock({ form, setForm, useModelsCatalog }: CatalogModelsBlockProps) {
+  const t = useTranslations("channels");
+  const { data } = useModelsCatalog();
+  const available = data ?? [];
+  const selected = splitModels(form.models);
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Label>{t("models")}</Label>
+          <CatalogPickerDialog
+            available={available}
+            alreadySelected={selected}
+            disabled={available.length === 0}
+            onConfirm={(added) =>
+              setForm({
+                ...form,
+                models: [...selected, ...added].join(","),
+              })
+            }
+          />
+        </div>
+        <ModelSelectorPanel
+          value={selected}
+          onChange={(models) => setForm({ ...form, models: models.join(",") })}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label>{t("weight")}</Label>
+          <Input
+            type="number"
+            min={1}
+            value={form.weight}
+            onChange={(e) => setForm({ ...form, weight: e.target.value })}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label>{t("priority")}</Label>
+          <Input
+            type="number"
+            value={form.priority}
+            onChange={(e) => setForm({ ...form, priority: e.target.value })}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface AdminFetchModelsBlockProps {
+  form: ChannelForm;
+  setForm: (next: ChannelForm) => void;
+  agentId?: string;
+}
+
+function AdminFetchModelsBlock({ form, setForm, agentId }: AdminFetchModelsBlockProps) {
+  const t = useTranslations("channels");
   const setting = parseSetting(form.setting);
 
   return (
@@ -36,16 +123,12 @@ export function ModelsSection({ form, setForm, agentId }: ModelsSectionProps) {
             endpoints={form.endpoints}
             proxyUrl={form.proxy_url || setting.proxy}
             agentId={agentId}
-            existingModels={
-              form.models ? form.models.split(",").map((s) => s.trim()).filter(Boolean) : []
-            }
+            existingModels={splitModels(form.models)}
             onModelsSelected={(models) => setForm({ ...form, models: models.join(",") })}
           />
         </div>
         <ModelSelectorPanel
-          value={
-            form.models ? form.models.split(",").map((s) => s.trim()).filter(Boolean) : []
-          }
+          value={splitModels(form.models)}
           onChange={(models) => setForm({ ...form, models: models.join(",") })}
         />
       </div>
@@ -57,9 +140,7 @@ export function ModelsSection({ form, setForm, agentId }: ModelsSectionProps) {
           value={form.model_mapping}
           onChange={(json) => setForm({ ...form, model_mapping: json })}
           onMappingAdd={(sourceModel) => {
-            const modelList = form.models
-              ? form.models.split(",").map((s) => s.trim()).filter(Boolean)
-              : [];
+            const modelList = splitModels(form.models);
             if (!modelList.includes(sourceModel)) {
               setForm({ ...form, models: [...modelList, sourceModel].join(",") });
             }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
@@ -74,5 +75,14 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[A
 		items[i].HTTPAddresses = effective
 		items[i].EffectiveHTTPAddresses = effective
 	}
+
+	if h.Hub != nil && h.Hub.Heartbeat != nil {
+		msync.EnrichLastSeen(h.Hub.Heartbeat, items,
+			func(it AgentResponse) string { return it.AgentID },
+			func(it AgentResponse) int64 { return it.LastSeen },
+			func(it *AgentResponse, ts int64) { it.LastSeen = ts },
+		)
+	}
+
 	return api.PaginatedResponse[AgentResponse]{Data: items, Total: total, Page: page, PageSize: pageSize}, nil
 }

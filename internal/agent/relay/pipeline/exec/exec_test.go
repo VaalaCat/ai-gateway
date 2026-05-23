@@ -1,11 +1,14 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/config"
@@ -15,6 +18,14 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+// stubSleep 实现 SleepReader，让测试控制 FallbackSleepMs 返回值，
+// 供 TestExecutor_DefaultFallback_SleepsBetween 等用例注入。
+type stubSleep struct {
+	ms int
+}
+
+func (s stubSleep) FallbackSleepMs() int { return s.ms }
 
 // recordingDispatcher 一次性返回预设的 state.AttemptResult 队列，记录调用计数。
 // 队列中 callCount 超出长度时返回零值，方便检测"按预期不被多调"的场景。
@@ -106,7 +117,7 @@ func TestExecutorSuccessFirstAttempt(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	e.Run(rctx)
@@ -133,8 +144,8 @@ func TestExecutorRetryOnFail(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 2}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	e.Run(rctx)
@@ -161,8 +172,8 @@ func TestExecutorStopsOnWritten(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 2}, Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	e.Run(rctx)
@@ -197,7 +208,7 @@ func TestExecutorMaybeForwardCommits(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	cache := &stubExecCache{route: &models.AgentRoute{ID: 1, AgentID: "other-agent"}}
 	fwd := &stubForwarder{forwarded: true}
@@ -222,7 +233,7 @@ func TestExecutorMaybeForwardFailsToBackend(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	cache := &stubExecCache{route: &models.AgentRoute{ID: 1}}
 	fwd := &stubForwarder{forwarded: false, err: errors.New("network")}
@@ -245,7 +256,7 @@ func TestExecutorNoForwarderSkipsForwardCheck(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: nil, cache: nil})
 	e.Run(rctx)
@@ -270,7 +281,7 @@ func TestExecutorNoForwarderSkipsForwardCheck(t *testing.T) {
 // 验证 forward 决策本身的早返语义，避开 dispatch 路径噪声。
 func TestMaybeForward_ForwarderPresentButCacheNil_SkipsForward(t *testing.T) {
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	// forwarder 非 nil（任何 stub 即可），cache 显式 nil。
 	fwd := &stubForwarder{forwarded: true}
@@ -346,9 +357,9 @@ func TestExecutorPerAttemptForwardLateHit(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 2}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 3}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 3}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	cache := &perChannelCache{routes: []*models.AgentRoute{nil, nil, {ID: 42}}}
 	// ForwardByRoute 仅在 MatchRoute 命中（第 3 attempt）时被调用 → 队列首项即对应第 3 attempt。
@@ -387,9 +398,9 @@ func TestExecutorPerAttemptForwardAfterBackendFailures(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 11}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 22}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 33}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 11}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 22}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 33}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	// 前 2 不匹配 route → 走 backend；第 3 匹配 → 走 forward。
 	cache := &perChannelCache{routes: []*models.AgentRoute{nil, nil, {ID: 7}}}
@@ -432,9 +443,9 @@ func TestExecutorForwardDecisionUsesRemainingChannelBatch(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 101}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 202}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 303}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 101}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 202}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 303}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	// MatchRoute 全部返 nil → 不进入 ForwardByRoute，但 captured 仍记录每次传入的 channelIDs。
 	cache := &perChannelCache{routes: []*models.AgentRoute{nil, nil, nil}}
@@ -485,8 +496,8 @@ func TestExecutor_RelayAttemptFailedLogEmitted(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 101}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 202}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 101}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 202}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{logger: logger})
 	// 注入带 URL 的 Request，让日志能填 path 字段。
@@ -529,7 +540,7 @@ func TestExecutor_RelayAttemptFailedLogEmittedOnWritten(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 7}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 7}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{logger: logger})
 	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -554,7 +565,7 @@ func TestExecutor_RouteForwardingFailedLogMessage(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	cache := &stubExecCache{route: &models.AgentRoute{ID: 42}}
 	fwd := &stubForwarder{forwarded: false, err: errors.New("upstream agent unreachable")}
@@ -590,9 +601,9 @@ func TestExecutor_RouteForwardingFailedLogMessage(t *testing.T) {
 // 旧 HEAD 行为：attempt 0 查 [A] 不命中 → dispatch A → 失败 → attempt 1 查 [B] 命中
 // 新 HEAD 行为：attempt 0 查 [A,B,C] 命中 B → forward（dispatcher 永远不被调用）
 func TestRun_ForwardBatch_MatchesLaterChannel(t *testing.T) {
-	chA := &models.Channel{ID: 1, Name: "A"}
-	chB := &models.Channel{ID: 2, Name: "B"}
-	chC := &models.Channel{ID: 3, Name: "C"}
+	chA := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Name: "A"}}
+	chB := &models.Channel{ChannelCore: models.ChannelCore{ID: 2, Name: "B"}}
+	chC := &models.Channel{ChannelCore: models.ChannelCore{ID: 3, Name: "C"}}
 
 	route := &models.AgentRoute{ID: 42}
 	// idChannelCache：当传入的 channelIDs 包含 chB.ID 时返回 route，否则 nil。
@@ -678,9 +689,9 @@ func TestLogAttemptFailed_AttemptsLeftReflectsPlanRemaining(t *testing.T) {
 	e := &Executor{Dispatcher: d}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 1}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 2}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ID: 3}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 3}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{logger: logger})
 	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
@@ -704,6 +715,124 @@ func TestLogAttemptFailed_AttemptsLeftReflectsPlanRemaining(t *testing.T) {
 	}
 }
 
+// ==================== Task 6: Sleep 行为覆盖 ====================
+
+// TestExecutor_ContextCanceled_NoSleep 验证例外 2：attempt 返回 context.Canceled
+// 时 Executor 立即返回（不进入 sleep 分支）。
+// 注入 stubSleep{ms:1000}（正常会 sleep 1 秒），但 context.Canceled 例外在 sleep
+// 之前触发，整体耗时应远小于 sleep 时长（100ms 以内）。
+func TestExecutor_ContextCanceled_NoSleep(t *testing.T) {
+	backend := &recordingDispatcher{results: []state.AttemptResult{
+		{Err: context.Canceled, Written: false},
+		{PromptTokens: 99}, // 不应被调
+	}}
+	e := &Executor{
+		Dispatcher: backend,
+		Sleep:      stubSleep{ms: 1000},
+	}
+
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	start := time.Now()
+	e.Run(rctx)
+	elapsed := time.Since(start)
+
+	// context.Canceled 触发例外 2，立即返回，不进入 sleep 分支。
+	if elapsed >= 100*time.Millisecond {
+		t.Errorf("context.Canceled 例外应立即返回，耗时 %v >= 100ms（怀疑进入了 sleep）", elapsed)
+	}
+	if backend.callCount != 1 {
+		t.Errorf("context.Canceled 后不应 retry，backend 调用次数 = %d, want 1", backend.callCount)
+	}
+	if !errors.Is(rctx.State.Execution.Err, context.Canceled) {
+		t.Errorf("Execution.Err 应为 context.Canceled, got %v", rctx.State.Execution.Err)
+	}
+}
+
+// TestExecutor_InvalidRequest_NoSleep 验证例外 3：attempt 返回
+// *UpstreamError{Status:400, ProviderErrorType:"invalid_request_error"} 时
+// Executor 立即短路返回，不进入 sleep，不 retry 下一 attempt。
+func TestExecutor_InvalidRequest_NoSleep(t *testing.T) {
+	invReqErr := &common.UpstreamError{
+		Status:            400,
+		Body:              []byte(`{"error":{"type":"invalid_request_error","message":"bad prompt"}}`),
+		ProviderErrorType: "invalid_request_error",
+	}
+	backend := &recordingDispatcher{results: []state.AttemptResult{
+		{Err: invReqErr, Written: false},
+		{PromptTokens: 99}, // 不应被调
+	}}
+	e := &Executor{
+		Dispatcher: backend,
+		Sleep:      stubSleep{ms: 1000},
+	}
+
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	start := time.Now()
+	e.Run(rctx)
+	elapsed := time.Since(start)
+
+	if elapsed >= 100*time.Millisecond {
+		t.Errorf("invalid_request_error 例外应立即返回，耗时 %v >= 100ms", elapsed)
+	}
+	if backend.callCount != 1 {
+		t.Errorf("invalid_request_error 短路后不应 retry，backend 调用次数 = %d, want 1", backend.callCount)
+	}
+	var gotErr *common.UpstreamError
+	if !errors.As(rctx.State.Execution.Err, &gotErr) {
+		t.Fatalf("Execution.Err 应为 *common.UpstreamError, got %T: %v", rctx.State.Execution.Err, rctx.State.Execution.Err)
+	}
+	if gotErr.ProviderErrorType != "invalid_request_error" {
+		t.Errorf("ProviderErrorType = %q, want invalid_request_error", gotErr.ProviderErrorType)
+	}
+}
+
+// TestExecutor_DefaultFallback_SleepsBetween 验证默认路径：attempt 1 失败（503，可
+// fallback），attempt 2 成功；stubSleep{ms:50} → 两次 attempt 之间至少 sleep 50ms。
+func TestExecutor_DefaultFallback_SleepsBetween(t *testing.T) {
+	backend := &recordingDispatcher{results: []state.AttemptResult{
+		{Err: &common.UpstreamError{Status: 503, Body: []byte("overloaded")}, Written: false},
+		{PromptTokens: 7}, // 成功
+	}}
+	e := &Executor{
+		Dispatcher: backend,
+		Sleep:      stubSleep{ms: 50},
+	}
+
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	// Sleep 分支需要 rctx.Context.Request != nil
+	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	start := time.Now()
+	e.Run(rctx)
+	elapsed := time.Since(start)
+
+	if backend.callCount != 2 {
+		t.Errorf("应 dispatch 2 次（fail + success），got %d", backend.callCount)
+	}
+	if rctx.State.Execution.Err != nil {
+		t.Errorf("终态应为成功（第 2 次 attempt），got Err=%v", rctx.State.Execution.Err)
+	}
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("两次 attempt 之间应 sleep ≥ 50ms，实际耗时 %v < 50ms", elapsed)
+	}
+}
+
 // TestRun_AttemptFailLog_LegacyModePath 钉死审计 D-C2 / 审计 #3：
 // 当 Attempt.Mode == state.ModeLegacy 失败时，"relay attempt failed" Warn 日志
 // 的 `path` 字段必须是 "legacy"（对齐 main:handler.go 老主循环的 nativeOrLegacy(useLegacy)
@@ -719,7 +848,7 @@ func TestRun_AttemptFailLog_LegacyModePath(t *testing.T) {
 	e := &Executor{Dispatcher: backend}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ID: 7}, RealModel: "claude", Mode: state.ModeLegacy},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 7}}, RealModel: "claude", Mode: state.ModeLegacy},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{logger: logger})
 	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)

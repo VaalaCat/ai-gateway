@@ -5,6 +5,8 @@ type UsageLog struct {
 	UserID           uint   `gorm:"index" json:"user_id"`
 	TokenID          uint   `gorm:"index" json:"token_id"`
 	ChannelID        uint   `gorm:"index" json:"channel_id"`
+	PrivateChannelID uint   `gorm:"index;default:0" json:"private_channel_id"`     // 0 = 非 BYOK 请求
+	OwnerType        string `gorm:"size:8;default:'admin'" json:"owner_type"` // "admin" | "private"
 	AgentID          string `gorm:"index;size:64" json:"agent_id"`
 	ModelName        string `gorm:"size:128" json:"model_name"`
 	PromptTokens     int    `json:"prompt_tokens"`

@@ -61,7 +61,7 @@ export function RefCombobox({
           role="combobox"
           aria-expanded={open}
           tabIndex={-1}
-          className="w-full justify-between"
+          className="w-full justify-between text-body"
         >
           {value ? (
             <span className="flex items-center gap-2 truncate">

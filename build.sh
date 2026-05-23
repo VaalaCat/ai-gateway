@@ -21,6 +21,10 @@ ensure_pnpm() {
 }
 
 if [[ -f "web/package.json" ]]; then
+  # Run i18n verification (catches missing translation keys)
+  echo "==> Verifying i18n keys..."
+  python3 scripts/verify-i18n.py
+
   echo "Building web assets..."
   pushd web >/dev/null
   ensure_pnpm

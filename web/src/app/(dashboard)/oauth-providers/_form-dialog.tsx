@@ -28,6 +28,7 @@ import {
   useCreateOAuthProvider,
   useUpdateOAuthProvider,
 } from "@/lib/api/oauth";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import type { OAuthProvider } from "@/lib/types-oauth";
 
 type Mode = "create" | "edit";
@@ -128,8 +129,8 @@ export function ProviderFormDialog({ mode, open, onOpenChange, initial }: Props)
       }
       toast.success(tc("success"));
       onOpenChange(false);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -9,64 +9,62 @@ import { toast } from "sonner";
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DateCell } from "@/components/business/date-cell";
-import {
-  DateRangeInputs,
-  isDateRangeValid,
-} from "@/components/business/date-range-inputs";
+import { ObservabilityHeader } from "@/components/business/observability-header";
+import { RebuildButton } from "@/components/business/rebuild-button";
 import { RebuildDialog } from "@/components/business/rebuild-dialog";
+import { StackedAreaChart } from "@/components/business/stacked-area-chart";
+import { KpiGrid } from "@/components/business/kpi-grid";
+import { DataGlyph } from "@/components/business/data-glyph";
+import { normalize0to100 } from "@/lib/utils/normalize";
 import {
   useBillingOverview,
   useChannelBilling,
   useTokenBilling,
 } from "@/lib/api/billing";
+import { useBillingInsights } from "@/lib/api/billing-insights";
 import { useChannelTypes } from "@/lib/api/channels";
 import { buildQuery } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth";
+import { useObsRange } from "@/lib/hooks/use-obs-range";
+import { tsToDateStr } from "@/lib/utils/date-range";
 import { PAGE_SIZES } from "@/lib/constants";
-import { formatCurrency, formatSuccessRate } from "@/lib/utils/format";
+import { formatMoneyCompact, formatMoneyExact, formatSuccessRate } from "@/lib/utils/format";
+import { MoneyCell } from "@/components/business/money-cell";
+import { TokensCell } from "@/components/business/tokens-cell";
 import type {
   BillingChannelRow,
   BillingOverviewResponse,
   BillingTokenRow,
 } from "@/lib/types";
 
-function MetricCard({
-  title,
-  value,
-}: {
-  title: string;
-  value: string;
-}) {
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          {title}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-semibold">{value}</div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function logHref(params: Record<string, string | number | undefined>) {
   return `/logs${buildQuery(params)}`;
 }
 
 export default function BillingPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center py-12 text-muted-foreground">
+          Loading...
+        </div>
+      }
+    >
+      <BillingPageContent />
+    </Suspense>
+  );
+}
+
+function BillingPageContent() {
   const t = useTranslations("billing");
   const tc = useTranslations("common");
   const { isAdmin, loading } = useAuth();
 
   const [tab, setTab] = useState("token");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
   const [userId, setUserId] = useState("");
   const [channelId, setChannelId] = useState("");
   const [rebuildOpen, setRebuildOpen] = useState(false);
@@ -78,37 +76,58 @@ export default function BillingPage() {
     PAGE_SIZES.DEFAULT
   );
 
+  // 统一时间窗 + gran (day/hour) 控制所有数据源 (KPI / trend / token-list / channel-list).
+  // useObsRange 默认 24h, 24h 配 gran=day 会出"1 个点", 这里仅在 URL 没显式 start 时
+  // 把窗口拉成 7 天 (gran 保留 useObsRange 给的, 用户可切 hour)。
+  const { range: rawRange, setRange, refresh, refreshKey } = useObsRange({
+    gran: "day",
+  });
+  const range = useMemo(
+    () =>
+      rawRange.end - rawRange.start <= 86400
+        ? { ...rawRange, start: rawRange.end - 7 * 86400 }
+        : rawRange,
+    [rawRange],
+  );
+
+  const startDateStr = tsToDateStr(range.start);
+  const endDateStr = tsToDateStr(range.end);
+
+  const insights = useBillingInsights(range, {
+    enabled: !loading,
+    refetchKey: refreshKey,
+  });
+
   const tokenUserId = userId ? Number(userId) : undefined;
   const channelFilterId = channelId ? Number(channelId) : undefined;
-  const dateValid = isDateRangeValid(startDate, endDate);
 
   const overview = useBillingOverview(
     {
-      ...(startDate ? { start_date: startDate } : {}),
-      ...(endDate ? { end_date: endDate } : {}),
+      start_date: startDateStr,
+      end_date: endDateStr,
       ...(tokenUserId ? { user_id: tokenUserId } : {}),
     },
-    { enabled: !loading && dateValid }
+    { enabled: !loading }
   );
   const tokenBilling = useTokenBilling(
     {
       page: tokenPage,
       page_size: tokenPageSize,
-      ...(startDate ? { start_date: startDate } : {}),
-      ...(endDate ? { end_date: endDate } : {}),
+      start_date: startDateStr,
+      end_date: endDateStr,
       ...(tokenUserId ? { user_id: tokenUserId } : {}),
     },
-    { enabled: !loading && dateValid }
+    { enabled: !loading }
   );
   const channelBilling = useChannelBilling(
     {
       page: channelPage,
       page_size: channelPageSize,
-      ...(startDate ? { start_date: startDate } : {}),
-      ...(endDate ? { end_date: endDate } : {}),
+      start_date: startDateStr,
+      end_date: endDateStr,
       ...(channelFilterId ? { channel_id: channelFilterId } : {}),
     },
-    { enabled: !loading && isAdmin && tab === "channel" && dateValid }
+    { enabled: !loading && isAdmin && tab === "channel" }
   );
   const channelTypes = useChannelTypes({ enabled: isAdmin });
 
@@ -161,7 +180,7 @@ export default function BillingPage() {
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={t("totalCost")} />
         ),
-        cell: ({ row }) => formatCurrency(row.original.total_cost),
+        cell: ({ row }) => <MoneyCell quota={row.original.total_cost} />,
       },
       {
         accessorKey: "request_count",
@@ -183,6 +202,7 @@ export default function BillingPage() {
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={t("promptTokens")} />
         ),
+        cell: ({ row }) => <TokensCell tokens={row.original.prompt_tokens} />,
       },
       {
         accessorKey: "completion_tokens",
@@ -192,6 +212,7 @@ export default function BillingPage() {
             title={t("completionTokens")}
           />
         ),
+        cell: ({ row }) => <TokensCell tokens={row.original.completion_tokens} />,
       },
       {
         accessorKey: "last_used_at",
@@ -199,6 +220,14 @@ export default function BillingPage() {
           <DataTableColumnHeader column={column} title={t("lastUsedAt")} />
         ),
         cell: ({ row }) => <DateCell timestamp={row.original.last_used_at} />,
+      },
+      {
+        id: "spark_24h",
+        header: t("spark24h"),
+        cell: ({ row }) => (
+          <DataGlyph kind="line" values={normalize0to100(row.original.spark_24h ?? [])} title="24h"
+            targetByBreakpoint={{ xs: 8, "sm-md": 12, "lg+": 20 }} />
+        ),
       },
       {
         id: "logs",
@@ -250,7 +279,7 @@ export default function BillingPage() {
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={t("totalCost")} />
         ),
-        cell: ({ row }) => formatCurrency(row.original.total_cost),
+        cell: ({ row }) => <MoneyCell quota={row.original.total_cost} />,
       },
       {
         accessorKey: "request_count",
@@ -272,6 +301,7 @@ export default function BillingPage() {
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={t("promptTokens")} />
         ),
+        cell: ({ row }) => <TokensCell tokens={row.original.prompt_tokens} />,
       },
       {
         accessorKey: "completion_tokens",
@@ -281,6 +311,7 @@ export default function BillingPage() {
             title={t("completionTokens")}
           />
         ),
+        cell: ({ row }) => <TokensCell tokens={row.original.completion_tokens} />,
       },
       {
         accessorKey: "last_used_at",
@@ -288,6 +319,14 @@ export default function BillingPage() {
           <DataTableColumnHeader column={column} title={t("lastUsedAt")} />
         ),
         cell: ({ row }) => <DateCell timestamp={row.original.last_used_at} />,
+      },
+      {
+        id: "spark_24h",
+        header: t("spark24h"),
+        cell: ({ row }) => (
+          <DataGlyph kind="line" values={normalize0to100(row.original.spark_24h ?? [])} title="24h"
+            targetByBreakpoint={{ xs: 8, "sm-md": 12, "lg+": 20 }} />
+        ),
       },
       {
         id: "logs",
@@ -322,55 +361,84 @@ export default function BillingPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t("title")}</h1>
-          <p className="mt-1 text-muted-foreground">{t("description")}</p>
+      <ObservabilityHeader
+        title={t("title")}
+        subtitle={t("description")}
+        range={range}
+        onRangeChange={setRange}
+        onRefresh={refresh}
+        refreshing={insights.isFetching || overview.isFetching}
+        showGranularity
+      />
+      {isAdmin && (
+        <div className="flex justify-end">
+          <RebuildButton onClick={() => setRebuildOpen(true)} />
         </div>
-        {isAdmin && (
-          <Button variant="outline" onClick={() => setRebuildOpen(true)}>
-            {t("rebuild")}
-          </Button>
-        )}
-      </div>
+      )}
 
-      <div className="grid gap-3 md:grid-cols-4">
-        <MetricCard
-          title={t("totalCost")}
-          value={formatCurrency(overviewValue?.total_cost ?? 0)}
-        />
-        <MetricCard
-          title={t("requestCount")}
-          value={String(overviewValue?.request_count ?? 0)}
-        />
-        <MetricCard
-          title={t("successRate")}
-          value={`${((overviewValue?.success_rate ?? 0) * 100).toFixed(1)}%`}
-        />
-        <MetricCard
-          title={t("activeTokens")}
-          value={String(overviewValue?.active_tokens ?? 0)}
-        />
-      </div>
+      {(() => {
+        const noData = !overviewValue || (overviewValue.request_count ?? 0) === 0;
+        const successPct = (overviewValue?.success_rate ?? 0) * 100;
+        const errorPct = 100 - successPct;
+        const cacheHitPct = (insights.data?.cache_saving?.hit_ratio ?? 0) * 100;
+        const savedTokens = insights.data?.cache_saving?.saved_tokens ?? 0;
+        const cacheReadTokens = insights.data?.cache_saving?.read_tokens ?? 0;
+        const cacheWriteTokens = insights.data?.cache_saving?.write_tokens ?? 0;
+        return (
+          <KpiGrid
+            items={[
+              {
+                key: "totalCost",
+                label: t("totalCost"),
+                value: formatMoneyCompact(overviewValue?.total_cost ?? 0),
+              },
+              {
+                key: "requestCount",
+                label: t("requestCount"),
+                value: overviewValue?.request_count ?? 0,
+              },
+              {
+                key: "successRate",
+                label: t("successRate"),
+                value: noData ? "—" : `${successPct.toFixed(1)}%`,
+                ratio: noData ? undefined : errorPct,
+                threshold: noData ? undefined : { warn: 5, critical: 10 },
+              },
+              {
+                key: "activeTokens",
+                label: t("activeTokens"),
+                value: overviewValue?.active_tokens ?? 0,
+              },
+              {
+                key: "cacheHit",
+                label: t("kpi.cacheHit"),
+                value: noData ? "—" : `${cacheHitPct.toFixed(1)}%`,
+                sublabel: t("kpi.cacheSubFull", {
+                  n: savedTokens.toLocaleString(),
+                  r: cacheReadTokens.toLocaleString(),
+                  w: cacheWriteTokens.toLocaleString(),
+                }),
+                ratio: noData ? undefined : cacheHitPct,
+              },
+            ]}
+          />
+        );
+      })()}
+
+      <StackedAreaChart
+        buckets={insights.data?.cost_trend_stacked.buckets ?? []}
+        seriesOrder={insights.data?.cost_trend_stacked.series_order ?? []}
+        title={t("costTrend")}
+        loading={insights.isLoading}
+        axisFormatter={formatMoneyCompact}
+        tooltipFormatter={formatMoneyExact}
+        unitLabel="Cost (USD)"
+      />
 
       <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
-        <DateRangeInputs
-          startDate={startDate}
-          endDate={endDate}
-          onStartDateChange={(d) => {
-            setStartDate(d);
-            setTokenPage(1);
-            setChannelPage(1);
-          }}
-          onEndDateChange={(d) => {
-            setEndDate(d);
-            setTokenPage(1);
-            setChannelPage(1);
-          }}
-        />
         {isAdmin && tab === "token" && (
           <div className="space-y-1">
-            <label className="text-sm font-medium">{t("user")}</label>
+            <Label>{t("user")}</Label>
             <Input
               type="number"
               placeholder={t("user")}
@@ -384,7 +452,7 @@ export default function BillingPage() {
         )}
         {isAdmin && tab === "channel" && (
           <div className="space-y-1">
-            <label className="text-sm font-medium">{t("channelId")}</label>
+            <Label>{t("channelId")}</Label>
             <Input
               type="number"
               placeholder={t("channelId")}

@@ -51,9 +51,9 @@ func (s *Syncer) getClient() app.WSClient {
 
 // FullSync pulls all data from master.
 //
-// LRU 模式实体（token / user）不参与 FullSync——它们靠 push apply-if-present
-// + miss 时 RPC 拉取保持最新。全量重拉违背 LRU 容量目标，会让 agent 内存
-// 重新涨回基线。
+// LRU 模式实体（token / user / private_channel）不参与 FullSync——它们靠 push
+// invalidate + miss 时 RPC 拉取保持最新。全量重拉违背 LRU 容量目标，会让 agent
+// 内存重新涨回基线。
 func (s *Syncer) FullSync(ctx context.Context) error {
 	if err := s.fullSyncEntity(ctx, "user_group"); err != nil {
 		s.Logger.Error("full sync user_group failed", zap.Error(err))

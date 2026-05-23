@@ -26,6 +26,7 @@ import {
   usePreviewSyncTokenTemplate,
   useSyncTokenTemplate,
 } from "@/lib/api/token-templates";
+import { formatErrorToast } from "@/lib/api/error-toast";
 
 interface Props {
   template: TokenTemplate | null;
@@ -122,8 +123,8 @@ export function TokenTemplateSyncDialog({ template, onOpenChange }: Props) {
       const r = await syncMut.mutateAsync(template.id);
       toast.success(t("sync.success", { count: r.synced }));
       onOpenChange(false);
-    } catch {
-      toast.error(t("sync.syncFailed"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, t("sync.syncFailed")));
     }
   };
 
@@ -155,7 +156,7 @@ export function TokenTemplateSyncDialog({ template, onOpenChange }: Props) {
             ) : (
               <>
                 <div className="max-h-[60vh] overflow-auto rounded-md border">
-                  <Table>
+                  <Table className="text-body">
                     <TableHeader>
                       <TableRow>
                         <TableHead>{t("sync.tokenName")}</TableHead>

@@ -5,6 +5,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
@@ -61,5 +62,14 @@ func (h *Handler) Online(c *app.Context, _ api.EmptyRequest) ([]OnlineAgentInfo,
 		result[i].HTTPAddresses = effective
 		result[i].EffectiveHTTPAddresses = effective
 	}
+
+	if h.Hub != nil && h.Hub.Heartbeat != nil {
+		msync.EnrichLastSeen(h.Hub.Heartbeat, result,
+			func(it OnlineAgentInfo) string { return it.AgentID },
+			func(it OnlineAgentInfo) int64 { return it.LastSeen },
+			func(it *OnlineAgentInfo, ts int64) { it.LastSeen = ts },
+		)
+	}
+
 	return result, nil
 }

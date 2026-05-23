@@ -17,6 +17,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { useAgentRoutes, useCreateAgentRoute, useDeleteAgentRoute } from "@/lib/api/agent-routes";
 import { useAgents } from "@/lib/api/agents";
+import { formatErrorToast } from "@/lib/api/error-toast";
 
 interface AgentRouteEditorProps {
   sourceType: "token" | "channel";
@@ -58,8 +59,8 @@ export function AgentRouteEditor({ sourceType, sourceId }: AgentRouteEditorProps
     try {
       await deleteMutation.mutateAsync(id);
       toast.success(t("ruleDeleted"));
-    } catch {
-      toast.error(t("deleteFailed"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, t("deleteFailed")));
     }
   };
 
@@ -86,8 +87,8 @@ export function AgentRouteEditor({ sourceType, sourceId }: AgentRouteEditorProps
       toast.success(t("ruleAdded"));
       setNewForm(DEFAULT_NEW_FORM);
       setShowAddForm(false);
-    } catch {
-      toast.error(t("addFailed"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, t("addFailed")));
     }
   };
 

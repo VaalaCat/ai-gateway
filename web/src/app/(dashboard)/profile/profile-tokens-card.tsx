@@ -17,17 +17,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/business/status-badge";
 import { CopyableText } from "@/components/business/copyable-text";
 import { useTokens } from "@/lib/api/tokens";
+import { tsToDateStr } from "@/lib/utils/date-range";
 
 interface ProfileTokensCardProps {
   userId: number;
 }
 
 const COL_COUNT = 5;
-
-function formatExpiry(expiredAt: number | null | undefined): string {
-  if (!expiredAt) return "—";
-  return new Date(expiredAt * 1000).toLocaleDateString();
-}
 
 export function ProfileTokensCard({ userId }: ProfileTokensCardProps) {
   const t = useTranslations("profile");
@@ -44,7 +40,7 @@ export function ProfileTokensCard({ userId }: ProfileTokensCardProps) {
         <CardTitle className="text-lg">{t("myTokens")}</CardTitle>
       </CardHeader>
       <CardContent className="p-0">
-        <Table>
+        <Table className="text-body">
           <TableHeader>
             <TableRow>
               <TableHead>{tt("name")}</TableHead>
@@ -80,7 +76,7 @@ export function ProfileTokensCard({ userId }: ProfileTokensCardProps) {
                     <StatusBadge status={tk.status} />
                   </TableCell>
                   <TableCell className="hidden md:table-cell text-muted-foreground">
-                    {formatExpiry(tk.expired_at)}
+                    {tk.expired_at ? tsToDateStr(tk.expired_at) : "—"}
                   </TableCell>
                   <TableCell className="hidden md:table-cell text-muted-foreground truncate max-w-xs">
                     {tk.models || "—"}

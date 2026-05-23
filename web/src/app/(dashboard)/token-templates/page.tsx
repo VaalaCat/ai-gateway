@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -8,7 +8,9 @@ import { MoreHorizontal, Plus, RefreshCw } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,8 +35,8 @@ import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
 import { ChannelMultiSelect } from "@/components/business/channel-multi-select";
 import { TokenTemplateSyncDialog } from "@/components/business/token-template-sync-dialog";
+import { formatErrorToast } from "@/lib/api/error-toast";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import {
   useTokenTemplates,
   useCreateTokenTemplate,
@@ -51,20 +53,36 @@ export default function TokenTemplatesPage() {
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
-  const [search, setSearch] = useState("");
-  const debouncedSearch = useDebounce(search, 300);
+
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+    status: {
+      kind: "enum",
+      options: [
+        { value: "1", label: t("statusEnabled") },
+        { value: "0", label: t("statusDisabled") },
+      ],
+      placeholder: t("filterByStatus"),
+    },
+  } satisfies FilterSpec), [t, tc]);
+
+  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
+
+  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
+    setPage(1);
+    setFilterValuesRaw(next);
+  };
 
   const { data, isLoading } = useTokenTemplates({
     page,
     pageSize,
-    search: debouncedSearch,
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
+    ...(filterValues.status ? { status: String(filterValues.status) } : {}),
   });
 
   const templates = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
-
-  useEffect(() => { setPage(1); }, [debouncedSearch]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -99,8 +117,8 @@ export default function TokenTemplatesPage() {
       toast.success(tc("success"));
       setCreateOpen(false);
       setCreateForm({ name: "", models: "", expiry_days: "-1", status: "1", allowed_channel_ids: [] });
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -113,12 +131,12 @@ export default function TokenTemplatesPage() {
         models: editForm.models,
         expiry_days: Number(editForm.expiry_days),
         status: Number(editForm.status),
-        allowed_channel_ids: editForm.allowed_channel_ids.length > 0 ? editForm.allowed_channel_ids : undefined,
+        allowed_channel_ids: editForm.allowed_channel_ids,
       });
       toast.success(tc("success"));
       setEditItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -128,8 +146,8 @@ export default function TokenTemplatesPage() {
       await deleteMutation.mutateAsync(deleteItem.id);
       toast.success(tc("success"));
       setDeleteItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -228,16 +246,20 @@ export default function TokenTemplatesPage() {
         pageCount={pageCount}
         onPaginationChange={handlePaginationChange}
         toolbar={
-          <DataTableToolbar
-            searchValue={search}
-            searchPlaceholder={tc("search")}
-            onSearchChange={setSearch}
-          >
-            <Button onClick={() => { setCreateForm({ name: "", models: "", expiry_days: "-1", status: "1", allowed_channel_ids: [] }); setCreateOpen(true); }}>
-              <Plus className="mr-2 size-4" />
-              {t("create")}
-            </Button>
-          </DataTableToolbar>
+          <FilterableToolbar
+            spec={filterSpec}
+            value={filterValues}
+            onChange={setFilterValues}
+            primaryAction={
+              <Button size="sm" onClick={() => {
+                setCreateForm({ name: "", models: "", expiry_days: "-1", status: "1", allowed_channel_ids: [] });
+                setCreateOpen(true);
+              }}>
+                <Plus className="mr-2 size-4" />
+                {t("create")}
+              </Button>
+            }
+          />
         }
       />
 

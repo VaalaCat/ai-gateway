@@ -124,3 +124,57 @@
     @apply bg-background text-foreground;
   }
 }
+
+.font-datatype {
+  font-family: var(--font-datatype), ui-monospace, SFMono-Regular, monospace;
+  font-feature-settings: "calt" 1;
+}
+
+@utility text-meta {
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+@utility text-label {
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+}
+
+/* text-body: mobile 16px → desktop 14px. Inverse direction is intentional —
+   16px on mobile prevents iOS Safari input zoom; 14px on desktop matches
+   shadcn `text-base md:text-sm` convention for visual density. */
+@utility text-body {
+  font-size: 1rem;
+  line-height: 1.5rem;
+  @media (min-width: 768px) {
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+  }
+}
+
+@utility text-heading {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  font-weight: 600;
+}
+
+@utility text-display {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 700;
+  @media (min-width: 768px) {
+    font-size: 1.75rem;
+    line-height: 2rem;
+  }
+}
+
+@utility text-2xs {
+  font-size: 0.625rem;
+  line-height: 0.875rem;
+}
+
+@keyframes rebuild-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}

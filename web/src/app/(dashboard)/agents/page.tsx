@@ -1,15 +1,18 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
-import { ChevronRight, Copy, MoreHorizontal, Plus, RefreshCw, Ticket, Info } from "lucide-react";
+import { ChevronRight, Copy, Database, MoreHorizontal, Plus, RefreshCw, Ticket, Info } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
+import type { ToolbarAction } from "@/components/data-table/toolbar-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +31,14 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
 import { OnlineBadge } from "@/components/business/status-badge";
 import { StatusSelect } from "@/components/business/status-select";
@@ -35,6 +46,7 @@ import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
 import { AgentAddressEditor } from "@/components/business/agent-address-editor";
+import { formatErrorToast } from "@/lib/api/error-toast";
 
 import {
   Collapsible,
@@ -43,7 +55,6 @@ import {
 } from "@/components/ui/collapsible";
 import { AgentExpandedRow } from "@/components/business/agent-expanded-row";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import {
   useAgents,
   useCreateAgent,
@@ -63,20 +74,31 @@ export default function AgentsPage() {
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
-  const [search, setSearch] = useState("");
-  const debouncedSearch = useDebounce(search, 300);
+
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+    status: {
+      kind: "enum",
+      options: [
+        { value: "1", label: t("statusOnline") },
+        { value: "0", label: t("statusOffline") },
+      ],
+      placeholder: t("filterByStatus"),
+    },
+  } satisfies FilterSpec), [t, tc]);
+
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading } = useAgents({
     page,
     page_size: pageSize,
-    search: debouncedSearch,
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
+    ...(filterValues.status !== undefined && filterValues.status !== "" ? { status: Number(filterValues.status) } : {}),
   });
 
   const agents = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
-
-  useEffect(() => { setPage(1); }, [debouncedSearch]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -120,8 +142,8 @@ export default function AgentsPage() {
       toast.success(tc("success"));
       setCreateOpen(false);
       setCreateForm({ name: "", agent_id: "", secret: "", tags: "", http_addresses: "", proxy_url: "" });
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -138,8 +160,8 @@ export default function AgentsPage() {
       });
       toast.success(tc("success"));
       setEditItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -149,8 +171,8 @@ export default function AgentsPage() {
       await deleteMutation.mutateAsync(deleteItem.id);
       toast.success(tc("success"));
       setDeleteItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -159,8 +181,8 @@ export default function AgentsPage() {
       const result = await enrollMutation.mutateAsync({ ttl: Number(enrollTTL) });
       setEnrollToken(result.enrollment_token);
       toast.success(tc("success"));
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -188,8 +210,8 @@ export default function AgentsPage() {
         toast.warning(`${t("fullSyncSuccess", { count: succeeded })}, ${t("fullSyncFailed", { count: failed })}`);
       }
       setRowSelection({});
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -322,37 +344,37 @@ export default function AgentsPage() {
           <div className="rounded-md border p-4 space-y-3 mt-3">
             <p className="text-sm text-muted-foreground">{t("usageGuideDesc")}</p>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-left">
-                    <th className="pb-2 pr-4 font-medium text-xs">{t("headerName")}</th>
-                    <th className="pb-2 pr-4 font-medium text-xs">{t("headerPurpose")}</th>
-                    <th className="pb-2 font-medium text-xs">{t("headerExample")}</th>
-                  </tr>
-                </thead>
-                <tbody className="text-xs">
-                  <tr className="border-b">
-                    <td className="py-2 pr-4"><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Agent-ID</code></td>
-                    <td className="py-2 pr-4">{t("headerAgentId")}</td>
-                    <td className="py-2"><code className="text-muted-foreground">agent-xxxxx</code></td>
-                  </tr>
-                  <tr className="border-b">
-                    <td className="py-2 pr-4"><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Agent-Tag</code></td>
-                    <td className="py-2 pr-4">{t("headerAgentTag")}</td>
-                    <td className="py-2"><code className="text-muted-foreground">us-west</code></td>
-                  </tr>
-                  <tr className="border-b">
-                    <td className="py-2 pr-4"><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Agent-Address-Tag</code></td>
-                    <td className="py-2 pr-4">{t("headerAddressTag")}</td>
-                    <td className="py-2"><code className="text-muted-foreground">internal</code></td>
-                  </tr>
-                  <tr>
-                    <td className="py-2 pr-4"><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Channel-ID</code></td>
-                    <td className="py-2 pr-4">{t("headerChannelId")}</td>
-                    <td className="py-2"><code className="text-muted-foreground">42</code></td>
-                  </tr>
-                </tbody>
-              </table>
+              <Table className="text-body">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("headerName")}</TableHead>
+                    <TableHead>{t("headerPurpose")}</TableHead>
+                    <TableHead>{t("headerExample")}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow>
+                    <TableCell><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Agent-ID</code></TableCell>
+                    <TableCell>{t("headerAgentId")}</TableCell>
+                    <TableCell><code className="text-muted-foreground">agent-xxxxx</code></TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Agent-Tag</code></TableCell>
+                    <TableCell>{t("headerAgentTag")}</TableCell>
+                    <TableCell><code className="text-muted-foreground">us-west</code></TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Agent-Address-Tag</code></TableCell>
+                    <TableCell>{t("headerAddressTag")}</TableCell>
+                    <TableCell><code className="text-muted-foreground">internal</code></TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><code className="bg-muted rounded px-1.5 py-0.5">X-Vaala-Channel-ID</code></TableCell>
+                    <TableCell>{t("headerChannelId")}</TableCell>
+                    <TableCell><code className="text-muted-foreground">42</code></TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
             </div>
             <div>
               <p className="text-xs font-medium mb-1.5">{t("curlExample")}</p>
@@ -378,46 +400,56 @@ export default function AgentsPage() {
         rowSelection={rowSelection}
         onRowSelectionChange={setRowSelection}
         toolbar={
-          <DataTableToolbar
-            searchValue={search}
-            searchPlaceholder={tc("search")}
-            onSearchChange={setSearch}
-          >
-            {Object.keys(rowSelection).length > 0 && (
-              <Button
-                variant="outline"
-                onClick={() => {
+          <FilterableToolbar
+            spec={filterSpec}
+            value={filterValues}
+            onChange={setFilterValues}
+            secondaryActions={[
+              Object.keys(rowSelection).length > 0 && {
+                label: t("fullSyncSelected", { count: Object.keys(rowSelection).length }),
+                icon: <RefreshCw className="size-4" />,
+                loading: fullSyncMutation.isPending,
+                onClick: () => {
                   const selectedIds = Object.keys(rowSelection)
                     .map((idx) => agents[Number(idx)]?.agent_id)
                     .filter(Boolean);
                   handleFullSync(selectedIds);
-                }}
-                disabled={fullSyncMutation.isPending}
-              >
-                <RefreshCw className={`mr-2 size-4 ${fullSyncMutation.isPending ? "animate-spin" : ""}`} />
-                {t("fullSyncSelected", { count: Object.keys(rowSelection).length })}
+                },
+              },
+              {
+                label: t("viewCache"),
+                icon: <Database className="size-4" />,
+                href: "/agents/cache",
+                variant: "outline",
+              },
+              {
+                label: t("fullSyncAll"),
+                icon: <RefreshCw className="size-4" />,
+                loading: fullSyncMutation.isPending,
+                onClick: () => handleFullSync(undefined, true),
+                variant: "outline",
+              },
+              {
+                label: t("generateToken"),
+                icon: <Ticket className="size-4" />,
+                onClick: () => {
+                  setEnrollToken("");
+                  setEnrollTTL("3600");
+                  setEnrollOpen(true);
+                },
+                variant: "outline",
+              },
+            ].filter(Boolean) as ToolbarAction[]}
+            primaryAction={
+              <Button size="sm" onClick={() => {
+                setCreateForm({ name: "", agent_id: "", secret: "", tags: "", http_addresses: "", proxy_url: "" });
+                setCreateOpen(true);
+              }}>
+                <Plus className="mr-2 size-4" />
+                {t("createAgent")}
               </Button>
-            )}
-            <Button
-              variant="outline"
-              onClick={() => handleFullSync(undefined, true)}
-              disabled={fullSyncMutation.isPending}
-            >
-              <RefreshCw className={`mr-2 size-4 ${fullSyncMutation.isPending ? "animate-spin" : ""}`} />
-              {t("fullSyncAll")}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => { setEnrollToken(""); setEnrollTTL("3600"); setEnrollOpen(true); }}
-            >
-              <Ticket className="mr-2 size-4" />
-              {t("generateToken")}
-            </Button>
-            <Button onClick={() => { setCreateForm({ name: "", agent_id: "", secret: "", tags: "", http_addresses: "", proxy_url: "" }); setCreateOpen(true); }}>
-              <Plus className="mr-2 size-4" />
-              {t("createAgent")}
-            </Button>
-          </DataTableToolbar>
+            }
+          />
         }
       />
 

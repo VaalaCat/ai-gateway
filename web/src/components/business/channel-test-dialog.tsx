@@ -37,10 +37,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ModelName } from "@/components/business/model-name";
-import { api } from "@/lib/api/client";
 import { API_TYPES } from "@/lib/constants";
 import { useDebounce } from "@/hooks/use-debounce";
-import type { Channel, ChannelTestResponse } from "@/lib/types";
+import type { ChannelTestResponse } from "@/lib/types";
 import type { OnlineAgentInfo } from "@/lib/types";
 import { useOnlineAgents } from "@/lib/api/agents";
 import { useAgentRoutes } from "@/lib/api/agent-routes";
@@ -53,8 +52,39 @@ interface ModelTestResult {
   timeCost?: number;
 }
 
+// ChannelLike 是 ChannelTestDialog 共用 Channel 与 BYOKChannelDetail 时的
+// 公共字段子集。两边 Channel / BYOKChannelDetail 类型在这 5 个字段上语义等价：
+//   - id: 用作传给 testFn 的 channel id
+//   - name: dialog title 显示
+//   - models: CSV 字符串。Channel.models 是 CSV；BYOK 适配处传 pc.models.join(",")
+//   - endpoints: JSON string。两边字段一致
+//   - type: provider type 编号。用于 testFn 内 fallback 路径推断（实际后端处理）
+export interface ChannelLike {
+  id: number;
+  name: string;
+  models: string;
+  endpoints: string;
+  type: number;
+}
+
+// TestFnArgs 是 Dialog 调 testFn 时传的参数。等价于 ChannelTestParams 的子集。
+export interface TestFnArgs {
+  id: number;
+  model: string;
+  endpoint_type: string;
+  stream?: boolean;
+  agent_id?: string;
+}
+
 interface ChannelTestDialogProps {
-  channel: Channel;
+  channelLike: ChannelLike;
+  testFn: (args: TestFnArgs) => Promise<ChannelTestResponse>;
+  // supportsStream：是否显示 stream 开关。channels 支持；BYOK 后端 PortalTest
+  // 仅做 max_tokens=1 的非流式 ping，传 true 也无意义，传 false 隐藏开关
+  supportsStream: boolean;
+  // agentSourceType：是否显示 agent route 选择器。"channel" 表示加载该 channel
+  // 的 agent_routes 并允许选 agent_id；null 表示完全隐藏 agent 相关 UI
+  agentSourceType: "channel" | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -70,7 +100,10 @@ const ENDPOINT_TYPES = [
 type EndpointLabelKey = (typeof ENDPOINT_TYPES)[number]["labelKey"];
 
 export function ChannelTestDialog({
-  channel,
+  channelLike,
+  testFn,
+  supportsStream,
+  agentSourceType,
   open,
   onOpenChange,
 }: ChannelTestDialogProps) {
@@ -87,10 +120,15 @@ export function ChannelTestDialog({
   const abortRef = useRef<AbortController | null>(null);
 
   const [agentId, setAgentId] = useState<string>("");
-  const { data: onlineAgents } = useOnlineAgents();
+  const { data: onlineAgents } = useOnlineAgents({ enabled: agentSourceType !== null });
 
   // Auto-resolve default agent from channel's routing rules
-  const { data: channelRoutes } = useAgentRoutes({ source_type: "channel", source_id: channel.id });
+  // agentSourceType === "channel" 时加载 agent routes；null 时跳过查询（BYOK 用户
+  // 无权访问 /admin/agent-routes，必须用 enabled 守卫避免 401）
+  const { data: channelRoutes } = useAgentRoutes(
+    { source_type: "channel", source_id: channelLike.id },
+    { enabled: agentSourceType === "channel" },
+  );
   const defaultAgentId = (channelRoutes?.data ?? []).find(r => !r.model)?.agent_id;
   useEffect(() => {
     if (defaultAgentId && !agentId) {
@@ -99,12 +137,12 @@ export function ChannelTestDialog({
   }, [defaultAgentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const allModels = useMemo(() => {
-    if (!channel.models) return [];
-    return channel.models
+    if (!channelLike.models) return [];
+    return channelLike.models
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-  }, [channel.models]);
+  }, [channelLike.models]);
 
   const filteredModels = useMemo(() => {
     if (!debouncedSearch) return allModels;
@@ -127,6 +165,15 @@ export function ChannelTestDialog({
     []
   );
 
+  // testModel runs a single-model test via the injected testFn.
+  //
+  // signal note: This signal is NOT forwarded to fetch — testFn (mutateAsync)
+  // does not accept AbortSignal. It only suppresses post-Stop UI updates:
+  // after Stop is pressed, `signal.aborted` becomes true; the catch block
+  // returns early so a failed inflight request doesn't get rendered as
+  // failed (it stays in "testing" visually, matching user intent to stop).
+  // The batch loop in handleBatchTest uses signal.aborted to break, which
+  // is the actual cancellation mechanism.
   const testModel = useCallback(
     async (model: string, signal?: AbortSignal) => {
       setResults((prev) => ({
@@ -134,19 +181,13 @@ export function ChannelTestDialog({
         [model]: { status: "testing" },
       }));
       try {
-        const res = await api.request<ChannelTestResponse>(
-          `/admin/channels/${channel.id}/test`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              model,
-              endpoint_type: endpointType,
-              stream,
-              ...(agentId ? { agent_id: agentId } : {}),
-            }),
-            signal,
-          }
-        );
+        const res = await testFn({
+          id: channelLike.id,
+          model,
+          endpoint_type: endpointType,
+          ...(supportsStream ? { stream } : {}),
+          ...(agentId ? { agent_id: agentId } : {}),
+        });
         if (res.success) {
           setResults((prev) => ({
             ...prev,
@@ -173,7 +214,7 @@ export function ChannelTestDialog({
         }));
       }
     },
-    [channel.id, endpointType, stream, agentId]
+    [channelLike.id, testFn, supportsStream, endpointType, stream, agentId]
   );
 
   const handleSingleTest = useCallback(
@@ -254,7 +295,7 @@ export function ChannelTestDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>{t("testDialogTitle")} - {channel.name}</DialogTitle>
+          <DialogTitle>{t("testDialogTitle")} - {channelLike.name}</DialogTitle>
           <p className="text-sm text-muted-foreground">
             {t("testDialogSubtitle", { count: allModels.length })}
           </p>
@@ -280,27 +321,31 @@ export function ChannelTestDialog({
             </Select>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Label>{t("streamMode")}</Label>
-            <Switch checked={stream} onCheckedChange={setStream} />
-          </div>
+          {supportsStream && (
+            <div className="flex items-center gap-2">
+              <Label>{t("streamMode")}</Label>
+              <Switch checked={stream} onCheckedChange={setStream} />
+            </div>
+          )}
 
-          <div className="flex items-center gap-2">
-            <Label>{t("agentSelector")}</Label>
-            <Select value={agentId || "local"} onValueChange={(v) => setAgentId(v === "local" ? "" : v)}>
-              <SelectTrigger className="w-[200px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="local">{t("localTest")}</SelectItem>
-                {onlineAgents?.map((a: OnlineAgentInfo) => (
-                  <SelectItem key={a.agent_id} value={a.agent_id}>
-                    {a.name} ({a.agent_id.slice(0, 8)}...)
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {agentSourceType !== null && (
+            <div className="flex items-center gap-2">
+              <Label>{t("agentSelector")}</Label>
+              <Select value={agentId || "local"} onValueChange={(v) => setAgentId(v === "local" ? "" : v)}>
+                <SelectTrigger className="w-[200px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="local">{t("localTest")}</SelectItem>
+                  {onlineAgents?.map((a: OnlineAgentInfo) => (
+                    <SelectItem key={a.agent_id} value={a.agent_id}>
+                      {a.name} ({a.agent_id.slice(0, 8)}...)
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2 py-2">
@@ -338,7 +383,7 @@ export function ChannelTestDialog({
               {tc("noData")}
             </div>
           ) : (
-            <Table>
+            <Table className="text-body">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-[50%]">

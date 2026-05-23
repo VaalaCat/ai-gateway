@@ -25,11 +25,12 @@ export function useAgentDetail(id: number) {
   });
 }
 
-export function useOnlineAgents() {
+export function useOnlineAgents(options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["agents", "online"],
     queryFn: () => api.get<OnlineAgentInfo[]>("/admin/agents/online"),
     refetchInterval: 30000,
+    enabled: options.enabled ?? true,
   });
 }
 

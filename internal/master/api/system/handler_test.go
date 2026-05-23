@@ -166,3 +166,95 @@ func TestCleanup_DeletesOldRecords(t *testing.T) {
 		t.Errorf("remaining records = %d, want 2", remaining)
 	}
 }
+
+func TestCleanupPreview_HourlyBuckets_CountsByDate(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now().UTC()
+
+	// 4 old rows (30 天前的 date), 2 new rows (今天)
+	oldDate := now.AddDate(0, 0, -30).Format("2006-01-02")
+	newDate := now.Format("2006-01-02")
+	for i := 0; i < 4; i++ {
+		db.Create(&models.UsageHourlyBucket{
+			Date: oldDate, Hour: i, ChannelID: 1, ModelName: "m", AgentID: "a",
+		})
+	}
+	for i := 0; i < 2; i++ {
+		db.Create(&models.UsageHourlyBucket{
+			Date: newDate, Hour: i, ChannelID: 1, ModelName: "m", AgentID: "a",
+		})
+	}
+
+	h := &Handler{}
+	c := newTestContext(db)
+	resp, err := h.CleanupPreview(c, CleanupPreviewRequest{
+		Target: "hourly_buckets", RetainDays: 7,
+	})
+	if err != nil {
+		t.Fatalf("CleanupPreview returned error: %v", err)
+	}
+	if resp.Total != 6 {
+		t.Errorf("Total = %d, want 6", resp.Total)
+	}
+	if resp.ToDelete != 4 {
+		t.Errorf("ToDelete = %d, want 4", resp.ToDelete)
+	}
+}
+
+func TestCleanup_HourlyBuckets_DeletesByDate(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now().UTC()
+
+	oldDate := now.AddDate(0, 0, -30).Format("2006-01-02")
+	newDate := now.Format("2006-01-02")
+	for i := 0; i < 3; i++ {
+		db.Create(&models.UsageHourlyBucket{
+			Date: oldDate, Hour: i, ChannelID: 1, ModelName: "m", AgentID: "a",
+		})
+	}
+	for i := 0; i < 2; i++ {
+		db.Create(&models.UsageHourlyBucket{
+			Date: newDate, Hour: i, ChannelID: 1, ModelName: "m", AgentID: "a",
+		})
+	}
+
+	h := &Handler{}
+	c := newTestContext(db)
+	resp, err := h.Cleanup(c, CleanupRequest{
+		Target: "hourly_buckets", RetainDays: 7,
+	})
+	if err != nil {
+		t.Fatalf("Cleanup returned error: %v", err)
+	}
+	if resp.Deleted != 3 {
+		t.Errorf("Deleted = %d, want 3", resp.Deleted)
+	}
+
+	var remaining int64
+	db.Model(&models.UsageHourlyBucket{}).Count(&remaining)
+	if remaining != 2 {
+		t.Errorf("remaining = %d, want 2", remaining)
+	}
+}
+
+func TestCleanup_InvalidTarget_Rejected(t *testing.T) {
+	// binding `oneof=traces logs hourly_buckets` 应拒绝其他值。
+	// 直接走 handler 不会触发 binding (binding 在 gin 层);这里测的是
+	// switch 默认分支的"未删除"语义:target=foo 时 Cleanup 应不删任何行
+	// (deleted=0) 且不报 error。
+	db := setupTestDB(t)
+	db.Create(&models.UsageHourlyBucket{
+		Date: "2026-05-01", Hour: 0, ChannelID: 1, ModelName: "m", AgentID: "a",
+	})
+	h := &Handler{}
+	c := newTestContext(db)
+	resp, err := h.Cleanup(c, CleanupRequest{
+		Target: "unknown_target", RetainDays: 7,
+	})
+	if err != nil {
+		t.Fatalf("Cleanup returned error: %v", err)
+	}
+	if resp.Deleted != 0 {
+		t.Errorf("Deleted = %d, want 0", resp.Deleted)
+	}
+}

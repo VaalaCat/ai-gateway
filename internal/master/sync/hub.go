@@ -16,6 +16,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/jsonrpc"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -54,9 +55,14 @@ type Hub struct {
 	nextCallID atomic.Int64
 
 	fetchRegistry *FetchRegistry
+
+	// Heartbeat captures agent last_seen in memory + skips redundant
+	// mergeAgentConfig SELECTs via the ConfigChanged fingerprint. May be nil
+	// in tests / pre-wiring; callers must nil-check before use.
+	Heartbeat *HeartbeatTracker
 }
 
-func NewHub(application dao.AppProvider, logger *zap.Logger, bus app.EventBus, getVersion func() int64) *Hub {
+func NewHub(application dao.AppProvider, logger *zap.Logger, bus app.EventBus, getVersion func() int64, cipher *byokcrypto.Cipher) *Hub {
 	return &Hub{
 		agents:        make(map[string]*ws.Conn),
 		runtimes:      make(map[string]*AgentRuntime),
@@ -67,7 +73,7 @@ func NewHub(application dao.AppProvider, logger *zap.Logger, bus app.EventBus, g
 		Bus:           bus,
 		GetVersion:    getVersion,
 		pending:       make(map[string]chan *jsonrpc.Response),
-		fetchRegistry: NewFetchRegistry(),
+		fetchRegistry: NewFetchRegistry(cipher),
 	}
 }
 
@@ -105,7 +111,12 @@ func (h *Hub) HandleWS(c *gin.Context) {
 	h.Logger.Info("agent connected", zap.String("agent_id", agentID))
 
 	// Update last_seen
-	dao.NewAdminMutation(dao.NewContext(h.App)).Agent().UpdateLastSeen(agentID, time.Now().Unix())
+	if h.Heartbeat != nil {
+		h.Heartbeat.Touch(agentID, time.Now().Unix())
+	} else {
+		// Fallback when tracker not wired (e.g. legacy tests).
+		dao.NewAdminMutation(dao.NewContext(h.App)).Agent().UpdateLastSeen(agentID, time.Now().Unix())
+	}
 
 	defer func() {
 		h.mu.Lock()
@@ -428,7 +439,12 @@ func (h *Hub) handleUsageReport(agentID string, req *jsonrpc.Request) {
 func (h *Hub) handleHeartbeat(conn *ws.Conn, agentID string, req *jsonrpc.Request) {
 	var params protocol.HeartbeatParams
 	json.Unmarshal(req.Params, &params)
-	dao.NewAdminMutation(dao.NewContext(h.App)).Agent().UpdateLastSeen(agentID, time.Now().Unix())
+	if h.Heartbeat != nil {
+		h.Heartbeat.Touch(agentID, time.Now().Unix())
+	} else {
+		// Fallback when tracker not wired (e.g. legacy tests).
+		dao.NewAdminMutation(dao.NewContext(h.App)).Agent().UpdateLastSeen(agentID, time.Now().Unix())
+	}
 
 	// Store runtime info
 	h.mu.Lock()
@@ -446,8 +462,12 @@ func (h *Hub) handleHeartbeat(conn *ws.Conn, agentID string, req *jsonrpc.Reques
 	}
 	h.mu.Unlock()
 
-	// Update DB if agent reported new addresses/tags/proxy
-	h.mergeAgentConfig(agentID, params)
+	// Update DB if agent reported new addresses/tags/proxy. Skip the SELECT
+	// inside mergeAgentConfig when no relevant config field changed; nil-tracker
+	// fallback preserves legacy behavior.
+	if h.Heartbeat == nil || h.Heartbeat.ConfigChanged(agentID, params) {
+		h.mergeAgentConfig(agentID, params)
+	}
 
 	// Check version drift
 	currentVersion := h.GetVersion()

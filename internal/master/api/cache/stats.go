@@ -3,6 +3,7 @@ package cache
 import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
@@ -54,6 +55,14 @@ func (h *Handler) Stats(c *app.Context, _ api.EmptyRequest) (StatsResponse, erro
 			Online:     online,
 			CacheStats: stats,
 		})
+	}
+
+	if h.Tracker != nil {
+		msync.EnrichLastSeen(h.Tracker, snapshots,
+			func(it AgentCacheSnapshot) string { return it.AgentID },
+			func(it AgentCacheSnapshot) int64 { return it.LastSeen },
+			func(it *AgentCacheSnapshot, ts int64) { it.LastSeen = ts },
+		)
 	}
 
 	return StatsResponse{

@@ -18,6 +18,7 @@ import { Separator } from "@/components/ui/separator";
 
 import { OAuthIdentityList } from "@/components/business/oauth-identity-list";
 import { useChangePassword } from "@/lib/api/users";
+import { formatErrorToast } from "@/lib/api/error-toast";
 
 export function AccountSecuritySection() {
   const t = useTranslations("profile.security");
@@ -41,8 +42,8 @@ export function AccountSecuritySection() {
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
-    } catch {
-      toast.error(tu("wrongPassword"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tu("wrongPassword")));
     }
   };
 
@@ -59,7 +60,7 @@ export function AccountSecuritySection() {
             <span className="flex items-center gap-2">
               <Lock className="size-5 text-muted-foreground" />
               <span className="text-lg font-semibold">{t("title")}</span>
-              <span className="text-sm font-normal text-muted-foreground hidden sm:inline">
+              <span className="text-body font-normal text-muted-foreground hidden sm:inline">
                 · {t("subtitle")}
               </span>
             </span>

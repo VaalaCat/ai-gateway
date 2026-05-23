@@ -51,7 +51,7 @@ export function ModelSelector(props: ModelSelectorProps) {
     return (
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button variant="outline" role="combobox" className="w-full justify-between">
+          <Button variant="outline" role="combobox" className="w-full justify-between text-body">
             {props.value || props.placeholder || t("selectModel")}
             <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
           </Button>
@@ -99,7 +99,7 @@ export function ModelSelector(props: ModelSelectorProps) {
     <div className="space-y-2">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button variant="outline" role="combobox" className="w-full justify-between">
+          <Button variant="outline" role="combobox" className="w-full justify-between text-body">
             {selected.size > 0 ? `${selected.size} ${t("modelsSelected")}` : props.placeholder || t("selectModels")}
             <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />
           </Button>

@@ -127,7 +127,25 @@ func (p *Publisher) fillExecution(e *protocol.UsageLogEntry, rctx *state.RelayCo
 	rules := upstream.ChannelOverrideRulesFor(u.Channel)
 	override := upstream.ResolveOverride(rules, u.RealModel)
 
-	e.ChannelID = u.Channel.ID
+	// Source-based ID routing (BYOK Task 14):
+	//   admin   → e.ChannelID = u.SourceID; e.OwnerType = "admin"
+	//   private → e.PrivateChannelID = u.SourceID; e.ChannelID = 0; e.OwnerType = "private"
+	// Zero/unknown Source falls back to admin path with Channel.ID for defensive compatibility
+	// (any pre-Task-12 callsite that hasn't been updated would have Source="" and still work).
+	switch u.Source {
+	case state.SourcePrivate:
+		e.PrivateChannelID = u.SourceID
+		e.ChannelID = 0
+		e.OwnerType = "private"
+	default:
+		// SourceAdmin or "" (zero value)
+		if u.SourceID != 0 {
+			e.ChannelID = u.SourceID
+		} else {
+			e.ChannelID = u.Channel.ID
+		}
+		e.OwnerType = "admin"
+	}
 	e.ModelName = u.RealModel
 	e.RoutingName = rctx.State.Plan.RoutingName
 

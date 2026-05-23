@@ -101,8 +101,8 @@ func newStoreWithChannels(t *testing.T, channels ...models.Channel) *cache.Store
 
 func TestListModels_NoRestrictions(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o,gpt-3.5-turbo"},
-		models.Channel{ID: 2, Status: consts.StatusEnabled, Models: "claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,gpt-3.5-turbo"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled}, Models: "claude-3-opus"},
 	)
 	got := runListModels(t, store, &app.UserInfo{})
 	want := map[string]bool{"gpt-4o": true, "gpt-3.5-turbo": true, "claude-3-opus": true}
@@ -118,7 +118,7 @@ func TestListModels_NoRestrictions(t *testing.T) {
 
 func TestListModels_TokenModelsOnly(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o,gpt-3.5-turbo,claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,gpt-3.5-turbo,claude-3-opus"},
 	)
 	ui := &app.UserInfo{TokenModels: []string{"gpt-4o"}}
 	got := runListModels(t, store, ui)
@@ -129,9 +129,9 @@ func TestListModels_TokenModelsOnly(t *testing.T) {
 
 func TestListModels_ChannelWhitelistOnly(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
-		models.Channel{ID: 2, Status: consts.StatusEnabled, Models: "gpt-3.5-turbo"},
-		models.Channel{ID: 3, Status: consts.StatusEnabled, Models: "claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled}, Models: "gpt-3.5-turbo"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 3, Status: consts.StatusEnabled}, Models: "claude-3-opus"},
 	)
 	ui := &app.UserInfo{AllowedChannelIDs: []uint{1}}
 	got := runListModels(t, store, ui)
@@ -142,8 +142,8 @@ func TestListModels_ChannelWhitelistOnly(t *testing.T) {
 
 func TestListModels_OverlappingModelsDeduped(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
-		models.Channel{ID: 2, Status: consts.StatusEnabled, Models: "gpt-4o,claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled}, Models: "gpt-4o,claude-3-opus"},
 	)
 	ui := &app.UserInfo{AllowedChannelIDs: []uint{1}}
 	got := runListModels(t, store, ui)
@@ -154,8 +154,8 @@ func TestListModels_OverlappingModelsDeduped(t *testing.T) {
 
 func TestListModels_DisabledChannelExcluded(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
-		models.Channel{ID: 2, Status: consts.StatusDisabled, Models: "claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusDisabled}, Models: "claude-3-opus"},
 	)
 	ui := &app.UserInfo{AllowedChannelIDs: []uint{2}}
 	got := runListModels(t, store, ui)
@@ -166,8 +166,8 @@ func TestListModels_DisabledChannelExcluded(t *testing.T) {
 
 func TestListModels_GhostChannelIDIgnored(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
-		models.Channel{ID: 2, Status: consts.StatusEnabled, Models: "claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled}, Models: "claude-3-opus"},
 	)
 	ui := &app.UserInfo{AllowedChannelIDs: []uint{1, 999}}
 	got := runListModels(t, store, ui)
@@ -178,8 +178,8 @@ func TestListModels_GhostChannelIDIgnored(t *testing.T) {
 
 func TestListModels_BothFiltersIntersect(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o,gpt-3.5-turbo"},
-		models.Channel{ID: 2, Status: consts.StatusEnabled, Models: "gpt-4o-mini,claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,gpt-3.5-turbo"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled}, Models: "gpt-4o-mini,claude-3-opus"},
 	)
 	ui := &app.UserInfo{
 		AllowedChannelIDs: []uint{1},
@@ -201,9 +201,9 @@ func TestListModels_BothFiltersIntersect(t *testing.T) {
 // Only models served by channel 1 should appear.
 func TestListModels_GroupChannelWhitelistOnly(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
-		models.Channel{ID: 2, Status: consts.StatusEnabled, Models: "gpt-3.5-turbo"},
-		models.Channel{ID: 3, Status: consts.StatusEnabled, Models: "claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled}, Models: "gpt-3.5-turbo"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 3, Status: consts.StatusEnabled}, Models: "claude-3-opus"},
 	)
 	ui := &app.UserInfo{GroupAllowedChannelIDs: []uint{1}}
 	got := runListModels(t, store, ui)
@@ -215,9 +215,9 @@ func TestListModels_GroupChannelWhitelistOnly(t *testing.T) {
 // TestListModels_GroupAndTokenChannelIntersect — group:[1,2], token:[2,3] → only ch2's model.
 func TestListModels_GroupAndTokenChannelIntersect(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
-		models.Channel{ID: 2, Status: consts.StatusEnabled, Models: "gpt-3.5-turbo"},
-		models.Channel{ID: 3, Status: consts.StatusEnabled, Models: "claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled}, Models: "gpt-3.5-turbo"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 3, Status: consts.StatusEnabled}, Models: "claude-3-opus"},
 	)
 	ui := &app.UserInfo{
 		GroupAllowedChannelIDs: []uint{1, 2},
@@ -232,7 +232,7 @@ func TestListModels_GroupAndTokenChannelIntersect(t *testing.T) {
 // TestListModels_GroupModelsPattern — GroupModels=["gpt-4.*"] filters by name pattern.
 func TestListModels_GroupModelsPattern(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o,gpt-3.5-turbo"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,gpt-3.5-turbo"},
 	)
 	ui := &app.UserInfo{GroupModels: []string{"gpt-4.*"}}
 	got := runListModels(t, store, ui)
@@ -244,7 +244,7 @@ func TestListModels_GroupModelsPattern(t *testing.T) {
 // TestListModels_GroupAndTokenModelsIntersect — group:["gpt-.*"] AND token:["gpt-4o"] → only "gpt-4o".
 func TestListModels_GroupAndTokenModelsIntersect(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o,gpt-3.5-turbo,claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,gpt-3.5-turbo,claude-3-opus"},
 	)
 	ui := &app.UserInfo{
 		GroupModels: []string{"gpt-.*"},
@@ -259,7 +259,7 @@ func TestListModels_GroupAndTokenModelsIntersect(t *testing.T) {
 // TestListModels_GroupAndTokenModelsConflict — group:["claude-.*"] AND token:["gpt-4o"] → empty.
 func TestListModels_GroupAndTokenModelsConflict(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o,claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,claude-3-opus"},
 	)
 	ui := &app.UserInfo{
 		GroupModels: []string{"claude-.*"},
@@ -274,7 +274,7 @@ func TestListModels_GroupAndTokenModelsConflict(t *testing.T) {
 // TestListModels_GlobalRoutingIncluded —— enabled global routing 应该作为 model 出现，owned_by 区分。
 func TestListModels_GlobalRoutingIncluded(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
 	)
 	store.SetGlobalRouting("smart-router", &protocol.SyncedRouting{
 		Name: "smart-router", Scope: "global", Enabled: true,
@@ -298,7 +298,7 @@ func TestListModels_GlobalRoutingIncluded(t *testing.T) {
 // TestListModels_DisabledGlobalRoutingExcluded —— disabled routing 不应该出现。
 func TestListModels_DisabledGlobalRoutingExcluded(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
 	)
 	store.SetGlobalRouting("disabled-router", &protocol.SyncedRouting{
 		Name: "disabled-router", Scope: "global", Enabled: false,
@@ -314,7 +314,7 @@ func TestListModels_DisabledGlobalRoutingExcluded(t *testing.T) {
 // TestListModels_UserRoutingIncludedForOwner —— 当前 user 的 user routing 应该出现。
 func TestListModels_UserRoutingIncludedForOwner(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
 	)
 	store.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
 		"my-personal-router": {
@@ -337,7 +337,7 @@ func TestListModels_UserRoutingIncludedForOwner(t *testing.T) {
 // TestListModels_UserRoutingNotIncludedForOtherUser —— user 42 的 routing 不应被 user 99 看到。
 func TestListModels_UserRoutingNotIncludedForOtherUser(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
 	)
 	store.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
 		"user42-only": {Name: "user42-only", Scope: "user", UserID: 42, Enabled: true},
@@ -354,7 +354,7 @@ func TestListModels_UserRoutingNotIncludedForOtherUser(t *testing.T) {
 // claude-router (routing) 仍应出现；claude-3-opus (model) 应被过滤。
 func TestListModels_TokenModelsDoesNotFilterRouting(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o,claude-3-opus"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,claude-3-opus"},
 	)
 	store.SetGlobalRouting("claude-router", &protocol.SyncedRouting{
 		Name: "claude-router", Scope: "global", Enabled: true,
@@ -386,7 +386,7 @@ func TestListModels_TokenModelsDoesNotFilterRouting(t *testing.T) {
 // response 中只保留 routing 项，owned_by 反映 routing 优先。
 func TestListModels_RoutingNameOverridesModel(t *testing.T) {
 	store := newStoreWithChannels(t,
-		models.Channel{ID: 1, Status: consts.StatusEnabled, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
 	)
 	store.SetGlobalRouting("gpt-4o", &protocol.SyncedRouting{
 		Name: "gpt-4o", Scope: "global", Enabled: true,
@@ -406,5 +406,79 @@ func TestListModels_RoutingNameOverridesModel(t *testing.T) {
 	}
 	if ownedBy != "ai-gateway-routing" {
 		t.Errorf("gpt-4o owned_by = %q, want ai-gateway-routing (routing precedence)", ownedBy)
+	}
+}
+
+// TestListModels_BYOKModelAppears —— 用户配了 BYOK channel 包含 gpt-7，
+// /v1/models 必须列出该 model，OwnedBy="ai-gateway-byok"。
+func TestListModels_BYOKModelAppears(t *testing.T) {
+	store := newStoreWithChannels(t,
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+	)
+	store.OverrideVisiblePrivateChannels(42, []protocol.SyncedPrivateChannel{
+		{ChannelCore: models.ChannelCore{ID: 100, Status: consts.StatusEnabled}, OwnerID: 42, Models: []string{"gpt-7"}},
+	})
+
+	got := runListModelsDetailed(t, store, &app.UserInfo{UserID: 42})
+
+	var count int
+	for _, m := range got {
+		if m.ID == "gpt-7" {
+			count++
+			if m.OwnedBy != "ai-gateway-byok" {
+				t.Errorf("gpt-7 owned_by = %q, want ai-gateway-byok", m.OwnedBy)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("gpt-7 appears %d times, want 1: %v", count, got)
+	}
+}
+
+// TestListModels_BYOKOverridesAdminWhitelistBlock —— 用户 token 白名单不含 gpt-5，
+// 但用户配了 BYOK gpt-5，必须能在 /v1/models 看到（修复"看不到但调得通"）。
+func TestListModels_BYOKOverridesAdminWhitelistBlock(t *testing.T) {
+	store := newStoreWithChannels(t,
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+		models.Channel{ChannelCore: models.ChannelCore{ID: 99, Status: consts.StatusEnabled}, Models: "gpt-5"},
+	)
+	store.OverrideVisiblePrivateChannels(42, []protocol.SyncedPrivateChannel{
+		{ChannelCore: models.ChannelCore{ID: 100, Status: consts.StatusEnabled}, OwnerID: 42, Models: []string{"gpt-5"}},
+	})
+	ui := &app.UserInfo{
+		UserID:            42,
+		AllowedChannelIDs: []uint{1}, // 排除 channel 99 → admin 段不应有 gpt-5
+	}
+
+	got := runListModelsDetailed(t, store, ui)
+
+	var gpt5OwnedBy string
+	var gpt5Count int
+	for _, m := range got {
+		if m.ID == "gpt-5" {
+			gpt5OwnedBy = m.OwnedBy
+			gpt5Count++
+		}
+	}
+	if gpt5Count != 1 {
+		t.Fatalf("gpt-5 appears %d times, want 1: %v", gpt5Count, got)
+	}
+	if gpt5OwnedBy != "ai-gateway-byok" {
+		t.Errorf("gpt-5 owned_by = %q, want ai-gateway-byok", gpt5OwnedBy)
+	}
+}
+
+// TestListModels_NoBYOKMeansNoBYOKOwner —— 用户没配 BYOK 时，
+// 响应里不应出现任何 OwnedBy="ai-gateway-byok" 的项。
+func TestListModels_NoBYOKMeansNoBYOKOwner(t *testing.T) {
+	store := newStoreWithChannels(t,
+		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o"},
+	)
+	got := runListModelsDetailed(t, store, &app.UserInfo{UserID: 42})
+
+	for _, m := range got {
+		if m.OwnedBy == "ai-gateway-byok" {
+			t.Errorf("unexpected byok-owned item: %v (full=%v)", m, got)
+		}
 	}
 }

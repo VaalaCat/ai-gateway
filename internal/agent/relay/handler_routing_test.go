@@ -64,7 +64,7 @@ func TestRelay_RoutingHit_Success(t *testing.T) {
 	defer up.Close()
 
 	handler, store, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up.URL, Key: "k", Models: "deepseek", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up.URL, Status: 1, Weight: 1}, Key: "k", Models: "deepseek"},
 	})
 
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
@@ -99,7 +99,7 @@ func TestRelay_NoRoutingHit_Unchanged(t *testing.T) {
 	defer up.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	ui := &app.UserInfo{UserID: 1, TokenID: 1}
@@ -129,8 +129,8 @@ func TestRelay_RoutingFallback_FirstMemberFailsAllChannels(t *testing.T) {
 	defer upB.Close()
 
 	handler, store, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k1", Models: "a", Status: 1, Weight: 1, Priority: 10},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Key: "k2", Models: "b", Status: 1, Weight: 1, Priority: 5},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1, Priority: 10}, Key: "k1", Models: "a"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Status: 1, Weight: 1, Priority: 5}, Key: "k2", Models: "b"},
 	})
 
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
@@ -178,8 +178,8 @@ func TestRelay_RoutingExhausted_404(t *testing.T) {
 	defer upB.Close()
 
 	handler, store, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k1", Models: "a", Status: 1, Weight: 1},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Key: "k2", Models: "b", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1}, Key: "k1", Models: "a"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Status: 1, Weight: 1}, Key: "k2", Models: "b"},
 	})
 
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
@@ -299,7 +299,7 @@ func TestRelay_ErrorMessageBytewiseParity_WithMain(t *testing.T) {
 		{
 			name: "no_channel_with_token_whitelist_suffix",
 			channels: []*models.Channel{
-				{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Models: "gpt-4o", Status: 1, Weight: 1},
+				{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Status: 1, Weight: 1}, Models: "gpt-4o"},
 			},
 			// AllowedChannelIDs=[999] 不在 channels → whitelist 过滤后空 → 老 line 341-343 后缀触发
 			ui:        &app.UserInfo{UserID: 1, TokenID: 1, AllowedChannelIDs: []uint{999}},
@@ -310,7 +310,7 @@ func TestRelay_ErrorMessageBytewiseParity_WithMain(t *testing.T) {
 		{
 			name: "model_not_allowed_token_models_blocks",
 			channels: []*models.Channel{
-				{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Models: "gpt-4o", Status: 1, Weight: 1},
+				{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Status: 1, Weight: 1}, Models: "gpt-4o"},
 			},
 			ui:        &app.UserInfo{UserID: 1, TokenID: 1, TokenModels: []string{"deepseek"}}, // gpt-4o 不在白名单
 			wantCode:  http.StatusNotFound,
@@ -320,7 +320,7 @@ func TestRelay_ErrorMessageBytewiseParity_WithMain(t *testing.T) {
 		{
 			name: "invalid_forced_channel_id",
 			channels: []*models.Channel{
-				{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Models: "gpt-4o", Status: 1, Weight: 1},
+				{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Status: 1, Weight: 1}, Models: "gpt-4o"},
 			},
 			ui:        &app.UserInfo{UserID: 1, TokenID: 1},
 			header:    "not-a-number",
@@ -442,7 +442,7 @@ func TestRelay_Whitelist_GroupModelsBlock(t *testing.T) {
 	defer up.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	ui := &app.UserInfo{
@@ -472,8 +472,8 @@ func TestRelay_Whitelist_FailsAtRealModel_RoutingFallback(t *testing.T) {
 	defer upDS.Close()
 
 	handler, store, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upGPT.URL, Key: "k1", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upDS.URL, Key: "k2", Models: "deepseek-v3", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upGPT.URL, Status: 1, Weight: 1}, Key: "k1", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upDS.URL, Status: 1, Weight: 1}, Key: "k2", Models: "deepseek-v3"},
 	})
 
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
@@ -537,8 +537,8 @@ func TestRelay_RoutingTrace_SuccessPath_SingleEntry(t *testing.T) {
 	defer upB.Close()
 
 	handler, store, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k1", Models: "a", Status: 1, Weight: 1},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Key: "k2", Models: "b", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1}, Key: "k1", Models: "a"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Status: 1, Weight: 1}, Key: "k2", Models: "b"},
 	})
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,

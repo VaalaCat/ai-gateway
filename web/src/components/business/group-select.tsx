@@ -57,7 +57,7 @@ export function GroupSelect({ value, onChange, disabled, placeholder }: GroupSel
           role="combobox"
           aria-expanded={open}
           disabled={disabled || isLoading}
-          className="w-full justify-between"
+          className="w-full justify-between text-body"
         >
           <span className={cn("truncate", !selected && "text-muted-foreground")}>
             {selected ? selected.name : placeholder ?? tu("groupPlaceholder")}

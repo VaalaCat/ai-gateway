@@ -32,6 +32,7 @@ import { StatusSelect } from "@/components/business/status-select";
 import { GroupSelect } from "@/components/business/group-select";
 
 import { useUpdateProfile, useUpdateUser } from "@/lib/api/users";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import type { User } from "@/lib/types";
 
 interface SelfProps {
@@ -208,8 +209,8 @@ function AdminDialog(props: AdminProps) {
       });
       toast.success(tc("success"));
       props.onOpenChange(false);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 

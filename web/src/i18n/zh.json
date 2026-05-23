@@ -2,6 +2,7 @@
   "common": {
     "save": "保存",
     "cancel": "取消",
+    "more": "更多",
     "delete": "删除",
     "edit": "编辑",
     "create": "新建",
@@ -27,7 +28,21 @@
     "perPage": "每页 {size} 条",
     "columns": "列设置",
     "selectDate": "选择日期",
-    "dateRangeError": "开始日期不能晚于结束日期"
+    "dateRangeError": "开始日期不能晚于结束日期",
+    "shared": "共享",
+    "relayStage": {
+      "inbound_decode": "入站解码",
+      "outbound_encode": "出站编码",
+      "upstream_dispatch": "上游派发",
+      "upstream_status": "上游状态",
+      "upstream_decode": "上游解码",
+      "client_encode": "客户响应",
+      "internal": "内部"
+    },
+    "adminScope": {
+      "self": "仅自己",
+      "global": "全部"
+    }
   },
   "nav": {
     "dashboard": "仪表盘",
@@ -41,6 +56,8 @@
     "agentRoutes": "路由规则",
     "modelRoutings": "模型路由",
     "myModelRoutings": "我的路由",
+    "byok": "BYOK",
+    "byokAdmin": "BYOK",
     "monitoring": "监控",
     "logs": "用量日志",
     "maintenance": "系统维护",
@@ -82,7 +99,37 @@
     "trend": "用量趋势",
     "myTokens": "我的令牌",
     "myRequests": "我的请求",
-    "myCost": "我的费用"
+    "myCost": "我的费用",
+    "kpi": {
+      "requests": "请求数",
+      "cost": "费用",
+      "tokens": "Tokens",
+      "users": "用户",
+      "successRate": "成功率",
+      "quota": "额度"
+    },
+    "leaderboard": {
+      "byUsers": "用户排行",
+      "byModels": "模型排行",
+      "byChannels": "渠道排行",
+      "by": {
+        "cost": "按费用",
+        "requests": "按请求",
+        "tokens": "按 token",
+        "tps": "按 TPS",
+        "ttft": "按 TTFT"
+      }
+    },
+    "trendCard": {
+      "title": "趋势"
+    },
+    "modelDist": {
+      "title": "模型分布"
+    },
+    "speed": {
+      "modelTitle": "模型速度",
+      "channelTitle": "渠道速度"
+    }
   },
   "users": {
     "title": "用户管理",
@@ -126,7 +173,8 @@
     "groupPlaceholder": "选择用户组",
     "groupEmpty": "无匹配用户组",
     "groupSelectLoadFailed": "加载失败，点此重试",
-    "targetUserNotInPage": "目标用户不在当前页，请使用搜索定位"
+    "targetUserNotInPage": "目标用户不在当前页，请使用搜索定位",
+    "filterByRole": "按角色筛选"
   },
   "userGroups": {
     "title": "用户组",
@@ -170,6 +218,41 @@
     "clear": "清空选择",
     "empty": "无匹配用户",
     "moreHint": "显示前 50 条，更多请输入搜索"
+  },
+  "tokenPicker": {
+    "all": "所有令牌",
+    "search": "搜索令牌名称",
+    "searchGlobal": "搜索所有用户的令牌",
+    "clear": "清空选择",
+    "empty": "无匹配令牌",
+    "emptyGlobal": "无匹配。试试按名称或 ID 搜索",
+    "moreHint": "显示前 50 条，更多请输入搜索",
+    "crossScopeNotice": "正在查看所有用户的令牌"
+  },
+  "byokChannelPicker": {
+    "all": "所有 BYOK 渠道",
+    "search": "搜索 BYOK 渠道名称",
+    "searchGlobal": "搜索所有用户的 BYOK 渠道",
+    "clear": "清空选择",
+    "empty": "无匹配渠道",
+    "emptyGlobal": "无匹配。试试按名称或 ID 搜索",
+    "moreHint": "显示前 50 条，更多请输入搜索",
+    "crossScopeNotice": "正在查看所有用户的 BYOK 渠道"
+  },
+  "entityPicker": {
+    "searchPlaceholder": "搜索…",
+    "noResults": "无结果",
+    "loading": "加载中…",
+    "clear": "清除",
+    "placeholder": {
+      "token": "选择令牌",
+      "user": "选择用户",
+      "user-group": "选择用户组",
+      "byok-channel": "选择 BYOK 渠道",
+      "channel": "选择渠道",
+      "model": "选择模型",
+      "agent": "选择节点"
+    }
   },
   "tokens": {
     "title": "令牌管理",
@@ -237,7 +320,30 @@
     "rebuildConfirm": "确认重建",
     "rebuildSuccess": "重建完成，已重放 {count} 条日志",
     "rebuildFailed": "重建失败",
-    "rebuildDateRequired": "至少需要填写一个日期"
+    "rebuildCanceled": "重建已取消",
+    "rebuildEntryRunningSingle": "重建中 · {pct}%",
+    "rebuildEntryRunningMulti": "重建中 · {count} 个任务",
+    "rebuildPickerTitle": "进行中的重建",
+    "rebuildPickerHint": "{count} 个任务正在运行，选一个查看进度，或开始新的重建。",
+    "rebuildPickerNew": "新建重建",
+    "rebuildJobLost": "任务已丢失（服务可能已重启），请重新触发",
+    "rebuildRunning": "重建进行中",
+    "rebuildRunInBackground": "后台运行",
+    "rebuildSlicesDone": "已完成 {done}/{total} 小时分片",
+    "rebuildLogsReplayed": "已重放 {count} 条",
+    "rebuildDateRequired": "至少需要填写一个日期",
+    "costTrend": "费用趋势",
+    "cacheSaving": {
+      "title": "缓存节省",
+      "label": "缓存命中",
+      "savedTokens": "节省 token: {n}",
+      "savedCost": "节省费用: {n}"
+    },
+    "kpi": {
+      "cacheHit": "缓存命中率",
+      "cacheSubFull": "已省 {n} · read {r} · write {w}"
+    },
+    "spark24h": "24h"
   },
   "channels": {
     "title": "渠道管理",
@@ -413,6 +519,8 @@
     "sectionEndpoints": "端点配置",
     "sectionProtocolBehavior": "协议行为",
     "sectionProtocolBehaviorDescription": "Claude/OpenAI 协议层开关",
+    "fieldSystemPromptInInput": "将系统提示词注入用户消息开头",
+    "fieldSystemPromptInInputHint": "适配不支持 system role 的模型；默认关闭",
     "sectionRequestRewrite": "请求改写",
     "sectionRequestRewriteDescription": "Header、参数、系统提示、代理、状态码改写",
     "sectionRouteRoles": "路由 / 角色",
@@ -426,6 +534,8 @@
     "updateSuccess": "渠道已更新",
     "createTitle": "新建渠道",
     "editTitle": "编辑渠道",
+    "createDescription": "配置一条上游 LLM 渠道：协议、模型、路由角色。",
+    "editDescription": "修改当前渠道的协议、模型与路由配置。",
     "endpointPath": "路径",
     "endpointPathTip": "追加到 Base URL 后的相对路径。完整的请求地址显示在下方。",
     "endpointPreview": "完整地址",
@@ -455,6 +565,7 @@
     "fetchModelsTitle": "从上游选择模型",
     "searchModels": "搜索模型...",
     "selectAll": "全选",
+    "addModelsCount": "添加 ({count})",
     "addSelectedModels": "添加所选",
     "nModels": "{count} 个模型",
     "nSelected": "已选 {count} 个",
@@ -491,7 +602,11 @@
     "agentSelector": "测试节点",
     "agentSelectorTip": "选择运行测试的节点。留空则在本地测试。",
     "localTest": "本地（内嵌）",
-    "agentRouteCreateHint": "保存渠道后即可分配 agent 路由"
+    "agentRouteCreateHint": "保存渠道后即可分配 agent 路由",
+    "filterByType": "按类型筛选",
+    "filterByStatus": "按状态筛选",
+    "enabled": "启用",
+    "disabled": "禁用"
   },
   "models": {
     "title": "模型配置",
@@ -611,12 +726,23 @@
     "loadingDetail": "加载中...",
     "fullSync": "全量同步",
     "fullSyncAll": "同步全部在线",
+    "viewCache": "查看缓存",
     "fullSyncSelected": "同步选中 ({count})",
     "fullSyncSuccess": "{count} 个成功",
     "fullSyncFailed": "{count} 个失败",
     "fullSyncOffline": "节点离线",
     "syncing": "同步中...",
-    "agentSectionTitle": "缓存"
+    "agentSectionTitle": "缓存",
+    "cacheTitle": "缓存监控",
+    "cacheSubtitle": "跨集群所有 agent 的 LRU 缓存运行状态",
+    "lastUpdated": "上次更新",
+    "refresh": "刷新",
+    "clusterAggregate": "集群聚合",
+    "perAgent": "Per-Agent",
+    "noData": "暂无数据",
+    "filterByStatus": "按状态筛选",
+    "statusOnline": "在线",
+    "statusOffline": "离线"
   },
   "logs": {
     "title": "用量日志",
@@ -667,7 +793,18 @@
     "outboundBody": "出站请求体",
     "responseHeaders": "响应 Header",
     "responseBody": "响应体",
-    "clientResponseBody": "客户端响应体"
+    "clientResponseBody": "客户端响应体",
+    "channelName": "渠道",
+    "filterPrivateChannel": "按 BYOK 渠道",
+    "byokBadge": "BYOK",
+    "kpi": {
+      "total": "总请求",
+      "failed": "失败",
+      "failedRate": "失败率",
+      "p95": "P95",
+      "slowest": "最慢"
+    },
+    "errorByStage": "按阶段错误分布"
   },
   "playground": {
     "title": "对话测试",
@@ -732,14 +869,12 @@
     "create": "+ 新建路由",
     "editTitle": "编辑路由",
     "newTitle": "新建路由",
-
     "scope": {
       "label": "范围",
       "global": "全局",
       "user": "用户",
       "all": "全部"
     },
-
     "cols": {
       "name": "名称",
       "scope": "范围",
@@ -749,28 +884,25 @@
       "enabled": "启用",
       "updated": "更新时间"
     },
-
     "filters": {
       "searchPlaceholder": "按名称搜索…",
-      "userIdPlaceholder": "用户 ID"
+      "userIdPlaceholder": "用户 ID",
+      "filterByScope": "按范围筛选",
+      "filterByUser": "按用户筛选"
     },
-
     "actions": {
       "edit": "编辑",
       "delete": "删除"
     },
-
     "delete": {
       "confirm": "删除路由 {name}？",
       "blockedReferenced": "无法删除：被 {refs} 引用"
     },
-
     "empty": {
       "title": "暂无路由",
       "desc": "创建路由，将多个模型聚合到同一名称并按权重分流",
       "cta": "+ 创建第一个路由"
     },
-
     "errors": {
       "duplicateName": "当前范围内已存在同名路由",
       "invalidRef": "引用 '{ref}' 不存在",
@@ -780,14 +912,12 @@
       "nameContainsComma": "名称不能包含逗号",
       "referencedBy": "被以下对象引用：{refs}"
     },
-
     "section": {
       "basic": "基本信息",
       "basicDesc": "名称、作用域、状态",
       "members": "成员",
       "membersDesc": "聚合最多 32 个引用"
     },
-
     "field": {
       "name": "名称",
       "namePlaceholder": "例如 smart-large",
@@ -802,7 +932,6 @@
       "noTokensTitle": "创建 routing 前需要至少一个 token",
       "goToTokens": "去令牌管理"
     },
-
     "members": {
       "refLabel": "引用",
       "priorityLabel": "优先级",
@@ -822,7 +951,6 @@
       "staleRef": "当前 token 不可访问",
       "emptyCandidates": "当前 token 无可用模型与 routing"
     },
-
     "preview": {
       "title": "实时预览",
       "placeholderHint": "至少添加一个成员后查看实时预览。",
@@ -840,7 +968,6 @@
       "empty": "添加成员后查看流量分布",
       "fail": "预览失败"
     },
-
     "saveBar": {
       "unsaved": "未保存的更改"
     }
@@ -874,7 +1001,10 @@
     "ruleAdded": "路由规则已添加",
     "deleteFailed": "删除失败",
     "addFailed": "添加失败",
-    "targetValueRequired": "请填写目标值"
+    "targetValueRequired": "请填写目标值",
+    "filterBySourceType": "按来源类型筛选",
+    "sourceToken": "令牌",
+    "sourceChannel": "渠道"
   },
   "tokenTemplates": {
     "title": "令牌模板",
@@ -884,6 +1014,9 @@
     "expiryDays": "有效期（天）",
     "expiryDaysHint": "-1 表示永不过期",
     "status": "状态",
+    "statusEnabled": "启用",
+    "statusDisabled": "禁用",
+    "filterByStatus": "按状态筛选",
     "create": "创建模板",
     "edit": "编辑模板",
     "noExpiry": "永不过期",
@@ -944,6 +1077,8 @@
     "cleanupTarget": "清理目标",
     "traceData": "Trace 数据",
     "logData": "日志数据",
+    "hourlyBucketData": "小时聚合桶（仅最近 7 天可见）",
+    "cleanupHourlyHint": "Hourly bucket 建议保留 14 天（小时维度只查询最近 7 天，多留 7 天 buffer）",
     "retainDays": "保留天数",
     "preview": "预览",
     "totalRecords": "总记录数",
@@ -971,7 +1106,10 @@
     "registrationEnabled": "允许账号密码注册",
     "registrationEnabledDesc": "开启后，登录页会显示注册入口，用户可通过用户名和密码创建账号；关闭后只能由管理员创建账号或通过 SSO 流程创建。",
     "oauthAutoCreate": "SSO 首次登录自动创建账号",
-    "oauthAutoCreateDesc": "开启后，未绑定本地账号的 SSO 身份首次登录时进入选择页：可创建新账号或绑定已有账号；关闭则只能绑定已有账号。"
+    "oauthAutoCreateDesc": "开启后，未绑定本地账号的 SSO 身份首次登录时进入选择页：可创建新账号或绑定已有账号；关闭则只能绑定已有账号。",
+    "fallbackSleep": "Fallback 间隔 (ms)",
+    "fallbackSleepDesc": "请求失败时切到下一个 channel 之前的等待时间(毫秒),0..60000",
+    "fallbackSleepRangeError": "Fallback 间隔必须在 0 到 60000 毫秒之间"
   },
   "tokenDetail": {
     "tokenInfo": "Token 信息",
@@ -1005,13 +1143,8 @@
     "fieldUpdated": "更新时间"
   },
   "monitoring": {
-    "title": "缓存监控",
-    "subtitle": "跨集群所有 agent 的 LRU 缓存运行状态",
-    "refresh": "刷新",
-    "lastUpdated": "上次更新",
-    "clusterAggregate": "集群聚合",
-    "perAgent": "Per-Agent",
-    "noData": "暂无数据",
+    "title": "监控",
+    "subtitle": "集群健康、流量与错误总览",
     "tableEntity": "实体",
     "tableHitRate": "命中率",
     "tableNegative": "Negative",
@@ -1019,7 +1152,39 @@
     "tableSizeCap": "Size / Cap",
     "tableUtil": "Util",
     "online": "在线",
-    "offline": "离线"
+    "offline": "离线",
+    "ring": {
+      "success": "成功率",
+      "agents": "Agent 在线",
+      "tps": "TPS",
+      "requests": "请求数"
+    },
+    "channels": {
+      "title": "渠道",
+      "name": "名称",
+      "requests": "请求",
+      "errorRatio": "错误率",
+      "ttft": "TTFT",
+      "tps": "TPS",
+      "p95": "P95",
+      "spark24h": "24h"
+    },
+    "agents": {
+      "title": "Agents",
+      "online": "在线",
+      "offline": "离线"
+    },
+    "errors": {
+      "title": "错误",
+      "byStage": "按阶段错误",
+      "byChannel": "按渠道错误"
+    },
+    "range": {
+      "day": "按天",
+      "hour": "按小时",
+      "hourWindowClamped": "已自动裁剪窗口到最近 7 天（小时维度上限）"
+    },
+    "noData": "暂无数据"
   },
   "oauth": {
     "loginWith": "使用 {provider} 登录",
@@ -1088,5 +1253,252 @@
       "scopes": "Scopes",
       "iconUrl": "图标 URL"
     }
+  },
+  "byok": {
+    "title": "BYOK 渠道",
+    "description": "自带你的 provider API key，费用直接在你的账户结算。",
+    "create": "新建",
+    "edit": "编辑",
+    "delete": "删除",
+    "test": "测试",
+    "search": "按名称或模型搜索",
+    "searchNameOrModel": "按名称或模型搜索",
+    "filterByType": "按类型筛选",
+    "filterByStatus": "按状态筛选",
+    "statusEnabled": "启用",
+    "statusDisabled": "禁用",
+    "name": "名称",
+    "type": "类型",
+    "key": "API Key",
+    "resetKey": "重置 Key",
+    "resetKeyPlaceholder": "(留空保持不变)— 当前 ****{last4}",
+    "keyLast4": "Key（末 4 位）",
+    "baseUrl": "Base URL",
+    "baseUrlHint": "留空使用 provider 默认地址",
+    "models": "可用模型",
+    "modelsNone": "未注册任何 model",
+    "catalog": {
+      "browseButton": "浏览可用模型",
+      "dialogTitle": "从可用模型中选择",
+      "empty": "无可用模型，请联系管理员注册"
+    },
+    "weight": "权重",
+    "priority": "优先级",
+    "status": "状态",
+    "enabled": "启用",
+    "disabled": "禁用",
+    "advanced": "高级",
+    "organization": "Organization",
+    "apiVersion": "API Version",
+    "systemPrompt": "系统提示词",
+    "tag": "标签",
+    "remark": "备注",
+    "createdAt": "创建时间",
+    "loadBalancing": "负载均衡",
+    "endpointChat": "Chat",
+    "endpointResp": "Resp",
+    "endpointClaude": "Claude",
+    "expandedEndpoints": "Endpoints",
+    "modelMapping": "Model 映射",
+    "expandedConfig": "配置",
+    "configPassthrough": "Passthrough",
+    "testModel": "测试 model",
+    "yes": "是",
+    "no": "否",
+    "modeLegacy": "Legacy 模式",
+    "testSuccessWithTime": "测试成功（{time}s）",
+    "testFailedWithError": "测试失败：{error}",
+    "cancel": "取消",
+    "save": "保存",
+    "create_action": "创建",
+    "newSheetTitle": "新建 BYOK 渠道",
+    "editSheetTitle": "编辑 BYOK 渠道",
+    "sheetDescription": "自带你的 provider API key。Models 必须是 gateway 已注册 model 列表的子集。",
+    "actions": "操作",
+    "emptyState": "暂无 BYOK 渠道。点击 \"新建\" 添加。",
+    "deleteConfirm": "删除 BYOK 渠道 \"{name}\"?",
+    "deleteDescription": "这将永久移除该 BYOK 渠道及其 API key。此操作无法撤销。",
+    "testOk": "测试通过 — {status}，耗时 {ms}ms",
+    "testFail": "测试失败 — {status} {detail}",
+    "savedToast": "已保存",
+    "createdToast": "已创建",
+    "updatedToast": "已更新",
+    "deletedToast": "已删除",
+    "saveFailedToast": "保存失败",
+    "deleteFailedToast": "删除失败",
+    "testFailedToast": "测试失败",
+    "notFound": "BYOK 渠道不存在",
+    "loading": "加载中…",
+    "last4Label": "末 4 位:",
+    "usageStats": "用量统计",
+    "stats": {
+      "title": "BYOK 用量",
+      "description": "你的 private channel 请求的用量统计。默认情况下，BYOK 请求不扣 gateway quota。",
+      "back": "返回",
+      "totalRequests": "总请求数",
+      "totalRequestsDesc": "通过你的 BYOK 渠道路由的请求数",
+      "serviceCost": "服务费",
+      "serviceCostDesc": "service-fee 模式下的 quota 消耗（free 模式为 0）",
+      "rangeLast7": "近 7 天",
+      "rangeLast30": "近 30 天",
+      "rangeAll": "全部",
+      "successRate": "成功率",
+      "totalTokens": "总 Token",
+      "totalCost": "总费用",
+      "trendTitle": "每日请求趋势",
+      "trendEmpty": "选定区间内无请求",
+      "byChannelTitle": "按 Channel",
+      "byChannelEmpty": "暂无 channel 维度数据",
+      "byModelTitle": "按 Model",
+      "byModelEmpty": "暂无 model 维度数据",
+      "tableChannelName": "Channel",
+      "tableModelName": "Model",
+      "tableRequests": "请求数",
+      "tableSuccessRate": "成功率",
+      "tableTokens": "Token",
+      "tableCost": "费用",
+      "chartRequests": "请求数",
+      "chartTokens": "Token",
+      "chartCost": "费用",
+      "breakdownPromptTokens": "输入 Token",
+      "breakdownCompletionTokens": "输出 Token",
+      "breakdownCacheRead": "缓存读取",
+      "breakdownCacheWrite": "缓存写入",
+      "chartAllHidden": "所有曲线已隐藏，点击图例恢复显示",
+      "viewLogs": "查看相关日志",
+      "chartInputCost": "输入费用",
+      "chartOutputCost": "输出费用"
+    },
+    "profileCard": {
+      "title": "BYOK",
+      "descriptionEmpty": "自带你的 provider API key，费用直接在你的账户结算",
+      "descriptionCount": "已配置 {count} 个 private channel",
+      "manage": "管理",
+      "usage": "用量"
+    },
+    "settings": {
+      "title": "BYOK 设置",
+      "description": "控制终端用户能否自带 provider API key，以及哪些 base URL 被允许。",
+      "globallyEnabled": "全局启用",
+      "globallyEnabledDesc": "关闭后，整个 gateway 禁用所有 BYOK 创建/使用。",
+      "maxChannels": "每个用户最多 private channel 数（全局默认）",
+      "maxChannelsDesc": "user group 可分别覆盖此值。",
+      "billingMode": "计费模式",
+      "billingFree": "免费（不扣 quota）",
+      "billingServiceFee": "服务费（按比例折扣计费）",
+      "feeRatio": "服务费比例 (0..1)",
+      "feeRatioDesc": "BYOK 成本乘以此比例（如 0.1 = 10% admin-channel 成本）。",
+      "allowlist": "BaseURL 白名单",
+      "systemRecommended": "系统推荐（只读，随每次发布更新）",
+      "systemNone": "未配置任何系统 URL",
+      "customAdditions": "自定义追加",
+      "customNone": "未追加任何自定义 URL",
+      "add": "添加",
+      "savedToast": "BYOK 设置已保存",
+      "saveFailedToast": "保存失败",
+      "duplicateToast": "已在列表中",
+      "saveButton": "保存 BYOK 设置",
+      "deleteBaseURLTitle": "移除该 BaseURL 前缀？",
+      "deleteBaseURLChecking": "正在统计有多少 channel 在使用该前缀…",
+      "deleteBaseURLSafe": "没有任何已存在的 channel 在使用该前缀，移除安全。",
+      "deleteBaseURLWarning": "当前有 {count} 个私有 channel 正在使用该前缀。移除后仍需点击「保存」才会真正生效；一旦保存，这些 owner 下次编辑 channel 时 BaseURL 将无法通过校验。",
+      "deleteBaseURLTruncated": "（展示前 {shown} 条，共 {total} 条）",
+      "deleteBaseURLColOwner": "Owner ID",
+      "deleteBaseURLColChannel": "Channel 名",
+      "deleteBaseURLConfirm": "仍然移除"
+    },
+    "groupCard": {
+      "title": "BYOK（自带密钥）",
+      "enabledLabel": "BYOK 启用",
+      "enabledDesc": "默认继承全局 BYOK 开关；打开\"使用组内设置\"后改由上方开关决定。",
+      "useOverride": "使用组内设置（覆盖全局）",
+      "maxLabel": "每用户最大 private channel 数",
+      "maxDesc": "默认继承全局每用户上限；打开\"使用组内设置\"后采用此处的数值。",
+      "savedToast": "BYOK 组设置已保存",
+      "saveFailedToast": "保存失败",
+      "saveButton": "保存 BYOK 设置"
+    },
+    "admin": {
+      "title": "所有 BYOK 渠道",
+      "description": "所有 private channel 的跨用户视图。明文 API key 永不显示。",
+      "filteredBy": "按 owner_id={id} 过滤中",
+      "filterByOwner": "按所有者筛选",
+      "owner": "拥有者",
+      "created": "创建时间",
+      "forceDisable": "强制禁用",
+      "disabledLabel": "已禁用",
+      "confirmTitle": "强制禁用此 BYOK 渠道？",
+      "confirmDesc": "拥有者需要自己重新启用。正在使用此渠道的请求会失败。",
+      "disabledToast": "渠道已禁用",
+      "disableFailedToast": "禁用失败",
+      "emptyState": "未找到任何渠道。",
+      "viewChannels": "查看 BYOK 渠道"
+    },
+    "errors": {
+      "quotaDisabled": "BYOK 通道额度已被管理员关闭",
+      "quotaReached": "BYOK 通道额度 {limit} 已用满",
+      "privateChannelNotOwned": "无权访问该 BYOK 渠道"
+    }
+  },
+  "observability": {
+    "header": {
+      "gran": {
+        "day": "日",
+        "hour": "时"
+      },
+      "refresh": "刷新"
+    },
+    "range": {
+      "daysExceedHourLimit": "小时粒度最多 7 天范围"
+    },
+    "banner": {
+      "hourlyDataStartsFrom": "小时粒度数据自 {date} 起。更早请用日粒度。"
+    }
+  },
+  "insights": {
+    "title": {
+      "agent": "Agent 详情",
+      "channel": "渠道详情",
+      "model": "模型详情",
+      "user": "用户详情",
+      "token": "Token 详情"
+    },
+    "section": {
+      "summary": "概览",
+      "trend": "趋势",
+      "stageLatency": "阶段延迟",
+      "breakdown": "拆分",
+      "errors": "最近错误",
+      "noErrors": "暂无最近错误",
+      "errorCol": {
+        "time": "时间",
+        "stage": "阶段",
+        "channel": "渠道",
+        "model": "模型",
+        "message": "信息"
+      }
+    },
+    "header": {
+      "lastSeen": "最近活跃"
+    },
+    "kpi": {
+      "requests": "请求数",
+      "cost": "费用",
+      "tokens": "Tokens",
+      "ttftP95": "TTFT p95",
+      "tpsAvg": "TPS 均值",
+      "successRate": "成功率"
+    },
+    "breakdown": {
+      "model": "按模型",
+      "channel": "按渠道",
+      "agent": "按 agent",
+      "user": "按用户",
+      "token": "按 token"
+    },
+    "missingId": "缺少 id 参数",
+    "unknownType": "未知实体类型: {type}",
+    "loading": "加载中...",
+    "notImplemented": "暂未实现该实体的详情视图"
   }
 }

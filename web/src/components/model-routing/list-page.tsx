@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
@@ -9,7 +9,9 @@ import { Network, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -25,20 +27,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { UserPicker } from "@/components/business/user-picker";
 
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
 import { ScopeBadge } from "@/components/model-routing/scope-badge";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import {
   useModelRoutings,
   useUpdateModelRouting,
@@ -47,8 +40,6 @@ import {
 import { ApiError } from "@/lib/api/client";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { ModelRouting } from "@/lib/types";
-
-type ScopeFilter = "all" | "global" | "user";
 
 export interface ModelRoutingsListPageProps {
   apiMode: "admin" | "user";
@@ -98,24 +89,43 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const router = useRouter();
 
   const baseHref = apiMode === "admin" ? "/model-routings" : "/profile/model-routings";
-  const showScopeFilter = apiMode === "admin";
-  const showUserFilter = apiMode === "admin";
+  const isAdmin = apiMode === "admin";
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
-  const [search, setSearch] = useState("");
-  const [scopeFilter, setScopeFilter] = useState<ScopeFilter>("all");
-  const [userIdFilter, setUserIdFilter] = useState("");
-  const debouncedSearch = useDebounce(search, 300);
-  const debouncedUserId = useDebounce(userIdFilter, 300);
+
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: t("filters.searchPlaceholder") },
+    ...(isAdmin ? {
+      scope: {
+        kind: "enum",
+        options: [
+          { value: "global", label: t("scope.global") },
+          { value: "user", label: t("scope.user") },
+        ],
+        placeholder: t("filters.filterByScope"),
+      },
+      user_id: { kind: "picker", entity: "user", placeholder: t("filters.filterByUser") },
+    } : {}),
+  } satisfies FilterSpec), [t, isAdmin]);
+
+  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
+
+  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
+    setPage(1);
+    setFilterValuesRaw(next);
+  };
+
+  const scopeFilter = filterValues.scope ? String(filterValues.scope) as "global" | "user" : undefined;
+  const userIdFilter = filterValues.user_id ? String(filterValues.user_id) : "";
 
   const { data, isLoading } = useModelRoutings(
     {
       page,
       page_size: pageSize,
-      search: debouncedSearch,
-      ...(scopeFilter !== "all" ? { scope: scopeFilter } : {}),
-      ...(debouncedUserId ? { user_id: Number(debouncedUserId) } : {}),
+      search: filterValues.search ? String(filterValues.search) : undefined,
+      ...(scopeFilter ? { scope: scopeFilter } : {}),
+      ...(userIdFilter ? { user_id: Number(userIdFilter) } : {}),
     },
     apiMode
   );
@@ -123,10 +133,6 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const routings = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
-
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedSearch, scopeFilter, debouncedUserId]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -257,8 +263,8 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const isEmpty =
     !isLoading &&
     routings.length === 0 &&
-    !search &&
-    scopeFilter === "all" &&
+    !filterValues.search &&
+    !filterValues.scope &&
     !userIdFilter;
 
   const pageTitle = apiMode === "admin" ? t("title") : t("myTitle");
@@ -298,35 +304,11 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
           pageCount={pageCount}
           onPaginationChange={handlePaginationChange}
           toolbar={
-            <DataTableToolbar
-              searchValue={search}
-              searchPlaceholder={t("filters.searchPlaceholder")}
-              onSearchChange={setSearch}
-            >
-              {showScopeFilter && (
-                <Select
-                  value={scopeFilter}
-                  onValueChange={(v) => setScopeFilter(v as ScopeFilter)}
-                >
-                  <SelectTrigger className="w-32">
-                    <SelectValue placeholder={t("scope.all")} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">{t("scope.all")}</SelectItem>
-                    <SelectItem value="global">{t("scope.global")}</SelectItem>
-                    <SelectItem value="user">{t("scope.user")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              )}
-              {showUserFilter && (
-                <UserPicker
-                  value={userIdFilter}
-                  onChange={setUserIdFilter}
-                  placeholder={t("filters.userIdPlaceholder")}
-                  className="w-44"
-                />
-              )}
-            </DataTableToolbar>
+            <FilterableToolbar
+              spec={filterSpec}
+              value={filterValues}
+              onChange={setFilterValues}
+            />
           }
         />
       )}

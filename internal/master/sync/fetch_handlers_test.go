@@ -46,8 +46,8 @@ func TestFetchRegistry_RegisterAndResolve(t *testing.T) {
 }
 
 func TestNewFetchRegistry_RegistersTokenAndUser(t *testing.T) {
-	r := NewFetchRegistry()
-	for _, e := range []string{"token", "user"} {
+	r := NewFetchRegistry(nil)
+	for _, e := range []string{"token", "user", "private_channel"} {
 		if _, ok := r.Resolve(e); !ok {
 			t.Fatalf("entity %q should be registered by default", e)
 		}

@@ -35,10 +35,7 @@ func TestRelayPassthrough_InvalidRequestBodyJSON_ErrNotPanic(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	ch := &models.Channel{
-		ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-		Models: "gpt-4o", Status: 1, Weight: 1, PassthroughEnabled: true,
-	}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "gpt-4o"}
 
 	rctx := &state.RelayContext{
 		Context: &gin.Context{},

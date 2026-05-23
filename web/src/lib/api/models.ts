@@ -39,7 +39,9 @@ interface PricingUpdate {
   cache_write_price: number;
 }
 
-export function useModels(params: PaginatedParams = {}) {
+export function useModels(
+  params: PaginatedParams & { search?: string; price_filter?: string } = {},
+) {
   return useQuery({
     queryKey: ["models", params],
     queryFn: () => api.get<PaginatedResponse<ModelConfig>>(`/admin/models${buildQuery(params)}`),

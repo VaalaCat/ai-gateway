@@ -1,20 +1,33 @@
 "use client";
 
-import { formatCurrency, formatPrice } from "@/lib/utils/format";
+import { BreakdownPopover, type BreakdownRow } from "@/components/business/breakdown-popover";
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  formatMoneyCompact,
+  formatMoneyExact,
+  formatPrice,
+  formatTokensCompact,
+} from "@/lib/utils/format";
 
 interface CostCellProps {
   amount: number;
+  /** @deprecated 保留参数签名兼容, 实际不再使用; 显示走 formatMoneyCompact + hover formatMoneyExact */
   decimals?: number;
 }
 
-export function CostCell({ amount, decimals = 6 }: CostCellProps) {
-  return <span>{formatCurrency(amount, decimals)}</span>;
+export function CostCell({ amount }: CostCellProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span>{formatMoneyCompact(amount)}</span>
+      </TooltipTrigger>
+      <TooltipContent>{formatMoneyExact(amount)}</TooltipContent>
+    </Tooltip>
+  );
 }
 
 interface CostDetailCellProps {
@@ -36,33 +49,36 @@ export function CostDetailCell({
   inputCost,
   outputCost,
 }: CostDetailCellProps) {
-  const hasCache = cacheReadTokens > 0 || cacheWriteTokens > 0;
-
+  const rows: BreakdownRow[] = [
+    {
+      label: `Input · ${formatTokensCompact(promptTokens)} tokens`,
+      value: formatMoneyCompact(inputCost),
+    },
+    {
+      label: `Output · ${formatTokensCompact(completionTokens)} tokens`,
+      value: formatMoneyCompact(outputCost),
+    },
+  ];
+  if (cacheReadTokens > 0) {
+    rows.push({
+      label: `Cache read · ${formatTokensCompact(cacheReadTokens)} tokens`,
+      value: "—",
+      accent: "success",
+    });
+  }
+  if (cacheWriteTokens > 0) {
+    rows.push({
+      label: `Cache write · ${formatTokensCompact(cacheWriteTokens)} tokens`,
+      value: "—",
+      accent: "info",
+    });
+  }
   return (
-    <TooltipProvider delayDuration={200}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="cursor-help border-b border-dotted border-muted-foreground/50">
-            {formatCurrency(amount)}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="text-xs space-y-1">
-          <div>Input: {promptTokens.toLocaleString()} tokens → {formatCurrency(inputCost)}</div>
-          <div>Output: {completionTokens.toLocaleString()} tokens → {formatCurrency(outputCost)}</div>
-          {hasCache && (
-            <>
-              {cacheReadTokens > 0 && (
-                <div className="text-green-500">Cache read: {cacheReadTokens.toLocaleString()} tokens</div>
-              )}
-              {cacheWriteTokens > 0 && (
-                <div className="text-blue-500">Cache write: {cacheWriteTokens.toLocaleString()} tokens</div>
-              )}
-            </>
-          )}
-          <div className="font-medium border-t pt-1">Total: {formatCurrency(amount)}</div>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <BreakdownPopover
+      trigger={formatMoneyCompact(amount)}
+      rows={rows}
+      total={{ label: "Total", value: formatMoneyExact(amount) }}
+    />
   );
 }
 

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
@@ -146,4 +147,37 @@ func TestAgentDAO(t *testing.T) {
 			t.Fatalf("expected ErrRecordNotFound, got %v", err)
 		}
 	})
+}
+
+func TestBatchUpdateLastSeen(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+
+	// 准备 3 个 agent
+	require.NoError(t, db.Create(&models.Agent{AgentID: "a1", Name: "a1", Status: 1}).Error)
+	require.NoError(t, db.Create(&models.Agent{AgentID: "a2", Name: "a2", Status: 1}).Error)
+	require.NoError(t, db.Create(&models.Agent{AgentID: "a3", Name: "a3", Status: 1}).Error)
+
+	m := NewAdminMutation(ctx)
+
+	// success: 批量更新两个 agent
+	err := m.Agent().BatchUpdateLastSeen(map[string]int64{"a1": 1000, "a2": 2000})
+	require.NoError(t, err)
+
+	var a1, a2, a3 models.Agent
+	require.NoError(t, db.Where("agent_id = ?", "a1").First(&a1).Error)
+	require.NoError(t, db.Where("agent_id = ?", "a2").First(&a2).Error)
+	require.NoError(t, db.Where("agent_id = ?", "a3").First(&a3).Error)
+	require.Equal(t, int64(1000), a1.LastSeen)
+	require.Equal(t, int64(2000), a2.LastSeen)
+	require.Equal(t, int64(0), a3.LastSeen, "未在 updates 中的 agent 不应被改")
+
+	// boundary: 空 map 立即返回 nil
+	err = m.Agent().BatchUpdateLastSeen(map[string]int64{})
+	require.NoError(t, err)
+
+	// failure: 含不存在的 agent_id 不报错（affected=0），其他 agent 正常
+	err = m.Agent().BatchUpdateLastSeen(map[string]int64{"a1": 3000, "ghost": 999})
+	require.NoError(t, err)
+	require.NoError(t, db.Where("agent_id = ?", "a1").First(&a1).Error)
+	require.Equal(t, int64(3000), a1.LastSeen)
 }

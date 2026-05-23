@@ -19,6 +19,8 @@ import { DateCell } from "@/components/business/date-cell";
 import { CopyableText } from "@/components/business/copyable-text";
 
 import { useAgentDetail, useConnectivityReport, useCheckConnectivity } from "@/lib/api/agents";
+import { formatErrorToast } from "@/lib/api/error-toast";
+import { formatDuration, formatUptime } from "@/lib/utils/format";
 import type { Agent, AgentAddress } from "@/lib/types";
 
 function parseAddresses(raw: string): AgentAddress[] {
@@ -28,12 +30,6 @@ function parseAddresses(raw: string): AgentAddress[] {
     if (Array.isArray(parsed)) return parsed;
   } catch { /* ignore */ }
   return [];
-}
-
-function formatUptime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return `${h}h ${m}m`;
 }
 
 function Stat({ label, children }: { label: string; children: React.ReactNode }) {
@@ -61,8 +57,8 @@ export function AgentExpandedRow({ agent }: AgentExpandedRowProps) {
     try {
       await checkMutation.mutateAsync(agent.id);
       toast.success(tc("success"));
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -157,7 +153,7 @@ export function AgentExpandedRow({ agent }: AgentExpandedRowProps) {
         </div>
         {connectivity && connectivity.checked_at > 0 && connectivity.results && connectivity.results.length > 0 ? (
           <div className="border-t">
-            <Table>
+            <Table className="text-body">
               <TableHeader>
                 <TableRow>
                   <TableHead className="h-8 text-xs">{t("targetAgent")}</TableHead>
@@ -190,7 +186,7 @@ export function AgentExpandedRow({ agent }: AgentExpandedRowProps) {
                         )}
                       </TableCell>
                       <TableCell className="py-1.5 text-xs">
-                        {r.reachable ? `${r.latency_ms}ms` : r.error || "-"}
+                        {r.reachable ? formatDuration(r.latency_ms) : r.error || "-"}
                       </TableCell>
                     </TableRow>
                   ))

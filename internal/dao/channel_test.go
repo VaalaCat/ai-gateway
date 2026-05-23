@@ -13,9 +13,9 @@ func TestChannelDAO(t *testing.T) {
 	m := NewAdminMutation(ctx).Channel()
 
 	// seed channels
-	ch1 := &models.Channel{Name: "OpenAI", Type: 1, Models: "gpt-4", Status: 1, Tag: "premium"}
-	ch2 := &models.Channel{Name: "Claude", Type: 2, Models: "claude-3", Status: 1, Tag: "premium"}
-	ch3 := &models.Channel{Name: "Disabled", Type: 1, Models: "gpt-3.5", Status: 1, Tag: "free"}
+	ch1 := &models.Channel{ChannelCore: models.ChannelCore{Name: "OpenAI", Type: 1, Status: 1}, Models: "gpt-4", Tag: "premium"}
+	ch2 := &models.Channel{ChannelCore: models.ChannelCore{Name: "Claude", Type: 2, Status: 1}, Models: "claude-3", Tag: "premium"}
+	ch3 := &models.Channel{ChannelCore: models.ChannelCore{Name: "Disabled", Type: 1, Status: 1}, Models: "gpt-3.5", Tag: "free"}
 	for _, ch := range []*models.Channel{ch1, ch2, ch3} {
 		if err := db.Create(ch).Error; err != nil {
 			t.Fatalf("seed: %v", err)
@@ -124,7 +124,7 @@ func TestChannelDAO(t *testing.T) {
 	})
 
 	t.Run("Create", func(t *testing.T) {
-		ch := &models.Channel{Name: "NewCh", Type: 3}
+		ch := &models.Channel{ChannelCore: models.ChannelCore{Name: "NewCh", Type: 3}}
 		if err := m.Create(ch); err != nil {
 			t.Fatalf("Create: %v", err)
 		}

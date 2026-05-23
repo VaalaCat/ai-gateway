@@ -17,15 +17,18 @@ import { ChannelMultiSelect } from "@/components/business/channel-multi-select";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 
 import { ApiError } from "@/lib/api/client";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import { useUpdateUserGroup, useDeleteUserGroup } from "@/lib/api/user-groups";
 import { parseModels, serializeModels } from "@/lib/parse-models";
 import type { UserGroup } from "@/lib/types";
+import { BYOKCard } from "./byok-card";
 
 export function OverviewTab({ group, isDefault }: { group: UserGroup; isDefault: boolean }) {
   return (
     <div className="space-y-4">
       <BasicInfoCard group={group} isDefault={isDefault} />
       <PermissionsCard group={group} />
+      <BYOKCard group={group} />
     </div>
   );
 }
@@ -161,8 +164,8 @@ function PermissionsCard({ group }: { group: UserGroup }) {
         models: serializeModels(models),
       });
       toast.success(t("updateSuccess"));
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -207,8 +210,8 @@ function DeleteEntry({ id }: { id: number }) {
       toast.success(t("deleteSuccess"));
       setOpen(false);
       router.push("/groups");
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 

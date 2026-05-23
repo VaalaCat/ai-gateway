@@ -13,8 +13,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useChannelTypes } from "@/lib/api/channels";
+import type { ChannelFormAdapter } from "./adapter";
 import { useChannelForm, ChannelFormMode } from "./use-channel-form";
+import { isSectionAllHidden, type SectionId } from "./section-visibility";
 import { SaveBar } from "./save-bar";
 import { LegacyChannelForm } from "./legacy-form";
 import { BasicSection } from "./sections/basic";
@@ -24,35 +25,48 @@ import { ProtocolBehaviorSection } from "./sections/protocol-behavior";
 import { RequestRewriteSection } from "./sections/request-rewrite";
 import { RouteRolesSection } from "./sections/route-roles";
 
-export interface ChannelFormProps {
+export interface ChannelFormProps<Entity = unknown> {
   mode: ChannelFormMode;
+  adapter: ChannelFormAdapter<Entity>;
   /** Resolved default agent id for fetch-models in edit mode (optional). */
   agentId?: string;
 }
 
-const SECTIONS = [
+const SECTIONS: ReadonlyArray<{
+  id: SectionId;
+  number: string;
+  titleKey: string;
+  descKey: string;
+}> = [
   { id: "basic", number: "①", titleKey: "sectionBasic", descKey: "sectionBasicDescription" },
   { id: "endpoints-protocol", number: "②", titleKey: "sectionEndpointsProtocol", descKey: "sectionEndpointsProtocolDescription" },
   { id: "models", number: "③", titleKey: "sectionModels", descKey: "sectionModelsDescription" },
   { id: "protocol-behavior", number: "④", titleKey: "sectionProtocolBehavior", descKey: "sectionProtocolBehaviorDescription" },
   { id: "request-rewrite", number: "⑤", titleKey: "sectionRequestRewrite", descKey: "sectionRequestRewriteDescription" },
   { id: "route-roles", number: "⑥", titleKey: "sectionRouteRoles", descKey: "sectionRouteRolesDescription" },
-] as const;
+];
 
-type SectionId = typeof SECTIONS[number]["id"];
-
-export function ChannelForm({ mode, agentId }: ChannelFormProps) {
+export function ChannelForm<Entity>({
+  mode,
+  adapter,
+  agentId,
+}: ChannelFormProps<Entity>) {
   const t = useTranslations("channels");
   const router = useRouter();
-  const { data: channelTypes = [] } = useChannelTypes();
-  const state = useChannelForm(mode);
-  const [activeId, setActiveId] = useState<SectionId>("basic");
+  const { data: channelTypes = [] } = adapter.useTypes();
+  const state = useChannelForm(mode, adapter);
+  const visibleSections = SECTIONS.filter(
+    (s) => !isSectionAllHidden(s.id, adapter.hiddenFields),
+  );
+  const [activeId, setActiveId] = useState<SectionId>(
+    (visibleSections[0]?.id ?? "basic") as SectionId,
+  );
 
   if (mode.kind === "edit" && state.notFound) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-lg text-muted-foreground">{t("channelNotFound")}</p>
-        <Button onClick={() => router.push("/channels")}>
+        <Button onClick={() => router.push(adapter.listPath)}>
           {t("backToList")}
         </Button>
       </div>
@@ -113,6 +127,9 @@ export function ChannelForm({ mode, agentId }: ChannelFormProps) {
             setForm={state.setForm}
             channelTypes={channelTypes}
             showStatus={mode.kind === "edit"}
+            hiddenFields={adapter.hiddenFields}
+            keyFieldHelpText={adapter.keyFieldHelpText}
+            entity={state.entity}
           />
         );
       case "endpoints-protocol":
@@ -125,6 +142,7 @@ export function ChannelForm({ mode, agentId }: ChannelFormProps) {
             form={state.form}
             setForm={state.setForm}
             agentId={agentId}
+            useModelsCatalog={adapter.useModelsCatalog}
           />
         );
       case "protocol-behavior":
@@ -133,7 +151,11 @@ export function ChannelForm({ mode, agentId }: ChannelFormProps) {
         );
       case "request-rewrite":
         return (
-          <RequestRewriteSection form={state.form} setForm={state.setForm} />
+          <RequestRewriteSection
+            form={state.form}
+            setForm={state.setForm}
+            hiddenFields={adapter.hiddenFields}
+          />
         );
       case "route-roles":
         return (
@@ -157,7 +179,7 @@ export function ChannelForm({ mode, agentId }: ChannelFormProps) {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {SECTIONS.map((s) => (
+            {visibleSections.map((s) => (
               <SelectItem key={s.id} value={s.id}>
                 <span className="mr-2 tabular-nums text-muted-foreground">
                   {s.number}
@@ -181,7 +203,7 @@ export function ChannelForm({ mode, agentId }: ChannelFormProps) {
             variant="line"
             className="hidden h-auto w-[200px] shrink-0 flex-col items-stretch justify-start gap-0.5 border-r bg-muted/20 p-2 md:flex"
           >
-            {SECTIONS.map((s) => (
+            {visibleSections.map((s) => (
               <TabsTrigger
                 key={s.id}
                 value={s.id}
@@ -196,7 +218,7 @@ export function ChannelForm({ mode, agentId }: ChannelFormProps) {
           </TabsList>
 
           <div className="min-w-0 flex-1 overflow-x-hidden">
-            {SECTIONS.map((s) => (
+            {visibleSections.map((s) => (
               <TabsContent
                 key={s.id}
                 value={s.id}

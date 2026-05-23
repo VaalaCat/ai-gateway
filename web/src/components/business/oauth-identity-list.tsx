@@ -26,6 +26,7 @@ import {
   useIssueLinkTicket,
 } from "@/lib/api/oauth";
 import { ApiError } from "@/lib/api/client";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import type { OAuthIdentityItem } from "@/lib/types-oauth";
 
 export function OAuthIdentityList() {
@@ -87,8 +88,8 @@ function OAuthIdentityListInner() {
     try {
       const { ticket } = await issueLink.mutateAsync();
       window.location.href = `/api/oauth/${name}/link?ticket=${encodeURIComponent(ticket)}`;
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 

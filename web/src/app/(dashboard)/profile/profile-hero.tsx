@@ -13,15 +13,12 @@ import { CopyableText } from "@/components/business/copyable-text";
 import { RoleBadge } from "@/components/business/status-badge";
 import { useMyIdentities } from "@/lib/api/oauth";
 import type { User } from "@/lib/types";
+import { formatMoneyCompact } from "@/lib/utils/format";
 
 interface ProfileHeroProps {
   profile: User;
   activeTokenCount: number;
   onEditClick: () => void;
-}
-
-function formatQuotaUSD(quota: number): string {
-  return `$${(quota / 100000).toFixed(2)}`;
 }
 
 function pickInitial(user: User): string {
@@ -52,7 +49,7 @@ export function ProfileHero({ profile, activeTokenCount, onEditClick }: ProfileH
               <RoleBadge role={profile.role} />
             </div>
             {profile.email && (
-              <p className="text-sm text-muted-foreground">{profile.email}</p>
+              <p className="text-body text-muted-foreground">{profile.email}</p>
             )}
             <div className="flex flex-wrap items-center gap-2 pt-1">
               <CopyableText text={String(profile.id)} display={`#${profile.id}`} />
@@ -78,8 +75,8 @@ export function ProfileHero({ profile, activeTokenCount, onEditClick }: ProfileH
 
         <div className="grid grid-cols-3 gap-3">
           <Stat label={t("activeTokens")} value={String(activeTokenCount)} />
-          <Stat label={t("remainingQuota")} value={formatQuotaUSD(profile.quota)} />
-          <Stat label={t("totalUsed")} value={formatQuotaUSD(profile.used_quota)} />
+          <Stat label={t("remainingQuota")} value={formatMoneyCompact(profile.quota)} />
+          <Stat label={t("totalUsed")} value={formatMoneyCompact(profile.used_quota)} />
         </div>
       </CardContent>
     </Card>
@@ -90,7 +87,7 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col">
       <span className="font-semibold tabular-nums">{value}</span>
-      <span className="text-xs text-muted-foreground uppercase tracking-wide">{label}</span>
+      <span className="text-label text-muted-foreground uppercase tracking-wide">{label}</span>
     </div>
   );
 }

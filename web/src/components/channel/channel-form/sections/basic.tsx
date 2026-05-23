@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { FieldTip } from "@/components/business/field-tip";
 import { StatusSelect } from "@/components/business/status-select";
+import type { ChannelTypeMeta } from "@/lib/types";
 import { ChannelForm } from "../types";
 
 function formatTypeName(
@@ -30,19 +31,25 @@ function formatTypeName(
   return name;
 }
 
-export interface BasicSectionProps {
+export interface BasicSectionProps<Entity = unknown> {
   form: ChannelForm;
   setForm: (next: ChannelForm) => void;
-  channelTypes: { id: number; name: string; i18n_key: string }[];
+  channelTypes: ChannelTypeMeta[];
   showStatus?: boolean;
+  hiddenFields?: ReadonlySet<keyof ChannelForm>;
+  keyFieldHelpText?: (entity: Entity | null) => string | undefined;
+  entity?: Entity | null;
 }
 
-export function BasicSection({
+export function BasicSection<Entity>({
   form,
   setForm,
   channelTypes,
   showStatus = false,
-}: BasicSectionProps) {
+  hiddenFields,
+  keyFieldHelpText,
+  entity = null,
+}: BasicSectionProps<Entity>) {
   const t = useTranslations("channels");
   const tc = useTranslations("common");
 
@@ -60,22 +67,24 @@ export function BasicSection({
   return (
     <div className="space-y-4">
       {/* Legacy Mode Toggle */}
-      <div
-        className={
-          form.use_legacy_adaptor
-            ? "flex items-center justify-between rounded-md border border-yellow-500/30 bg-yellow-500/5 px-4 py-3"
-            : "flex items-center justify-between rounded-md border px-4 py-3"
-        }
-      >
-        <div className="space-y-0.5">
-          <Label>{t("useLegacyAdaptor")}</Label>
-          <p className="text-sm text-muted-foreground">{t("useLegacyAdaptorTip")}</p>
+      {!hiddenFields?.has("use_legacy_adaptor") && (
+        <div
+          className={
+            form.use_legacy_adaptor
+              ? "flex items-center justify-between rounded-md border border-yellow-500/30 bg-yellow-500/5 px-4 py-3"
+              : "flex items-center justify-between rounded-md border px-4 py-3"
+          }
+        >
+          <div className="space-y-0.5">
+            <Label>{t("useLegacyAdaptor")}</Label>
+            <p className="text-sm text-muted-foreground">{t("useLegacyAdaptorTip")}</p>
+          </div>
+          <Switch
+            checked={form.use_legacy_adaptor}
+            onCheckedChange={(v) => setForm({ ...form, use_legacy_adaptor: v })}
+          />
         </div>
-        <Switch
-          checked={form.use_legacy_adaptor}
-          onCheckedChange={(v) => setForm({ ...form, use_legacy_adaptor: v })}
-        />
-      </div>
+      )}
 
       {/* Type (legacy mode only) */}
       {form.use_legacy_adaptor && (
@@ -112,6 +121,12 @@ export function BasicSection({
           value={form.key}
           onChange={(e) => setForm({ ...form, key: e.target.value })}
         />
+        {keyFieldHelpText && (() => {
+          const hint = keyFieldHelpText(entity);
+          return hint ? (
+            <p className="text-xs text-muted-foreground mt-1">{hint}</p>
+          ) : null;
+        })()}
       </div>
 
       {/* Base URL */}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -8,6 +8,9 @@ import { MoreHorizontal, RefreshCw, DollarSign, Copy } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,13 +27,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 
 import { StatusBadge } from "@/components/business/status-badge";
 import { StatusSelect } from "@/components/business/status-select";
@@ -38,7 +34,6 @@ import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
 import { PricingPreviewDialog } from "@/components/business/pricing-preview-dialog";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
   useModels,
@@ -51,6 +46,7 @@ import {
 } from "@/lib/api/models";
 import { PAGE_SIZES } from "@/lib/constants";
 import { formatPrice } from "@/lib/utils/format";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import type { ModelConfig } from "@/lib/types";
 
 // --- Helpers ---
@@ -74,8 +70,6 @@ function ModelNameCell({ name }: { name: string }) {
   );
 }
 
-type PriceFilter = "all" | "no_price" | "has_price";
-
 // --- Page ---
 
 export default function ModelsPage() {
@@ -85,23 +79,34 @@ export default function ModelsPage() {
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
-  const [search, setSearch] = useState("");
-  const [priceFilter, setPriceFilter] = useState<PriceFilter>("all");
-  const debouncedSearch = useDebounce(search, 300);
 
-  const queryParams: Record<string, string | number | undefined> = {
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+    price_filter: {
+      kind: "enum",
+      options: [
+        { value: "all", label: t("priceFilterAll") },
+        { value: "no_price", label: t("priceFilterNone") },
+        { value: "has_price", label: t("priceFilterSet") },
+      ],
+      includeAll: false,
+      placeholder: t("priceFilterAll"),
+    },
+  } satisfies FilterSpec), [t, tc]);
+
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+
+  const { data, isLoading } = useModels({
     page,
     page_size: pageSize,
-    search: debouncedSearch,
-  };
-  if (priceFilter !== "all") queryParams.price_filter = priceFilter;
-
-  const { data, isLoading } = useModels(queryParams);
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
+    ...(filterValues.price_filter && filterValues.price_filter !== "all"
+      ? { price_filter: String(filterValues.price_filter) }
+      : {}),
+  });
   const models = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
-
-  useEffect(() => { setPage(1); }, [debouncedSearch, priceFilter]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) { setPage(1); setPageSize(newPageSize); } else { setPage(newPage); }
@@ -136,7 +141,7 @@ export default function ModelsPage() {
       });
       toast.success(tc("success"));
       setEditItem(null);
-    } catch { toast.error(tc("error")); }
+    } catch (e) { toast.error(formatErrorToast(e, tc("error"))); }
   };
 
   const handleDelete = async () => {
@@ -145,7 +150,7 @@ export default function ModelsPage() {
       await deleteMutation.mutateAsync(deleteItem.id);
       toast.success(tc("success"));
       setDeleteItem(null);
-    } catch { toast.error(tc("error")); }
+    } catch (e) { toast.error(formatErrorToast(e, tc("error"))); }
   };
 
   const openEdit = (model: ModelConfig) => {
@@ -165,7 +170,7 @@ export default function ModelsPage() {
       const result = await fetchPricingMutation.mutateAsync(source ? { source } : undefined);
       if ((result.matches ?? []).length === 0) { toast.info(t("noMatches")); return; }
       setPricingData(result);
-    } catch { toast.error(t("fetchFailed")); }
+    } catch (e) { toast.error(formatErrorToast(e, t("fetchFailed"))); }
   };
 
   const handleApplyPricing = async (updates: Array<{
@@ -176,7 +181,7 @@ export default function ModelsPage() {
       const result = await applyPricingMutation.mutateAsync({ updates });
       toast.success(t("pricingApplied", { count: result.updated }));
       setPricingData(null);
-    } catch { toast.error(tc("error")); }
+    } catch (e) { toast.error(formatErrorToast(e, tc("error"))); }
   };
 
   // --- Columns ---
@@ -246,65 +251,48 @@ export default function ModelsPage() {
 
   // --- Toolbar ---
 
-  const toolbar = (
-    <div className="flex items-start justify-between gap-2 flex-wrap">
-      {/* Left: Search + Filter */}
-      <div className="flex items-center gap-2">
-        <div className="relative w-44 shrink-0">
-          <Input
-            placeholder={tc("search")}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-8 h-8 text-sm"
-          />
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-        </div>
-        <Select value={priceFilter} onValueChange={(v) => setPriceFilter(v as PriceFilter)}>
-          <SelectTrigger className="w-fit h-8 text-xs shrink-0">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{t("priceFilterAll")}</SelectItem>
-            <SelectItem value="no_price">{t("priceFilterNone")}</SelectItem>
-            <SelectItem value="has_price">{t("priceFilterSet")}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+  const toolbarActions = (
+    <div className="flex items-center gap-2">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="sm" disabled={fetchPricingMutation.isPending}>
+            <DollarSign className={`mr-1.5 size-3.5 ${fetchPricingMutation.isPending ? "animate-pulse" : ""}`} />
+            {fetchPricingMutation.isPending ? t("fetching") : t("fetchPricing")}
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          <DropdownMenuItem onClick={() => handleFetchPricing()}>
+            {t("filterAll")} (basellm + models.dev)
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => handleFetchPricing("basellm")}>basellm</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => handleFetchPricing("models.dev")}>models.dev</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
-      {/* Right: Actions */}
-      <div className="flex items-center gap-2">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm" disabled={fetchPricingMutation.isPending}>
-              <DollarSign className={`mr-1.5 size-3.5 ${fetchPricingMutation.isPending ? "animate-pulse" : ""}`} />
-              {fetchPricingMutation.isPending ? t("fetching") : t("fetchPricing")}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuItem onClick={() => handleFetchPricing()}>
-              {t("filterAll")} (basellm + models.dev)
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => handleFetchPricing("basellm")}>basellm</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => handleFetchPricing("models.dev")}>models.dev</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={async () => {
-            try {
-              const result = await syncMutation.mutateAsync();
-              toast.success(t("syncSuccess", { count: result.created }));
-            } catch { toast.error(tc("error")); }
-          }}
-          disabled={syncMutation.isPending}
-        >
-          <RefreshCw className={`mr-1.5 size-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
-          {t("syncFromChannels")}
-        </Button>
-      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={async () => {
+          try {
+            const result = await syncMutation.mutateAsync();
+            toast.success(t("syncSuccess", { count: result.created }));
+          } catch (e) { toast.error(formatErrorToast(e, tc("error"))); }
+        }}
+        disabled={syncMutation.isPending}
+      >
+        <RefreshCw className={`mr-1.5 size-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
+        {t("syncFromChannels")}
+      </Button>
     </div>
+  );
+
+  const toolbar = (
+    <FilterableToolbar
+      spec={filterSpec}
+      value={filterValues}
+      onChange={setFilterValues}
+      primaryAction={toolbarActions}
+    />
   );
 
   // --- Render ---

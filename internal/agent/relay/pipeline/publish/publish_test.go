@@ -266,7 +266,7 @@ func TestPublishExecuteSuccess(t *testing.T) {
 	rctx.State.Plan.RoutingName = "rt"
 	rctx.State.Execution = state.ExecutionResult{
 		Used: state.Attempt{
-			Channel:   &models.Channel{ID: 7, Type: consts.ChannelTypeOpenAI, Name: "ch7"},
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 7, Type: consts.ChannelTypeOpenAI, Name: "ch7"}},
 			RealModel: "gpt-4",
 			Mode:      state.ModeNative,
 		},
@@ -331,7 +331,7 @@ func TestPublishExecuteFailSetsStatus0(t *testing.T) {
 	rctx.State.Err = upstreamErr
 	rctx.State.Execution = state.ExecutionResult{
 		Used: state.Attempt{
-			Channel:   &models.Channel{ID: 5, Type: consts.ChannelTypeOpenAI, Name: "ch5"},
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 5, Type: consts.ChannelTypeOpenAI, Name: "ch5"}},
 			RealModel: "gpt-4",
 			Mode:      state.ModeNative,
 		},
@@ -448,7 +448,7 @@ func TestPublishExecuteFailWritten_NoCacheNoFirstResponseMs(t *testing.T) {
 	rctx.State.Err = streamErr
 	rctx.State.Execution = state.ExecutionResult{
 		Used: state.Attempt{
-			Channel:   &models.Channel{ID: 8, Type: consts.ChannelTypeOpenAI, Name: "ch8"},
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 8, Type: consts.ChannelTypeOpenAI, Name: "ch8"}},
 			RealModel: "gpt-4",
 			Mode:      state.ModeNative,
 		},
@@ -514,7 +514,7 @@ func TestPublish_ExecuteFail_NotWritten_AllTokenFieldsZero(t *testing.T) {
 	rctx.State.Err = upstreamErr
 	rctx.State.Execution = state.ExecutionResult{
 		Used: state.Attempt{
-			Channel:   &models.Channel{ID: 9, Type: consts.ChannelTypeOpenAI, Name: "ch9"},
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 9, Type: consts.ChannelTypeOpenAI, Name: "ch9"}},
 			RealModel: "gpt-4",
 			Mode:      state.ModeNative,
 		},
@@ -631,7 +631,7 @@ func TestPublishExecuteLegacyAndUpstreamFallback(t *testing.T) {
 	rctx.State.FailPhase = state.PhaseNone
 	rctx.State.Execution = state.ExecutionResult{
 		Used: state.Attempt{
-			Channel:   &models.Channel{ID: 9, Type: consts.ChannelTypeOpenAI, Name: "ch9"},
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 9, Type: consts.ChannelTypeOpenAI, Name: "ch9"}},
 			RealModel: "gpt-4",
 			Mode:      state.ModeLegacy,
 		},

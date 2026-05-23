@@ -1,15 +1,18 @@
 "use client";
 
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState, useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
 import { MoreHorizontal, Plus } from "lucide-react";
+import Link from "next/link";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/business/password-input";
@@ -41,8 +44,8 @@ import { ProfileFormDialog } from "@/components/business/profile-form-dialog";
 import { DateCell } from "@/components/business/date-cell";
 import { GroupSelect } from "@/components/business/group-select";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import { useUsers, useCreateUser, useDeleteUser, useUpdateQuota } from "@/lib/api/users";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { User } from "@/lib/types";
 
@@ -60,20 +63,38 @@ function UsersPageContent() {
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
-  const [search, setSearch] = useState("");
-  const debouncedSearch = useDebounce(search, 300);
+
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+    role: {
+      kind: "enum",
+      options: [
+        { value: "1", label: t("roleUser") },
+        { value: "2", label: t("roleAdmin") },
+      ],
+      placeholder: t("filterByRole"),
+    },
+    group_id: {
+      kind: "picker",
+      entity: "user-group",
+    },
+  } satisfies FilterSpec), [t, tc]);
+
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading } = useUsers({
     page,
     page_size: pageSize,
-    search: debouncedSearch,
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
+    ...(filterValues.role ? { role: String(filterValues.role) } : {}),
+    ...(filterValues.group_id ? { group_id: Number(filterValues.group_id) } : {}),
   });
 
   const users = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
 
-  useEffect(() => { setPage(1); }, [debouncedSearch]);
+  useEffect(() => { setPage(1); }, [filterValues]);
 
   const searchParams = useSearchParams();
   const targetId = searchParams.get("id");
@@ -124,8 +145,8 @@ function UsersPageContent() {
       toast.success(tc("success"));
       setCreateOpen(false);
       setCreateForm({ username: "", password: "", role: "1", group_id: undefined });
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -135,8 +156,8 @@ function UsersPageContent() {
       await deleteMutation.mutateAsync(deleteItem.id);
       toast.success(tc("success"));
       setDeleteItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -147,8 +168,8 @@ function UsersPageContent() {
       toast.success(tc("success"));
       setQuotaItem(null);
       setQuotaDelta("");
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -229,6 +250,11 @@ function UsersPageContent() {
             <DropdownMenuItem onClick={() => { setQuotaItem(row.original); setQuotaDelta(""); }}>
               {t("adjustQuota")}
             </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href={`/admin/byok?owner_id=${row.original.id}`}>
+                View BYOK Channels
+              </Link>
+            </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"
               onClick={() => setDeleteItem(row.original)}
@@ -258,16 +284,20 @@ function UsersPageContent() {
         pageCount={pageCount}
         onPaginationChange={handlePaginationChange}
         toolbar={
-          <DataTableToolbar
-            searchValue={search}
-            searchPlaceholder={tc("search")}
-            onSearchChange={setSearch}
-          >
-            <Button onClick={() => { setCreateForm({ username: "", password: "", role: "1", group_id: undefined }); setCreateOpen(true); }}>
-              <Plus className="mr-2 size-4" />
-              {t("createUser")}
-            </Button>
-          </DataTableToolbar>
+          <FilterableToolbar
+            spec={filterSpec}
+            value={filterValues}
+            onChange={setFilterValues}
+            primaryAction={
+              <Button size="sm" onClick={() => {
+                setCreateForm({ username: "", password: "", role: "1", group_id: undefined });
+                setCreateOpen(true);
+              }}>
+                <Plus className="mr-2 size-4" />
+                {t("createUser")}
+              </Button>
+            }
+          />
         }
       />
 

@@ -84,6 +84,42 @@ Aggregate multiple upstream channel-models under one virtual model name, with pr
 
 ---
 
+## BYOK (Bring Your Own Key)
+
+End users plug in their own provider API key — cost is billed directly against their own account and does not consume gateway quota.
+
+### BYOK Channels
+
+Per-user list of private channels: status, allowed models, load-balancing weight, and a connectivity-test action.
+
+![BYOK Channels](images/en/byok.png)
+
+### New BYOK Channel
+
+Stepped form: Basics → Endpoints & Protocol → Models → Protocol Behavior → Request Rewrite → Routes / Roles. Models must be a subset of the gateway's registered model list.
+
+![New BYOK Channel](images/en/byok-new.png)
+
+### Edit BYOK Channel
+
+Modify name, Base URL, status, protocol behavior, etc. API key echoes only the last 4 digits — leave blank to keep the existing key.
+
+![Edit BYOK Channel](images/en/byok-edit.png)
+
+### BYOK Usage Stats
+
+Per-user request / token / cost trend across their own private channels, broken down by channel and by model.
+
+![BYOK Usage](images/en/byok-stats.png)
+
+### All BYOK Channels (Admin)
+
+Cross-user audit view of every private channel + owner + status. Plaintext API keys are never shown; admin can disable any channel with one click.
+
+![All BYOK Channels](images/en/admin-byok.png)
+
+---
+
 ## Tokens & Usage
 
 ### Tokens
@@ -123,6 +159,18 @@ User-scoped model routings — each user can define their own private pools with
 ---
 
 ## Operations
+
+### Monitoring
+
+Cluster health overview: success rate, agents online, TPS, request count; per-channel and per-agent 24h trend and error rate; errors broken down by request stage.
+
+![Monitoring](images/en/monitoring.png)
+
+### Entity Insight
+
+Drill-down view for a single entity (agent / channel / model / token): KPIs, trend, errors, stage-latency distribution, related breakdowns.
+
+![Entity Insight](images/en/monitoring-insight.png)
 
 ### System Settings
 

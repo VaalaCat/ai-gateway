@@ -37,12 +37,15 @@ func (s *stubRoutingStore) GetGlobalRouting(name string) *protocol.SyncedRouting
 }
 
 // stubAgentCache 用 embedded interface 技巧满足 app.AgentCache，
-// 只覆盖 ResolveRouting / GetGlobalRouting / GetChannelsForModel 三个测试关心的方法。
+// 只覆盖 ResolveRouting / GetGlobalRouting / GetChannelsForModel /
+// GetVisiblePrivateChannelsForUser 四个测试关心的方法。
 // 其它方法访问会 nil 反射 panic——测试只触发上述方法故安全。
 type stubAgentCache struct {
 	app.AgentCache // embedded nil interface — promoted methods 不会被本测试调用
 	rs             RoutingStore
 	channels       []*models.Channel
+	// privChannels: model → private channels，供 BYOK pool 测试使用。
+	privChannels map[string][]*protocol.SyncedPrivateChannel
 }
 
 func (c *stubAgentCache) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
@@ -61,6 +64,13 @@ func (c *stubAgentCache) GetGlobalRouting(name string) *protocol.SyncedRouting {
 
 func (c *stubAgentCache) GetChannelsForModel(model string) []*models.Channel {
 	return c.channels
+}
+
+func (c *stubAgentCache) GetVisiblePrivateChannelsForUser(userID uint, model string) []*protocol.SyncedPrivateChannel {
+	if c.privChannels == nil {
+		return nil
+	}
+	return c.privChannels[model]
 }
 
 // stubAgentApp 实现 app.AgentApplication，只暴露我们装配的 stubAgentCache。

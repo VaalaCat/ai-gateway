@@ -5,6 +5,8 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 )
 
 // Store 本地配置缓存
@@ -39,6 +41,10 @@ type Store interface {
 	RebuildModelIndex()
 	GetAllModelNames() []string
 
+	// --- BYOK 私有 channel ---
+	GetVisiblePrivateChannelsForUser(userID uint, model string) []*protocol.SyncedPrivateChannel
+	ListVisibleBYOKModelNamesForUser(userID uint) []string // 列举 user 全部 enabled BYOK channel 的 Models 并集（去重）
+
 	// --- Agent 操作 ---
 	GetAgent(agentID string) *models.Agent
 	SetAgent(agent *models.Agent)
@@ -52,9 +58,10 @@ type Store interface {
 	// --- 版本与设置 ---
 	Version() int64
 	SetVersion(v int64)
-	LoadSettings(settings []models.Setting)
+	LoadSettings(s []models.Setting)
+	Settings() settings.AgentSettings
 	TraceMaxBodySize() int
-	SetTraceMaxBodySize(size int)
+	FallbackSleepMs() int
 
 	// --- 系统 Token ---
 	GetSystemTestToken() *models.Token

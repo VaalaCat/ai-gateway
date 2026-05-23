@@ -53,7 +53,7 @@ func TestAttemptResultErrChain(t *testing.T) {
 // TestAttemptFieldsRoundTrip：Attempt / AttemptResult 是 plan→executor→reporter
 // 的载具，所有字段必须可读写不丢失（落到 ExecutionResult.Used / Outcome 后仍可还原）。
 func TestAttemptFieldsRoundTrip(t *testing.T) {
-	ch := &models.Channel{ID: 7}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 7}}
 	a := state.Attempt{Channel: ch, RealModel: "claude-3-5-sonnet", Mode: state.ModeNative}
 	r := state.AttemptResult{
 		PromptTokens:     100,

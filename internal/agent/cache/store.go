@@ -3,11 +3,12 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"go.uber.org/zap"
@@ -20,8 +21,10 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 )
 
 var _ app.Store = (*Store)(nil)
@@ -34,15 +37,20 @@ type Store struct {
 	agents         entitycache.EntityCache[string, *models.Agent]
 	userGroups     entitycache.EntityCache[uint, *models.UserGroup]
 	modelChannels  utils.SyncMap[string, []*models.Channel]
-	globalRoutings entitycache.EntityCache[string, *protocol.SyncedRouting]
-	userRoutings   entitycache.EntityCache[uint, *protocol.UserRoutingMap]
+	globalRoutings        entitycache.EntityCache[string, *protocol.SyncedRouting]
+	userRoutings          entitycache.EntityCache[uint, *protocol.UserRoutingMap]
+	visiblePrivateChannels entitycache.EntityCache[uint, *protocol.VisiblePrivateChannelSet]
 
 	RouteIndex *RouteIndex
 
 	version atomic.Int64
 	mu      sync.Mutex // protects index rebuild
 
-	traceMaxBodySize atomic.Int64
+	// settings 持有 master 同步过来的全局配置快照。
+	// 读路径走 atomic.Load(无锁,hot path);写路径(applySetting)用 settingsMu
+	// 串行化 read-modify-write,防止 event bus 并发 handler 丢失 update。
+	settingsMu sync.Mutex
+	settings   atomic.Pointer[settings.AgentSettings]
 
 	logger *zap.Logger
 
@@ -63,7 +71,13 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		userGroups:   entitycache.NewFullCache[uint, *models.UserGroup](),
 		RouteIndex:   NewRouteIndex(),
 	}
-	s.traceMaxBodySize.Store(64 * 1024)
+	{
+		snap := settings.AgentSettings{}
+		for k, v := range settings.Defaults() {
+			_ = settings.Apply(&snap, k, v) // 默认值不会越界,error 安全忽略
+		}
+		s.settings.Store(&snap)
+	}
 	s.logger = zap.NewNop()
 
 	negTTLSec := cfg.NegativeTTLSeconds
@@ -98,7 +112,7 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 	if client != nil {
 		routingLoader = &loaders.UserRoutingsLoader{Client: client}
 	}
-	userRoutings, err := entitycache.NewLRUCache[uint, *protocol.UserRoutingMap](entitycache.Config[uint, *protocol.UserRoutingMap]{
+	userRoutings, err := entitycache.NewLRUCache(entitycache.Config[uint, *protocol.UserRoutingMap]{
 		Capacity:    routingCap,
 		Loader:      routingLoader,
 		NegativeTTL: negTTL,
@@ -107,6 +121,25 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		panic(err)
 	}
 	s.userRoutings = userRoutings
+
+	pchanCap := cfg.PrivateChannelsCapacity
+	if pchanCap <= 0 {
+		pchanCap = 5000
+	}
+	var pchanLoader entitycache.Loader[uint, *protocol.VisiblePrivateChannelSet]
+	if client != nil {
+		pchanLoader = &loaders.PrivateChannelsVisibleLoader{Client: client}
+	}
+	privateChans, err := entitycache.NewLRUCache(
+		entitycache.Config[uint, *protocol.VisiblePrivateChannelSet]{
+			Capacity:    pchanCap,
+			Loader:      pchanLoader,
+			NegativeTTL: negTTL,
+		})
+	if err != nil {
+		panic(err)
+	}
+	s.visiblePrivateChannels = privateChans
 
 	return s
 }
@@ -125,7 +158,7 @@ func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration) (entity
 	if client != nil {
 		loader = &loaders.UserLoader{Client: client}
 	}
-	return entitycache.NewLRUCache[uint, *protocol.SyncedUser](entitycache.Config[uint, *protocol.SyncedUser]{
+	return entitycache.NewLRUCache(entitycache.Config[uint, *protocol.SyncedUser]{
 		Capacity:    capacity,
 		Loader:      loader,
 		NegativeTTL: negTTL,
@@ -138,7 +171,7 @@ func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *
 	if client != nil {
 		loader = &loaders.TokenLoader{Client: client, Users: users}
 	}
-	primary, err := entitycache.NewLRUCache[string, *models.Token](entitycache.Config[string, *models.Token]{
+	primary, err := entitycache.NewLRUCache(entitycache.Config[string, *models.Token]{
 		Capacity:    capacity,
 		Loader:      loader,
 		NegativeTTL: negTTL,
@@ -283,19 +316,41 @@ func (s *Store) LoadSettings(settings []models.Setting) {
 	}
 }
 
+// applySetting 用 master 推下来的 key/value 更新 settings snapshot。
+// 解析或越界错误静默忽略(forward-compat,不让单条坏数据冲垮整个 store)。
+// 用 settingsMu 串行化 RMW 临界区,防 setting bus 并发 handler 丢失 update。
 func (s *Store) applySetting(key, value string) {
-	switch key {
-	case "trace_max_body_size":
-		if v, err := strconv.Atoi(value); err == nil && v > 0 {
-			s.SetTraceMaxBodySize(v)
-		}
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	cur := s.settings.Load()
+	if cur == nil {
+		cur = &settings.AgentSettings{}
 	}
+	next := *cur
+	if err := settings.Apply(&next, key, value); err != nil {
+		return
+	}
+	s.settings.Store(&next)
 }
 
-// === Trace ===
+// === Settings / Trace ===
 
-func (s *Store) TraceMaxBodySize() int        { return int(s.traceMaxBodySize.Load()) }
-func (s *Store) SetTraceMaxBodySize(size int) { s.traceMaxBodySize.Store(int64(size)) }
+// Settings 返回当前同步配置快照(value copy,不可变,无锁读)。
+func (s *Store) Settings() settings.AgentSettings {
+	cur := s.settings.Load()
+	if cur == nil {
+		return settings.AgentSettings{}
+	}
+	return *cur
+}
+
+// TraceMaxBodySize 兼容老调用方(internal/agent/relay/handler.go:125-126 等)。
+// 新代码请走 Settings().TraceMaxBodySize 直读。
+func (s *Store) TraceMaxBodySize() int { return s.Settings().TraceMaxBodySize }
+
+// FallbackSleepMs 实现 exec.SleepReader 接口。
+// 单独抽出方法是为了避免 exec 包 import cache 包(叶子原则)。
+func (s *Store) FallbackSleepMs() int { return s.Settings().FallbackSleepMs }
 
 // === Version ===
 
@@ -342,8 +397,7 @@ func (s *Store) RebuildModelIndex() {
 		if ch.Status != consts.StatusEnabled {
 			return true
 		}
-		modelList := strings.Split(ch.Models, ",")
-		for _, m := range modelList {
+		for m := range strings.SplitSeq(ch.Models, ",") {
 			m = strings.TrimSpace(m)
 			if m != "" {
 				index[m] = append(index[m], ch)
@@ -393,7 +447,7 @@ func (s *Store) GetAgentsByTag(tag string) []*models.Agent {
 		if agent.Status != consts.StatusEnabled {
 			return true
 		}
-		for _, t := range strings.Split(agent.Tags, ",") {
+		for t := range strings.SplitSeq(agent.Tags, ",") {
 			if strings.TrimSpace(t) == tag {
 				result = append(result, agent)
 				break
@@ -534,6 +588,22 @@ func (s *Store) HandleSyncEvent(entity, action string, data []byte) {
 			return
 		}
 		s.applyModelRoutingEvent(action, &r)
+	case events.EntityPrivateChannel:
+		var payload protocol.PrivateChannelInvalidatePayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return
+		}
+		for _, uid := range payload.AffectedUserIDs {
+			s.InvalidateVisiblePrivateChannels(uid)
+		}
+	case events.EntityPrivateChannelShare:
+		var payload protocol.PrivateChannelInvalidatePayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return
+		}
+		for _, uid := range payload.AffectedUserIDs {
+			s.InvalidateVisiblePrivateChannels(uid)
+		}
 	}
 }
 
@@ -696,6 +766,102 @@ func (s *Store) ResolveRouting(name string, userID uint) *protocol.SyncedRouting
 	return s.GetGlobalRouting(name)
 }
 
+// === PrivateChannel API ===
+
+// GetVisiblePrivateChannelsForUser 返回某 user 可见的、enabled 的、对应 model 的
+// private channels（未投影成 *models.Channel——投影在 upstream/private_channel_adapter
+// 内进行，避免 Store 与 channel 表示层耦合）。
+func (s *Store) GetVisiblePrivateChannelsForUser(userID uint, model string) []*protocol.SyncedPrivateChannel {
+	if userID == 0 {
+		return nil
+	}
+	// 用 Peek 区分 hit/miss：Peek 命中说明本地 LRU 已有；否则 Get 会触发 loader。
+	// 负缓存条目对 Peek 表现为 miss，与"需要外部拉取"语义对齐。
+	_, localHit := s.visiblePrivateChannels.Peek(userID)
+	if localHit {
+		metrics.BYOKVisibleSetCacheHit.Inc()
+	} else {
+		metrics.BYOKVisibleSetCacheMiss.Inc()
+	}
+	set, _, _ := s.visiblePrivateChannels.Get(context.Background(), userID)
+	// 写入或负缓存后，size 可能变化；Get 内部 Add 不暴露事件，这里 Set 当前 Len。
+	metrics.BYOKVisibleSetCacheSize.Set(float64(s.visiblePrivateChannels.Len()))
+	if set == nil {
+		return nil
+	}
+	var out []*protocol.SyncedPrivateChannel
+	for i := range set.Channels {
+		if set.Channels[i].Status != consts.StatusEnabled {
+			continue
+		}
+		if !modelInList(model, set.Channels[i].Models) {
+			continue
+		}
+		out = append(out, &set.Channels[i])
+	}
+	return out
+}
+
+// ListVisibleBYOKModelNamesForUser 返回某 user 全部 enabled BYOK channel 的
+// Models 字段并集（去重，保序：channel 内部 Models 原序，跨 channel 先到先得）。
+// userID == 0 / 缓存 miss / 无 enabled channel 时返回 nil。
+// 复用 visiblePrivateChannels LRU 缓存层，不引入新缓存。
+func (s *Store) ListVisibleBYOKModelNamesForUser(userID uint) []string {
+	if userID == 0 {
+		return nil
+	}
+	set, _, _ := s.visiblePrivateChannels.Get(context.Background(), userID)
+	if set == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for i := range set.Channels {
+		if set.Channels[i].Status != consts.StatusEnabled {
+			continue
+		}
+		for _, name := range set.Channels[i].Models {
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// InvalidateVisiblePrivateChannels 删该 user 的整块 cache，下次 LRU miss 由 loader
+// 重新拉取（与 user_routings 同模式：不增量合并，整块失效）。
+// share 表变更 / channel CRUD / user 离开 group 都触发。
+func (s *Store) InvalidateVisiblePrivateChannels(userID uint) {
+	s.visiblePrivateChannels.Delete(userID)
+	metrics.BYOKVisibleSetCacheSize.Set(float64(s.visiblePrivateChannels.Len()))
+}
+
+// VisiblePrivateChannelsCount 返回当前 LRU 中缓存的 user-scope private channel 块数。
+func (s *Store) VisiblePrivateChannelsCount() int {
+	return s.visiblePrivateChannels.Len()
+}
+
+// OverrideVisiblePrivateChannels 直接写入 visiblePrivateChannels LRU，
+// 绕过 loader——仅供跨包测试用，调用方必须在测试上下文中（testing.Testing()）。
+// 非测试上下文调用会 panic，避免生产代码意外污染用户 BYOK 缓存。
+func (s *Store) OverrideVisiblePrivateChannels(userID uint, channels []protocol.SyncedPrivateChannel) {
+	if !testing.Testing() {
+		panic("cache.Store.OverrideVisiblePrivateChannels called outside test context")
+	}
+	s.visiblePrivateChannels.Set(userID, &protocol.VisiblePrivateChannelSet{
+		UserID:   userID,
+		Channels: channels,
+	})
+}
+
+// modelInList 检查 model 是否在切片中（精确匹配；不支持通配符——byok 不参与 model_routing 通配语义）。
+func modelInList(model string, list []string) bool {
+	return slices.Contains(list, model)
+}
+
 // OnChannelChange 注册一个 channel upsert 时的回调。
 // old 可能是 nil（首次出现）；new 可能是 nil（删除）。
 // 同步调用，回调函数应保持轻量。
@@ -736,5 +902,6 @@ func (s *Store) CacheSnapshot() map[string]protocol.CacheEntityStats {
 	put("user_group", s.userGroups.Stats())
 	put("model_routing", s.globalRoutings.Stats())
 	put("user_routings", s.userRoutings.Stats())
+	put("private_channels_visible", s.visiblePrivateChannels.Stats())
 	return snap
 }

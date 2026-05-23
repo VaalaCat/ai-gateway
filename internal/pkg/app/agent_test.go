@@ -11,6 +11,8 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 )
 
 // Compile-time check that the interface set exists and has expected methods.
@@ -103,9 +105,13 @@ func (stubStore) SetModelConfig(*models.ModelConfig)                    {}
 func (stubStore) DeleteModelConfig(string)                              {}
 func (stubStore) LoadModelConfigs([]models.ModelConfig)                 {}
 func (stubStore) ModelConfigCount() int                                 { return 0 }
-func (stubStore) GetChannelsForModel(string) []*models.Channel          { return nil }
-func (stubStore) RebuildModelIndex()                                    {}
-func (stubStore) GetAllModelNames() []string                            { return nil }
+func (stubStore) GetChannelsForModel(string) []*models.Channel                          { return nil }
+func (stubStore) RebuildModelIndex()                                                    {}
+func (stubStore) GetAllModelNames() []string                                            { return nil }
+func (stubStore) GetVisiblePrivateChannelsForUser(uint, string) []*protocol.SyncedPrivateChannel {
+	return nil
+}
+func (stubStore) ListVisibleBYOKModelNamesForUser(uint) []string        { return nil }
 func (stubStore) GetAgent(string) *models.Agent                         { return nil }
 func (stubStore) SetAgent(*models.Agent)                                {}
 func (stubStore) UpdateAgentAutoAddresses(string, []agentproxy.Address) {}
@@ -117,7 +123,8 @@ func (stubStore) AgentCount() int                                       { return
 func (stubStore) Version() int64                                        { return 0 }
 func (stubStore) SetVersion(int64)                                      {}
 func (stubStore) LoadSettings([]models.Setting)                         {}
+func (stubStore) Settings() settings.AgentSettings                     { return settings.AgentSettings{} }
 func (stubStore) TraceMaxBodySize() int                                 { return 0 }
-func (stubStore) SetTraceMaxBodySize(int)                               {}
+func (stubStore) FallbackSleepMs() int                                  { return 0 }
 func (stubStore) GetSystemTestToken() *models.Token                     { return nil }
 func (stubStore) HandleSyncEvent(string, string, []byte)                {}

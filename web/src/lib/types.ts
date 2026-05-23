@@ -58,6 +58,7 @@ export interface Channel {
   system_prompt: string;
   proxy_url: string;
   role_mapping: string;
+  system_prompt_in_input?: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -201,6 +202,9 @@ export interface UsageLog {
   user_id: number;
   token_id: number;
   channel_id: number;
+  private_channel_id: number;
+  owner_type: "admin" | "private";
+  channel_name: string;
   agent_id: string;
   model_name: string;
   prompt_tokens: number;
@@ -265,6 +269,7 @@ export interface BillingTokenRow {
   output_cost: number;
   total_cost: number;
   last_used_at: number;
+  spark_24h?: number[];
 }
 
 export interface BillingTokenDailyRow {
@@ -297,6 +302,7 @@ export interface BillingChannelRow {
   output_cost: number;
   total_cost: number;
   last_used_at: number;
+  spark_24h?: number[];
 }
 
 export interface BillingChannelDailyRow {
@@ -355,11 +361,29 @@ export interface BillingChannelDailyQueryParams {
 export interface BillingRebuildRequest {
   start_date?: string;
   end_date?: string;
+  targets?: string[];
 }
 
-export interface BillingRebuildResponse {
-  status: string;
+export interface BillingRebuildSubmitResponse {
+  job_id: string;
+  total_slices: number;
+}
+
+export type RebuildJobStatus = "running" | "succeeded" | "failed" | "canceled";
+
+export interface RebuildJob {
+  id: string;
+  status: RebuildJobStatus;
+  done_slices: number;
+  total_slices: number;
   replayed_logs: number;
+  started_at: number;
+  finished_at?: number;
+  error?: string;
+}
+
+export interface RebuildJobListResponse {
+  jobs: RebuildJob[];
 }
 
 export interface ChannelTestResponse {
@@ -368,7 +392,7 @@ export interface ChannelTestResponse {
   response?: string;
   error?: string;
   time_cost: number;
-  model: string;
+  model?: string;
 }
 
 export interface ChannelTestParams {
@@ -438,6 +462,8 @@ export interface UserGroup {
   created_at: number;
   updated_at: number;
   user_count?: number;
+  byok_enabled?: boolean | null;
+  byok_max_channels?: number | null;
 }
 
 export interface AuthPayload {

@@ -1,6 +1,8 @@
 package app
 
-import "gorm.io/gorm"
+import (
+	"gorm.io/gorm"
+)
 
 type application struct {
 	db           *gorm.DB

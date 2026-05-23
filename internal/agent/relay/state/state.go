@@ -45,6 +45,16 @@ const (
 	ModeLegacy      RelayMode = "legacy"
 )
 
+// ChannelSource 标识 Attempt 来自 admin shared channel 还是用户 BYOK private channel。
+// 在 publish 阶段决定 usage_log 写 channel_id 还是 private_channel_id。
+// Pool 阶段由 lister 在装配 ScoredCandidate 时填入；Solver 透传到 Attempt。
+type ChannelSource string
+
+const (
+	SourceAdmin   ChannelSource = "admin"
+	SourcePrivate ChannelSource = "private"
+)
+
 // RelayContext 跟 master app.Context 同源风格：内嵌 *gin.Context + 强类型字段。
 // 4 个 Phase 阶段沿途读写同一个 RelayContext，避免参数列表越来越长。
 type RelayContext struct {
@@ -90,7 +100,9 @@ type AttemptPlan struct {
 type Attempt struct {
 	Channel   *models.Channel
 	RealModel string
-	Mode      RelayMode // legacy / passthrough / native
+	Mode      RelayMode     // legacy / passthrough / native
+	Source    ChannelSource // 新增；admin 表示来自 shared channel pool，private 表示用户 BYOK
+	SourceID  uint          // 新增；admin → Channel.ID；private → PrivateChannel.ID
 }
 
 // AttemptResult 是一次 attempt 的完整结果，含 token 计数 / 错误 / 中间产物。

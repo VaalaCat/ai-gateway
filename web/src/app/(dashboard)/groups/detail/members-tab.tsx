@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
@@ -8,6 +8,9 @@ import { ExternalLink } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { StatusBadge, RoleBadge } from "@/components/business/status-badge";
 import { DateCell } from "@/components/business/date-cell";
@@ -24,10 +27,19 @@ export function MembersTab({ groupId }: { groupId: number }) {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
 
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+  } satisfies FilterSpec), [tc]);
+
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+
+  useEffect(() => { setPage(1); }, [filterValues]);
+
   const { data, isLoading } = useUsers({
     page,
     page_size: pageSize,
     group_id: groupId,
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
   });
 
   const users = data?.data ?? [];
@@ -87,6 +99,13 @@ export function MembersTab({ groupId }: { groupId: number }) {
       pageSize={pageSize}
       pageCount={pageCount}
       onPaginationChange={handlePaginationChange}
+      toolbar={
+        <FilterableToolbar
+          spec={filterSpec}
+          value={filterValues}
+          onChange={setFilterValues}
+        />
+      }
     />
   );
 }

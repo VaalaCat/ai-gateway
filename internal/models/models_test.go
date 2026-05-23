@@ -213,6 +213,36 @@ func TestUsageLog_TraceFieldsMigrate(t *testing.T) {
 	}
 }
 
+func TestPrivateChannelMigration(t *testing.T) {
+	db := setupTestDB(t)
+	if err := db.AutoMigrate(&PrivateChannel{}, &PrivateChannelShare{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"owner_id", "name", "type", "key_cipher", "key_last4",
+		"base_url", "models", "model_mapping", "weight", "priority", "status"} {
+		if !db.Migrator().HasColumn(&PrivateChannel{}, col) {
+			t.Errorf("column %s missing on private_channels", col)
+		}
+	}
+	for _, col := range []string{"channel_id", "target_type", "target_id"} {
+		if !db.Migrator().HasColumn(&PrivateChannelShare{}, col) {
+			t.Errorf("column %s missing on private_channel_shares", col)
+		}
+	}
+}
+
+func TestUserGroupBYOKColumns(t *testing.T) {
+	db := setupTestDB(t)
+	if err := db.AutoMigrate(&UserGroup{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"byok_enabled", "byok_max_channels"} {
+		if !db.Migrator().HasColumn(&UserGroup{}, col) {
+			t.Errorf("column %s missing on user_groups", col)
+		}
+	}
+}
+
 func TestToken_AllowedChannelIDs_Roundtrip(t *testing.T) {
 	db := setupTestDB(t)
 

@@ -14,6 +14,7 @@ A distributed-by-design AI API gateway with a separated control-plane (master) /
 - **Multi-Region Routing** — Route requests from region A to agents in region B, enabling cross-region load balancing and bypassing regional restrictions
 - **Quota & Billing** — Usage-based settlement and quota enforcement
 - **Model Routing** — Aggregate multiple upstream models under one name with priority/weight load balancing and error retries
+- **BYOK (Bring Your Own Key)** — End-users can self-serve upload their own provider API keys (AES-GCM encrypted at rest); private channels are merged into the candidate pool with priority over shared admin channels, with optional service-fee billing mode
 - **Single Binary** — Frontend static assets embedded; no separate web server needed
 
 ## Screenshots
@@ -159,6 +160,28 @@ This project supports native code (purely self-developed, supporting chat, respo
 It builds upon the work of the following:
 
 - **[new-api](https://github.com/QuantumNous/new-api)** by [@QuantumNous](https://github.com/QuantumNous) — the legacy channel adaptor, 50+ upstream provider constants, model-fetch protocols, and token-counting utilities are reused via `github.com/QuantumNous/new-api`. Without this prior work, out-of-the-box support for 50+ providers would not be feasible. Sincere thanks to the new-api maintainers and contributors.
+
+- **[datatype](https://github.com/franktisellano/datatype)** by [@franktisellano](https://github.com/franktisellano) — variable OpenType font (SIL OFL 1.1) used for inline sparklines in the UI. See `web/public/fonts/OFL.txt`.
+
+## Contract Test (optional)
+
+`test/contract/` 包含跨语言一致性测试,默认不跑,需要时手动:
+
+```bash
+# 1) 启动 master
+./ai-gateway --config config.yaml &
+
+# 2) 取 admin token
+TOKEN=$(curl -s -X POST http://localhost:8140/api/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"change-this-password"}' \
+  | jq -r '.data.token')
+
+# 3) 跑测试
+AIGW_ADMIN_TOKEN=$TOKEN go test -tags=contract ./test/contract/
+```
+
+测试内容: 扫 `web/src/lib/api/*.ts` 中所有 `/...` 路径字面量,逐个发请求,验证后端没有返回 404 (即不存在路由漂移)。
 
 ## License
 

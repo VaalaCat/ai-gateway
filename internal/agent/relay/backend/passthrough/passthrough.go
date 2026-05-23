@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/transform"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
@@ -163,40 +164,38 @@ func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.R
 	return firstResponseMs
 }
 
-// handlePassthroughErrorStatus 处理 4xx / 5xx 上行响应：
-//   - 5xx：可重试，读 body / 记 trace / 返回带 Err 的 state.AttemptResult（Written=false）。
-//   - 4xx：不可重试，把 body 原样写回客户端 + 记 trace / 返回 Written=true 的 state.AttemptResult。
-//   - 其它（2xx/3xx）：返回 handled=false，由调用方继续走流式回放路径。
-func handlePassthroughErrorStatus(rec *trace.Recorder, resp *http.Response, w gin.ResponseWriter, upstreamModel string) (state.AttemptResult, bool) {
-	// Handle 5xx: retryable
-	if resp.StatusCode >= 500 {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		upstreamErr := fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
-		rec.WithUpstreamStatus(resp)
-		rec.SetUpstreamBody(body)
-		rec.WithFail(trace.StageUpstreamStatus, upstreamErr)
-		return state.AttemptResult{Err: upstreamErr}, true
+// handlePassthroughErrorStatus 处理非 2xx/3xx 上行响应。
+//
+// 本函数职责仅:读 body / 记 trace / 包装成 *common.UpstreamError 返回。
+// 是否重试 / fallback / 立即返回的决策由 Executor 统一负责(参见
+// pipeline/exec/exec.go Run() 主循环)。
+//
+// 注意:本函数不再把 body 原样写回客户端,因为是否写回取决于 Executor 走例外路径
+// (plan 全部 attempt 耗尽 + 最后一次失败时才写),由 Executor 在终止 attempt 链时统一处理。
+//
+// 过渡期说明(T5 尚未落地):4xx 错误当前不写回客户端,会经历全部 attempt
+// 后由 Executor 统一终止。T5 落地后 Executor 将对 invalid_request_error 做
+// 立即短路返回。
+func handlePassthroughErrorStatus(rec *trace.Recorder, resp *http.Response, _w gin.ResponseWriter, upstreamModel string) (state.AttemptResult, bool) {
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return state.AttemptResult{}, false
 	}
-
-	// Handle 4xx: forward to client
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		copyRespHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		w.Write(body)
-		upstreamErr := fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
-		rec.WithUpstreamStatus(resp)
-		rec.SetUpstreamBody(body)
-		rec.WithFail(trace.StageUpstreamStatus, upstreamErr)
-		return state.AttemptResult{
-			Written:       true,
-			UpstreamModel: upstreamModel,
-			Err:           upstreamErr,
-		}, true
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	upErr := &common.UpstreamError{
+		Status:            resp.StatusCode,
+		Body:              body,
+		ProviderErrorType: common.ParseProviderErrorType(body),
+		Header:            resp.Header.Clone(),
 	}
-	return state.AttemptResult{}, false
+	rec.WithUpstreamStatus(resp)
+	rec.SetUpstreamBody(body)
+	rec.WithFail(trace.StageUpstreamStatus, upErr)
+	return state.AttemptResult{
+		UpstreamModel: upstreamModel,
+		Err:           upErr,
+		// Written 留默认 false;客户端写回由 Executor 在 plan 结束时统一处理。
+	}, true
 }
 
 // applyPassthroughOverrides 把 channel 的 ParamOverride / HeaderOverride 应用到上行请求上。

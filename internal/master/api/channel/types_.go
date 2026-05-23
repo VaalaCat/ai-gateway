@@ -1,7 +1,6 @@
 package channel
 
 import (
-	"sort"
 	"strings"
 	"unicode"
 
@@ -11,14 +10,7 @@ import (
 )
 
 func (h *Handler) Types(_ *app.Context, _ api.EmptyRequest) ([]TypeMeta, error) {
-	ids := make([]int, 0, len(newAPIConstant.ChannelTypeNames))
-	for id := range newAPIConstant.ChannelTypeNames {
-		if id == int(newAPIConstant.ChannelTypeUnknown) || id == int(newAPIConstant.ChannelTypeDummy) {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	sort.Ints(ids)
+	ids := ListProviderTypes()
 
 	items := make([]TypeMeta, 0, len(ids))
 	for _, id := range ids {

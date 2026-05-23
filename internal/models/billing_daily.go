@@ -21,10 +21,24 @@ type TokenDailyBilling struct {
 	UpdatedAt        int64  `gorm:"autoUpdateTime" json:"updated_at"`
 }
 
+// ChannelDailyBilling 按天聚合 channel 维度用量。
+//
+// 同时承担两类来源：
+//   - admin channel: channel_id>0, private_channel_id=0, owner_type="admin"
+//   - BYOK channel: channel_id=0, private_channel_id>0, owner_type="private"
+//
+// 唯一键是 (date, channel_id, private_channel_id) 三列联合，保证两类行
+// 不会因为对方那一列都填 0 而互相冲突——同一天内 admin channel 5 落在
+// (date, 5, 0)，BYOK pchan 7 落在 (date, 0, 7)，互不影响。
+//
+// 旧 unique index idx_channel_daily_billing_date_channel 由 migrate.go 的
+// dropLegacyChannelBillingIndex 在启动时自动 drop（SQLite IF EXISTS 幂等）。
 type ChannelDailyBilling struct {
 	ID               uint   `gorm:"primaryKey" json:"id"`
-	Date             string `gorm:"size:10;uniqueIndex:idx_channel_daily_billing_date_channel" json:"date"`
-	ChannelID        uint   `gorm:"uniqueIndex:idx_channel_daily_billing_date_channel;index" json:"channel_id"`
+	Date             string `gorm:"size:10;uniqueIndex:idx_cdb_date_channel_pchan" json:"date"`
+	ChannelID        uint   `gorm:"uniqueIndex:idx_cdb_date_channel_pchan;index" json:"channel_id"`
+	PrivateChannelID uint   `gorm:"uniqueIndex:idx_cdb_date_channel_pchan;index;default:0" json:"private_channel_id"`
+	OwnerType        string `gorm:"size:8;default:'admin'" json:"owner_type"` // "admin" | "private"
 	ChannelName      string `gorm:"size:64" json:"channel_name"`
 	ChannelType      int    `json:"channel_type"`
 	RequestCount     int64  `json:"request_count"`

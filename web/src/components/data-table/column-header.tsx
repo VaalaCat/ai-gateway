@@ -18,7 +18,7 @@ export function DataTableColumnHeader<TData, TValue>({
   className,
 }: DataTableColumnHeaderProps<TData, TValue>) {
   if (!column.getCanSort()) {
-    return <div className={cn(className)}>{title}</div>;
+    return <div className={cn("text-label", className)}>{title}</div>;
   }
 
   return (
@@ -26,7 +26,7 @@ export function DataTableColumnHeader<TData, TValue>({
       <Button
         variant="ghost"
         size="sm"
-        className="-ml-3 h-8 data-[state=open]:bg-accent"
+        className="-ml-3 h-8 data-[state=open]:bg-accent text-label"
         onClick={() => {
           const currentSort = column.getIsSorted();
           if (currentSort === false) {

@@ -11,7 +11,9 @@ import { MoreHorizontal, Plus } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -47,7 +49,6 @@ import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
 import { ChannelMultiSelect } from "@/components/business/channel-multi-select";
-import { UserPicker } from "@/components/business/user-picker";
 import { UsernameCell } from "@/components/business/username-cell";
 import { TokenDetailPanel } from "@/components/business/token-detail-panel";
 import {
@@ -55,15 +56,16 @@ import {
   isDateRangeValid,
 } from "@/components/business/date-range-inputs";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import { useBillingOverview, useTokenBilling } from "@/lib/api/billing";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import { buildQuery } from "@/lib/api/client";
 import { useTokens, useCreateToken, useUpdateToken, useDeleteToken } from "@/lib/api/tokens";
 import { useEnabledTokenTemplates } from "@/lib/api/token-templates";
 import { useAuth } from "@/lib/auth";
 import { PAGE_SIZES } from "@/lib/constants";
 import { parseModels, serializeModels } from "@/lib/parse-models";
-import { formatCurrency, formatSuccessRate } from "@/lib/utils/format";
+import { formatSuccessRate, formatMoneyCompact } from "@/lib/utils/format";
+import { MoneyCell } from "@/components/business/money-cell";
 import type { BillingTokenRow, Token } from "@/lib/types";
 
 function isWeakToken(token: string): boolean {
@@ -110,9 +112,21 @@ function TokensPageContent() {
   const [pageSize, setPageSize] = useState<number>(
     () => Number(searchParams.get("page_size")) || PAGE_SIZES.DEFAULT,
   );
-  const [search, setSearch] = useState(() => searchParams.get("search") ?? "");
-  const [userId, setUserId] = useState(() => searchParams.get("user_id") ?? "");
-  const [statusFilter, setStatusFilter] = useState(() => searchParams.get("status") ?? "");
+
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+    user_id: { kind: "picker", entity: "user", visible: (ctx: { isAdmin: boolean }) => ctx.isAdmin },
+    status: {
+      kind: "enum",
+      options: [
+        { value: "1", label: t("statusEnabled") },
+        { value: "0", label: t("statusDisabled") },
+      ],
+      placeholder: t("filterByStatus"),
+    },
+  } satisfies FilterSpec), [t, tc]);
+
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const router = useRouter();
   const [expandedState, setExpandedState] = useState<ExpandedState>(() => {
@@ -134,16 +148,15 @@ function TokensPageContent() {
   const [billingPageSize, setBillingPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
   const [billingStartDate, setBillingStartDate] = useState("");
   const [billingEndDate, setBillingEndDate] = useState("");
-  const debouncedSearch = useDebounce(search, 300);
   const billingDateValid = isDateRangeValid(billingStartDate, billingEndDate);
   const showBillingView = !loading && !isAdmin;
 
   const { data, isLoading } = useTokens({
     page,
     page_size: pageSize,
-    search: debouncedSearch,
-    ...(isAdmin && userId ? { user_id: Number(userId) } : {}),
-    ...(isAdmin && statusFilter ? { status: Number(statusFilter) } : {}),
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
+    ...(filterValues.user_id ? { user_id: Number(filterValues.user_id) } : {}),
+    ...(filterValues.status ? { status: Number(filterValues.status) } : {}),
   });
   const billingOverview = useBillingOverview(
     {
@@ -238,8 +251,8 @@ function TokensPageContent() {
       }
 
       await submitCreate(createForm);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -248,8 +261,8 @@ function TokensPageContent() {
     try {
       await submitCreate(pendingWeakKeyCreate);
       setWeakKeyConfirmOpen(false);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -265,7 +278,7 @@ function TokensPageContent() {
           ...(editForm.expired_at ? { expired_at: Number(editForm.expired_at) } : {}),
           models: editForm.models,
           trace_enabled: editForm.trace_enabled,
-          ...(editForm.allowed_channel_ids.length > 0 ? { allowed_channel_ids: editForm.allowed_channel_ids } : { allowed_channel_ids: undefined }),
+          allowed_channel_ids: editForm.allowed_channel_ids,
         });
       } else {
         await updateMutation.mutateAsync({
@@ -276,8 +289,8 @@ function TokensPageContent() {
       }
       toast.success(tc("success"));
       setEditItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -287,8 +300,8 @@ function TokensPageContent() {
       await deleteMutation.mutateAsync(deleteItem.id);
       toast.success(tc("success"));
       setDeleteItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -419,7 +432,7 @@ function TokensPageContent() {
     {
       accessorKey: "total_cost",
       header: ({ column }) => <DataTableColumnHeader column={column} title={tb("totalCost")} />,
-      cell: ({ row }) => formatCurrency(row.original.total_cost),
+      cell: ({ row }) => <MoneyCell quota={row.original.total_cost} />,
     },
     {
       accessorKey: "request_count",
@@ -473,42 +486,17 @@ function TokensPageContent() {
         onPaginationChange={handlePaginationChange}
         defaultColumnVisibility={{ template_id: false }}
         toolbar={
-          <DataTableToolbar
-            searchValue={search}
-            searchPlaceholder={tc("search")}
-            onSearchChange={(value) => {
-              setSearch(value);
-              setPage(1);
-            }}
-          >
-            {isAdmin && (
-              <div className="flex flex-wrap items-center gap-2">
-                <UserPicker
-                  value={userId}
-                  onChange={(v) => { setUserId(v); setPage(1); }}
-                  placeholder={t("filterByUser")}
-                  className="w-full sm:w-48"
-                />
-                <Select
-                  value={statusFilter || "all"}
-                  onValueChange={(v) => { setStatusFilter(v === "all" ? "" : v); setPage(1); }}
-                >
-                  <SelectTrigger className="w-full sm:w-32">
-                    <SelectValue placeholder={t("filterByStatus")} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">{t("allStatus")}</SelectItem>
-                    <SelectItem value="1">{t("statusEnabled")}</SelectItem>
-                    <SelectItem value="0">{t("statusDisabled")}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            <Button onClick={() => { setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, allowed_channel_ids: [] }); setCreateOpen(true); }}>
-              <Plus className="mr-2 size-4" />
-              {t("createToken")}
-            </Button>
-          </DataTableToolbar>
+          <FilterableToolbar
+            spec={filterSpec}
+            value={filterValues}
+            onChange={setFilterValues}
+            primaryAction={
+              <Button size="sm" onClick={() => { setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, allowed_channel_ids: [] }); setCreateOpen(true); }}>
+                <Plus className="mr-2 size-4" />
+                {t("createToken")}
+              </Button>
+            }
+          />
         }
         expandedState={expandedState}
         onExpandedStateChange={setExpandedState}
@@ -520,7 +508,7 @@ function TokensPageContent() {
         <div className="space-y-4 rounded-xl border p-4">
           <div className="space-y-1">
             <h2 className="text-xl font-semibold">{t("billingTitle")}</h2>
-            <p className="text-sm text-muted-foreground">{t("billingDescription")}</p>
+            <p className="text-body text-muted-foreground">{t("billingDescription")}</p>
           </div>
 
           <DateRangeInputs
@@ -539,48 +527,48 @@ function TokensPageContent() {
           <div className="grid gap-3 md:grid-cols-4">
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
+                <CardTitle className="text-label text-muted-foreground">
                   {tb("totalCost")}
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-semibold">
-                  {formatCurrency(billingOverview.data?.total_cost ?? 0)}
+                <div className="text-display">
+                  {formatMoneyCompact(billingOverview.data?.total_cost ?? 0)}
                 </div>
               </CardContent>
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
+                <CardTitle className="text-label text-muted-foreground">
                   {tb("requestCount")}
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-semibold">
+                <div className="text-display">
                   {billingOverview.data?.request_count ?? 0}
                 </div>
               </CardContent>
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
+                <CardTitle className="text-label text-muted-foreground">
                   {tb("successRate")}
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-semibold">
+                <div className="text-display">
                   {`${((billingOverview.data?.success_rate ?? 0) * 100).toFixed(1)}%`}
                 </div>
               </CardContent>
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
+                <CardTitle className="text-label text-muted-foreground">
                   {tb("activeTokens")}
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-semibold">
+                <div className="text-display">
                   {billingOverview.data?.active_tokens ?? 0}
                 </div>
               </CardContent>
@@ -664,7 +652,7 @@ function TokensPageContent() {
                       onChange={(ids) => setCreateForm({ ...createForm, allowed_channel_ids: ids })}
                       placeholder={tTpl("allowedChannelsPlaceholder")}
                     />
-                    <p className="text-xs text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>
+                    <p className="text-meta text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>
                   </div>
                 )}
                 <div className="space-y-2">
@@ -750,7 +738,7 @@ function TokensPageContent() {
                     value={editForm.user_id}
                     onChange={(e) => setEditForm({ ...editForm, user_id: e.target.value })}
                   />
-                  <p className="text-xs text-muted-foreground">{t("ownerChangeHint")}</p>
+                  <p className="text-meta text-muted-foreground">{t("ownerChangeHint")}</p>
                 </div>
                 <StatusSelect value={editForm.status} onChange={(v) => setEditForm({ ...editForm, status: v })} />
                 <div className="space-y-2">
@@ -777,7 +765,7 @@ function TokensPageContent() {
                     onChange={(ids) => setEditForm({ ...editForm, allowed_channel_ids: ids })}
                     placeholder={tTpl("allowedChannelsPlaceholder")}
                   />
-                  <p className="text-xs text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>
+                  <p className="text-meta text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>
                 </div>
               </>
             )}

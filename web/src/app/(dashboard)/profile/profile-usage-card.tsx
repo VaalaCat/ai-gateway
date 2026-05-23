@@ -18,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { CostCell } from "@/components/business/cost-cell";
 import { DurationCell } from "@/components/business/duration-cell";
 import { DateCell } from "@/components/business/date-cell";
+import { TokensCell } from "@/components/business/tokens-cell";
 import { useLogs } from "@/lib/api/logs";
 
 interface ProfileUsageCardProps {
@@ -41,7 +42,7 @@ export function ProfileUsageCard({ userId }: ProfileUsageCardProps) {
         <CardTitle className="text-lg">{t("myUsage")}</CardTitle>
       </CardHeader>
       <CardContent className="p-0">
-        <Table>
+        <Table className="text-body">
           <TableHeader>
             <TableRow>
               <TableHead>{tl("modelName")}</TableHead>
@@ -73,10 +74,10 @@ export function ProfileUsageCard({ userId }: ProfileUsageCardProps) {
                     <Badge variant="outline">{log.model_name}</Badge>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {log.prompt_tokens.toLocaleString()} / {log.completion_tokens.toLocaleString()}
+                    <TokensCell tokens={log.prompt_tokens} /> / <TokensCell tokens={log.completion_tokens} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    <CostCell amount={log.total_cost} decimals={4} />
+                    <CostCell amount={log.total_cost} />
                   </TableCell>
                   <TableCell className="hidden md:table-cell text-right tabular-nums">
                     <DurationCell ms={log.duration} />

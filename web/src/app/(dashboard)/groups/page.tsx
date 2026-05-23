@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -10,7 +10,9 @@ import { MoreHorizontal, Plus } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -35,21 +37,14 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 
 import { StatusBadge } from "@/components/business/status-badge";
 import { StatusSelect } from "@/components/business/status-select";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import { ApiError } from "@/lib/api/client";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import {
   useUserGroups,
   useDeleteUserGroup,
@@ -66,22 +61,33 @@ export default function UserGroupsPage() {
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
-  const debouncedSearch = useDebounce(search, 300);
+
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+    status: {
+      kind: "enum",
+      options: [
+        { value: "1", label: t("statusEnabled") },
+        { value: "0", label: t("statusDisabled") },
+      ],
+      placeholder: t("filterByStatus"),
+    },
+  } satisfies FilterSpec), [t, tc]);
+
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading } = useUserGroups({
     page,
     pageSize,
-    search: debouncedSearch,
-    status: status || undefined,
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
+    ...(filterValues.status ? { status: String(filterValues.status) } : {}),
   });
 
   const groups = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
 
-  useEffect(() => { setPage(1); }, [debouncedSearch, status]);
+  useEffect(() => { setPage(1); }, [filterValues]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -126,8 +132,8 @@ export default function UserGroupsPage() {
       await deleteMutation.mutateAsync(deleteItem.id);
       toast.success(t("deleteSuccess"));
       setDeleteItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -254,29 +260,20 @@ export default function UserGroupsPage() {
         pageCount={pageCount}
         onPaginationChange={handlePaginationChange}
         toolbar={
-          <DataTableToolbar
-            searchValue={search}
-            searchPlaceholder={t("searchPlaceholder")}
-            onSearchChange={setSearch}
-          >
-            <Select
-              value={status || "all"}
-              onValueChange={(v) => setStatus(v === "all" ? "" : v)}
-            >
-              <SelectTrigger className="w-full sm:w-32">
-                <SelectValue placeholder={t("filterByStatus")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">{t("allStatus")}</SelectItem>
-                <SelectItem value="1">{t("statusEnabled")}</SelectItem>
-                <SelectItem value="0">{t("statusDisabled")}</SelectItem>
-              </SelectContent>
-            </Select>
-            <Button onClick={() => { setCreateForm({ name: "", description: "", status: "1" }); setCreateOpen(true); }}>
-              <Plus className="mr-2 size-4" />
-              {t("createButton")}
-            </Button>
-          </DataTableToolbar>
+          <FilterableToolbar
+            spec={filterSpec}
+            value={filterValues}
+            onChange={setFilterValues}
+            primaryAction={
+              <Button size="sm" onClick={() => {
+                setCreateForm({ name: "", description: "", status: "1" });
+                setCreateOpen(true);
+              }}>
+                <Plus className="mr-2 size-4" />
+                {t("createButton")}
+              </Button>
+            }
+          />
         }
       />
 

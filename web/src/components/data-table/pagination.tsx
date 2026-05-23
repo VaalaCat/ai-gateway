@@ -28,7 +28,7 @@ export function DataTablePagination({
   const t = useTranslations("common");
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex items-center gap-4 text-body">
       <div className="flex items-center gap-2">
         <Select
           value={String(pageSize)}
@@ -48,7 +48,7 @@ export function DataTablePagination({
           </SelectContent>
         </Select>
       </div>
-      <div className="text-sm text-muted-foreground">
+      <div className="text-muted-foreground">
         {page} / {pageCount || 1}
       </div>
       <div className="flex items-center gap-1">

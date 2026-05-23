@@ -5,35 +5,45 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 )
 
+// toScoredAdmin 把 []*models.Channel 包成 []ScoredCandidate（Source=SourceAdmin）。
+func toScoredAdmin(chans []*models.Channel) []ScoredCandidate {
+	out := make([]ScoredCandidate, 0, len(chans))
+	for _, ch := range chans {
+		out = append(out, ScoredCandidate{Channel: ch, Source: state.SourceAdmin, SourceID: ch.ID})
+	}
+	return out
+}
+
 // TestSorter_ByPriorityDescending: success — priority 高的排前面。
 func TestSorter_ByPriorityDescending(t *testing.T) {
 	ch := []*models.Channel{
-		{ID: 1, Priority: 1, Weight: 1, Status: consts.StatusEnabled},
-		{ID: 2, Priority: 5, Weight: 1, Status: consts.StatusEnabled},
-		{ID: 3, Priority: 3, Weight: 1, Status: consts.StatusEnabled},
+		{ChannelCore: models.ChannelCore{ID: 1, Priority: 1, Weight: 1, Status: consts.StatusEnabled}},
+		{ChannelCore: models.ChannelCore{ID: 2, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
+		{ChannelCore: models.ChannelCore{ID: 3, Priority: 3, Weight: 1, Status: consts.StatusEnabled}},
 	}
-	got := priorityWeightedSorter{}.Sort(ch)
+	got := priorityWeightedSorter{}.Sort(toScoredAdmin(ch))
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3", len(got))
 	}
-	if got[0].ID != 2 || got[1].ID != 3 || got[2].ID != 1 {
+	if got[0].Channel.ID != 2 || got[1].Channel.ID != 3 || got[2].Channel.ID != 1 {
 		t.Errorf("order wrong: got [%d %d %d], want [2 3 1]",
-			got[0].ID, got[1].ID, got[2].ID)
+			got[0].Channel.ID, got[1].Channel.ID, got[2].Channel.ID)
 	}
 }
 
 // TestSorter_SkipsDisabled: success — Status != Enabled 的 channel 不进结果。
 func TestSorter_SkipsDisabled(t *testing.T) {
 	ch := []*models.Channel{
-		{ID: 1, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 2, Status: consts.StatusDisabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusDisabled, Weight: 1}},
 	}
-	got := priorityWeightedSorter{}.Sort(ch)
-	if len(got) != 1 || got[0].ID != 1 {
+	got := priorityWeightedSorter{}.Sort(toScoredAdmin(ch))
+	if len(got) != 1 || got[0].Channel.ID != 1 {
 		t.Errorf("disabled should skip, got %v", got)
 	}
 }
@@ -48,10 +58,10 @@ func TestSorter_NilInput(t *testing.T) {
 // TestSorter_AllDisabledReturnsNil: failure — 全 disabled 返回 nil。
 func TestSorter_AllDisabledReturnsNil(t *testing.T) {
 	ch := []*models.Channel{
-		{ID: 1, Status: consts.StatusDisabled},
-		{ID: 2, Status: consts.StatusDisabled},
+		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusDisabled}},
+		{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusDisabled}},
 	}
-	if got := (priorityWeightedSorter{}).Sort(ch); got != nil {
+	if got := (priorityWeightedSorter{}).Sort(toScoredAdmin(ch)); got != nil {
 		t.Errorf("all disabled → nil, got %v", got)
 	}
 }
@@ -60,17 +70,17 @@ func TestSorter_AllDisabledReturnsNil(t *testing.T) {
 func TestSorter_SamePriorityContainsAll(t *testing.T) {
 	rand.Seed(1)
 	ch := []*models.Channel{
-		{ID: 1, Priority: 1, Weight: 1, Status: consts.StatusEnabled},
-		{ID: 2, Priority: 1, Weight: 1, Status: consts.StatusEnabled},
-		{ID: 3, Priority: 1, Weight: 1, Status: consts.StatusEnabled},
+		{ChannelCore: models.ChannelCore{ID: 1, Priority: 1, Weight: 1, Status: consts.StatusEnabled}},
+		{ChannelCore: models.ChannelCore{ID: 2, Priority: 1, Weight: 1, Status: consts.StatusEnabled}},
+		{ChannelCore: models.ChannelCore{ID: 3, Priority: 1, Weight: 1, Status: consts.StatusEnabled}},
 	}
-	got := priorityWeightedSorter{}.Sort(ch)
+	got := priorityWeightedSorter{}.Sort(toScoredAdmin(ch))
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3", len(got))
 	}
 	seen := map[uint]bool{}
-	for _, c := range got {
-		seen[c.ID] = true
+	for _, sc := range got {
+		seen[sc.Channel.ID] = true
 	}
 	if !seen[1] || !seen[2] || !seen[3] {
 		t.Errorf("missing channel: %v", got)
@@ -91,15 +101,15 @@ func TestSorter_SamePriorityGroupNotInputOrderDependent(t *testing.T) {
 	const trials = 100
 	for i := 0; i < trials; i++ {
 		ch := []*models.Channel{
-			{ID: 1, Priority: 5, Weight: 1, Status: consts.StatusEnabled},
-			{ID: 2, Priority: 5, Weight: 1, Status: consts.StatusEnabled},
-			{ID: 3, Priority: 5, Weight: 1, Status: consts.StatusEnabled},
+			{ChannelCore: models.ChannelCore{ID: 1, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
+			{ChannelCore: models.ChannelCore{ID: 2, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
+			{ChannelCore: models.ChannelCore{ID: 3, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
 		}
-		got := priorityWeightedSorter{}.Sort(ch)
+		got := priorityWeightedSorter{}.Sort(toScoredAdmin(ch))
 		if len(got) != 3 {
 			t.Fatalf("trial %d: len = %d, want 3", i, len(got))
 		}
-		first[got[0].ID]++
+		first[got[0].Channel.ID]++
 	}
 	// 期望 3 个 ID 都出现过头位（同概率 1/3，100 trials 漏一个 ~3e-18 概率）
 	if len(first) < 2 {
@@ -124,28 +134,28 @@ func TestSortByPriorityDesc_IsNotStable(t *testing.T) {
 		in := make([]*models.Channel, n)
 		for i := range in {
 			// priority 交替 0/1 — 强制 pdqsort 走 partition 路径而非快速路径
-			in[i] = &models.Channel{ID: uint(i + 1), Priority: i % 2, Status: consts.StatusEnabled}
+			in[i] = &models.Channel{ChannelCore: models.ChannelCore{ID: uint(i + 1), Priority: i % 2, Status: consts.StatusEnabled}}
 		}
 		return in
 	}
 
-	sliceOut := sortByPriorityDesc(mkInput())
+	sliceOut := sortByPriorityDesc(toScoredAdmin(mkInput()))
 
-	stableOut := mkInput()
-	sort.SliceStable(stableOut, func(i, j int) bool {
-		return stableOut[i].Priority > stableOut[j].Priority
+	stableInput := mkInput()
+	sort.SliceStable(stableInput, func(i, j int) bool {
+		return stableInput[i].Priority > stableInput[j].Priority
 	})
 
 	sameOrder := true
-	for i, ch := range sliceOut {
-		if ch.ID != stableOut[i].ID {
+	for i, sc := range sliceOut {
+		if sc.Channel.ID != stableInput[i].ID {
 			sameOrder = false
 			break
 		}
 	}
 	if sameOrder {
 		t.Errorf("expected sort.Slice output to differ from sort.SliceStable on %d alternating-priority elements; sortByPriorityDesc may have been changed to SliceStable. sliceOut IDs: %v stableOut IDs: %v",
-			n, channelIDs(sliceOut), channelIDs(stableOut))
+			n, scoredIDs(sliceOut), channelIDs(stableInput))
 	}
 }
 
@@ -157,25 +167,139 @@ func channelIDs(channels []*models.Channel) []uint {
 	return ids
 }
 
+func scoredIDs(cands []ScoredCandidate) []uint {
+	ids := make([]uint, len(cands))
+	for i, sc := range cands {
+		ids[i] = sc.Channel.ID
+	}
+	return ids
+}
+
+// TestSorter_PrivateBeforeAdmin_SamePriority: success —
+// 同 priority 时 private 必排在 admin 前，与输入顺序无关。
+// 守护 Task 15 改造：source 是 sort 第一维度，priority 是第二维度。
+func TestSorter_PrivateBeforeAdmin_SamePriority(t *testing.T) {
+	cands := []ScoredCandidate{
+		{
+			Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Priority: 100, Weight: 1, Status: consts.StatusEnabled}},
+			Source:   state.SourceAdmin,
+			SourceID: 1,
+		},
+		{
+			Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 2, Priority: 100, Weight: 1, Status: consts.StatusEnabled}},
+			Source:   state.SourcePrivate,
+			SourceID: 2,
+		},
+	}
+	got := priorityWeightedSorter{}.Sort(cands)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Source != state.SourcePrivate {
+		t.Fatalf("private must rank first regardless of input order, got %v (ID=%d)", got[0].Source, got[0].Channel.ID)
+	}
+	if got[1].Source != state.SourceAdmin {
+		t.Fatalf("admin must rank second, got %v (ID=%d)", got[1].Source, got[1].Channel.ID)
+	}
+}
+
+// TestSorter_PrivateBeforeAdmin_PrivateLowerPriority: success —
+// private priority 极低 + admin priority 极高，结果仍是 private 在前。
+// 守护"source rank 主导 priority"契约（替代旧的 +10000 priority offset）。
+func TestSorter_PrivateBeforeAdmin_PrivateLowerPriority(t *testing.T) {
+	cands := []ScoredCandidate{
+		{
+			Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Priority: 999999, Weight: 1, Status: consts.StatusEnabled}},
+			Source:   state.SourceAdmin,
+			SourceID: 1,
+		},
+		{
+			Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 2, Priority: 1, Weight: 1, Status: consts.StatusEnabled}},
+			Source:   state.SourcePrivate,
+			SourceID: 2,
+		},
+	}
+	got := priorityWeightedSorter{}.Sort(cands)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Source != state.SourcePrivate {
+		t.Fatalf("private rank must dominate priority: expected SourcePrivate first, got %v (ID=%d Priority=%d)",
+			got[0].Source, got[0].Channel.ID, got[0].Channel.Priority)
+	}
+}
+
+// TestSorter_WithinSameSource_PriorityOrder: success —
+// 同 source 内 priority 高的排前。private vs private 与 admin vs admin 行为一致。
+func TestSorter_WithinSameSource_PriorityOrder(t *testing.T) {
+	cands := []ScoredCandidate{
+		{
+			Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Priority: 10, Weight: 1, Status: consts.StatusEnabled}},
+			Source:   state.SourcePrivate,
+			SourceID: 1,
+		},
+		{
+			Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 2, Priority: 100, Weight: 1, Status: consts.StatusEnabled}},
+			Source:   state.SourcePrivate,
+			SourceID: 2,
+		},
+	}
+	got := priorityWeightedSorter{}.Sort(cands)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Channel.ID != 2 {
+		t.Fatalf("higher priority should rank first within same source, got order [%d, %d]",
+			got[0].Channel.ID, got[1].Channel.ID)
+	}
+}
+
+// TestSorter_SourceGroupBoundary_NoCrossSourceShuffle: boundary —
+// 不同 source 即使同 priority 也分到不同 group，不能混入 weightedShuffle。
+// 通过统计多次 trial，第一位永远是 private 来验证 group 边界。
+func TestSorter_SourceGroupBoundary_NoCrossSourceShuffle(t *testing.T) {
+	rand.Seed(0xBEEF)
+	const trials = 50
+	for i := 0; i < trials; i++ {
+		cands := []ScoredCandidate{
+			{
+				Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
+				Source:   state.SourceAdmin,
+				SourceID: 1,
+			},
+			{
+				Channel:  &models.Channel{ChannelCore: models.ChannelCore{ID: 2, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
+				Source:   state.SourcePrivate,
+				SourceID: 2,
+			},
+		}
+		got := priorityWeightedSorter{}.Sort(cands)
+		if got[0].Source != state.SourcePrivate {
+			t.Fatalf("trial %d: cross-source shuffle leaked — expected SourcePrivate at index 0 in every trial, got %v",
+				i, got[0].Source)
+		}
+	}
+}
+
 // TestSorter_MixedPriorityGroupOrder: success — 跨 priority 组的顺序 (高→低)，组内允许随机。
 func TestSorter_MixedPriorityGroupOrder(t *testing.T) {
 	ch := []*models.Channel{
-		{ID: 10, Priority: 1, Weight: 1, Status: consts.StatusEnabled},
-		{ID: 20, Priority: 5, Weight: 1, Status: consts.StatusEnabled},
-		{ID: 30, Priority: 5, Weight: 1, Status: consts.StatusEnabled},
-		{ID: 40, Priority: 1, Weight: 1, Status: consts.StatusEnabled},
+		{ChannelCore: models.ChannelCore{ID: 10, Priority: 1, Weight: 1, Status: consts.StatusEnabled}},
+		{ChannelCore: models.ChannelCore{ID: 20, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
+		{ChannelCore: models.ChannelCore{ID: 30, Priority: 5, Weight: 1, Status: consts.StatusEnabled}},
+		{ChannelCore: models.ChannelCore{ID: 40, Priority: 1, Weight: 1, Status: consts.StatusEnabled}},
 	}
-	got := priorityWeightedSorter{}.Sort(ch)
+	got := priorityWeightedSorter{}.Sort(toScoredAdmin(ch))
 	if len(got) != 4 {
 		t.Fatalf("len = %d, want 4", len(got))
 	}
 	// 前 2 个必须是 priority 5 组（ID 20 / 30，顺序随机）；后 2 个必须是 priority 1 组（ID 10 / 40）
-	hi := map[uint]bool{got[0].ID: true, got[1].ID: true}
-	lo := map[uint]bool{got[2].ID: true, got[3].ID: true}
+	hi := map[uint]bool{got[0].Channel.ID: true, got[1].Channel.ID: true}
+	lo := map[uint]bool{got[2].Channel.ID: true, got[3].Channel.ID: true}
 	if !(hi[20] && hi[30]) {
-		t.Errorf("first 2 should be priority-5 group [20,30], got [%d,%d]", got[0].ID, got[1].ID)
+		t.Errorf("first 2 should be priority-5 group [20,30], got [%d,%d]", got[0].Channel.ID, got[1].Channel.ID)
 	}
 	if !(lo[10] && lo[40]) {
-		t.Errorf("last 2 should be priority-1 group [10,40], got [%d,%d]", got[2].ID, got[3].ID)
+		t.Errorf("last 2 should be priority-1 group [10,40], got [%d,%d]", got[2].Channel.ID, got[3].Channel.ID)
 	}
 }

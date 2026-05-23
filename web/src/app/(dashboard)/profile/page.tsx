@@ -11,6 +11,7 @@ import { ProfileFormDialog } from "@/components/business/profile-form-dialog";
 import { ProfileHero } from "./profile-hero";
 import { ProfileUsageCard } from "./profile-usage-card";
 import { ProfileTokensCard } from "./profile-tokens-card";
+import { ProfileBYOKCard } from "./profile-byok-card";
 import { AccountSecuritySection } from "./account-security-section";
 
 import { useProfile } from "@/lib/api/users";
@@ -71,6 +72,7 @@ export default function ProfilePage() {
 
       <ProfileUsageCard userId={profile.id} />
       <ProfileTokensCard userId={profile.id} />
+      <ProfileBYOKCard />
       <AccountSecuritySection />
 
       <ProfileFormDialog

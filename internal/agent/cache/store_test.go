@@ -35,10 +35,10 @@ func TestStoreTokenCRUD(t *testing.T) {
 func TestStoreModelIndex(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 
-	s.SetChannel(&models.Channel{ID: 1, Models: "gpt-4o,gpt-3.5-turbo", Status: 1, Priority: 1, Weight: 1})
-	s.SetChannel(&models.Channel{ID: 2, Models: "gpt-4o", Status: 1, Priority: 0, Weight: 2})
-	s.SetChannel(&models.Channel{ID: 3, Models: "claude-sonnet-4-20250514", Status: 1, Priority: 0, Weight: 1})
-	s.SetChannel(&models.Channel{ID: 4, Models: "gpt-4o", Status: 0, Priority: 0, Weight: 1}) // disabled
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: 1, Priority: 1, Weight: 1}, Models: "gpt-4o,gpt-3.5-turbo"})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: 1, Priority: 0, Weight: 2}, Models: "gpt-4o"})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 3, Status: 1, Priority: 0, Weight: 1}, Models: "claude-sonnet-4-20250514"})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 4, Status: 0, Priority: 0, Weight: 1}, Models: "gpt-4o"}) // disabled
 
 	s.RebuildModelIndex()
 
@@ -94,7 +94,7 @@ func TestCounts(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 	s.SetToken(&models.Token{ID: 1, Key: "sk-1", Status: 1})
 	s.SetToken(&models.Token{ID: 2, Key: "sk-2", Status: 1})
-	s.SetChannel(&models.Channel{ID: 1, Models: "gpt-4o", Status: 1})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: 1}, Models: "gpt-4o"})
 
 	if s.TokenCount() != 2 {
 		t.Errorf("tokens = %d, want 2", s.TokenCount())
@@ -109,7 +109,7 @@ func TestStore_GetChannel(t *testing.T) {
 	if ch := s.GetChannel(999); ch != nil {
 		t.Error("expected nil for missing channel")
 	}
-	s.SetChannel(&models.Channel{ID: 1, Name: "ch1", Models: "gpt-4o", Status: 1})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Name: "ch1", Status: 1}, Models: "gpt-4o"})
 	ch := s.GetChannel(1)
 	if ch == nil || ch.Name != "ch1" {
 		t.Error("expected channel ch1")
@@ -118,7 +118,7 @@ func TestStore_GetChannel(t *testing.T) {
 
 func TestStore_DeleteChannel(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
-	s.SetChannel(&models.Channel{ID: 1, Name: "ch1", Status: 1})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Name: "ch1", Status: 1}})
 	s.DeleteChannel(1)
 	if ch := s.GetChannel(1); ch != nil {
 		t.Error("expected nil after delete")
@@ -164,8 +164,8 @@ func TestStore_LoadBulk(t *testing.T) {
 	}
 
 	channels := []models.Channel{
-		{ID: 1, Name: "c1", Models: "gpt-4o", Status: 1},
-		{ID: 2, Name: "c2", Models: "claude-3", Status: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Name: "c1", Status: 1}, Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 2, Name: "c2", Status: 1}, Models: "claude-3"},
 	}
 	s.LoadChannels(channels)
 	if s.ChannelCount() != 2 {
@@ -184,7 +184,7 @@ func TestStore_LoadBulk(t *testing.T) {
 
 func TestStore_GetAllModelNames(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
-	s.SetChannel(&models.Channel{ID: 1, Models: "gpt-4o,claude-3", Status: 1})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: 1}, Models: "gpt-4o,claude-3"})
 	s.RebuildModelIndex()
 	names := s.GetAllModelNames()
 	if len(names) != 2 {
@@ -211,12 +211,12 @@ func TestStore_HandleSyncEvent_Channels(t *testing.T) {
 
 func TestStore_Settings_TraceMaxBodySize(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
-	// Default should be 64KB
+	// Default should be 64KB (来自 settings.Defaults())
 	if got := s.TraceMaxBodySize(); got != 64*1024 {
 		t.Errorf("default TraceMaxBodySize = %d, want %d", got, 64*1024)
 	}
-	// Set a new value
-	s.SetTraceMaxBodySize(1024 * 1024)
+	// 通过 LoadSettings 更新,不再暴露 SetTraceMaxBodySize
+	s.LoadSettings([]models.Setting{{Key: "trace_max_body_size", Value: "1048576"}})
 	if got := s.TraceMaxBodySize(); got != 1024*1024 {
 		t.Errorf("TraceMaxBodySize = %d, want %d", got, 1024*1024)
 	}

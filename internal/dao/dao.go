@@ -51,6 +51,8 @@ type AdminQuery interface {
 	OAuthProvider() AdminOAuthProviderQuery
 	OAuthIdentity() AdminOAuthIdentityQuery
 	ModelRouting() AdminModelRoutingQuery
+	PrivateChannel() AdminPrivateChannelQuery
+	PrivateChannelShare() AdminPrivateChannelShareQuery
 }
 
 type AdminMutation interface {
@@ -69,6 +71,8 @@ type AdminMutation interface {
 	OAuthProvider() AdminOAuthProviderMutation
 	OAuthIdentity() AdminOAuthIdentityMutation
 	ModelRouting() AdminModelRoutingMutation
+	PrivateChannel() AdminPrivateChannelMutation
+	PrivateChannelShare() AdminPrivateChannelShareMutation
 }
 
 // getBaseContext extracts *baseContext from any Context implementation.
@@ -125,6 +129,12 @@ func (q *compositeAdminQuery) OAuthIdentity() AdminOAuthIdentityQuery {
 func (q *compositeAdminQuery) ModelRouting() AdminModelRoutingQuery {
 	return &adminModelRoutingQuery{ctx: q.ctx}
 }
+func (q *compositeAdminQuery) PrivateChannel() AdminPrivateChannelQuery {
+	return &adminPrivateChannelQuery{ctx: q.ctx}
+}
+func (q *compositeAdminQuery) PrivateChannelShare() AdminPrivateChannelShareQuery {
+	return &adminPrivateChannelShareQuery{ctx: q.ctx}
+}
 
 type compositeAdminMutation struct{ ctx *baseContext }
 
@@ -166,4 +176,10 @@ func (m *compositeAdminMutation) OAuthIdentity() AdminOAuthIdentityMutation {
 }
 func (m *compositeAdminMutation) ModelRouting() AdminModelRoutingMutation {
 	return &adminModelRoutingMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) PrivateChannel() AdminPrivateChannelMutation {
+	return &adminPrivateChannelMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) PrivateChannelShare() AdminPrivateChannelShareMutation {
+	return &adminPrivateChannelShareMutation{ctx: m.ctx}
 }

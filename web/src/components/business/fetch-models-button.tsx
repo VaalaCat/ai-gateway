@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useFetchUpstreamModels } from "@/lib/api/channels";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import { groupModelsByProvider, getProviderIconKey } from "@/lib/constants";
 import { ProviderAvatar } from "@/components/business/provider-avatar";
 
@@ -95,8 +96,8 @@ export function FetchModelsButton({
       setSearch("");
       setExpanded(new Set());
       setDialogOpen(true);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 

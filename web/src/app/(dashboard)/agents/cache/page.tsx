@@ -17,8 +17,8 @@ import { DateCell } from "@/components/business/date-cell";
 
 import { useCacheStats } from "@/lib/api/cache-stats";
 
-export default function MonitoringCachePage() {
-  const t = useTranslations("monitoring");
+export default function AgentsCachePage() {
+  const t = useTranslations("agents");
   const tc = useTranslations("common");
   const { data, isLoading, refetch, isFetching, dataUpdatedAt } = useCacheStats();
 
@@ -44,8 +44,8 @@ export default function MonitoringCachePage() {
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h1 className="text-2xl font-bold">{t("title")}</h1>
-          <p className="text-muted-foreground mt-1">{t("subtitle")}</p>
+          <h1 className="text-2xl font-bold">{t("cacheTitle")}</h1>
+          <p className="text-muted-foreground mt-1">{t("cacheSubtitle")}</p>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0 mt-1">
           {dataUpdatedAt > 0 && (

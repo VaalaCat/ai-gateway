@@ -94,15 +94,17 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 			whitelistBlockedAny = true
 			continue
 		}
-		channels := s.Pool.Available(rctx, realModel)
-		if len(channels) == 0 {
+		cands := s.Pool.Available(rctx, realModel)
+		if len(cands) == 0 {
 			continue
 		}
-		for _, ch := range s.Sorter.Sort(channels) {
+		for _, sc := range s.Sorter.Sort(cands) {
 			plan.Attempts = append(plan.Attempts, state.Attempt{
-				Channel:   ch,
+				Channel:   sc.Channel,
 				RealModel: realModel,
-				Mode:      s.Picker.Pick(ch, realModel, rctx.Input.InboundProto),
+				Mode:      s.Picker.Pick(sc.Channel, realModel, rctx.Input.InboundProto),
+				Source:    sc.Source,
+				SourceID:  sc.SourceID,
 			})
 			if len(plan.Attempts) >= budget {
 				return nil

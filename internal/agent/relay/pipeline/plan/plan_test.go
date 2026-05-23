@@ -29,8 +29,8 @@ func newPlannerTestRctx(channels []*models.Channel, ui *app.UserInfo, model stri
 // TestPlanner_Success: 链长 1 个 model + 2 个 enabled channel → Attempts 长度 2。
 func TestPlanner_Success(t *testing.T) {
 	chs := []*models.Channel{
-		{ID: 1, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 2, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 
@@ -68,9 +68,9 @@ func TestPlanner_NoChannelAvailable(t *testing.T) {
 // TestPlanner_RetryMaxTruncates: 3 个候选 channel，RetryMax=2 → 截断到 2。
 func TestPlanner_RetryMaxTruncates(t *testing.T) {
 	chs := []*models.Channel{
-		{ID: 1, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 2, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 3, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 3, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 2)
 
@@ -88,9 +88,9 @@ func TestPlanner_RetryMaxTruncates(t *testing.T) {
 //   - Plan.Attempts 长度必须 == 1
 //   - 选中的必须是最高 Priority 的 channel（Sorter 按 priority 降序，截断后取首）。
 func TestSolve_RetryMaxOne_SingleAttempt(t *testing.T) {
-	chLow := &models.Channel{ID: 1, Priority: 5, Status: consts.StatusEnabled, Weight: 1}
-	chHigh := &models.Channel{ID: 2, Priority: 10, Status: consts.StatusEnabled, Weight: 1}
-	chMid := &models.Channel{ID: 3, Priority: 1, Status: consts.StatusEnabled, Weight: 1}
+	chLow := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Priority: 5, Status: consts.StatusEnabled, Weight: 1}}
+	chHigh := &models.Channel{ChannelCore: models.ChannelCore{ID: 2, Priority: 10, Status: consts.StatusEnabled, Weight: 1}}
+	chMid := &models.Channel{ChannelCore: models.ChannelCore{ID: 3, Priority: 1, Status: consts.StatusEnabled, Weight: 1}}
 
 	rctx := newPlannerTestRctx(
 		[]*models.Channel{chLow, chHigh, chMid},
@@ -122,7 +122,7 @@ func TestSolve_RetryMaxOne_SingleAttempt(t *testing.T) {
 //
 // 配套断言：Attempts 必须为空（budget=0 决不能产 attempt）。
 func TestSolve_RetryMaxZero_ReturnsRoutingFallback(t *testing.T) {
-	chs := []*models.Channel{{ID: 1, Status: consts.StatusEnabled, Weight: 1}}
+	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 0)
 
 	err := NewSolver().Solve(rctx)
@@ -137,8 +137,8 @@ func TestSolve_RetryMaxZero_ReturnsRoutingFallback(t *testing.T) {
 // TestPlanner_WhitelistSkipsAllChannels: channels 存在但 token 白名单全部排除 → state.ErrNoChannelAvailable。
 func TestPlanner_WhitelistSkipsAllChannels(t *testing.T) {
 	chs := []*models.Channel{
-		{ID: 1, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 2, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	ui := &app.UserInfo{AllowedChannelIDs: []uint{999}}
 	rctx := newPlannerTestRctx(chs, ui, "gpt-4", 5)
@@ -153,7 +153,7 @@ func TestPlanner_WhitelistSkipsAllChannels(t *testing.T) {
 // 整条链都被白名单拦 + 没走 routing → state.ErrModelNotAllowed（复刻老主循环 line 359）。
 // 边界：验证 modelAllowedByWhitelist(ui 是值传递) 走到了路径。
 func TestPlanner_TokenModelsBlocks(t *testing.T) {
-	chs := []*models.Channel{{ID: 1, Status: consts.StatusEnabled, Weight: 1}}
+	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	ui := &app.UserInfo{TokenModels: []string{"only-this-one"}}
 	rctx := newPlannerTestRctx(chs, ui, "gpt-4", 5)
 
@@ -166,7 +166,7 @@ func TestPlanner_TokenModelsBlocks(t *testing.T) {
 // TestPlanner_NilUserInfo: UserInfo = nil 必须不 panic；nil 视为"无白名单"放行。
 // 边界：modelAllowedByWhitelist 接受值参数，Planner 必须 nil 防御后再解引用。
 func TestPlanner_NilUserInfo(t *testing.T) {
-	chs := []*models.Channel{{ID: 1, Status: consts.StatusEnabled, Weight: 1}}
+	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, nil, "gpt-4", 5)
 
 	if err := NewSolver().Solve(rctx); err != nil {
@@ -245,7 +245,7 @@ func TestPlanner_TracePropagatedToPlan(t *testing.T) {
 		},
 	}
 	cache := &stubAgentCache{rs: rs, channels: []*models.Channel{
-		{ID: 1, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
 	}}
 	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 1}, 0)
 	rctx.Agent.(*stubAgentApp).cfg = &config.AgentRuntimeConfig{
@@ -279,7 +279,7 @@ func TestPlanner_RoutingResolvedLogEmitted(t *testing.T) {
 		},
 	}
 	cache := &stubAgentCache{rs: rs, channels: []*models.Channel{
-		{ID: 1, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
 	}}
 	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 42}, 0)
 	rctx.Agent.(*stubAgentApp).cfg = &config.AgentRuntimeConfig{
@@ -316,7 +316,7 @@ func TestPlanner_RoutingResolvedLogSkippedWhenNoTrace(t *testing.T) {
 	core, recorded := observer.New(zap.InfoLevel)
 	logger := zap.New(core)
 
-	chs := []*models.Channel{{ID: 1, Status: consts.StatusEnabled, Weight: 1}}
+	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 	rctx.Agent.(*stubAgentApp).logger = logger
 
@@ -331,7 +331,7 @@ func TestPlanner_RoutingResolvedLogSkippedWhenNoTrace(t *testing.T) {
 
 // TestPlanner_TraceEmptyOnPassthrough: 非 routing → Plan.Trace 应为空。
 func TestPlanner_TraceEmptyOnPassthrough(t *testing.T) {
-	chs := []*models.Channel{{ID: 1, Status: consts.StatusEnabled, Weight: 1}}
+	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 
 	if err := NewSolver().Solve(rctx); err != nil {
@@ -345,7 +345,7 @@ func TestPlanner_TraceEmptyOnPassthrough(t *testing.T) {
 // TestPlanner_ModePickerInvoked: 验证 Picker 装配生效——单个 enabled channel 的 Mode 字段被填。
 // 默认 ProtocolUnknown 走 legacy 分支（见 shouldUseLegacy）。
 func TestPlanner_ModePickerInvoked(t *testing.T) {
-	chs := []*models.Channel{{ID: 1, Status: consts.StatusEnabled, Weight: 1}}
+	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 	// 不设置 InboundProto → ProtocolUnknown → 走 legacy 分支。
 
@@ -384,14 +384,14 @@ type staticPerModelPool struct {
 	byModel map[string][]*models.Channel
 }
 
-func (p staticPerModelPool) Available(_ *state.RelayContext, realModel string) []*models.Channel {
-	return p.byModel[realModel]
+func (p staticPerModelPool) Available(_ *state.RelayContext, realModel string) []ScoredCandidate {
+	return toScoredAdmin(p.byModel[realModel])
 }
 
 // identitySorter 不动顺序，保证测试可预期断言 Attempts 排序。
 type identitySorter struct{}
 
-func (identitySorter) Sort(channels []*models.Channel) []*models.Channel { return channels }
+func (identitySorter) Sort(cands []ScoredCandidate) []ScoredCandidate { return cands }
 
 // newMultiModelPlanner 装出 staticChainBuilder + staticPerModelPool + identitySorter 的 Planner，
 // 让 Plan() 行为完全可预测：按链顺序遍历 model，model 内按输入 channel 顺序展开。
@@ -410,14 +410,14 @@ func newMultiModelPlanner(chain []string, pool map[string][]*models.Channel) *de
 // RealModel 字段必须按 chain 顺序：前 3 个是 A，第 4 个是 B。
 func TestPlanner_MultiModel_RetryMaxTruncatesAcrossChain(t *testing.T) {
 	chsA := []*models.Channel{
-		{ID: 11, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 12, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 13, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 11, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 12, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 13, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	chsB := []*models.Channel{
-		{ID: 21, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 22, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 23, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 21, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 22, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 23, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	pool := map[string][]*models.Channel{
 		"A": chsA,
@@ -460,14 +460,14 @@ func TestPlanner_MultiModel_RetryMaxTruncatesAcrossChain(t *testing.T) {
 // 顺序：A.11, A.12, A.13, B.21, B.22, B.23。
 func TestPlanner_MultiModel_RetryMaxNotTruncated(t *testing.T) {
 	chsA := []*models.Channel{
-		{ID: 11, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 12, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 13, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 11, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 12, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 13, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	chsB := []*models.Channel{
-		{ID: 21, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 22, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 23, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 21, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 22, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 23, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	pool := map[string][]*models.Channel{
 		"A": chsA,
@@ -509,12 +509,12 @@ func TestPlanner_MultiModel_RetryMaxNotTruncated(t *testing.T) {
 // 链 [A,B] 每 model 2 channel + RetryMax=4 → 期望 4 个 attempt。
 func TestPlanner_MultiModel_RetryMaxExactBoundary(t *testing.T) {
 	chsA := []*models.Channel{
-		{ID: 11, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 12, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 11, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 12, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	chsB := []*models.Channel{
-		{ID: 21, Status: consts.StatusEnabled, Weight: 1},
-		{ID: 22, Status: consts.StatusEnabled, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 21, Status: consts.StatusEnabled, Weight: 1}},
+		{ChannelCore: models.ChannelCore{ID: 22, Status: consts.StatusEnabled, Weight: 1}},
 	}
 	pool := map[string][]*models.Channel{
 		"A": chsA,

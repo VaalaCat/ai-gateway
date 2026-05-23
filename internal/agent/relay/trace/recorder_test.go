@@ -82,7 +82,7 @@ func TestRecorder_WithOutbound_StoresAndPicksUpChannelSecrets(t *testing.T) {
 	req := httptest.NewRequest("POST", "https://up.example/v1/chat", strings.NewReader(""))
 	req.Header.Set("X-Api-Key", "upstream-secret")
 	body := []byte(`{"upstream":true}`)
-	ch := &models.Channel{Key: "upstream-secret", BaseURL: "https://up.example"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{BaseURL: "https://up.example"}, Key: "upstream-secret"}
 
 	r.WithOutbound(req, body, ch)
 
@@ -187,7 +187,7 @@ func TestRecorder_WithLegacyTrace_PopulatesAndMarksPassthrough(t *testing.T) {
 		ResponseHeaders: http.Header{"Content-Type": []string{"text/event-stream"}},
 		ResponseBody:    []byte(`event:done`),
 	}
-	ch := &models.Channel{Key: "k", BaseURL: "https://up.example"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{BaseURL: "https://up.example"}, Key: "k"}
 
 	r.WithLegacyTrace(td, ch)
 
@@ -343,7 +343,7 @@ func TestRecorder_Finalize_HappyPath(t *testing.T) {
 	outReq := httptest.NewRequest("POST", "https://up/v1/chat", strings.NewReader(""))
 	outReq.Header.Set("X-Api-Key", "upstream-key-AAA")
 	r.WithOutbound(outReq, []byte(`{"out":1}`),
-		&models.Channel{Key: "upstream-key-AAA", BaseURL: "https://up"})
+		&models.Channel{ChannelCore: models.ChannelCore{BaseURL: "https://up"}, Key: "upstream-key-AAA"})
 	r.WithUpstreamStatus(&http.Response{StatusCode: 200, Header: http.Header{"X-Up": []string{"v"}}})
 	r.upstreamBody.WriteString(`{"resp":1}`)
 	r.clientBody.WriteString(`{"cli":1}`)

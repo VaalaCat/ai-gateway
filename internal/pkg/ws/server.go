@@ -27,6 +27,11 @@ var (
 
 var _ app.WSConn = (*Conn)(nil)
 
+// upgrader 用于 master 的 agent WS 端点 /ws/agent。
+// CheckOrigin 直接放行——该端点只接 agent 客户端（机器对机器，要先 enroll
+// 拿到 X-Vaala-Agent-ID/Secret header 才能通过 hub.HandleWS 的鉴权），
+// 浏览器既无法注入这两个自定义 header，CORS preflight 也拦不住 WS handshake，
+// 但缺 header 会被 hub 立即 401。故 Origin 白名单不构成实际防御层。
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -164,6 +169,7 @@ func (c *Conn) Done() <-chan struct{} {
 	return c.closed
 }
 
+// Upgrade 升级 HTTP 连接到 WebSocket。
 func Upgrade(w http.ResponseWriter, r *http.Request, logger *zap.Logger) (*Conn, error) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

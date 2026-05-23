@@ -1,130 +1,233 @@
 "use client";
 
+import { Suspense, useMemo } from "react";
 import { useTranslations } from "next-intl";
-import { useStats, useStatsTrend } from "@/lib/api/stats";
+import { useDashboard, type LeaderRow, type SpeedRow } from "@/lib/api/dashboard";
+import { useObsRange } from "@/lib/hooks/use-obs-range";
 import { useAuth } from "@/lib/auth";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Users,
-  Key,
-  Server,
-  Brain,
-  Bot,
-  Wifi,
-  ScrollText,
-  DollarSign,
-} from "lucide-react";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
+
+import { ObservabilityHeader } from "@/components/business/observability-header";
+import { TrendChart } from "@/components/business/trend-chart";
+import { DonutChart } from "@/components/business/donut-chart";
+import { Leaderboard } from "@/components/business/leaderboard";
+import { KpiGrid, type KpiItem } from "@/components/business/kpi-grid";
+import { formatDuration, formatMoneyCompact, formatTokensCompact, UNIT_QUOTA_SCALE } from "@/lib/utils/format";
 
 export default function DashboardPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center py-12 text-muted-foreground">
+          Loading...
+        </div>
+      }
+    >
+      <DashboardPageContent />
+    </Suspense>
+  );
+}
+
+function DashboardPageContent() {
   const t = useTranslations("dashboard");
   const { isAdmin } = useAuth();
-  const { data: stats, isLoading } = useStats();
-  const { data: trendData } = useStatsTrend(30);
+  const { range: rawRange, setRange, refresh, refreshKey } = useObsRange({
+    gran: "day",
+  });
+  const range = useMemo(
+    () =>
+      rawRange.end - rawRange.start <= 86400
+        ? { ...rawRange, start: rawRange.end - 7 * 86400 }
+        : rawRange,
+    [rawRange],
+  );
+  const { data, isFetching, refetch } = useDashboard(range, {
+    refetchKey: refreshKey,
+  });
 
-  const adminCards = [
-    { key: "users", icon: Users, value: stats?.users },
-    { key: "tokens", icon: Key, value: stats?.tokens },
-    { key: "channels", icon: Server, value: stats?.channels },
-    { key: "models", icon: Brain, value: stats?.models },
-    { key: "agents", icon: Bot, value: stats?.agents },
-    { key: "connectedAgents", icon: Wifi, value: stats?.connected_agents },
-    { key: "usageLogs", icon: ScrollText, value: stats?.usage_logs },
-    {
-      key: "totalCost",
-      icon: DollarSign,
-      value: stats?.total_cost,
-      isCost: true,
-    },
-  ];
+  const kpis = data?.kpis;
+  const quota = !isAdmin ? kpis?.quota : undefined;
 
-  const userCards = [
-    { key: "myTokens", icon: Key, value: stats?.tokens },
-    { key: "myRequests", icon: ScrollText, value: stats?.usage_logs },
-    {
-      key: "myCost",
-      icon: DollarSign,
-      value: stats?.total_cost,
-      isCost: true,
-    },
-  ];
-
-  const cards = isAdmin ? adminCards : userCards;
+  const handleRefresh = () => {
+    refresh();
+    refetch();
+  };
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold">{t("title")}</h1>
-      <p className="text-muted-foreground mt-1">{t("description")}</p>
+    <div className="space-y-6">
+      <ObservabilityHeader
+        title={t("title")}
+        subtitle={t("description")}
+        range={range}
+        onRangeChange={setRange}
+        onRefresh={handleRefresh}
+        refreshing={isFetching}
+        showGranularity
+      />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
-        {cards.map(({ key, icon: Icon, value, isCost }) => (
-          <Card key={key}>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">
-                {t(key)}
-              </CardTitle>
-              <Icon className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              {isLoading ? (
-                <Skeleton className="h-8 w-20" />
-              ) : (
-                <div className="text-2xl font-bold">
-                  {isCost
-                    ? `$ ${((value ?? 0) / 100000).toFixed(4)}`
-                    : (value ?? 0)}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        ))}
+      {(() => {
+        if (!kpis) return null;
+        const items: KpiItem[] = [
+          {
+            key: "requests",
+            label: t("kpi.requests"),
+            value: kpis.requests.value,
+            ...(kpis.requests.spark ? { spark: kpis.requests.spark } : {}),
+          },
+          {
+            key: "cost",
+            label: t("kpi.cost"),
+            value: formatMoneyCompact(kpis.cost.value),
+            ...(kpis.cost.spark ? { spark: kpis.cost.spark } : {}),
+          },
+          {
+            key: "tokens",
+            label: t("kpi.tokens"),
+            value: formatTokensCompact(kpis.tokens.value),
+            ...(kpis.tokens.spark ? { spark: kpis.tokens.spark } : {}),
+          },
+        ];
 
-        {!isAdmin && stats?.quota != null && (
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">{t("quota")}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">
-                {((stats.used_quota || 0) / 100000).toFixed(4)} / {(stats.quota / 100000).toFixed(4)}
-              </div>
-              <div className="mt-2 h-2 w-full rounded-full bg-secondary">
-                <div
-                  className="h-full rounded-full bg-primary"
-                  style={{ width: `${Math.min(100, stats.quota > 0 ? ((stats.used_quota || 0) / stats.quota) * 100 : 0)}%` }}
-                />
-              </div>
-            </CardContent>
-          </Card>
-        )}
+        if (isAdmin) {
+          items.push({
+            key: "users",
+            label: t("kpi.users"),
+            value: kpis.users?.value ?? 0,
+          });
+          const succ = kpis.success_rate?.value ?? 0;
+          const reqs = kpis.requests?.value ?? 0;
+          const successPct = reqs > 0 ? Math.min(succ / reqs, 1) * 100 : 0;
+          const errorPct = 100 - successPct;
+          items.push({
+            key: "successRate",
+            label: t("kpi.successRate"),
+            value: `${successPct.toFixed(1)}%`,
+            ratio: errorPct,
+            threshold: { warn: 5, critical: 10 },
+          });
+        }
+
+        if (quota) {
+          const pct =
+            quota.quota > 0
+              ? Math.min(100, ((quota.used_quota || 0) / quota.quota) * 100)
+              : 0;
+          items.push({
+            key: "quota",
+            label: t("kpi.quota"),
+            value: `${((quota.used_quota || 0) / UNIT_QUOTA_SCALE).toFixed(4)} / ${((quota.quota || 0) / UNIT_QUOTA_SCALE).toFixed(4)}`,
+            progress: pct,
+            threshold: { warn: 80, critical: 95 },
+          });
+        }
+
+        return <KpiGrid items={items} />;
+      })()}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div
+          className={
+            isAdmin && data?.model_distribution && data.model_distribution.length > 0
+              ? "lg:col-span-2"
+              : "lg:col-span-3"
+          }
+        >
+          <TrendChart
+            buckets={data?.trend.buckets ?? []}
+            title={t("trendCard.title")}
+          />
+        </div>
+        {isAdmin &&
+          data?.model_distribution &&
+          data.model_distribution.length > 0 && (
+            <DonutChart
+              slices={data.model_distribution}
+              title={t("modelDist.title")}
+              topN={5}
+            />
+          )}
       </div>
 
-      {!isAdmin && trendData?.items && trendData.items.length > 0 && (
-        <Card className="mt-6">
-          <CardHeader>
-            <CardTitle>{t("trend")}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={trendData.items}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="date" />
-                <YAxis />
-                <Tooltip />
-                <Line type="monotone" dataKey="requests" stroke="#8884d8" name={t("myRequests")} />
-              </LineChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
+      {isAdmin && data?.speed_compare && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <Leaderboard<SpeedRow>
+            title={t("speed.modelTitle")}
+            rows={data.speed_compare.by_model}
+            columns={[
+              { key: "name", label: "Name" },
+              {
+                key: "ttft_ms",
+                label: "TTFT",
+                render: (r) => formatDuration(r.ttft_ms),
+              },
+              {
+                key: "tps",
+                label: "TPS",
+                render: (r) => r.tps.toFixed(1),
+              },
+            ]}
+          />
+          <Leaderboard<SpeedRow>
+            title={t("speed.channelTitle")}
+            rows={data.speed_compare.by_channel}
+            columns={[
+              { key: "name", label: "Name" },
+              {
+                key: "ttft_ms",
+                label: "TTFT",
+                render: (r) => formatDuration(r.ttft_ms),
+              },
+              {
+                key: "tps",
+                label: "TPS",
+                render: (r) => r.tps.toFixed(1),
+              },
+            ]}
+          />
+        </div>
+      )}
+
+      {isAdmin && data?.leaderboard && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Leaderboard<LeaderRow>
+            title={t("leaderboard.byUsers")}
+            rows={data.leaderboard.users}
+            columns={[
+              { key: "name", label: "Name" },
+              {
+                key: "cost",
+                label: "Cost",
+                render: (r) => formatMoneyCompact(r.cost),
+              },
+              { key: "requests", label: "Reqs" },
+            ]}
+          />
+          <Leaderboard<LeaderRow>
+            title={t("leaderboard.byModels")}
+            rows={data.leaderboard.models}
+            columns={[
+              { key: "name", label: "Name" },
+              {
+                key: "cost",
+                label: "Cost",
+                render: (r) => formatMoneyCompact(r.cost),
+              },
+              { key: "requests", label: "Reqs" },
+            ]}
+          />
+          <Leaderboard<LeaderRow>
+            title={t("leaderboard.byChannels")}
+            rows={data.leaderboard.channels}
+            columns={[
+              { key: "name", label: "Name" },
+              {
+                key: "cost",
+                label: "Cost",
+                render: (r) => formatMoneyCompact(r.cost),
+              },
+              { key: "requests", label: "Reqs" },
+            ]}
+          />
+        </div>
       )}
     </div>
   );

@@ -9,4 +9,7 @@ import (
 type Handler struct {
 	GetOnlineAgentIDs func() []string
 	GetRuntime        func(agentID string) *msync.AgentRuntime
+	// Tracker 用于 EnrichLastSeen，覆盖 stats 中 agent 的 last_seen。
+	// nil 时跳过 enrich（DB 值 fallback）。
+	Tracker *msync.HeartbeatTracker
 }

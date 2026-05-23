@@ -71,7 +71,7 @@ func TestRelayHandler_Success(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 
 	usageReceived := make(chan bool, 1)
@@ -118,8 +118,8 @@ func TestRelayHandler_RetryOn5xx(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k1", Models: "gpt-4o", Status: 1, Weight: 1, Priority: 1},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k2", Models: "gpt-4o", Status: 1, Weight: 1, Priority: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, Priority: 1}, Key: "k1", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, Priority: 1}, Key: "k2", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -198,7 +198,7 @@ func TestRelayHandler_ResponsesEndpoint(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1, SupportedAPITypes: `["responses"]`},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, SupportedAPITypes: `["responses"]`}, Key: "test-key", Models: "gpt-4o"},
 	})
 
 	r := setupResponsesRouter(handler)
@@ -226,7 +226,7 @@ func TestRelayHandler_CrossProtocol_ChatToResponses(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1, SupportedAPITypes: `["responses"]`},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, SupportedAPITypes: `["responses"]`}, Key: "test-key", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -263,7 +263,7 @@ func TestRelayHandler_CrossProtocol_ResponsesToChat(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1, SupportedAPITypes: `["chat-completion"]`},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, SupportedAPITypes: `["chat-completion"]`}, Key: "test-key", Models: "gpt-4o"},
 	})
 
 	r := setupResponsesRouter(handler)
@@ -306,7 +306,7 @@ func TestRelayHandler_StreamingRelay(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -337,7 +337,7 @@ func TestRelayHandler_UpstreamError(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -346,8 +346,63 @@ func TestRelayHandler_UpstreamError(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 
-	if w.Code == 200 {
-		t.Errorf("expected non-200 status for upstream error, got 200: %s", w.Body.String())
+	// Path B 后:上游 429 应原样透传给客户端(status + body),不再被 StatusFromState
+	// 泛化成 502。tighten 自原"!= 200"弱断言。
+	if w.Code != 429 {
+		t.Fatalf("expected 429 (上游原样透传), got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "rate_limit_error") {
+		t.Errorf("expected client body 含上游 rate_limit_error 文案, got %q", w.Body.String())
+	}
+}
+
+// TestRelay_4xxForwards_CustomHeader 验证上游 4xx 响应的自定义 header 通过
+// UpstreamError.Header + handler.writeResponse 路径正确透传到客户端 Response。
+// 同时锁定 Content-Encoding 必须被 strip(避免客户端按 gzip 解未压缩 body 崩)。
+//
+// 配合 T6 引入的 UpstreamError.Header 字段:backend 用 resp.Header.Clone() 填充,
+// writeResponse 转发(跳过 Content-Encoding / Content-Length)。
+// 走 native 路径(channel 不开 PassthroughEnabled),确保非 passthrough 模式也走通。
+func TestRelay_4xxForwards_CustomHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-RateLimit-Limit", "100")
+		w.Header().Set("X-Custom", "forwarded")
+		w.Header().Set("Retry-After", "20")
+		// 验证 Content-Encoding 被 strip——不 strip 的话客户端会按 gzip 解一段裸 JSON,崩。
+		w.Header().Set("Content-Encoding", "should-be-stripped")
+		w.WriteHeader(429)
+		w.Write([]byte(`{"error":{"message":"rate limit exceeded","type":"rate_limit_exceeded"}}`))
+	}))
+	defer upstream.Close()
+
+	// 单 channel + 无 fallback,确保终态走到 writeResponse 的 UpstreamError 分支。
+	handler, _, _ := setupTestHandler([]*models.Channel{
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
+	})
+
+	r := setupRouter(handler)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+
+	if w.Code != 429 {
+		t.Fatalf("expected 429, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-RateLimit-Limit"); got != "100" {
+		t.Errorf("X-RateLimit-Limit = %q, want %q (Header.Clone → writeResponse 透传)", got, "100")
+	}
+	if got := w.Header().Get("X-Custom"); got != "forwarded" {
+		t.Errorf("X-Custom = %q, want %q", got, "forwarded")
+	}
+	if got := w.Header().Get("Retry-After"); got != "20" {
+		t.Errorf("Retry-After = %q, want %q (rate limit 关键 hint header)", got, "20")
+	}
+	// Content-Encoding 必须被 strip — 否则客户端按 gzip 解一段裸 JSON 崩。
+	if got := w.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding 应被 strip, got %q", got)
 	}
 }
 
@@ -408,7 +463,7 @@ func TestRelayHandler_4xxErrorLogsFailure(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 	usageLogs := collectUsageLogs(bus)
 
@@ -444,7 +499,7 @@ func TestRelayHandler_5xxErrorLogsFailure(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 	usageLogs := collectUsageLogs(bus)
 
@@ -480,7 +535,7 @@ func TestRelayHandler_SuccessLogsCorrectly(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 	usageLogs := collectUsageLogs(bus)
 
@@ -520,7 +575,7 @@ func TestRelayHandler_TokenSource_Provider(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 	usageLogs := collectUsageLogs(bus)
 
@@ -582,9 +637,9 @@ func TestHandler_WhitelistFiltering(t *testing.T) {
 	defer upC.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 5, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 7, Type: consts.ChannelTypeOpenAI, BaseURL: upC.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 5, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 7, Type: consts.ChannelTypeOpenAI, BaseURL: upC.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	r := setupRouterWithUserInfo(handler, &app.UserInfo{
@@ -612,7 +667,7 @@ func TestHandler_WhitelistExhausted_404(t *testing.T) {
 	defer upA.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	r := setupRouterWithUserInfo(handler, &app.UserInfo{
@@ -641,7 +696,7 @@ func TestHandler_XChannelID_NotFound_404_BehaviorChange(t *testing.T) {
 	defer upA.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	r := setupRouterWithUserInfo(handler, &app.UserInfo{UserID: 1, TokenID: 1})
@@ -665,8 +720,8 @@ func TestHandler_XChannelID_OutsideWhitelist_404(t *testing.T) {
 	defer upB.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 5, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 7, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 5, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 7, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	r := setupRouterWithUserInfo(handler, &app.UserInfo{
@@ -696,8 +751,8 @@ func TestHandler_GroupWhitelist_FiltersChannels(t *testing.T) {
 	defer upB.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upA.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upB.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	r := setupRouterWithUserInfo(handler, &app.UserInfo{
@@ -727,9 +782,9 @@ func TestHandler_BothWhitelists_Intersect(t *testing.T) {
 	defer up3.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up1.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: up2.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: up3.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up1.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: up2.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 3, Type: consts.ChannelTypeOpenAI, BaseURL: up3.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	// group=[1,2] ∩ token=[2,3] → intersection={2}
@@ -759,8 +814,8 @@ func TestHandler_BothWhitelists_Conflict_404(t *testing.T) {
 	defer up2.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up1.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: up2.URL, Key: "k", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up1.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: up2.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	// group=[1] ∩ token=[2] → empty
@@ -798,7 +853,7 @@ func TestRelayHandler_TokenSource_Estimated(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key", Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1}, Key: "test-key", Models: "gpt-4o"},
 	})
 	usageLogs := collectUsageLogs(bus)
 

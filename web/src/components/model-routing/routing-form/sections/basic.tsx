@@ -14,7 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { UserPicker } from "@/components/business/user-picker";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { RoutingFormValues } from "../types";
 
 export interface BasicSectionProps {
@@ -110,7 +110,8 @@ export function BasicSection({
             <FormItem>
               <FormLabel>{t("field.userId")}</FormLabel>
               <FormControl>
-                <UserPicker
+                <EntityPicker
+                  entity="user"
                   value={field.value ? String(field.value) : ""}
                   onChange={(v) => field.onChange(v ? Number(v) : 0)}
                   className="w-full"

@@ -40,12 +40,7 @@ func TestRelayPassthrough_Success(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "upstream-key",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-			ModelMapping:       `{"gpt-4o":"gpt-4o-mapped"}`,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "upstream-key", Models: "gpt-4o", ModelMapping: `{"gpt-4o":"gpt-4o-mapped"}`},
 	})
 
 	r := setupRouter(handler)
@@ -85,11 +80,7 @@ func TestRelayPassthrough_4xxForwarded(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "test-key",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "test-key", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -123,11 +114,7 @@ func TestRelayPassthrough_HeaderFilter(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "upstream-key",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "upstream-key", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -180,12 +167,7 @@ func TestRelayPassthrough_HeaderOverrideCanRestoreFilteredHeader(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "upstream-key",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-			HeaderOverride:     `{"X-Forwarded-For":"override-value"}`,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "upstream-key", Models: "gpt-4o", HeaderOverride: `{"X-Forwarded-For":"override-value"}`},
 	})
 
 	r := setupRouter(handler)
@@ -411,8 +393,8 @@ func TestRelayPassthrough_5xxRetries(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k1", Models: "gpt-4o", Status: 1, Weight: 1, Priority: 1, PassthroughEnabled: true},
-		{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k2", Models: "gpt-4o", Status: 1, Weight: 1, Priority: 1, PassthroughEnabled: true},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, Priority: 1, PassthroughEnabled: true}, Key: "k1", Models: "gpt-4o"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, Priority: 1, PassthroughEnabled: true}, Key: "k2", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -466,11 +448,7 @@ func TestRelayPassthrough_NonStreamUsageCaptured(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "upstream-key",
-			Models: "mimo-v2.5-pro", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "upstream-key", Models: "mimo-v2.5-pro"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -547,12 +525,7 @@ func TestRelayPassthrough_InvalidParamOverrideJSON_Graceful(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-			ParamOverride:      `{not-json`, // 非法 JSON → 触发 warn skip
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true, ParamOverride: `{not-json`}, Key: "k", Models: "gpt-4o"},
 	})
 
 	r := setupRouter(handler)
@@ -589,12 +562,7 @@ func TestRelayPassthrough_InvalidHeaderOverrideJSON_Graceful(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, _ := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-			HeaderOverride:     `[not an object`, // 非法 JSON
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "gpt-4o", HeaderOverride: `[not an object`},
 	})
 
 	r := setupRouter(handler)

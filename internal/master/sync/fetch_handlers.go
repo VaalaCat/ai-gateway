@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 )
 
@@ -26,13 +27,15 @@ type FetchRegistry struct {
 	handlers map[string]FetchHandler
 }
 
-// NewFetchRegistry 返回带默认实体（token / user）注册的 registry。
-// Token / User 的具体 handler 在 fetch_token.go / fetch_user.go 中定义。
-func NewFetchRegistry() *FetchRegistry {
+// NewFetchRegistry 返回带默认实体（token / user / user_routings / private_channel）注册的 registry。
+// cipher 用于 private_channel 拉取时解密 key；可为 nil（仅在 BYOK 未配置的早期/测试场景），
+// 此时 private channel handler 在被调用时返回 error。
+func NewFetchRegistry(cipher *byokcrypto.Cipher) *FetchRegistry {
 	r := &FetchRegistry{handlers: map[string]FetchHandler{}}
 	r.Register(events.EntityToken, tokenFetchHandler{})
 	r.Register(events.EntityUser, userFetchHandler{})
 	r.Register(events.EntityUserRoutings, userRoutingsFetchHandler{})
+	r.Register(events.EntityPrivateChannel, &privateChannelsVisibleFetchHandler{cipher: cipher})
 	return r
 }
 

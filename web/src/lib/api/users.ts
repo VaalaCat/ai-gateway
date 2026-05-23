@@ -4,7 +4,7 @@ import { api, buildQuery } from "./client";
 import type { User, PaginatedResponse, PaginatedParams } from "@/lib/types";
 
 export function useUsers(
-  params: PaginatedParams & { group_id?: number } = {},
+  params: PaginatedParams & { search?: string; role?: string; group_id?: number } = {},
   options?: Omit<UseQueryOptions<PaginatedResponse<User>>, "queryKey" | "queryFn">,
 ) {
   return useQuery({

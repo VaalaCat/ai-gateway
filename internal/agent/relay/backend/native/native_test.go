@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude"  // register claude codec for tests
 	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"  // register openai codec for tests
@@ -62,15 +63,7 @@ func newNativeTestCtx(t *testing.T, body []byte, inbound codec.Protocol, isStrea
 // makeNativeChannel 构造一个最小 native channel，BaseURL 指向 httptest server。
 // 默认 Type=OpenAI、SupportedAPITypes 为空（不强制 outbound 协议）。
 func makeNativeChannel(baseURL string) *models.Channel {
-	return &models.Channel{
-		ID:      1,
-		Type:    consts.ChannelTypeOpenAI,
-		BaseURL: baseURL,
-		Key:     "k",
-		Models:  "gpt-4",
-		Status:  1,
-		Weight:  1,
-	}
+	return &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: baseURL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4"}
 }
 
 // ==================== Tests ====================
@@ -325,13 +318,14 @@ func TestBackend_InvalidUpstreamURL_DispatchError(t *testing.T) {
 	}
 }
 
-// TestBackend_Upstream4xx_ForwardsToClient 覆盖 handleNativeErrorStatus 4xx 分支：
-// 上游 400 → 不可重试，body 通过 EncodeError 写回客户端，Written=true 且 Err 非 nil。
-func TestBackend_Upstream4xx_ForwardsToClient(t *testing.T) {
+// TestBackend_Upstream4xx_Returns4xxAsUpstreamError 覆盖 handleNativeErrorStatus
+// 4xx 分支的新合约(T4 重构后):上游 400 → 返回 *common.UpstreamError,
+// Written=false,客户端 w 未被写过(EncodeError 决策移交 Executor)。
+func TestBackend_Upstream4xx_Returns4xxAsUpstreamError(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"bad model"}`))
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"bad model"}}`))
 	}))
 	defer upstream.Close()
 
@@ -345,14 +339,173 @@ func TestBackend_Upstream4xx_ForwardsToClient(t *testing.T) {
 	if got.Err == nil {
 		t.Fatal("expected Err on 4xx")
 	}
-	if !got.Written {
-		t.Errorf("4xx must be terminal: Written should be true, got %+v", got)
+	if got.Written {
+		t.Errorf("T4 后 backend 不再做 4xx EncodeError + Written=true 决策, got Written=true: %+v", got)
 	}
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("client response code = %d, want 400", w.Code)
+	var upErr *common.UpstreamError
+	if !errors.As(got.Err, &upErr) {
+		t.Fatalf("Err 应为 *common.UpstreamError, got %T: %v", got.Err, got.Err)
 	}
-	if !strings.Contains(w.Body.String(), "bad model") {
-		t.Errorf("client body should contain upstream error, got %q", w.Body.String())
+	if upErr.Status != http.StatusBadRequest {
+		t.Errorf("UpstreamError.Status = %d, want 400", upErr.Status)
+	}
+	if upErr.ProviderErrorType != "invalid_request_error" {
+		t.Errorf("ProviderErrorType = %q, want invalid_request_error", upErr.ProviderErrorType)
+	}
+	// 客户端 w 应没被写过(EncodeError 已移到 Executor)。
+	if w.Body.Len() != 0 {
+		t.Errorf("client w 不应被写过, got body=%q", w.Body.String())
+	}
+}
+
+// ==================== Task 6: 4xx 错误路径覆盖 ====================
+
+// TestHandleNativeError_429_RateLimit_GoesFallback 验证 handleNativeErrorStatus
+// 对 429 的处理：Written=false（可重试/fallback），Err 是 *common.UpstreamError，
+// Status=429，Body 含 rate_limit。
+func TestHandleNativeError_429_RateLimit_GoesFallback(t *testing.T) {
+	rateLimitBody := `{"error":{"message":"Rate limit exceeded","type":"rate_limit_error","code":"rate_limit"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(rateLimitBody))
+	}))
+	defer upstream.Close()
+
+	ch := makeNativeChannel(upstream.URL)
+	rctx, w := newNativeTestCtx(t,
+		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
+		codec.ProtocolOpenAIChat, false)
+	backend := &Backend{Agent: nil}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
+	if got.Err == nil {
+		t.Fatal("expected Err on 429")
+	}
+	if got.Written {
+		t.Errorf("429 必须 Written=false 以便 Executor 可 fallback, got Written=true: %+v", got)
+	}
+	var upErr *common.UpstreamError
+	if !errors.As(got.Err, &upErr) {
+		t.Fatalf("Err 应为 *common.UpstreamError, got %T: %v", got.Err, got.Err)
+	}
+	if upErr.Status != http.StatusTooManyRequests {
+		t.Errorf("UpstreamError.Status = %d, want 429", upErr.Status)
+	}
+	if !strings.Contains(string(upErr.Body), "rate_limit") {
+		t.Errorf("UpstreamError.Body 应含 rate_limit, got %q", upErr.Body)
+	}
+	// 客户端 w 不应被写过（body 回写决策已移到 Executor）。
+	if w.Body.Len() != 0 {
+		t.Errorf("client w 不应被写过, got body=%q", w.Body.String())
+	}
+}
+
+// TestHandleNativeError_408_Timeout_GoesFallback 验证 handleNativeErrorStatus
+// 对 408 Request Timeout 的处理：同样是 Written=false，可以 fallback 到下一 channel。
+func TestHandleNativeError_408_Timeout_GoesFallback(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusRequestTimeout)
+		_, _ = w.Write([]byte(`{"error":{"message":"Request timeout","type":"timeout_error"}}`))
+	}))
+	defer upstream.Close()
+
+	ch := makeNativeChannel(upstream.URL)
+	rctx, w := newNativeTestCtx(t,
+		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
+		codec.ProtocolOpenAIChat, false)
+	backend := &Backend{Agent: nil}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
+	if got.Err == nil {
+		t.Fatal("expected Err on 408")
+	}
+	if got.Written {
+		t.Errorf("408 必须 Written=false 以便 Executor 可 fallback, got %+v", got)
+	}
+	var upErr *common.UpstreamError
+	if !errors.As(got.Err, &upErr) {
+		t.Fatalf("Err 应为 *common.UpstreamError, got %T", got.Err)
+	}
+	if upErr.Status != http.StatusRequestTimeout {
+		t.Errorf("UpstreamError.Status = %d, want 408", upErr.Status)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("client w 不应被写过, got body=%q", w.Body.String())
+	}
+}
+
+// TestHandleNativeError_400_InvalidRequest 验证 handleNativeErrorStatus 对
+// HTTP 400 + provider error.type=invalid_request_error 的处理：
+// UpstreamError.ProviderErrorType 应被正确解析（供 Executor 做短路决策）。
+func TestHandleNativeError_400_InvalidRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"model not supported"}}`))
+	}))
+	defer upstream.Close()
+
+	ch := makeNativeChannel(upstream.URL)
+	rctx, _ := newNativeTestCtx(t,
+		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
+		codec.ProtocolOpenAIChat, false)
+	backend := &Backend{Agent: nil}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
+	if got.Err == nil {
+		t.Fatal("expected Err on 400")
+	}
+	if got.Written {
+		t.Errorf("400 backend 不做 EncodeError，Written 应为 false, got %+v", got)
+	}
+	var upErr *common.UpstreamError
+	if !errors.As(got.Err, &upErr) {
+		t.Fatalf("Err 应为 *common.UpstreamError, got %T", got.Err)
+	}
+	if upErr.Status != http.StatusBadRequest {
+		t.Errorf("UpstreamError.Status = %d, want 400", upErr.Status)
+	}
+	if upErr.ProviderErrorType != "invalid_request_error" {
+		t.Errorf("ProviderErrorType = %q, want invalid_request_error (Executor 用此字段做短路决策)", upErr.ProviderErrorType)
+	}
+}
+
+// TestHandleNativeError_400_NoProviderType 验证 handleNativeErrorStatus 对
+// HTTP 400 但 body 不含 error.type 的处理：ProviderErrorType 应为空字符串
+// （不强制走 invalid_request_error 短路路径，允许 Executor 走 fallback）。
+func TestHandleNativeError_400_NoProviderType(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		// 不含 error.type 字段
+		_, _ = w.Write([]byte(`{"message":"bad request"}`))
+	}))
+	defer upstream.Close()
+
+	ch := makeNativeChannel(upstream.URL)
+	rctx, _ := newNativeTestCtx(t,
+		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
+		codec.ProtocolOpenAIChat, false)
+	backend := &Backend{Agent: nil}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
+	if got.Err == nil {
+		t.Fatal("expected Err on 400")
+	}
+	if got.Written {
+		t.Errorf("400 backend 不做 EncodeError，Written 应为 false, got %+v", got)
+	}
+	var upErr *common.UpstreamError
+	if !errors.As(got.Err, &upErr) {
+		t.Fatalf("Err 应为 *common.UpstreamError, got %T", got.Err)
+	}
+	if upErr.Status != http.StatusBadRequest {
+		t.Errorf("UpstreamError.Status = %d, want 400", upErr.Status)
+	}
+	if upErr.ProviderErrorType != "" {
+		t.Errorf("ProviderErrorType 应为空(无 error.type 字段), got %q", upErr.ProviderErrorType)
 	}
 }
 

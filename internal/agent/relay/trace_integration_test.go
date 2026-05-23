@@ -135,11 +135,7 @@ func TestRelayNative_TraceBodiesFilled(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: false, // 走 native
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: false}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -202,11 +198,7 @@ func TestRelayNative_UpstreamDecodeFailTrace(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: false,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: false}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -250,14 +242,10 @@ func TestRelayNative_UpstreamDecodeFailTrace(t *testing.T) {
 // 验证 ErrorStage = outbound_encode，InboundBody 非空、Outbound/Response/Client 为空。
 
 func TestRelayNative_OutboundEncodeFailTrace(t *testing.T) {
+	// BaseURL 含 \n —— http.NewRequest 在 codec.EncodeRequest 内部会返
+	// "net/url: invalid control character in URL"，触发 outbound_encode 失败。
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			// BaseURL 含 \n —— http.NewRequest 在 codec.EncodeRequest 内部会返
-			// "net/url: invalid control character in URL"，触发 outbound_encode 失败。
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://invalid\n.example", Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: false,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://invalid\n.example", Status: 1, Weight: 1, PassthroughEnabled: false}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -304,11 +292,7 @@ func TestRelayNative_UpstreamDispatchFailTrace(t *testing.T) {
 	upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: false,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: false}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -355,11 +339,7 @@ func TestRelayPassthrough_NonStreamClientResponseBodyFilled(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true, // 走 passthrough
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -430,11 +410,7 @@ func TestRelayPassthrough_StreamClientResponseBodyFilled(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -491,11 +467,7 @@ func TestRelayPassthrough_UpstreamStatusErrorTrace(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			PassthroughEnabled: true,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -544,11 +516,7 @@ func TestRelayLegacy_TraceBodiesFilled(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			UseLegacyAdaptor: true, // 强制走 legacy 路径
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, UseLegacyAdaptor: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -602,11 +570,7 @@ func TestRelayLegacy_FailTrace(t *testing.T) {
 	upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			UseLegacyAdaptor: true,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, UseLegacyAdaptor: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -647,7 +611,7 @@ func (errReader) Close() error               { return nil }
 
 func TestRelayEarly_ReadBodyFailTrace(t *testing.T) {
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Key: "k", Models: "test-model", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Status: 1, Weight: 1}, Key: "k", Models: "test-model"},
 	})
 	got := make(chan protocol.UsageLogEntry, 1)
 	events.SubscribeUsageCompleted(bus, func(_ context.Context, entry protocol.UsageLogEntry) error {
@@ -677,7 +641,7 @@ func TestRelayEarly_ReadBodyFailTrace(t *testing.T) {
 
 func TestRelayEarly_ModelEmptyTrace(t *testing.T) {
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Key: "k", Models: "test-model", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Status: 1, Weight: 1}, Key: "k", Models: "test-model"},
 	})
 	got := make(chan protocol.UsageLogEntry, 1)
 	events.SubscribeUsageCompleted(bus, func(_ context.Context, entry protocol.UsageLogEntry) error {
@@ -710,7 +674,7 @@ func TestRelayEarly_ModelEmptyTrace(t *testing.T) {
 
 func TestRelayEarly_NoChannelTrace(t *testing.T) {
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Key: "k", Models: "other-model", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Status: 1, Weight: 1}, Key: "k", Models: "other-model"},
 	})
 	got := make(chan protocol.UsageLogEntry, 1)
 	events.SubscribeUsageCompleted(bus, func(_ context.Context, entry protocol.UsageLogEntry) error {
@@ -759,11 +723,7 @@ func TestRelayPassthrough_TraceOff_Success_TimingFilled(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{
-			ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "mimo-v2.5-pro", Status: 1, Weight: 1,
-			PassthroughEnabled: true, // 走 passthrough
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "mimo-v2.5-pro"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -819,8 +779,7 @@ func TestRelayNative_TraceOff_Success(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1, PassthroughEnabled: false},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: false}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -866,8 +825,7 @@ func TestRelayNative_TraceOff_UpstreamFail(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1, PassthroughEnabled: false},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: false}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -910,8 +868,7 @@ func TestRelayPassthrough_TraceOff_UpstreamFail(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1, PassthroughEnabled: true},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -948,10 +905,7 @@ func TestRelayLegacy_TraceOff_Success(t *testing.T) {
 	defer upstream.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			UseLegacyAdaptor: true, // 走 legacy
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, UseLegacyAdaptor: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -993,10 +947,7 @@ func TestRelayLegacy_TraceOff_UpstreamFail(t *testing.T) {
 	defer server.Close()
 
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: server.URL, Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1,
-			UseLegacyAdaptor: true,
-		},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: server.URL, Status: 1, Weight: 1, UseLegacyAdaptor: true}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -1031,8 +982,7 @@ func TestRelayLegacy_TraceOff_UpstreamFail(t *testing.T) {
 // TestRelayEarly_TraceOff_ReadBodyFail：read body 失败 + trace 关
 func TestRelayEarly_TraceOff_ReadBodyFail(t *testing.T) {
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -1064,8 +1014,7 @@ func TestRelayEarly_TraceOff_ReadBodyFail(t *testing.T) {
 // TestRelayEarly_TraceOff_InvalidJSON：JSON 解析失败 + trace 关
 func TestRelayEarly_TraceOff_InvalidJSON(t *testing.T) {
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -1100,8 +1049,7 @@ func TestRelayEarly_TraceOff_InvalidJSON(t *testing.T) {
 // TestRelayEarly_TraceOff_ModelEmpty：JSON 合法但 model 字段缺失 + trace 关
 func TestRelayEarly_TraceOff_ModelEmpty(t *testing.T) {
 	handler, _, bus := setupTestHandler([]*models.Channel{
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)
@@ -1134,8 +1082,7 @@ func TestRelayEarly_TraceOff_ModelEmpty(t *testing.T) {
 func TestRelayEarly_TraceOff_NoChannel(t *testing.T) {
 	handler, _, bus := setupTestHandler([]*models.Channel{
 		// 故意只放 gpt-4o，不放 claude-3
-		{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Key: "k",
-			Models: "gpt-4o", Status: 1, Weight: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://up", Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
 
 	got := make(chan protocol.UsageLogEntry, 1)

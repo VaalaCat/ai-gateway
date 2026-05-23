@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -168,36 +169,38 @@ func streamNativeResponse(
 	}
 }
 
-// handleNativeErrorStatus 处理 4xx / 5xx 上行响应：
-//   - 5xx：可重试，读 body / 记 trace / 返回带 Err 的 state.AttemptResult（Written=false）。
-//   - 4xx：不可重试，通过 inboundCodec.EncodeError 写回客户端 + 记 trace / 返回 Written=true。
-//   - 其它（2xx/3xx）：返回 handled=false，由调用方继续走 decode 路径。
-func handleNativeErrorStatus(rec *trace.Recorder, resp *http.Response, w gin.ResponseWriter, inboundCodec codec.InboundCodec, upstreamModel string) (state.AttemptResult, bool) {
-	// Handle 5xx: retryable error
-	if resp.StatusCode >= 500 {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		upstreamErr := fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
-		rec.SetUpstreamBody(body)
-		rec.WithFail(trace.StageUpstreamStatus, upstreamErr)
-		return state.AttemptResult{Err: upstreamErr}, true
+// handleNativeErrorStatus 处理非 2xx/3xx 上行响应。
+//
+// 本函数职责仅:读 body / 记 trace / 包装成 *common.UpstreamError 返回。
+// 是否重试 / fallback / 立即返回的决策由 Executor 统一负责(参见
+// pipeline/exec/exec.go Run() 主循环)。
+//
+// 注意:本函数不再调用 inboundCodec.EncodeError,因为是否写回客户端取决于
+// Executor 走例外路径(plan 全部 attempt 耗尽 + 最后一次失败时才写),
+// 由 Executor 在终止 attempt 链时统一处理。
+//
+// 过渡期说明(T5 尚未落地):4xx 错误当前不写回客户端,会经历全部 attempt
+// 后由 Executor 统一终止。T5 落地后 Executor 将对 invalid_request_error 做
+// 立即短路返回。
+func handleNativeErrorStatus(rec *trace.Recorder, resp *http.Response, _w gin.ResponseWriter, _inboundCodec codec.InboundCodec, upstreamModel string) (state.AttemptResult, bool) {
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return state.AttemptResult{}, false
 	}
-
-	// Handle 4xx: forward error to client, non-retryable
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		inboundCodec.EncodeError(w, resp.StatusCode, fmt.Errorf("%s", string(body)))
-		upstreamErr := fmt.Errorf("upstream returned %d: %s", resp.StatusCode, string(body))
-		rec.SetUpstreamBody(body)
-		rec.WithFail(trace.StageUpstreamStatus, upstreamErr)
-		return state.AttemptResult{
-			Written:       true,
-			UpstreamModel: upstreamModel,
-			Err:           upstreamErr,
-		}, true
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	upErr := &common.UpstreamError{
+		Status:            resp.StatusCode,
+		Body:              body,
+		ProviderErrorType: common.ParseProviderErrorType(body),
+		Header:            resp.Header.Clone(),
 	}
-	return state.AttemptResult{}, false
+	rec.SetUpstreamBody(body)
+	rec.WithFail(trace.StageUpstreamStatus, upErr)
+	return state.AttemptResult{
+		UpstreamModel: upstreamModel,
+		Err:           upErr,
+		// Written 留默认 false;客户端写回由 Executor 在 plan 结束时统一处理。
+	}, true
 }
 
 // dispatchUpstream 跑 HTTP 请求；失败时通过 Recorder.WithFail 打 trace + 返回 wrapped error。

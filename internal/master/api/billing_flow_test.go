@@ -308,7 +308,7 @@ func TestBillingChannelRebuild(t *testing.T) {
 
 	userID := createUser("billing-rebuild-user")
 	srv.DB.Create(&models.Token{ID: 2, UserID: uint(userID), Key: "sk-rebuild", Name: "rebuild-key", Status: 1, ExpiredAt: -1})
-	srv.DB.Create(&models.Channel{ID: 21, Name: "rebuild-channel", Type: 1, Key: "sk-upstream", Status: 1})
+	srv.DB.Create(&models.Channel{ChannelCore: models.ChannelCore{ID: 21, Name: "rebuild-channel", Type: 1, Status: 1}, Key: "sk-upstream"})
 	srv.DB.Create(&models.UsageLog{
 		RequestID:        "req-rebuild-1",
 		UserID:           uint(userID),
@@ -342,23 +342,57 @@ func TestBillingChannelRebuild(t *testing.T) {
 		CreatedAt:        time.Date(2026, 4, 1, 13, 0, 0, 0, time.UTC).Unix(),
 	})
 
-	w := doAdmin("POST", "/api/admin/billing/rebuild", map[string]any{
-		"start_date": "2026-04-01",
-		"end_date":   "2026-04-01",
-	})
-	if w.Code != 200 {
-		t.Fatalf("rebuild channel billing: %d %s", w.Code, w.Body.String())
+	// Async submit: POST returns {job_id, total_slices}; client polls
+	// GET /billing/rebuild/jobs/:id for status until terminal.
+	submitRebuild := func() string {
+		t.Helper()
+		w := doAdmin("POST", "/api/admin/billing/rebuild", map[string]any{
+			"start_date": "2026-04-01",
+			"end_date":   "2026-04-01",
+		})
+		if w.Code != 200 {
+			t.Fatalf("submit rebuild: %d %s", w.Code, w.Body.String())
+		}
+		resp := jsonBody(t, w)
+		jobID, _ := resp["job_id"].(string)
+		if jobID == "" {
+			t.Fatalf("submit rebuild: missing job_id in %v", resp)
+		}
+		if total, _ := resp["total_slices"].(float64); int(total) != 24 {
+			t.Fatalf("submit rebuild: total_slices = %v, want 24", resp["total_slices"])
+		}
+		return jobID
 	}
 
-	w = doAdmin("POST", "/api/admin/billing/rebuild", map[string]any{
-		"start_date": "2026-04-01",
-		"end_date":   "2026-04-01",
-	})
-	if w.Code != 200 {
-		t.Fatalf("rebuild channel billing second pass: %d %s", w.Code, w.Body.String())
+	waitJobSucceeded := func(jobID string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			w := doAdmin("GET", "/api/admin/billing/rebuild/jobs/"+jobID, nil)
+			if w.Code != 200 {
+				t.Fatalf("get rebuild job %s: %d %s", jobID, w.Code, w.Body.String())
+			}
+			view := jsonBody(t, w)
+			status, _ := view["status"].(string)
+			switch status {
+			case "succeeded":
+				return
+			case "failed", "canceled":
+				t.Fatalf("rebuild job %s terminal=%s view=%v", jobID, status, view)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("rebuild job %s did not succeed in 10s; last view=%v", jobID, view)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 
-	w = doAdmin("GET", "/api/admin/billing/channels?start_date=2026-04-01&end_date=2026-04-01", nil)
+	waitJobSucceeded(submitRebuild())
+	// Second pass should be idempotent (hour 0 of each day resets daily
+	// rollups; replay re-derives identical totals).
+	waitJobSucceeded(submitRebuild())
+
+	w := doAdmin("GET", "/api/admin/billing/channels?start_date=2026-04-01&end_date=2026-04-01", nil)
 	if w.Code != 200 {
 		t.Fatalf("admin list channel billing after rebuild: %d %s", w.Code, w.Body.String())
 	}

@@ -114,6 +114,7 @@ export function AppSidebar() {
     { label: t("logs"), icon: ScrollText, href: "/logs" },
     { label: t("billing"), icon: Wallet, href: "/billing" },
     { label: t("playground"), icon: MessageSquare, href: "/playground" },
+    { label: t("byok"), icon: KeyRound, href: "/byok" },
     { label: t("myModelRoutings"), icon: Network, href: "/profile/model-routings" },
   ];
 
@@ -144,6 +145,7 @@ export function AppSidebar() {
           defaultOpen: true,
           items: [
             { label: t("channels"), icon: Server, href: "/channels" },
+            { label: t("byokAdmin"), icon: KeyRound, href: "/admin/byok" },
             { label: t("models"), icon: Brain, href: "/models" },
             { label: t("agents"), icon: Bot, href: "/agents" },
             { label: t("agentRoutes"), icon: Route, href: "/agent-routes" },
@@ -158,7 +160,7 @@ export function AppSidebar() {
             {
               label: t("monitoring"),
               icon: Activity,
-              href: "/monitoring/cache",
+              href: "/monitoring",
             },
             { label: t("maintenance"), icon: Wrench, href: "/system" },
           ],

@@ -11,6 +11,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
+	"go.uber.org/zap"
 	"gorm.io/datatypes"
 )
 
@@ -61,6 +62,20 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (api.StatusResponse,
 		}
 	}
 
+	// §5.4 BYOKMaxChannels: reject negative writes on PATCH. 0 = quota disabled,
+	// nil/absent = inherit global, positive = effective cap.
+	if raw, ok := updates["byok_max_channels"]; ok && raw != nil {
+		n, valid := toInt(raw)
+		if !valid {
+			return api.StatusResponse{}, api.BadRequestError(
+				"byok_max_channels must be an integer", nil)
+		}
+		if n < 0 {
+			return api.StatusResponse{}, api.BadRequestError(
+				"byok_max_channels must be >= 0 (0 = disabled, omit for inherit)", nil)
+		}
+	}
+
 	daoCtx := dao.NewContext(c.App)
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
@@ -89,5 +104,45 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (api.StatusResponse,
 		_ = events.PublishEntity(context.Background(), h.Bus, events.EntityUserGroup, events.ActionUpdate, *updated)
 	}
 
+	// §1.7: when an admin flips byok_enabled on the group, fan out a
+	// PrivateChannelInvalidate to every member so each agent drops its cached
+	// visiblePrivateChannels block (which may still embed plaintext keys).
+	// Over-trigger on no-op writes is harmless — the cache reloads on miss.
+	// Fanout failure must not block the Update response; cache TTL is the
+	// fallback safety net.
+	if _, ok := updates["byok_enabled"]; ok {
+		if err := fanoutBYOKInvalidateForGroup(context.Background(), q, h.Bus, id); err != nil {
+			if c.Logger != nil {
+				c.Logger.Warn("byok invalidate fanout failed",
+					zap.Uint("group_id", id), zap.Error(err))
+			}
+		}
+	}
+
 	return api.StatusResponse{Status: "ok"}, nil
+}
+
+// toInt coerces JSON-decoded numerics (float64) and Go ints into an int. Returns
+// (0, false) when the value cannot be interpreted as a whole number.
+func toInt(v any) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int32:
+		return int(x), true
+	case int64:
+		return int(x), true
+	case float64:
+		if x != float64(int64(x)) {
+			return 0, false
+		}
+		return int(x), true
+	case float32:
+		if x != float32(int64(x)) {
+			return 0, false
+		}
+		return int(x), true
+	default:
+		return 0, false
+	}
 }

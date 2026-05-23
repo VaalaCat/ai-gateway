@@ -14,12 +14,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -271,7 +265,7 @@ export function PricingPreviewDialog({
       <button
         disabled={!available}
         onClick={() => available && toggle(modelId, srcKey)}
-        className={`text-[11px] px-1.5 py-0.5 rounded border transition-colors whitespace-nowrap ${
+        className={`text-2xs px-1.5 py-0.5 rounded border transition-colors whitespace-nowrap ${
           isSelected
             ? "bg-primary text-primary-foreground border-primary"
             : available
@@ -294,7 +288,7 @@ export function PricingPreviewDialog({
             <TooltipProvider delayDuration={100}>
               <Tooltip>
                 <TooltipTrigger>
-                  <Badge variant="outline" className="ml-1 text-[9px] py-0 h-3.5 text-yellow-600 border-yellow-400">{t("matchFuzzy")}</Badge>
+                  <Badge variant="outline" className="ml-1 text-2xs py-0 h-3.5 text-yellow-600 border-yellow-400">{t("matchFuzzy")}</Badge>
                 </TooltipTrigger>
                 <TooltipContent className="text-xs">
                   {Object.entries(m.sources).filter(([, s]) => s.match_type === "fuzzy").map(([k, s]) => `${sourceLabel(k)}: ${s.matched_name}`).join(", ")}
@@ -328,7 +322,7 @@ export function PricingPreviewDialog({
               <SourceButton key={sk} srcKey={sk} modelId={m.model_id} srcData={m.sources[sk]} current={m.current} isSelected={sel === sk} />
             ))}
             {sel !== "skip" && (
-              <button onClick={() => toggle(m.model_id, sel)} className="text-[11px] px-1 text-muted-foreground hover:text-foreground">✕</button>
+              <button onClick={() => toggle(m.model_id, sel)} className="text-2xs px-1 text-muted-foreground hover:text-foreground">✕</button>
             )}
           </div>
         </td>
@@ -342,14 +336,14 @@ export function PricingPreviewDialog({
       <div className={`rounded-lg border p-2.5 space-y-1.5 ${m.has_price && sel !== "skip" ? "border-orange-300 bg-orange-50/50 dark:border-orange-800 dark:bg-orange-950/20" : ""}`}>
         <div className="flex items-center gap-1.5">
           <span className="font-mono text-xs font-medium truncate" title={m.model_name}>{m.model_name}</span>
-          {!m.has_price && <Badge variant="secondary" className="text-[9px] py-0 h-3.5 shrink-0">{t("filterNoPrice")}</Badge>}
+          {!m.has_price && <Badge variant="secondary" className="text-2xs py-0 h-3.5 shrink-0">{t("filterNoPrice")}</Badge>}
           {Object.values(m.sources).some((s) => s.match_type === "fuzzy") && (
-            <Badge variant="outline" className="text-[9px] py-0 h-3.5 text-yellow-600 border-yellow-400 shrink-0">{t("matchFuzzy")}</Badge>
+            <Badge variant="outline" className="text-2xs py-0 h-3.5 text-yellow-600 border-yellow-400 shrink-0">{t("matchFuzzy")}</Badge>
           )}
         </div>
 
         {m.has_price && (
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-2xs text-muted-foreground">
             {t("currentPrice")}: <PriceSummary input={m.current.input_price} output={m.current.output_price} cr={m.current.cache_read_price} cw={m.current.cache_write_price} />
           </div>
         )}
@@ -369,8 +363,8 @@ export function PricingPreviewDialog({
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-medium">{sourceLabel(sk)}</span>
-                  {src?.match_type === "fuzzy" && <span className="text-[10px] text-muted-foreground">({src.matched_name})</span>}
+                  <span className="text-2xs font-medium">{sourceLabel(sk)}</span>
+                  {src?.match_type === "fuzzy" && <span className="text-2xs text-muted-foreground">({src.matched_name})</span>}
                 </div>
                 {src && (
                   <div className="mt-0.5">
@@ -398,7 +392,7 @@ export function PricingPreviewDialog({
             {sourceKeys.map((src) => {
               const err = data.source_errors?.[src];
               return (
-                <Badge key={src} variant="outline" className={`text-[10px] ${err ? "border-destructive text-destructive" : "border-green-500 text-green-600"}`}>
+                <Badge key={src} variant="outline" className={`text-2xs ${err ? "border-destructive text-destructive" : "border-green-500 text-green-600"}`}>
                   {sourceLabel(src)} {err ? "✗" : "✓"}
                 </Badge>
               );
@@ -432,11 +426,11 @@ export function PricingPreviewDialog({
           </div>
           <div className="flex items-center gap-1 flex-wrap">
             {sourceKeys.map((src) => (
-              <Button key={src} variant="outline" size="sm" className="h-6 text-[11px] px-2" onClick={() => batchSelect(src)}>
+              <Button key={src} variant="outline" size="sm" className="h-6 text-2xs px-2" onClick={() => batchSelect(src)}>
                 {t("selectAllFrom", { source: sourceLabel(src) })}
               </Button>
             ))}
-            <Button variant="outline" size="sm" className="h-6 text-[11px] px-2" onClick={() => batchSelect("skip")}>{t("selectAllSkip")}</Button>
+            <Button variant="outline" size="sm" className="h-6 text-2xs px-2" onClick={() => batchSelect("skip")}>{t("selectAllSkip")}</Button>
           </div>
         </div>
 
@@ -450,7 +444,7 @@ export function PricingPreviewDialog({
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead className="sticky top-0 bg-background z-10">
-                  <tr className="border-b text-[11px] text-muted-foreground">
+                  <tr className="border-b text-2xs text-muted-foreground">
                     <th className="py-1.5 px-2 font-medium text-left">{t("modelName")}</th>
                     <th className="py-1.5 px-2 font-medium text-left">{t("currentPrice")}</th>
                     {sourceKeys.map((src) => (
@@ -473,7 +467,7 @@ export function PricingPreviewDialog({
               </button>
               {unmatchedOpen && (
                 <div className="mt-1.5 pl-5 space-y-0.5">
-                  {unmatchedModels.map((n) => <div key={n} className="text-[11px] text-muted-foreground font-mono">{n}</div>)}
+                  {unmatchedModels.map((n) => <div key={n} className="text-2xs text-muted-foreground font-mono">{n}</div>)}
                 </div>
               )}
             </div>

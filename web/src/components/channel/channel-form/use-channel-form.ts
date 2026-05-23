@@ -1,22 +1,22 @@
 "use client";
 
-import { useReducer, useCallback, useEffect } from "react";
+import { useReducer, useCallback, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { useTranslations } from "next-intl";
-import { useChannel, useCreateChannel, useUpdateChannel } from "@/lib/api/channels";
-import type { Channel } from "@/lib/types";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import { ChannelForm, emptyForm } from "./types";
-import { mapChannelToForm, sanitizeOtherSettingsForSubmit } from "./utils";
+import type { ChannelFormAdapter } from "./adapter";
 
 export type ChannelFormMode =
   | { kind: "create" }
   | { kind: "edit"; id: number };
 
-export interface UseChannelFormResult {
+export interface UseChannelFormResult<Entity> {
   form: ChannelForm;
   setForm: (next: ChannelForm) => void;
   initial: ChannelForm;
+  entity: Entity | null;
   isDirty: boolean;
   dirtyFieldCount: number;
   isLoading: boolean;
@@ -26,32 +26,43 @@ export interface UseChannelFormResult {
   cancel: () => void;
 }
 
-interface FormState {
+interface FormState<Entity> {
   form: ChannelForm;
   initial: ChannelForm;
-  /** The channel id for which `initial` was set; used to detect channel change. */
-  loadedChannelId: number | null;
+  entity: Entity | null;
+  /** The entity id for which `initial` was set; used to detect entity change. */
+  loadedEntityId: number | null;
 }
 
-type FormAction =
+type FormAction<Entity> =
   | { type: "SET_FORM"; form: ChannelForm }
-  | { type: "LOAD_CHANNEL"; channel: Channel }
+  | { type: "LOAD_ENTITY"; entity: Entity; id: number }
   | { type: "CLEAR_DIRTY" };
 
-function formReducer(state: FormState, action: FormAction): FormState {
-  switch (action.type) {
-    case "SET_FORM":
-      return { ...state, form: action.form };
-    case "LOAD_CHANNEL": {
-      if (state.loadedChannelId === action.channel.id) return state;
-      const f = mapChannelToForm(action.channel);
-      return { form: f, initial: f, loadedChannelId: action.channel.id };
+function makeReducer<Entity>(mapEntityToForm: (e: Entity) => ChannelForm) {
+  return function formReducer(
+    state: FormState<Entity>,
+    action: FormAction<Entity>,
+  ): FormState<Entity> {
+    switch (action.type) {
+      case "SET_FORM":
+        return { ...state, form: action.form };
+      case "LOAD_ENTITY": {
+        if (state.loadedEntityId === action.id) return state;
+        const f = mapEntityToForm(action.entity);
+        return {
+          form: f,
+          initial: f,
+          entity: action.entity,
+          loadedEntityId: action.id,
+        };
+      }
+      case "CLEAR_DIRTY":
+        return { ...state, initial: state.form };
+      default:
+        return state;
     }
-    case "CLEAR_DIRTY":
-      return { ...state, initial: state.form };
-    default:
-      return state;
-  }
+  };
 }
 
 function shallowEqual(a: ChannelForm, b: ChannelForm): boolean {
@@ -71,29 +82,40 @@ function diffFieldCount(a: ChannelForm, b: ChannelForm): number {
   return n;
 }
 
-export function useChannelForm(mode: ChannelFormMode): UseChannelFormResult {
+export function useChannelForm<Entity>(
+  mode: ChannelFormMode,
+  adapter: ChannelFormAdapter<Entity>,
+): UseChannelFormResult<Entity> {
   const t = useTranslations("channels");
   const tc = useTranslations("common");
   const router = useRouter();
 
   const editId = mode.kind === "edit" ? mode.id : 0;
-  const { data: channel, isLoading, isError } = useChannel(editId);
-  const notFound = mode.kind === "edit" && !isLoading && (isError || channel === undefined);
+  const { data: entityData, isLoading, isError } = adapter.useEntity(editId);
+  const notFound =
+    mode.kind === "edit" && !isLoading && (isError || entityData === undefined);
 
-  const [state, dispatch] = useReducer(formReducer, {
+  // adapter.mapEntityToForm is a module-level stable reference; useMemo keeps
+  // the reducer identity stable across renders so React doesn't re-bind it.
+  const reducer = useMemo(
+    () => makeReducer<Entity>(adapter.mapEntityToForm),
+    [adapter.mapEntityToForm],
+  );
+  const [state, dispatch] = useReducer(reducer, {
     form: emptyForm,
     initial: emptyForm,
-    loadedChannelId: null,
-  });
+    entity: null,
+    loadedEntityId: null,
+  } as FormState<Entity>);
 
-  // Sync when channel data arrives. useReducer dispatch is allowed in effects.
+  // Sync when entity data arrives. useReducer dispatch is allowed in effects.
   useEffect(() => {
-    if (mode.kind === "edit" && channel) {
-      dispatch({ type: "LOAD_CHANNEL", channel });
+    if (mode.kind === "edit" && entityData) {
+      dispatch({ type: "LOAD_ENTITY", entity: entityData, id: editId });
     }
-  }, [mode.kind, channel]);
+  }, [mode.kind, entityData, editId]);
 
-  const { form, initial } = state;
+  const { form, initial, entity } = state;
   const isDirty = !shallowEqual(form, initial);
   const dirtyFieldCount = diffFieldCount(form, initial);
 
@@ -101,64 +123,47 @@ export function useChannelForm(mode: ChannelFormMode): UseChannelFormResult {
     dispatch({ type: "SET_FORM", form: next });
   }, []);
 
-  const createMutation = useCreateChannel();
-  const updateMutation = useUpdateChannel();
-
-  // Build payload identically to current channels/page.tsx submit logic.
-  const buildPayload = useCallback((): Partial<Channel> => {
-    const otherSettings = sanitizeOtherSettingsForSubmit(form.other_settings, form.endpoints);
-    return {
-      name: form.name,
-      type: Number(form.type),
-      key: form.key,
-      base_url: form.base_url,
-      models: form.models,
-      model_mapping: form.model_mapping,
-      weight: Number(form.weight),
-      priority: Number(form.priority),
-      status: Number(form.status),
-      setting: form.setting,
-      organization: form.organization,
-      api_version: form.api_version,
-      tag: form.tag,
-      remark: form.remark,
-      test_model: form.test_model,
-      auto_ban: Number(form.auto_ban),
-      status_code_mapping: form.status_code_mapping,
-      param_override: form.param_override,
-      header_override: form.header_override,
-      other_settings: otherSettings,
-      supported_api_types: form.supported_api_types,
-      endpoints: form.endpoints,
-      passthrough_enabled: form.passthrough_enabled,
-      use_legacy_adaptor: form.use_legacy_adaptor,
-      system_prompt: form.system_prompt,
-      proxy_url: form.proxy_url,
-      role_mapping: form.role_mapping,
-    } as Partial<Channel>;
-  }, [form]);
+  const createMutation = adapter.useCreate();
+  const updateMutation = adapter.useUpdate();
+  const rotateMutation = adapter.useRotateKey?.();
 
   const submit = useCallback(async () => {
     try {
-      const payload = buildPayload();
       if (mode.kind === "create") {
-        await createMutation.mutateAsync(payload);
+        await createMutation.mutateAsync(adapter.buildCreatePayload(form));
         toast.success(t("createSuccess"));
-        router.push("/channels");
-      } else {
-        await updateMutation.mutateAsync({ id: mode.id, ...payload });
-        toast.success(t("updateSuccess"));
-        dispatch({ type: "CLEAR_DIRTY" }); // clear dirty after save
+        router.push(adapter.listPath);
+        return;
       }
-    } catch {
-      toast.error(tc("error"));
+      const { fields, rotateKey } = adapter.buildUpdatePayload(form, initial);
+      if (rotateKey && rotateMutation) {
+        await rotateMutation.mutateAsync({ id: mode.id, key: rotateKey });
+      }
+      if (Object.keys(fields).length > 0) {
+        await updateMutation.mutateAsync({ id: mode.id, fields });
+      }
+      toast.success(t("updateSuccess"));
+      dispatch({ type: "CLEAR_DIRTY" });
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
-  }, [mode, buildPayload, createMutation, updateMutation, router, t, tc]);
+  }, [
+    mode,
+    adapter,
+    form,
+    initial,
+    createMutation,
+    updateMutation,
+    rotateMutation,
+    router,
+    t,
+    tc,
+  ]);
 
   const cancel = useCallback(() => {
     if (isDirty && !window.confirm(t("cancelDirtyConfirm"))) return;
-    router.push("/channels");
-  }, [isDirty, router, t]);
+    router.push(adapter.listPath);
+  }, [isDirty, router, t, adapter.listPath]);
 
   // onbeforeunload guard for browser-level navigation.
   useEffect(() => {
@@ -175,11 +180,15 @@ export function useChannelForm(mode: ChannelFormMode): UseChannelFormResult {
     form,
     setForm,
     initial,
+    entity,
     isDirty,
     dirtyFieldCount,
     isLoading: mode.kind === "edit" ? isLoading : false,
     notFound,
-    saving: createMutation.isPending || updateMutation.isPending,
+    saving:
+      createMutation.isPending ||
+      updateMutation.isPending ||
+      !!rotateMutation?.isPending,
     submit,
     cancel,
   };

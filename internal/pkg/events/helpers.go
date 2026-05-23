@@ -126,3 +126,14 @@ func SubscribeSyncFullSyncRequested(bus app.EventBus, handler func(context.Conte
 func SubscribeSyncPushPattern(bus app.EventBus, pattern Pattern[protocol.SyncPushParams], handler func(context.Context, protocol.SyncPushParams) error) (eventbus.Subscription, error) {
 	return SubscribePattern(bus, pattern, handler)
 }
+
+// PublishPrivateChannelInvalidate notifies agents to drop cached visiblePrivateChannels
+// for the listed users. Callers (master CRUD/share handlers) expand
+// (owner ∪ share→user ∪ share→group members) into affectedUserIDs before calling.
+func PublishPrivateChannelInvalidate(ctx context.Context, bus app.EventBus, affectedUserIDs []uint) error {
+	payload := protocol.PrivateChannelInvalidatePayload{
+		Action:          "invalidate",
+		AffectedUserIDs: affectedUserIDs,
+	}
+	return PublishEntity(ctx, bus, EntityPrivateChannel, "invalidate", payload)
+}

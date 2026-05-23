@@ -24,6 +24,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { DataTablePagination } from "./pagination";
 import { ColumnVisibility } from "./column-visibility";
@@ -39,6 +40,8 @@ interface DataTableProps<TData, TValue> {
   onPaginationChange?: (page: number, pageSize: number) => void;
   toolbar?: React.ReactNode;
   defaultColumnVisibility?: VisibilityState;
+  columnVisibilityState?: VisibilityState;
+  onColumnVisibilityChange?: (state: VisibilityState) => void;
   storageKey?: string;
   renderExpandedRow?: (row: Row<TData>) => React.ReactNode;
   rowSelection?: Record<string, boolean>;
@@ -65,6 +68,8 @@ export function DataTable<TData, TValue>({
   onRowSelectionChange,
   expandedState,
   onExpandedStateChange,
+  columnVisibilityState,
+  onColumnVisibilityChange,
   getRowId,
 }: DataTableProps<TData, TValue>) {
   const t = useTranslations("common");
@@ -95,7 +100,9 @@ export function DataTable<TData, TValue>({
     }
   };
 
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(() => {
+  const isVisibilityControlled =
+    columnVisibilityState !== undefined && onColumnVisibilityChange !== undefined;
+  const [internalColumnVisibility, setInternalColumnVisibility] = useState<VisibilityState>(() => {
     if (storageKey && typeof window !== "undefined") {
       const saved = localStorage.getItem(`col-vis-${storageKey}`);
       if (saved) {
@@ -104,19 +111,36 @@ export function DataTable<TData, TValue>({
     }
     return defaultColumnVisibility ?? {};
   });
+  const columnVisibility = isVisibilityControlled
+    ? columnVisibilityState!
+    : internalColumnVisibility;
 
   useEffect(() => {
+    if (isVisibilityControlled) return;
     if (storageKey && typeof window !== "undefined") {
-      localStorage.setItem(`col-vis-${storageKey}`, JSON.stringify(columnVisibility));
+      localStorage.setItem(`col-vis-${storageKey}`, JSON.stringify(internalColumnVisibility));
     }
-  }, [columnVisibility, storageKey]);
+  }, [internalColumnVisibility, storageKey, isVisibilityControlled]);
+
+  const handleColumnVisibilityChange = (
+    updaterOrValue: VisibilityState | ((old: VisibilityState) => VisibilityState),
+  ) => {
+    const next = typeof updaterOrValue === "function"
+      ? (updaterOrValue as (old: VisibilityState) => VisibilityState)(columnVisibility)
+      : updaterOrValue;
+    if (isVisibilityControlled) {
+      onColumnVisibilityChange!(next);
+    } else {
+      setInternalColumnVisibility(next);
+    }
+  };
 
   const table = useReactTable({
     data,
     columns,
     state: { sorting, columnVisibility, expanded, ...(onRowSelectionChange ? { rowSelection: rowSelection ?? {} } : {}) },
     onSortingChange: setSorting,
-    onColumnVisibilityChange: setColumnVisibility,
+    onColumnVisibilityChange: handleColumnVisibilityChange,
     onExpandedChange: handleExpandedChange,
     enableRowSelection: !!onRowSelectionChange,
     onRowSelectionChange: onRowSelectionChange
@@ -132,100 +156,102 @@ export function DataTable<TData, TValue>({
   });
 
   return (
-    <div className="min-w-0 space-y-4">
-      {toolbar}
-      {defaultColumnVisibility && (
-        <div className="flex justify-end">
-          <ColumnVisibility table={table} />
-        </div>
-      )}
-      <div className="rounded-md border overflow-x-auto">
-        <Table>
-          <TableHeader>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} className="whitespace-nowrap">
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext()
-                        )}
-                  </TableHead>
-                ))}
-              </TableRow>
-            ))}
-          </TableHeader>
-          <TableBody>
-            {loading ? (
-              Array.from({ length: 5 }).map((_, i) => (
-                <TableRow key={`skeleton-${i}`}>
-                  {columns.map((_, j) => (
-                    <TableCell key={`skeleton-${i}-${j}`}>
-                      <Skeleton className="h-5 w-full" />
-                    </TableCell>
+    <TooltipProvider delayDuration={200}>
+      <div className="min-w-0 space-y-4">
+        {toolbar}
+        {defaultColumnVisibility && (
+          <div className="flex justify-end">
+            <ColumnVisibility table={table} />
+          </div>
+        )}
+        <div className="rounded-md border overflow-x-auto">
+          <Table className="text-body">
+            <TableHeader>
+              {table.getHeaderGroups().map((headerGroup) => (
+                <TableRow key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => (
+                    <TableHead key={header.id} className="whitespace-nowrap">
+                      {header.isPlaceholder
+                        ? null
+                        : flexRender(
+                            header.column.columnDef.header,
+                            header.getContext()
+                          )}
+                    </TableHead>
                   ))}
                 </TableRow>
-              ))
-            ) : table.getRowModel().rows.length > 0 ? (
-              table.getRowModel().rows.map((row) => {
-                const isExpanded = row.getIsExpanded();
-                return (
-                  <Fragment key={row.id}>
-                    <TableRow
-                      className={cn(
-                        renderExpandedRow && "cursor-pointer hover:bg-muted/30",
-                        renderExpandedRow && isExpanded && "bg-muted/40",
-                      )}
-                      data-state={isExpanded ? "expanded" : undefined}
-                      onClick={renderExpandedRow ? () => row.toggleExpanded() : undefined}
-                    >
-                      {row.getVisibleCells().map((cell) => (
-                        <TableCell key={cell.id} className="whitespace-nowrap">
-                          {flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext()
-                          )}
-                        </TableCell>
-                      ))}
-                    </TableRow>
-                    {isExpanded && renderExpandedRow && (
-                      <TableRow>
-                        <TableCell colSpan={row.getVisibleCells().length} className="bg-muted/50 p-4">
-                          {renderExpandedRow(row)}
-                        </TableCell>
+              ))}
+            </TableHeader>
+            <TableBody>
+              {loading ? (
+                Array.from({ length: 5 }).map((_, i) => (
+                  <TableRow key={`skeleton-${i}`}>
+                    {columns.map((_, j) => (
+                      <TableCell key={`skeleton-${i}-${j}`}>
+                        <Skeleton className="h-5 w-full" />
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))
+              ) : table.getRowModel().rows.length > 0 ? (
+                table.getRowModel().rows.map((row) => {
+                  const isExpanded = row.getIsExpanded();
+                  return (
+                    <Fragment key={row.id}>
+                      <TableRow
+                        className={cn(
+                          renderExpandedRow && "cursor-pointer hover:bg-muted/30",
+                          renderExpandedRow && isExpanded && "bg-muted/40",
+                        )}
+                        data-state={isExpanded ? "expanded" : undefined}
+                        onClick={renderExpandedRow ? () => row.toggleExpanded() : undefined}
+                      >
+                        {row.getVisibleCells().map((cell) => (
+                          <TableCell key={cell.id} className="whitespace-nowrap">
+                            {flexRender(
+                              cell.column.columnDef.cell,
+                              cell.getContext()
+                            )}
+                          </TableCell>
+                        ))}
                       </TableRow>
-                    )}
-                  </Fragment>
-                );
-              })
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={columns.length}
-                  className="h-24 text-center text-muted-foreground"
-                >
-                  {t("noData")}
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
-      <div className="flex items-center justify-between">
-        <div className="text-sm text-muted-foreground">
-          {total !== undefined && t("total", { count: total })}
+                      {isExpanded && renderExpandedRow && (
+                        <TableRow>
+                          <TableCell colSpan={row.getVisibleCells().length} className="bg-muted/50 p-4">
+                            {renderExpandedRow(row)}
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
+                  );
+                })
+              ) : (
+                <TableRow>
+                  <TableCell
+                    colSpan={columns.length}
+                    className="h-24 text-center text-muted-foreground"
+                  >
+                    {t("noData")}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
         </div>
-        {onPaginationChange && (
-          <DataTablePagination
-            page={page}
-            pageSize={pageSize}
-            pageCount={pageCount}
-            onPaginationChange={onPaginationChange}
-          />
-        )}
+        <div className="flex items-center justify-between">
+          <div className="text-sm text-muted-foreground">
+            {total !== undefined && t("total", { count: total })}
+          </div>
+          {onPaginationChange && (
+            <DataTablePagination
+              page={page}
+              pageSize={pageSize}
+              pageCount={pageCount}
+              onPaginationChange={onPaginationChange}
+            />
+          )}
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }

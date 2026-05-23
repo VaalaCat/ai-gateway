@@ -76,7 +76,7 @@ func (h *Handler) Stats(c *app.Context, _ StatsRequest) (StatsResponse, error) {
 }
 
 type CleanupPreviewRequest struct {
-	Target     string `form:"target" binding:"required,oneof=traces logs"`
+	Target     string `form:"target" binding:"required,oneof=traces logs hourly_buckets"`
 	RetainDays int    `form:"retain_days" binding:"required,min=1"`
 }
 
@@ -100,7 +100,15 @@ func (h *Handler) CleanupPreview(c *app.Context, req CleanupPreviewRequest) (Cle
 
 	var toDelete int64
 	daoCtx := dao.NewContext(c.App)
-	daoCtx.GetDB().Table(tableName).Where("created_at < ?", cutoff).Count(&toDelete)
+	q2 := daoCtx.GetDB().Table(tableName)
+	if req.Target == "hourly_buckets" {
+		// hourly bucket 按 date 字符串比较 (与 DeleteHourlyBucketsBefore 一致)
+		cutoffDate := time.Unix(cutoff, 0).UTC().Format("2006-01-02")
+		q2 = q2.Where("date < ?", cutoffDate)
+	} else {
+		q2 = q2.Where("created_at < ?", cutoff)
+	}
+	q2.Count(&toDelete)
 
 	return CleanupPreviewResponse{
 		Target:     req.Target,
@@ -111,7 +119,7 @@ func (h *Handler) CleanupPreview(c *app.Context, req CleanupPreviewRequest) (Cle
 }
 
 type CleanupRequest struct {
-	Target     string `json:"target" binding:"required,oneof=traces logs"`
+	Target     string `json:"target" binding:"required,oneof=traces logs hourly_buckets"`
 	RetainDays int    `json:"retain_days" binding:"required,min=1"`
 }
 
@@ -130,6 +138,8 @@ func (h *Handler) Cleanup(c *app.Context, req CleanupRequest) (CleanupResponse, 
 		deleted, cleanupErr = mut.UsageLog().DeleteLogsBefore(cutoff)
 	case "traces":
 		deleted, cleanupErr = mut.UsageLog().DeleteTracesBefore(cutoff)
+	case "hourly_buckets":
+		deleted, cleanupErr = mut.Billing().DeleteHourlyBucketsBefore(cutoff)
 	}
 	if cleanupErr != nil {
 		return CleanupResponse{}, cleanupErr
@@ -144,6 +154,8 @@ func targetTable(target string) string {
 		return "usage_log_traces"
 	case "logs":
 		return "usage_logs"
+	case "hourly_buckets":
+		return "usage_hourly_buckets"
 	default:
 		return ""
 	}

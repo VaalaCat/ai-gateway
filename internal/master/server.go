@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,17 +21,22 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
 	"github.com/VaalaCat/ai-gateway/internal/config"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	apiagent "github.com/VaalaCat/ai-gateway/internal/master/api/agent"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/agent_route"
 	apibilling "github.com/VaalaCat/ai-gateway/internal/master/api/billing"
 	apicache "github.com/VaalaCat/ai-gateway/internal/master/api/cache"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/channel"
+	apiinsights "github.com/VaalaCat/ai-gateway/internal/master/api/insights"
 	apilog "github.com/VaalaCat/ai-gateway/internal/master/api/log"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/model"
 	apimodelrouting "github.com/VaalaCat/ai-gateway/internal/master/api/model_routing"
+	apimonitoring "github.com/VaalaCat/ai-gateway/internal/master/api/monitoring"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/private_channel"
 	apioauth "github.com/VaalaCat/ai-gateway/internal/master/api/oauth"
 	apioap "github.com/VaalaCat/ai-gateway/internal/master/api/oauth_provider_admin"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/stats"
@@ -56,16 +62,39 @@ import (
 var _ app.MasterServer = (*Server)(nil)
 
 type Server struct {
-	Cfg      *config.MasterRuntimeConfig
-	Logger   *zap.Logger
-	DB       *gorm.DB
-	Bus      app.EventBus
-	Router   *gin.Engine
-	Version  atomic.Int64
-	Hub      *msync.Hub
-	Listener net.Listener
-	httpSrv  *http.Server
-	App      app.Application
+	Cfg              *config.MasterRuntimeConfig
+	Logger           *zap.Logger
+	DB               *gorm.DB
+	Bus              app.EventBus
+	Router           *gin.Engine
+	Version          atomic.Int64
+	lastSavedVersion atomic.Int64
+	Hub              *msync.Hub
+	Listener         net.Listener
+	httpSrv          *http.Server
+	App              app.Application
+
+	// Heartbeat captures agent last_seen in memory and periodically flushes
+	// to DB; also serves freshness reads for API enrichment. Started in Run
+	// and stopped (force-flushed) in Shutdown.
+	Heartbeat *msync.HeartbeatTracker
+
+	// Aggregator buffers per-key billing rollup deltas (token_daily /
+	// channel_daily / hourly_bucket) in memory and flushes them in
+	// batched UPSERTs. Settler hands off each committed UsageLog to it
+	// via the UsageAggregator interface. Started in Run; Stop() in
+	// Shutdown drains the final batch before Heartbeat.Stop.
+	Aggregator *billing.Aggregator
+
+	// RebuildRunner schedules async per-hour billing rollup rebuilds.
+	// Submitted jobs run as background goroutines (one per Submit);
+	// the gc loop spawns inside NewRebuildRunner. Stopped in Shutdown
+	// between Aggregator and Heartbeat (spec §9).
+	RebuildRunner *billing.RebuildRunner
+
+	// BYOKProvider 是 BYOK cipher 的注入点。private_channel.Handler
+	// 通过它获取 *Cipher，避免污染 app.Application 顶层接口。
+	BYOKProvider byokcrypto.Provider
 
 	channelHandler *channel.Handler
 	embeddedAgent  *agent.Server
@@ -145,6 +174,16 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		return nil, fmt.Errorf("seed default user group: %w", err)
 	}
 
+	if err := models.SeedBYOKSettings(db); err != nil {
+		return nil, fmt.Errorf("seed byok settings: %w", err)
+	}
+
+	byokCipher, err := byokcrypto.NewFromConfig(runtimeCfg.Master.BYOKKEK, runtimeCfg.Master.JWTSecret)
+	if err != nil {
+		return nil, fmt.Errorf("init byok cipher: %w", err)
+	}
+	byokProvider := byokcrypto.NewStaticProvider(byokCipher)
+
 	bus := eventbus.NewMemoryBus()
 
 	application := app.NewApplication()
@@ -152,12 +191,13 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	application.SetEventBus(bus)
 
 	s := &Server{
-		Cfg:    runtimeCfg,
-		Logger: logger,
-		DB:     db,
-		Bus:    bus,
-		Router: gin.New(),
-		App:    application,
+		Cfg:          runtimeCfg,
+		Logger:       logger,
+		DB:           db,
+		Bus:          bus,
+		Router:       gin.New(),
+		App:          application,
+		BYOKProvider: byokProvider,
 	}
 
 	allowlist, err := apioauth.NewAllowlist(runtimeCfg.Master.PublicBaseURLs)
@@ -169,12 +209,58 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	// Load persisted version from DB
 	s.loadVersion()
 
-	s.Hub = msync.NewHub(application, logger, bus, func() int64 { return s.Version.Load() })
+	s.Hub = msync.NewHub(application, logger, bus, func() int64 { return s.Version.Load() }, byokProvider.GetCipher())
+
+	// Heartbeat tracker — memory-first last_seen + config fingerprint.
+	// Flush interval is admin-configurable; falls back to 300s if unset.
+	flushSec := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
+		"agent.heartbeat_flush_interval_seconds", 300,
+	)
+	s.Heartbeat = msync.NewHeartbeatTracker(application, logger, time.Duration(flushSec)*time.Second)
+	s.Heartbeat.SetLastSeenPersistFn(func(updates map[string]int64) error {
+		return dao.NewAdminMutation(dao.NewContext(application)).Agent().BatchUpdateLastSeen(updates)
+	})
+	s.Hub.Heartbeat = s.Heartbeat
+
+	warnIfPlaintextAgentChannel(logger, runtimeCfg.Master.PublicBaseURLs)
 
 	publisher := msync.NewPublisher(s.Hub, bus, &s.Version, logger)
 	publisher.Start()
 
-	settler := billing.NewSettler(application, bus, logger)
+	// Aggregator: buffer rollup writes in memory; flush in batches.
+	// Settings provide override; defaults match spec (30s tick / 5000 row cap).
+	aggFlushSec := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
+		"billing.aggregator_flush_interval_seconds", 30,
+	)
+	aggMaxRows := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
+		"billing.aggregator_max_buffered_rows", 5000,
+	)
+	aggregator := billing.NewAggregator(application, logger, billing.AggregatorOptions{
+		FlushEvery: time.Duration(aggFlushSec) * time.Second,
+		MaxRows:    aggMaxRows,
+	})
+	aggregator.SetFlushFns(
+		func(rows []dao.TokenDailyRow) error {
+			return dao.NewAdminMutation(dao.NewContext(application)).Billing().BatchUpsertTokenDaily(rows)
+		},
+		func(rows []dao.ChannelDailyRow) error {
+			return dao.NewAdminMutation(dao.NewContext(application)).Billing().BatchUpsertChannelDaily(rows)
+		},
+		func(rows []dao.HourlyBucketRow) error {
+			return dao.NewAdminMutation(dao.NewContext(application)).Billing().BatchUpsertHourlyBucket(rows)
+		},
+	)
+	s.Aggregator = aggregator
+
+	// RebuildRunner: per-hour async rebuild scheduler. Terminal-job retention
+	// is admin-configurable; default 24h. Production sliceFn falls back to
+	// dao.RebuildHourSlice (set inside run() when SliceFn is nil + app non-nil).
+	retainSec := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
+		"billing.rebuild_job_retain_seconds", 86400,
+	)
+	s.RebuildRunner = billing.NewRebuildRunner(application, logger, time.Duration(retainSec)*time.Second)
+
+	settler := billing.NewSettlerWithAggregator(application, bus, logger, aggregator)
 	settler.Start()
 	checker := billing.NewQuotaChecker(application, bus, logger)
 	checker.Start()
@@ -209,6 +295,7 @@ func (s *Server) setupRoutes() {
 	cacheH := &apicache.Handler{
 		GetOnlineAgentIDs: s.Hub.GetOnlineAgentIDs,
 		GetRuntime:        s.Hub.GetRuntime,
+		Tracker:           s.Heartbeat,
 	}
 
 	// Public endpoints
@@ -227,6 +314,7 @@ func (s *Server) setupRoutes() {
 	s.Router.GET("/api/oauth/:provider/link", oauthH.HandleLink)
 
 	mrH := &apimodelrouting.Handler{Bus: s.Bus}
+	pcH := private_channel.NewHandler(s.App, s.BYOKProvider)
 
 	// User-level authenticated routes (no admin required)
 	userAuth := s.Router.Group("/api")
@@ -251,6 +339,22 @@ func (s *Server) setupRoutes() {
 	userAuth.GET("/model-routings/:id", api.Adapt(adapter, api.BindURI, mrH.PortalGet))
 	userAuth.PUT("/model-routings/:id", api.Adapt(adapter, api.BindURIAndBodyMap, mrH.PortalUpdate))
 	userAuth.DELETE("/model-routings/:id", api.Adapt(adapter, api.BindURI, mrH.PortalDelete))
+
+	// Portal private-channels (BYOK)
+	userAuth.GET("/private-channels", api.Adapt(adapter, api.BindQuery, pcH.PortalList))
+	userAuth.POST("/private-channels", api.Adapt(adapter, api.BindJSON, pcH.Create))
+	userAuth.GET("/private-channels/available-models", api.Adapt(adapter, api.BindNone, pcH.PortalAvailableModels))
+	userAuth.GET("/private-channels/types", api.Adapt(adapter, api.BindNone, pcH.PortalSupportedTypes))
+	userAuth.GET("/private-channels/:id", api.Adapt(adapter, api.BindURI, pcH.PortalGet))
+	userAuth.PUT("/private-channels/:id", api.Adapt(adapter, api.BindURIAndBodyMap, pcH.PortalUpdate))
+	userAuth.PUT("/private-channels/:id/key", api.Adapt(adapter, api.BindURIAndJSON, pcH.PortalUpdateKey))
+	userAuth.DELETE("/private-channels/:id", api.Adapt(adapter, api.BindURI, pcH.PortalDelete))
+	userAuth.POST("/private-channels/:id/test", api.Adapt(adapter, api.BindURIAndOptionalJSON, pcH.PortalTest))
+
+	// Portal BYOK billing breakdowns (current-user scoped; spec §4.3 / Task 21)
+	userAuth.GET("/private-channels/billing/overview", api.Adapt(adapter, api.BindQuery, pcH.BillingOverview))
+	userAuth.GET("/private-channels/billing/by-channel", api.Adapt(adapter, api.BindQuery, pcH.BillingByChannel))
+	userAuth.GET("/private-channels/billing/by-model", api.Adapt(adapter, api.BindQuery, pcH.BillingByModel))
 
 	// Protected endpoints
 	auth := s.Router.Group("/api/admin")
@@ -293,6 +397,12 @@ func (s *Server) setupRoutes() {
 	auth.POST("/channels/:id/test", api.Adapt(adapter, api.BindURIAndOptionalJSON, channelH.Test))
 	auth.POST("/channels/fetch-models", api.Adapt(adapter, api.BindJSON, channelH.FetchModels))
 
+	// Admin private-channels (BYOK cross-user view + kill switch)
+	auth.GET("/private-channels", api.Adapt(adapter, api.BindQuery, pcH.AdminList))
+	auth.GET("/private-channels/baseurl/usage", api.Adapt(adapter, api.BindQuery, pcH.AdminBaseURLUsage))
+	auth.GET("/private-channels/:id", api.Adapt(adapter, api.BindURI, pcH.AdminGet))
+	auth.POST("/private-channels/:id/disable", api.Adapt(adapter, api.BindURI, pcH.AdminDisable))
+
 	auth.GET("/models", api.Adapt(adapter, api.BindQuery, modelH.List))
 	auth.POST("/models", api.Adapt(adapter, api.BindJSON, modelH.Create))
 	auth.GET("/models/:id", api.Adapt(adapter, api.BindURI, modelH.Get))
@@ -331,8 +441,10 @@ func (s *Server) setupRoutes() {
 	auth.DELETE("/model-routings/:id", api.Adapt(adapter, api.BindURI, mrH.Delete))
 
 	logH := &apilog.Handler{}
-	billingH := &apibilling.Handler{}
+	billingH := &apibilling.Handler{Runner: s.RebuildRunner}
 	statsH := &stats.Handler{ConnectedCount: s.Hub.ConnectedAgents}
+	monitoringH := &apimonitoring.Handler{}
+	insightsH := &apiinsights.Handler{Tracker: s.Heartbeat}
 
 	// Token/Log/Stats routes on userAuth (accessible by all authenticated users)
 	userAuth.GET("/tokens", api.Adapt(adapter, api.BindQuery, tokenH.List))
@@ -349,6 +461,15 @@ func (s *Server) setupRoutes() {
 
 	userAuth.GET("/stats/overview", api.Adapt(adapter, api.BindNone, statsH.Overview))
 	userAuth.GET("/stats/trend", api.Adapt(adapter, api.BindQuery, statsH.Trend))
+	userAuth.GET("/stats/byok-overview", api.Adapt(adapter, api.BindNone, statsH.BYOKOverview))
+
+	// Observability v1: dashboard / billing insights / logs insights (all users; admin/user scope
+	// 由各 handler 内部按 RequestScope 区分);monitoring insights / generic insights 仅 admin。
+	userAuth.GET("/stats/dashboard", api.Adapt(adapter, api.BindQuery, statsH.Dashboard))
+	userAuth.GET("/billing/insights", api.Adapt(adapter, api.BindQuery, billingH.Insights))
+	userAuth.GET("/logs/insights", api.Adapt(adapter, api.BindQuery, logH.Insights))
+	auth.GET("/monitoring/insights", api.Adapt(adapter, api.BindQuery, monitoringH.Insights))
+	auth.GET("/insights", api.Adapt(adapter, api.BindQuery, insightsH.Get))
 
 	// Backward-compatible aliases on admin group (deprecated)
 	auth.GET("/tokens", api.Adapt(adapter, api.BindQuery, tokenH.List))
@@ -362,6 +483,8 @@ func (s *Server) setupRoutes() {
 	auth.GET("/billing/channels", api.Adapt(adapter, api.BindQuery, billingH.ListChannels))
 	auth.GET("/billing/channels/:channel_id/daily", api.Adapt(adapter, api.BindURIAndQuery, billingH.ChannelDaily))
 	auth.POST("/billing/rebuild", api.Adapt(adapter, api.BindOptionalJSON, billingH.Rebuild))
+	auth.GET("/billing/rebuild/jobs", api.Adapt(adapter, api.BindNone, billingH.ListRebuildJobs))
+	auth.GET("/billing/rebuild/jobs/:id", api.Adapt(adapter, api.BindURI, billingH.GetRebuildJob))
 
 	auth.GET("/stats", api.Adapt(adapter, api.BindNone, statsH.Overview))
 
@@ -371,6 +494,7 @@ func (s *Server) setupRoutes() {
 	auth.POST("/system/cleanup", api.Adapt(adapter, api.BindJSON, systemH.Cleanup))
 	auth.GET("/system/settings", api.Adapt(adapter, api.BindNone, systemH.GetSettings))
 	auth.PUT("/system/settings", api.Adapt(adapter, api.BindJSON, systemH.UpdateSettings))
+	auth.GET("/byok-system-baseurls", api.Adapt(adapter, api.BindNone, systemH.BYOKSystemBaseURLs))
 
 	auth.GET("/cache/stats", api.Adapt(adapter, api.BindNone, cacheH.Stats))
 
@@ -456,6 +580,28 @@ func (s *Server) setupStaticRoutesFromFS(assets fs.FS) {
 	})
 }
 
+// warnIfPlaintextAgentChannel 检查 public_base_urls 是否含 http:// 项。
+// 含有意味着外部（含 agent 回连 master）很可能走明文：BYOK API key 经
+// master-agent WS 通道下发时会被中间人嗅探。生产请用 wss://。
+// 不阻断启动，让运维自行权衡。
+func warnIfPlaintextAgentChannel(logger *zap.Logger, publicBaseURLs []string) {
+	if logger == nil {
+		return
+	}
+	for _, raw := range publicBaseURLs {
+		parsed, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "ws") {
+			logger.Warn(
+				"master public_base_urls contains a plaintext entry; BYOK keys and agent credentials will traverse in plaintext over the master-agent WS channel. Use https:// (wss://) in production.",
+				zap.String("entry", raw),
+			)
+		}
+	}
+}
+
 func isAPIOrWSPath(path string) bool {
 	return path == "/api" ||
 		strings.HasPrefix(path, "/api/") ||
@@ -486,16 +632,31 @@ func (s *Server) loadVersion() {
 			s.Logger.Info("loaded version from DB", zap.Int64("version", v))
 		}
 	}
+	// 不存在则插入 placeholder，让后续 saveVersion 走纯 UPDATE 不需要 INSERT
+	s.DB.Where(models.Setting{Key: "version"}).
+		Attrs(models.Setting{Value: "0"}).
+		FirstOrCreate(&models.Setting{})
+	s.lastSavedVersion.Store(s.Version.Load())
 }
 
 func (s *Server) saveVersion() {
-	v := strconv.FormatInt(s.Version.Load(), 10)
-	s.DB.Where("key = ?", "version").Assign(models.Setting{Value: v}).FirstOrCreate(&models.Setting{Key: "version"})
+	current := s.Version.Load()
+	if current == s.lastSavedVersion.Load() {
+		return
+	}
+	v := strconv.FormatInt(current, 10)
+	if err := s.DB.Model(&models.Setting{}).
+		Where("key = ?", "version").
+		Update("value", v).Error; err != nil {
+		s.Logger.Warn("saveVersion failed", zap.Error(err))
+		return
+	}
+	s.lastSavedVersion.Store(current)
 }
 
 func (s *Server) startVersionPersistence(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -566,6 +727,10 @@ func (s *Server) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	s.startVersionPersistence(ctx)
+	s.Heartbeat.Start(ctx)
+	if s.Aggregator != nil {
+		s.Aggregator.Start(ctx)
+	}
 	go s.runStateSweeper(ctx, s.oauthHandler.StateStore)
 
 	ln, err := net.Listen("tcp", s.Cfg.Master.Listen)
@@ -603,10 +768,28 @@ func (s *Server) runStateSweeper(ctx context.Context, store *apioauth.StateStore
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	var httpErr error
 	if s.httpSrv != nil {
-		return s.httpSrv.Shutdown(ctx)
+		httpErr = s.httpSrv.Shutdown(ctx)
 	}
-	return nil
+	// Shutdown order (spec §9): HTTP → Aggregator → RebuildRunner → Heartbeat.
+	// Aggregator.Stop drains the final billing rollup batch; running it
+	// AFTER the HTTP server has stopped accepting new requests guarantees
+	// the in-memory deltas reflect every committed UsageLog.
+	if s.Aggregator != nil {
+		s.Aggregator.Stop()
+	}
+	// Cancel in-flight rebuild jobs; in-progress slice transactions finish on
+	// their own goroutine then exit at the next ctx check. Idempotent.
+	if s.RebuildRunner != nil {
+		s.RebuildRunner.Stop()
+	}
+	// Force-flush in-memory last_seen before exit. Idempotent + safe even
+	// if Start was never called (e.g. in tests).
+	if s.Heartbeat != nil {
+		s.Heartbeat.Stop()
+	}
+	return httpErr
 }
 
 // generateAgentSecret 用 crypto/rand 读 32 字节，base64 RawURL 编码（约 43 字符）。

@@ -31,11 +31,20 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		}
 	}
 
+	// §5.4 BYOKMaxChannels: reject negative writes. 0 = quota disabled, nil = inherit
+	// global byok_max_channels_per_user, positive = effective cap.
+	if req.BYOKMaxChannels != nil && *req.BYOKMaxChannels < 0 {
+		return api.Created[models.UserGroup]{}, api.BadRequestError(
+			"byok_max_channels must be >= 0 (0 = disabled, omit for inherit)", nil)
+	}
+
 	g := models.UserGroup{
-		Name:        req.Name,
-		Description: req.Description,
-		Status:      req.Status,
-		Models:      req.Models,
+		Name:            req.Name,
+		Description:     req.Description,
+		Status:          req.Status,
+		Models:          req.Models,
+		BYOKEnabled:     req.BYOKEnabled,
+		BYOKMaxChannels: req.BYOKMaxChannels,
 	}
 	if g.Status == 0 {
 		g.Status = consts.StatusEnabled

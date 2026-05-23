@@ -17,6 +17,8 @@ type CreateRequest struct {
 	Status            int     `json:"status"`
 	AllowedChannelIDs *[]uint `json:"allowed_channel_ids"`
 	Models            string  `json:"models"`
+	BYOKEnabled       *bool   `json:"byok_enabled"`
+	BYOKMaxChannels   *int    `json:"byok_max_channels"`
 }
 
 type UpdateRequest struct {

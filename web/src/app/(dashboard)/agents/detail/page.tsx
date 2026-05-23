@@ -22,6 +22,8 @@ import { CopyableText } from "@/components/business/copyable-text";
 import { CacheStatsTable } from "@/components/business/cache-stats-table";
 
 import { useAgentDetail, useConnectivityReport, useCheckConnectivity, useFullSyncAgents } from "@/lib/api/agents";
+import { formatErrorToast } from "@/lib/api/error-toast";
+import { formatDuration, formatUptime } from "@/lib/utils/format";
 import type { AgentAddress } from "@/lib/types";
 
 function parseAddresses(raw: string): AgentAddress[] {
@@ -31,12 +33,6 @@ function parseAddresses(raw: string): AgentAddress[] {
     if (Array.isArray(parsed)) return parsed;
   } catch { /* ignore */ }
   return [];
-}
-
-function formatUptime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return `${h}h ${m}m`;
 }
 
 function Stat({ label, children }: { label: string; children: React.ReactNode }) {
@@ -72,8 +68,8 @@ function AgentDetailContent() {
     try {
       await checkMutation.mutateAsync(id);
       toast.success(tc("success"));
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -83,13 +79,13 @@ function AgentDetailContent() {
       const result = await fullSyncMutation.mutateAsync({ agent_ids: [agent.agent_id] });
       const r = result.results[0];
       if (r?.success) {
-        toast.success(`${t("fullSync")}: v${r.version}, ${r.duration_ms}ms`);
+        toast.success(`${t("fullSync")}: v${r.version}, ${formatDuration(r.duration_ms ?? 0)}`);
         refetch();
       } else {
         toast.error(r?.error || tc("error"));
       }
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -213,7 +209,7 @@ function AgentDetailContent() {
         </div>
         {connectivity && connectivity.checked_at > 0 && connectivity.results && connectivity.results.length > 0 ? (
           <div className="border-t">
-            <Table>
+            <Table className="text-body">
               <TableHeader>
                 <TableRow>
                   <TableHead className="h-8 text-xs">{t("targetAgent")}</TableHead>
@@ -246,7 +242,7 @@ function AgentDetailContent() {
                         )}
                       </TableCell>
                       <TableCell className="py-1.5 text-xs">
-                        {r.reachable ? `${r.latency_ms}ms` : r.error || "-"}
+                        {r.reachable ? formatDuration(r.latency_ms) : r.error || "-"}
                       </TableCell>
                     </TableRow>
                   ))

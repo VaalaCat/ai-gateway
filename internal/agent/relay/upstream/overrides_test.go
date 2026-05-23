@@ -116,7 +116,7 @@ func TestChannelProtocolOverride(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ch := &models.Channel{OtherSettings: tc.otherSettings}
+			ch := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: tc.otherSettings}}
 			rules := ChannelOverrideRulesFor(ch)
 			var got map[codec.Protocol]codec.Protocol
 			if rules != nil {
@@ -217,15 +217,12 @@ func TestParseModelProtocolOverride_AutoSkipped(t *testing.T) {
 }
 
 func TestChannelOverrideRulesFor_PicksUpBoth(t *testing.T) {
-	ch := &models.Channel{
-		ID: 1,
-		OtherSettings: `{
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, OtherSettings: `{
 			"protocol_override": {"openai_chat": "claude"},
 			"model_protocol_override": [
 				{"model": "gpt-4o", "overrides": {"openai_chat": "openai_responses"}}
 			]
-		}`,
-	}
+		}`}}
 	rules := ChannelOverrideRulesFor(ch)
 	if rules == nil {
 		t.Fatal("expected non-nil rules")
@@ -239,28 +236,25 @@ func TestChannelOverrideRulesFor_PicksUpBoth(t *testing.T) {
 }
 
 func TestChannelOverrideRulesFor_EmptyOtherSettings(t *testing.T) {
-	ch := &models.Channel{ID: 1, OtherSettings: ""}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, OtherSettings: ""}}
 	if rules := ChannelOverrideRulesFor(ch); rules != nil {
 		t.Fatalf("empty OtherSettings should return nil; got %+v", rules)
 	}
 }
 
 func TestChannelOverrideRulesFor_MalformedJSON(t *testing.T) {
-	ch := &models.Channel{ID: 1, OtherSettings: "{not json"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, OtherSettings: "{not json"}}
 	if rules := ChannelOverrideRulesFor(ch); rules != nil {
 		t.Fatalf("malformed JSON should return nil; got %+v", rules)
 	}
 }
 
 func TestChannelOverrideRulesFor_OnlyModelLevel(t *testing.T) {
-	ch := &models.Channel{
-		ID: 1,
-		OtherSettings: `{
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, OtherSettings: `{
 			"model_protocol_override": [
 				{"model": "gpt-4o", "overrides": {"openai_chat": "openai_responses"}}
 			]
-		}`,
-	}
+		}`}}
 	rules := ChannelOverrideRulesFor(ch)
 	if rules == nil {
 		t.Fatal("expected non-nil rules")

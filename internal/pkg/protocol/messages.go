@@ -42,6 +42,8 @@ type UsageLogEntry struct {
 	UserID           uint   `json:"user_id"`
 	TokenID          uint   `json:"token_id"`
 	ChannelID        uint   `json:"channel_id"`
+	PrivateChannelID uint   `json:"private_channel_id"`
+	OwnerType        string `json:"owner_type"`
 	ModelName        string `json:"model_name"`
 	PromptTokens     int    `json:"prompt_tokens"`
 	CompletionTokens int    `json:"completion_tokens"`

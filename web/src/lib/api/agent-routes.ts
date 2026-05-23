@@ -2,13 +2,17 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
 import type { AgentRoute, AgentRouteOverviewItem, PaginatedResponse, PaginatedParams } from "@/lib/types";
 
-export function useAgentRoutes(params: PaginatedParams & { source_type?: string; source_id?: number } = {}) {
+export function useAgentRoutes(
+  params: PaginatedParams & { source_type?: string; source_id?: number } = {},
+  options: { enabled?: boolean } = {},
+) {
   return useQuery({
     queryKey: ["agent-routes", params],
     queryFn: () =>
       api.get<PaginatedResponse<AgentRoute>>(
         `/admin/agent-routes${buildQuery(params)}`
       ),
+    enabled: options.enabled ?? true,
   });
 }
 

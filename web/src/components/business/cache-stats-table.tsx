@@ -10,6 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { formatPercent } from "@/lib/utils/format";
 import { CACHE_ENTITY_NAMES } from "@/lib/types";
 import type {
   CacheEntityName,
@@ -59,10 +60,6 @@ function toRow(
   };
 }
 
-function formatPct(v: number | null): string {
-  return v === null ? "—" : `${(v * 100).toFixed(1)}%`;
-}
-
 function hitRateClass(v: number | null): string {
   if (v === null) return "text-muted-foreground";
   if (v < 0.5) return "text-destructive font-medium";
@@ -97,7 +94,7 @@ export function CacheStatsTable({ data, mode }: CacheStatsTableProps) {
 
   return (
     <div className="overflow-x-auto">
-      <Table className="min-w-[640px]">
+      <Table className="min-w-[640px] text-body">
         <TableHeader>
           <TableRow>
             <TableHead className="w-32">{t("tableEntity")}</TableHead>
@@ -116,7 +113,7 @@ export function CacheStatsTable({ data, mode }: CacheStatsTableProps) {
               <TableRow key={name}>
                 <TableCell className="font-mono text-xs">{name as CacheEntityName}</TableCell>
                 <TableCell className={cn("text-right tabular-nums", hitRateClass(row.hit_rate))}>
-                  {formatPct(row.hit_rate)}
+                  {row.hit_rate === null ? "—" : formatPercent(row.hit_rate)}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
                   {isFullSync ? <span className="text-muted-foreground">—</span> : row.negative_hits}

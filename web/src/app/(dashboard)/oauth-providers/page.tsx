@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -8,6 +8,9 @@ import { MoreHorizontal, Plus } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -25,6 +28,7 @@ import {
   useUpdateOAuthProvider,
   useDeleteOAuthProvider,
 } from "@/lib/api/oauth";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import type { OAuthProvider } from "@/lib/types-oauth";
 
 import { ProviderFormDialog } from "./_form-dialog";
@@ -32,6 +36,11 @@ import { ProviderFormDialog } from "./_form-dialog";
 export default function OAuthProvidersPage() {
   const t = useTranslations("oauth.providers");
   const tc = useTranslations("common");
+
+  // 后端 List 接口暂不支持 search，filterSpec 为空（仅承载 primaryAction）
+  const filterSpec = useMemo(() => ({} satisfies FilterSpec), []);
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+  void filterValues;
 
   const { data: providers = [], isLoading } = useOAuthProviders();
   const update = useUpdateOAuthProvider();
@@ -44,8 +53,8 @@ export default function OAuthProvidersPage() {
   const handleToggleEnabled = async (p: OAuthProvider, next: boolean) => {
     try {
       await update.mutateAsync({ id: p.id, enabled: next });
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -54,8 +63,8 @@ export default function OAuthProvidersPage() {
     try {
       await del.mutateAsync(deleteItem.id);
       toast.success(tc("success"));
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     } finally {
       setDeleteItem(null);
     }
@@ -134,14 +143,25 @@ export default function OAuthProvidersPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">{t("title")}</h1>
-        <Button onClick={() => setCreateOpen(true)}>
-          <Plus className="mr-2 size-4" />
-          {t("addNew")}
-        </Button>
-      </div>
-      <DataTable columns={columns} data={providers} loading={isLoading} />
+      <h1 className="text-2xl font-semibold">{t("title")}</h1>
+      <DataTable
+        columns={columns}
+        data={providers}
+        loading={isLoading}
+        toolbar={
+          <FilterableToolbar
+            spec={filterSpec}
+            value={filterValues}
+            onChange={setFilterValues}
+            primaryAction={
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="mr-2 size-4" />
+                {t("addNew")}
+              </Button>
+            }
+          />
+        }
+      />
       <ProviderFormDialog
         mode="create"
         open={createOpen}

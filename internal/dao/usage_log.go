@@ -10,6 +10,7 @@ import (
 type UsageLogQuery interface {
 	List(opts ListOptions, filter UsageLogListFilter) ([]models.UsageLog, int64, error)
 	GetByRequestID(requestID string) (*models.UsageLog, error)
+	PercentileTTFT(filter UsageLogListFilter, p float64) (int64, error)
 }
 
 type AdminUsageLogQuery interface {
@@ -31,6 +32,7 @@ type adminUsageLogQuery struct{ ctx *baseContext }
 type adminUsageLogMutation struct{ ctx *baseContext }
 
 func applyUsageLogFilter(db *gorm.DB, filter UsageLogListFilter) *gorm.DB {
+	db = filter.TimeWindow.Apply(db, "created_at")
 	if filter.UserID != nil {
 		db = db.Where("user_id = ?", *filter.UserID)
 	}
@@ -45,6 +47,12 @@ func applyUsageLogFilter(db *gorm.DB, filter UsageLogListFilter) *gorm.DB {
 	}
 	if filter.Status != nil {
 		db = db.Where("status = ?", *filter.Status)
+	}
+	if filter.OwnerType != nil && *filter.OwnerType != "" {
+		db = db.Where("owner_type = ?", *filter.OwnerType)
+	}
+	if filter.PrivateChannelID != nil {
+		db = db.Where("private_channel_id = ?", *filter.PrivateChannelID)
 	}
 	return db
 }
@@ -66,6 +74,44 @@ func (q *usageLogQuery) GetByRequestID(requestID string) (*models.UsageLog, erro
 	var log models.UsageLog
 	err := q.ctx.UserDB().Where("request_id = ?", requestID).First(&log).Error
 	return &log, err
+}
+
+// PercentileTTFT 计算 first_response_ms 的 p 分位数 (p ∈ [0,1]),
+// 仅统计 is_stream=1 AND status=1 AND completion_tokens>0 的行,
+// 与 applyUsageLogFilter 叠加 user_id 自动 scope。
+// SQLite 友好的近似实现: ORDER BY first_response_ms ASC LIMIT 1 OFFSET floor(cnt * p)。
+// cnt=0 时直接返回 0。
+func (q *usageLogQuery) PercentileTTFT(filter UsageLogListFilter, p float64) (int64, error) {
+	return percentileTTFT(q.ctx.UserDB().Model(&models.UsageLog{}), filter, p)
+}
+
+// percentileTTFT 是 PercentileTTFT 的核心实现 (传入 base db 已带 scope 过滤)。
+func percentileTTFT(base *gorm.DB, filter UsageLogListFilter, p float64) (int64, error) {
+	streamSuccess := func() *gorm.DB {
+		return applyUsageLogFilter(base, filter).
+			Where("is_stream = 1 AND status = 1 AND completion_tokens > 0")
+	}
+	var cnt int64
+	if err := streamSuccess().Count(&cnt).Error; err != nil {
+		return 0, err
+	}
+	if cnt == 0 {
+		return 0, nil
+	}
+	offset := int64(float64(cnt) * p)
+	if offset >= cnt {
+		offset = cnt - 1
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var v int64
+	err := streamSuccess().
+		Select("first_response_ms").
+		Order("first_response_ms ASC").
+		Offset(int(offset)).Limit(1).
+		Scan(&v).Error
+	return v, err
 }
 
 // --- admin-scoped ---

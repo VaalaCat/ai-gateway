@@ -19,6 +19,9 @@ const (
 	EntitySync          = "sync"
 	EntityUserGroup  = "user_group"
 	EntityUser       = "user"
+
+	EntityPrivateChannel      = "private_channel"
+	EntityPrivateChannelShare = "private_channel_share"
 )
 
 // CRUD action 常量。

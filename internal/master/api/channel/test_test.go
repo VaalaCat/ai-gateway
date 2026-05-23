@@ -57,7 +57,7 @@ func TestChannelTest_LocalUsesLoopbackPort(t *testing.T) {
 	upstreamURL, _ := url.Parse(upstream.URL)
 
 	db := setupTestDB(t)
-	db.Create(&models.Channel{Name: "test-ch", Models: "gpt-4", Status: 1})
+	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "test-ch", Status: 1}, Models: "gpt-4"})
 
 	h := &Handler{MasterListen: ":" + upstreamURL.Port()}
 	c := newTestContext(t, db, "evil.example.com")
@@ -102,7 +102,7 @@ func TestChannelTest_LocalIgnoresRequestHost(t *testing.T) {
 	upstreamURL, _ := url.Parse(upstream.URL)
 
 	db := setupTestDB(t)
-	db.Create(&models.Channel{Name: "ch", Models: "gpt-4", Status: 1})
+	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "ch", Status: 1}, Models: "gpt-4"})
 
 	// 故意设一个不可达的 Host header；旧实现会拼出 http://10.255.255.1:9999/...
 	// 完全连不上，证明 c.Request.Host 已经不再被使用。
@@ -141,7 +141,7 @@ func TestChannelTest_LocalListenWithExplicitHost(t *testing.T) {
 	for _, listenStr := range cases {
 		t.Run(listenStr, func(t *testing.T) {
 			db := setupTestDB(t)
-			db.Create(&models.Channel{Name: "ch", Models: "gpt-4", Status: 1})
+			db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "ch", Status: 1}, Models: "gpt-4"})
 
 			h := &Handler{MasterListen: listenStr}
 			c := newTestContext(t, db, "")
@@ -170,7 +170,7 @@ func TestChannelTest_LocalInvalidListenReturnsError(t *testing.T) {
 	defer upstream.Close()
 
 	db := setupTestDB(t)
-	db.Create(&models.Channel{Name: "ch", Models: "gpt-4", Status: 1})
+	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "ch", Status: 1}, Models: "gpt-4"})
 
 	h := &Handler{MasterListen: "garbage-not-a-host-port"}
 	c := newTestContext(t, db, "")

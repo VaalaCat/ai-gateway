@@ -130,7 +130,7 @@ func TestGetAllModelNames_IncludesRoutings(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 	// 模拟一个 channel 提供 model "gpt-4o"
 	s.LoadChannels([]models.Channel{
-		{ID: 1, Name: "ch", Type: 1, Models: "gpt-4o", Status: 1},
+		{ChannelCore: models.ChannelCore{ID: 1, Name: "ch", Type: 1, Status: 1}, Models: "gpt-4o"},
 	})
 	s.RebuildModelIndex()
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{Name: "smart", Scope: "global", Enabled: true})

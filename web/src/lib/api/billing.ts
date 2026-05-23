@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, buildQuery } from "./client";
+
+import { localDateRangeToUTCRange } from "@/lib/utils/date-range";
 import type {
   BillingChannelDailyQueryParams,
   BillingChannelDailyRow,
@@ -9,13 +10,17 @@ import type {
   BillingOverviewQueryParams,
   BillingOverviewResponse,
   BillingRebuildRequest,
-  BillingRebuildResponse,
+  BillingRebuildSubmitResponse,
+  RebuildJob,
+  RebuildJobListResponse,
   BillingTokenDailyQueryParams,
   BillingTokenDailyRow,
   BillingTokenQueryParams,
   BillingTokenRow,
   PaginatedResponse,
 } from "@/lib/types";
+
+import { api, buildQuery } from "./client";
 
 interface BillingQueryOptions {
   enabled?: boolean;
@@ -27,7 +32,16 @@ export function useBillingOverview(
 ) {
   return useQuery({
     queryKey: ["billing-overview", params],
-    queryFn: () => api.get<BillingOverviewResponse>(`/billing/overview${buildQuery(params)}`),
+    queryFn: () => {
+      const utc = localDateRangeToUTCRange(params.start_date ?? "", params.end_date ?? "");
+      return api.get<BillingOverviewResponse>(
+        `/billing/overview${buildQuery({
+          ...params,
+          start_date: utc.from,
+          end_date: utc.to,
+        })}`,
+      );
+    },
     enabled: options.enabled ?? true,
   });
 }
@@ -38,7 +52,16 @@ export function useTokenBilling(
 ) {
   return useQuery({
     queryKey: ["billing-token-list", params],
-    queryFn: () => api.get<PaginatedResponse<BillingTokenRow>>(`/billing/tokens${buildQuery(params)}`),
+    queryFn: () => {
+      const utc = localDateRangeToUTCRange(params.start_date ?? "", params.end_date ?? "");
+      return api.get<PaginatedResponse<BillingTokenRow>>(
+        `/billing/tokens${buildQuery({
+          ...params,
+          start_date: utc.from,
+          end_date: utc.to,
+        })}`,
+      );
+    },
     enabled: options.enabled ?? true,
   });
 }
@@ -50,8 +73,16 @@ export function useTokenBillingDaily(
 ) {
   return useQuery({
     queryKey: ["billing-token-daily", tokenId, params],
-    queryFn: () =>
-      api.get<BillingDailyResponse<BillingTokenDailyRow>>(`/billing/tokens/${tokenId}/daily${buildQuery(params)}`),
+    queryFn: () => {
+      const utc = localDateRangeToUTCRange(params.start_date ?? "", params.end_date ?? "");
+      return api.get<BillingDailyResponse<BillingTokenDailyRow>>(
+        `/billing/tokens/${tokenId}/daily${buildQuery({
+          ...params,
+          start_date: utc.from,
+          end_date: utc.to,
+        })}`,
+      );
+    },
     enabled: (options.enabled ?? true) && tokenId != null,
   });
 }
@@ -62,8 +93,16 @@ export function useChannelBilling(
 ) {
   return useQuery({
     queryKey: ["billing-channel-list", params],
-    queryFn: () =>
-      api.get<PaginatedResponse<BillingChannelRow>>(`/admin/billing/channels${buildQuery(params)}`),
+    queryFn: () => {
+      const utc = localDateRangeToUTCRange(params.start_date ?? "", params.end_date ?? "");
+      return api.get<PaginatedResponse<BillingChannelRow>>(
+        `/admin/billing/channels${buildQuery({
+          ...params,
+          start_date: utc.from,
+          end_date: utc.to,
+        })}`,
+      );
+    },
     enabled: options.enabled ?? true,
   });
 }
@@ -75,23 +114,72 @@ export function useChannelBillingDaily(
 ) {
   return useQuery({
     queryKey: ["billing-channel-daily", channelId, params],
-    queryFn: () =>
-      api.get<BillingDailyResponse<BillingChannelDailyRow>>(
-        `/admin/billing/channels/${channelId}/daily${buildQuery(params)}`
-      ),
+    queryFn: () => {
+      const utc = localDateRangeToUTCRange(params.start_date ?? "", params.end_date ?? "");
+      return api.get<BillingDailyResponse<BillingChannelDailyRow>>(
+        `/admin/billing/channels/${channelId}/daily${buildQuery({
+          ...params,
+          start_date: utc.from,
+          end_date: utc.to,
+        })}`
+      );
+    },
     enabled: (options.enabled ?? true) && channelId != null,
   });
 }
 
-export function useRebuildBilling() {
-  const qc = useQueryClient();
+// useRebuildBillingSubmit kicks off an async rebuild job. The mutation
+// resolves with { job_id, total_slices }; callers should then poll
+// useRebuildBillingJob(jobId) and invalidate billing caches on terminal status.
+export function useRebuildBillingSubmit() {
   return useMutation({
     mutationFn: (body: BillingRebuildRequest) =>
-      api.post<BillingRebuildResponse>("/admin/billing/rebuild", body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["billing-overview"] });
-      qc.invalidateQueries({ queryKey: ["billing-token-list"] });
-      qc.invalidateQueries({ queryKey: ["billing-channel-list"] });
-    },
+      api.post<BillingRebuildSubmitResponse>("/admin/billing/rebuild", body),
   });
+}
+
+// useRebuildBillingJob polls a single job; auto-stops refetch on terminal status.
+// Pass `null` to disable (e.g. before a job has been created).
+export function useRebuildBillingJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["billing-rebuild-job", jobId],
+    enabled: !!jobId,
+    refetchInterval: (q) => {
+      const data = q.state.data as RebuildJob | undefined;
+      if (!data) return 2000;
+      return data.status === "running" ? 2000 : false;
+    },
+    queryFn: () =>
+      api.get<RebuildJob>(`/admin/billing/rebuild/jobs/${jobId}`),
+  });
+}
+
+// useRebuildBillingJobs polls the global jobs list, used by the entry button
+// to surface in-progress jobs after the dialog has been closed. Polls every
+// 2s while any job is running; backs off to 10s when idle so we don't hammer
+// the admin endpoint when nothing's happening.
+export function useRebuildBillingJobs(options: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: ["billing-rebuild-jobs"],
+    enabled: options.enabled ?? true,
+    refetchInterval: (q) => {
+      const data = q.state.data as RebuildJobListResponse | undefined;
+      const anyRunning = data?.jobs?.some((j) => j.status === "running");
+      return anyRunning ? 2000 : 10000;
+    },
+    queryFn: () =>
+      api.get<RebuildJobListResponse>("/admin/billing/rebuild/jobs"),
+  });
+}
+
+// useInvalidateBillingOnRebuildComplete is a helper for callers that want to
+// flush billing-related caches after a successful rebuild. Typically called
+// once when polling sees status === "succeeded".
+export function useInvalidateBillingCaches() {
+  const qc = useQueryClient();
+  return () => {
+    qc.invalidateQueries({ queryKey: ["billing-overview"] });
+    qc.invalidateQueries({ queryKey: ["billing-token-list"] });
+    qc.invalidateQueries({ queryKey: ["billing-channel-list"] });
+  };
 }

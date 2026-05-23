@@ -23,7 +23,7 @@ func TestNewTransportPoolReturnsInterface(t *testing.T) {
 		t.Fatal("NewTransportPool returned nil")
 	}
 	// happy path：构造完能用接口方法
-	tr := pool.Get(&models.Channel{ID: 42, BaseURL: "https://x"})
+	tr := pool.Get(&models.Channel{ChannelCore: models.ChannelCore{ID: 42, BaseURL: "https://x"}})
 	if tr == nil {
 		t.Fatal("pool.Get returned nil transport")
 	}
@@ -33,7 +33,7 @@ func TestNewTransportPoolReturnsInterface(t *testing.T) {
 // Get 不应 panic，并能正常返回 transport。
 func TestTransportPoolGetEmptyChannelFields(t *testing.T) {
 	pool := NewTransportPool(8, 4, 30*time.Second)
-	tr := pool.Get(&models.Channel{ID: 999, ProxyURL: ""})
+	tr := pool.Get(&models.Channel{ChannelCore: models.ChannelCore{ID: 999}, ProxyURL: ""})
 	if tr == nil {
 		t.Fatal("Get should return a usable transport for zero-value channel")
 	}
@@ -41,7 +41,7 @@ func TestTransportPoolGetEmptyChannelFields(t *testing.T) {
 
 func TestTransportPool_GetReturnsCachedInstance(t *testing.T) {
 	p := newTransportPool(100, 10, 30*time.Second)
-	ch := &models.Channel{ID: 1, BaseURL: "https://api.example.com"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://api.example.com"}}
 
 	t1 := p.Get(ch)
 	t2 := p.Get(ch)
@@ -52,8 +52,8 @@ func TestTransportPool_GetReturnsCachedInstance(t *testing.T) {
 
 func TestTransportPool_DifferentChannelsGetDifferentTransports(t *testing.T) {
 	p := newTransportPool(100, 10, 30*time.Second)
-	ch1 := &models.Channel{ID: 1, BaseURL: "https://a"}
-	ch2 := &models.Channel{ID: 2, BaseURL: "https://b"}
+	ch1 := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://a"}}
+	ch2 := &models.Channel{ChannelCore: models.ChannelCore{ID: 2, BaseURL: "https://b"}}
 
 	if p.Get(ch1) == p.Get(ch2) {
 		t.Errorf("different channels should get different transports")
@@ -62,7 +62,7 @@ func TestTransportPool_DifferentChannelsGetDifferentTransports(t *testing.T) {
 
 func TestTransportPool_ReadsConfigFields(t *testing.T) {
 	p := newTransportPool(50, 5, 60*time.Second)
-	ch := &models.Channel{ID: 1, BaseURL: "https://x"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://x"}}
 	tr := p.Get(ch)
 	if tr.MaxIdleConns != 50 {
 		t.Errorf("MaxIdleConns = %d, want 50", tr.MaxIdleConns)
@@ -80,7 +80,7 @@ func TestTransportPool_ReadsConfigFields(t *testing.T) {
 
 func TestTransportPool_ProxyURLAppliedToTransport(t *testing.T) {
 	p := newTransportPool(100, 10, 30*time.Second)
-	ch := &models.Channel{ID: 1, BaseURL: "https://x", ProxyURL: "http://proxy.local:3128"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://x"}, ProxyURL: "http://proxy.local:3128"}
 	tr := p.Get(ch)
 	if tr.Proxy == nil {
 		t.Fatal("Proxy should be set when ProxyURL configured")
@@ -98,7 +98,7 @@ func TestTransportPool_ProxyURLAppliedToTransport(t *testing.T) {
 
 func TestTransportPool_InvalidateRebuildsAfter(t *testing.T) {
 	p := newTransportPool(100, 10, 30*time.Second)
-	ch := &models.Channel{ID: 1, BaseURL: "https://x", ProxyURL: "http://proxy:3128"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://x"}, ProxyURL: "http://proxy:3128"}
 
 	t1 := p.Get(ch)
 	p.Invalidate(ch.ID, ch.ProxyURL)
@@ -110,7 +110,7 @@ func TestTransportPool_InvalidateRebuildsAfter(t *testing.T) {
 
 func TestTransportPool_ConcurrentGetCreatesOnce(t *testing.T) {
 	p := newTransportPool(100, 10, 30*time.Second)
-	ch := &models.Channel{ID: 1, BaseURL: "https://x"}
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://x"}}
 
 	var seen sync.Map
 	var wg sync.WaitGroup
@@ -133,7 +133,7 @@ func TestTransportPool_ConcurrentGetCreatesOnce(t *testing.T) {
 
 func TestTransportPool_InvalidateOnlyOnProxyChange(t *testing.T) {
 	p := newTransportPool(100, 10, 30*time.Second)
-	ch1 := &models.Channel{ID: 1, ProxyURL: "http://proxy1:3128"}
+	ch1 := &models.Channel{ChannelCore: models.ChannelCore{ID: 1}, ProxyURL: "http://proxy1:3128"}
 	t1 := p.Get(ch1)
 
 	// 模拟"ProxyURL 变了"

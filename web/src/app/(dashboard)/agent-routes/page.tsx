@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -8,19 +8,19 @@ import { Trash2 } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
 
-import { useDebounce } from "@/hooks/use-debounce";
 import { useAgentRoutesOverview, useDeleteAgentRoute } from "@/lib/api/agent-routes";
+import { formatErrorToast } from "@/lib/api/error-toast";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { AgentRouteOverviewItem } from "@/lib/types";
-
-type SourceTypeFilter = "" | "token" | "channel";
 
 function PriorityBadge({ priority }: { priority: number }) {
   if (priority >= 100) {
@@ -41,22 +41,31 @@ export default function AgentRoutesPage() {
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
-  const [search, setSearch] = useState("");
-  const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>("");
-  const debouncedSearch = useDebounce(search, 300);
+
+  const filterSpec = useMemo(() => ({
+    search: { kind: "text", placeholder: tc("search") },
+    source_type: {
+      kind: "enum",
+      options: [
+        { value: "token", label: t("sourceToken") },
+        { value: "channel", label: t("sourceChannel") },
+      ],
+      placeholder: t("filterBySourceType"),
+    },
+  } satisfies FilterSpec), [t, tc]);
+
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading } = useAgentRoutesOverview({
     page,
     page_size: pageSize,
-    search: debouncedSearch,
-    ...(sourceTypeFilter ? { source_type: sourceTypeFilter } : {}),
+    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
+    ...(filterValues.source_type ? { source_type: String(filterValues.source_type) } : {}),
   });
 
   const routes = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
-
-  useEffect(() => { setPage(1); }, [debouncedSearch, sourceTypeFilter]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -76,8 +85,8 @@ export default function AgentRoutesPage() {
       await deleteMutation.mutateAsync(deleteItem.id);
       toast.success(tc("success"));
       setDeleteItem(null);
-    } catch {
-      toast.error(tc("error"));
+    } catch (e) {
+      toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
@@ -138,30 +147,11 @@ export default function AgentRoutesPage() {
     },
   ];
 
-  const filterButtons: { label: string; value: SourceTypeFilter }[] = [
-    { label: t("all"), value: "" },
-    { label: t("tokenRules"), value: "token" },
-    { label: t("channelRules"), value: "channel" },
-  ];
-
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-bold">{t("title")}</h1>
         <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
-
-      <div className="flex gap-2">
-        {filterButtons.map((btn) => (
-          <Button
-            key={btn.value}
-            variant={sourceTypeFilter === btn.value ? "default" : "outline"}
-            size="sm"
-            onClick={() => setSourceTypeFilter(btn.value)}
-          >
-            {btn.label}
-          </Button>
-        ))}
       </div>
 
       <DataTable
@@ -174,10 +164,10 @@ export default function AgentRoutesPage() {
         pageCount={pageCount}
         onPaginationChange={handlePaginationChange}
         toolbar={
-          <DataTableToolbar
-            searchValue={search}
-            searchPlaceholder={tc("search")}
-            onSearchChange={setSearch}
+          <FilterableToolbar
+            spec={filterSpec}
+            value={filterValues}
+            onChange={setFilterValues}
           />
         }
       />
