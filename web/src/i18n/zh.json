@@ -1103,6 +1103,8 @@
     "proxyUrl": "代理地址",
     "proxyUrlDesc": "用于 Master 访问外部 API（获取模型价格、拉取模型列表等）的 HTTP 代理",
     "proxyUrlPlaceholder": "http://proxy.example.com:8080",
+    "registrationEnabled": "允许账号密码注册",
+    "registrationEnabledDesc": "开启后，登录页会显示注册入口，用户可通过用户名和密码创建账号；关闭后只能由管理员创建账号或通过 SSO 流程创建。",
     "oauthAutoCreate": "SSO 首次登录自动创建账号",
     "oauthAutoCreateDesc": "开启后，未绑定本地账号的 SSO 身份首次登录时进入选择页：可创建新账号或绑定已有账号；关闭则只能绑定已有账号。",
     "fallbackSleep": "Fallback 间隔 (ms)",

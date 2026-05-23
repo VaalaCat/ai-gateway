@@ -1103,6 +1103,8 @@
     "proxyUrl": "Proxy URL",
     "proxyUrlDesc": "HTTP proxy for Master to access external APIs (fetch pricing, fetch models, etc.)",
     "proxyUrlPlaceholder": "http://proxy.example.com:8080",
+    "registrationEnabled": "Allow password-based registration",
+    "registrationEnabledDesc": "When enabled, the login page shows a sign-up entry and users can create accounts with username and password; when disabled, only admin-created accounts or SSO flows can create users.",
     "oauthAutoCreate": "Auto-create account on first SSO sign-in",
     "oauthAutoCreateDesc": "When enabled, unbound SSO identities are shown a choice page to create a new account or bind an existing one. When disabled, only binding is allowed.",
     "fallbackSleep": "Fallback interval (ms)",
