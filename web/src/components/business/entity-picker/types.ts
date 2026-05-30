@@ -26,6 +26,8 @@ export interface EntityAdapter<T = unknown> {
   getLabel(item: T): string;
   /** 可选：item 富 UI 渲染（badge / icon / 副标题）。默认仅渲染 label。 */
   renderItem?(item: T): ReactNode;
+  /** 可选:value 本身即可读 label 时(如 model 的 model_name),无需 useOne 即可同步回显。 */
+  labelForValue?(value: string): string | undefined;
   /** 是否暴露 admin scope toggle（仅 admin user 看到）。默认 false。 */
   supportsAdminScope?: boolean;
 }

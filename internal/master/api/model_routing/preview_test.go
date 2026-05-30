@@ -146,6 +146,92 @@ func TestPreview_DisabledRoutingMarked(t *testing.T) {
 	}
 }
 
+// 编辑路由 gpt-5.5、成员引用同名真实模型 gpt-5.5：预览应为 model 叶子，不标 cycle。
+func TestPreview_SelfNameModelNotCycle(t *testing.T) {
+	srv := setupTestMaster(t)
+	jwt := loginAdmin(t, srv)
+	seedChannel(t, srv, jwt, "gpt-5.5,gpt-4o")
+	// 先建一个名为 gpt-5.5 的全局路由（成员随意填真实模型），使其进入 rIdx。
+	createRouting(t, srv, jwt, map[string]any{
+		"name": "gpt-5.5", "scope": "global", "enabled": true,
+		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+	})
+	resp := previewRouting(t, srv, jwt, map[string]any{
+		"self_name": "gpt-5.5", "self_scope": "global",
+		"members": []map[string]any{{"ref": "gpt-5.5", "priority": 0, "weight": 1}},
+	})
+	root := resp["root"].(map[string]any)
+	children := root["children"].([]any)
+	if len(children) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(children))
+	}
+	child := children[0].(map[string]any)
+	if child["kind"] != "model" || child["error"] != nil {
+		t.Errorf("same-name real model should be kind=model without error, got %v", child)
+	}
+	weights := resp["effective_weights"].([]any)
+	if len(weights) != 1 {
+		t.Fatalf("expected 1 effective weight, got %d", len(weights))
+	}
+	w := weights[0].(map[string]any)
+	if w["ref"] != "gpt-5.5" || w["percent"].(float64) != 100 {
+		t.Errorf("shadow model should be 100%% effective weight, got %v", w)
+	}
+}
+
+// off-path：preview outer 引用 N，N 是已保存全局路由且存在同名真实模型 →
+// 应展开为 routing 节点（有 children），而非短路成 model 叶子。
+func TestPreview_OffPathRoutingNotShortCircuitToModel(t *testing.T) {
+	srv := setupTestMaster(t)
+	jwt := loginAdmin(t, srv)
+	seedChannel(t, srv, jwt, "N,realM")
+	createRouting(t, srv, jwt, map[string]any{
+		"name": "N", "scope": "global", "enabled": true,
+		"members": []map[string]any{{"ref": "realM", "priority": 0, "weight": 1}},
+	})
+	resp := previewRouting(t, srv, jwt, map[string]any{
+		"self_name": "outer", "self_scope": "global",
+		"members": []map[string]any{{"ref": "N", "priority": 0, "weight": 1}},
+	})
+	root := resp["root"].(map[string]any)
+	children := root["children"].([]any)
+	if len(children) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(children))
+	}
+	child := children[0].(map[string]any)
+	if child["kind"] != "routing" || child["error"] != nil {
+		t.Errorf("off-path routing N should expand as routing node (not short-circuit to model), got %v", child)
+	}
+	sub := child["children"].([]any)
+	if len(sub) != 1 || sub[0].(map[string]any)["ref"] != "realM" {
+		t.Errorf("routing N should expand to realM leaf, got %v", sub)
+	}
+}
+
+// 同上但不存在同名真实模型：仍应标 cycle。
+func TestPreview_SelfNameNoModelCycle(t *testing.T) {
+	srv := setupTestMaster(t)
+	jwt := loginAdmin(t, srv)
+	seedChannel(t, srv, jwt, "gpt-4o") // 没有 gpt-5.5 真实模型
+	createRouting(t, srv, jwt, map[string]any{
+		"name": "gpt-5.5", "scope": "global", "enabled": true,
+		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+	})
+	resp := previewRouting(t, srv, jwt, map[string]any{
+		"self_name": "gpt-5.5", "self_scope": "global",
+		"members": []map[string]any{{"ref": "gpt-5.5", "priority": 0, "weight": 1}},
+	})
+	root := resp["root"].(map[string]any)
+	children := root["children"].([]any)
+	if len(children) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(children))
+	}
+	child := children[0].(map[string]any)
+	if child["kind"] != "routing" || child["error"] != "cycle" {
+		t.Errorf("self-loop without real model should be kind=routing error=cycle, got %v", child)
+	}
+}
+
 func TestCandidates_ListsModelsAndRoutings(t *testing.T) {
 	srv := setupTestMaster(t)
 	jwt := loginAdmin(t, srv)

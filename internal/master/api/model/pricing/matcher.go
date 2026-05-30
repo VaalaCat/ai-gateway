@@ -5,45 +5,30 @@ import (
 	"strings"
 )
 
-type MatchResult struct {
-	Pricing     ModelPricing
-	MatchType   string // "exact" or "fuzzy"
-	MatchedName string
-}
-
-func Match(modelName string, source map[string]ModelPricing) *MatchResult {
-	// Phase 1: Exact match
-	if p, ok := source[modelName]; ok {
-		return &MatchResult{Pricing: p, MatchType: "exact", MatchedName: modelName}
+// MatchAll 在 source 中匹配 modelName，返回命中名下的全部 provider 候选。
+// 先精确、再模糊（normalize 后取最短、字母序最早的源端名）。
+func MatchAll(modelName string, source SourceData) (matchType, matchedName string, prices []SourceModelPrice, ok bool) {
+	if p, found := source[modelName]; found {
+		return "exact", modelName, p, true
 	}
-
-	// Phase 2: Fuzzy match — collect ALL candidates, pick best deterministically
 	normalizedTarget := normalize(modelName)
-	type candidate struct {
-		name    string
-		pricing ModelPricing
-	}
-	var candidates []candidate
-	for sourceName, p := range source {
-		if normalize(sourceName) == normalizedTarget {
-			candidates = append(candidates, candidate{sourceName, p})
+	var names []string
+	for name := range source {
+		if normalize(name) == normalizedTarget {
+			names = append(names, name)
 		}
 	}
-
-	if len(candidates) == 0 {
-		return nil
+	if len(names) == 0 {
+		return "", "", nil, false
 	}
-
-	// Deterministic selection: prefer shorter name (less provider prefix), then alphabetical
-	sort.Slice(candidates, func(i, j int) bool {
-		if len(candidates[i].name) != len(candidates[j].name) {
-			return len(candidates[i].name) < len(candidates[j].name)
+	sort.Slice(names, func(i, j int) bool {
+		if len(names[i]) != len(names[j]) {
+			return len(names[i]) < len(names[j])
 		}
-		return candidates[i].name < candidates[j].name
+		return names[i] < names[j]
 	})
-
-	best := candidates[0]
-	return &MatchResult{Pricing: best.pricing, MatchType: "fuzzy", MatchedName: best.name}
+	best := names[0]
+	return "fuzzy", best, source[best], true
 }
 
 func normalize(name string) string {

@@ -94,18 +94,20 @@ type RelayState struct {
 // AttemptPlan 是 Planner 产出，Executor 按序遍历。
 // 包含完整的尝试列表（已按 RetryMax 截断）以及路由解析信息。
 type AttemptPlan struct {
-	Attempts    []Attempt // 完整有序列表，已按 RetryMax 截断
-	RoutingName string    // 用户输入的 routing 名（无 routing 时为空）
-	Trace       []string  // routing 解析路径
+	Attempts         []Attempt // 完整有序列表，已按 RetryMax 截断
+	RoutingName      string    // 用户输入的 routing 名（无 routing 时为空）
+	Trace            []string  // routing 解析路径
+	HadAffinityEntry bool      // 本次规划 Lookup 命中过粘性记录（供 publish 推导 fallback）
 }
 
 // Attempt 描述一次 upstream 尝试：用哪个 channel、真实 model 名、走哪条 relay 路径。
 type Attempt struct {
-	Channel   *models.Channel
-	RealModel string
-	Mode      RelayMode     // legacy / passthrough / native
-	Source    ChannelSource // 新增；admin 表示来自 shared channel pool，private 表示用户 BYOK
-	SourceID  uint          // 新增；admin → Channel.ID；private → PrivateChannel.ID
+	Channel    *models.Channel
+	RealModel  string
+	Mode       RelayMode     // legacy / passthrough / native
+	Source     ChannelSource // 新增；admin 表示来自 shared channel pool，private 表示用户 BYOK
+	SourceID   uint          // 新增；admin → Channel.ID；private → PrivateChannel.ID
+	ByAffinity bool          // 该 attempt 由粘性重排置顶
 }
 
 // AttemptResult 是一次 attempt 的完整结果，含 token 计数 / 错误 / 中间产物。
@@ -128,6 +130,7 @@ type ExecutionResult struct {
 	Used    Attempt
 	Outcome AttemptResult
 	Err     error
+	History []models.AttemptRecord // fallback 链路:每候选一条,Executor 累加
 }
 
 // Dispatcher 是 Executor 调用的 attempt 派发器抽象。

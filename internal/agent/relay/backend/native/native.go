@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/scripthook"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -74,6 +75,12 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	}
 
 	outboundBody = applyNativeOverrides(upstreamReq, outboundBody, cfg, logger)
+
+	newBody, rejected, rejRes := scripthook.RunUpstreamScripts(b.Agent, c, rctx, ch, outboundProto, modelName, upstreamReq, outboundBody)
+	if rejected {
+		return rejRes
+	}
+	outboundBody = newBody
 
 	rec.WithOutbound(upstreamReq, outboundBody, ch)
 	rec.WithStage(trace.StageUpstreamDispatch)

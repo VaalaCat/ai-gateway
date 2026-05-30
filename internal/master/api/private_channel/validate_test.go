@@ -693,3 +693,103 @@ func TestRunValidators_PatchPath_RejectsOversizeBaseURL(t *testing.T) {
 		t.Fatal("oversize base_url via RunValidators must reject")
 	}
 }
+
+func TestValidateEndpointsCtx(t *testing.T) {
+	mk := func(raw string) ValidatorCtx {
+		return ValidatorCtx{
+			Req:   map[string]any{"endpoints": raw},
+			Dirty: map[string]bool{"endpoints": true},
+		}
+	}
+	t.Run("valid relative paths", func(t *testing.T) {
+		err := validateEndpointsCtx(mk(`{"chat_completions":"/v1/chat/completions","messages":"/v1/messages"}`))
+		if err != nil {
+			t.Fatalf("want nil, got %v", err)
+		}
+	})
+	t.Run("empty endpoints ok", func(t *testing.T) {
+		if err := validateEndpointsCtx(mk("")); err != nil {
+			t.Fatalf("want nil, got %v", err)
+		}
+	})
+	t.Run("not dirty is skipped", func(t *testing.T) {
+		c := ValidatorCtx{Req: map[string]any{"endpoints": `{"chat_completions":"@evil/x"}`}, Dirty: map[string]bool{}}
+		if err := validateEndpointsCtx(c); err != nil {
+			t.Fatalf("want nil (not dirty), got %v", err)
+		}
+	})
+	t.Run("at-sign exfil rejected", func(t *testing.T) {
+		if err := validateEndpointsCtx(mk(`{"chat_completions":"@evil.example/v1/chat/completions"}`)); err == nil {
+			t.Fatal("want error, got nil")
+		}
+	})
+	t.Run("absolute url rejected", func(t *testing.T) {
+		if err := validateEndpointsCtx(mk(`{"messages":"https://evil.example/x"}`)); err == nil {
+			t.Fatal("want error, got nil")
+		}
+	})
+	t.Run("invalid json rejected", func(t *testing.T) {
+		if err := validateEndpointsCtx(mk(`{not json`)); err == nil {
+			t.Fatal("want error, got nil")
+		}
+	})
+	t.Run("one bad value rejects whole map", func(t *testing.T) {
+		if err := validateEndpointsCtx(mk(`{"chat_completions":"/v1/ok","messages":"//evil/x"}`)); err == nil {
+			t.Fatal("want error, got nil")
+		}
+	})
+}
+
+// === Task: base_url matcher hardening (case-insensitive host + reject userinfo) ===
+
+func TestValidateBaseURLAllowlist_Hardening(t *testing.T) {
+	// Built-in allowlist contains https://api.openai.com and https://api.anthropic.com.
+	cases := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"uppercase host accepted", "https://API.OpenAI.Com/v1", false},
+		{"port mismatch rejected", "https://api.openai.com:8080/v1", true},
+		{"subdomain suffix rejected", "https://api.openai.com.evil.com/v1", true},
+		{"userinfo rejected", "https://api.openai.com@evil.example/v1", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			appCtx := newValidatorTestCtx(t, 1, 1)
+			ctx := newCreateCtx(appCtx, 1, 1, map[string]any{"base_url": tc.url})
+			err := validateBaseURLAllowlistCtx(ctx)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("base_url=%q: got err=%v, wantErr=%v", tc.url, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestIsSafeRelativePath(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"normal chat path", "/v1/chat/completions", true},
+		{"normal messages path", "/v1/messages", true},
+		{"root only", "/", true},
+		{"empty", "", false},
+		{"no leading slash", "v1/chat", false},
+		{"userinfo at sign", "@evil.example/v1/chat/completions", false},
+		{"at sign mid path", "/v1@evil.example/x", false},
+		{"protocol relative", "//evil.example/x", false},
+		{"absolute https", "https://evil.example/x", false},
+		{"backslash", "/v1\\evil", false},
+		{"control char", "/v1/\x00chat", false},
+		{"newline", "/v1/\nchat", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isSafeRelativePath(c.in); got != c.want {
+				t.Fatalf("isSafeRelativePath(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}

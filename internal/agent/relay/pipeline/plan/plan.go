@@ -3,6 +3,7 @@ package plan
 import (
 	"go.uber.org/zap"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
@@ -25,15 +26,18 @@ type defaultSolver struct {
 	Pool         ChannelPool
 	Sorter       ChannelSorter
 	Picker       ModePicker
+	Affinity     *affinity.Engine // 可为 nil：nil 时不做粘性重排
 }
 
 // NewSolver 用生产默认实现装配 Solver。
-func NewSolver() Solver {
+// aff 可为 nil（nil 时不做粘性重排）。
+func NewSolver(aff *affinity.Engine) Solver {
 	return &defaultSolver{
 		ChainBuilder: routingChainBuilder{},
 		Pool:         newDefaultChannelPool(),
 		Sorter:       priorityWeightedSorter{},
 		Picker:       defaultModePicker{},
+		Affinity:     aff,
 	}
 }
 
@@ -79,7 +83,7 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 	plan.RoutingName = chain.RoutingName
 	plan.Trace = chain.Trace
 
-	budget := rctx.Agent.GetConfig().Runtime.RetryMax
+	budget := rctx.Agent.GetCache().Settings().RetryMaxChannels
 	if budget <= 0 {
 		// ★ B-C1 行为修复：原返 state.ErrNoChannelAvailable → 404 + "no channel available for model X"。
 		//   main `for attemptsLeft > 0 { ... }` 在 attemptsLeft<=0 时整段跳过主循环 →
@@ -98,13 +102,15 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 		if len(cands) == 0 {
 			continue
 		}
-		for _, sc := range s.Sorter.Sort(cands) {
+		ordered := s.applyAffinity(rctx, realModel, s.Sorter.Sort(cands))
+		for _, sc := range ordered {
 			plan.Attempts = append(plan.Attempts, state.Attempt{
-				Channel:   sc.Channel,
-				RealModel: realModel,
-				Mode:      s.Picker.Pick(sc.Channel, realModel, rctx.Input.InboundProto),
-				Source:    sc.Source,
-				SourceID:  sc.SourceID,
+				Channel:    sc.Channel,
+				RealModel:  realModel,
+				Mode:       s.Picker.Pick(sc.Channel, realModel, rctx.Input.InboundProto),
+				Source:     sc.Source,
+				SourceID:   sc.SourceID,
+				ByAffinity: sc.ByAffinity,
 			})
 			if len(plan.Attempts) >= budget {
 				return nil
@@ -151,4 +157,41 @@ func modelAllowedByWhitelist(model string, ui app.UserInfo) bool {
 		return false
 	}
 	return true
+}
+
+// applyAffinity 若命中粘性记录，把对应 channel 置顶到该 realModel 候选队首并打标。
+// nil engine / 无 UserInfo / Policy 不允许 / Lookup miss 时原样返回。
+// Lookup 命中即置 HadAffinityEntry（即便目标 channel 已被过滤掉——供 publish 区分 fallback）。
+func (s *defaultSolver) applyAffinity(rctx *state.RelayContext, realModel string, ordered []ScoredCandidate) []ScoredCandidate {
+	if s.Affinity == nil || rctx.Input.UserInfo == nil {
+		return ordered
+	}
+	uid := rctx.Input.UserInfo.UserID
+	if uid == 0 {
+		return ordered
+	}
+	if !s.Affinity.Decide(affinity.Subject{UserID: uid, RealModel: realModel}).Apply {
+		return ordered
+	}
+	entry, ok := s.Affinity.Lookup(affinity.Key{UserID: uid, RealModel: realModel})
+	if !ok {
+		return ordered
+	}
+	rctx.State.Plan.HadAffinityEntry = true
+	for i := range ordered {
+		if ordered[i].Source != entry.Source || ordered[i].SourceID != entry.SourceID {
+			continue
+		}
+		out := make([]ScoredCandidate, 0, len(ordered))
+		picked := ordered[i]
+		picked.ByAffinity = true
+		out = append(out, picked)
+		for j := range ordered {
+			if j != i {
+				out = append(out, ordered[j])
+			}
+		}
+		return out
+	}
+	return ordered
 }

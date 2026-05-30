@@ -41,41 +41,6 @@ func TestBYOKMetrics_PrivateChannelCountByOwner(t *testing.T) {
 	}
 }
 
-// TestBYOKMetrics_VisibleSetCacheCountersAreReal 验证 hit/miss counter 是真实
-// prometheus.Counter（非 noop stub），Inc() 反映在 prometheus 输出上。
-// 因为单实例 Counter 无 Reset()，这里用 before/after delta 断言而非绝对值，
-// 确保与其他测试隔离。
-func TestBYOKMetrics_VisibleSetCacheCountersAreReal(t *testing.T) {
-	beforeHit := readCounter(t, BYOKVisibleSetCacheHit)
-	beforeMiss := readCounter(t, BYOKVisibleSetCacheMiss)
-
-	BYOKVisibleSetCacheHit.Inc()
-	BYOKVisibleSetCacheHit.Inc()
-	BYOKVisibleSetCacheMiss.Inc()
-
-	if got := readCounter(t, BYOKVisibleSetCacheHit) - beforeHit; got != 2 {
-		t.Fatalf("hit delta want 2, got %v", got)
-	}
-	if got := readCounter(t, BYOKVisibleSetCacheMiss) - beforeMiss; got != 1 {
-		t.Fatalf("miss delta want 1, got %v", got)
-	}
-}
-
-// TestBYOKMetrics_VisibleSetCacheSizeIsGauge 验证 cache size 是 Gauge（Set 覆盖
-// 而非累加），用于 master heartbeat 上报当前块数快照。
-func TestBYOKMetrics_VisibleSetCacheSizeIsGauge(t *testing.T) {
-	BYOKVisibleSetCacheSize.Set(100)
-	BYOKVisibleSetCacheSize.Set(50)
-
-	m := &dto.Metric{}
-	if err := BYOKVisibleSetCacheSize.Write(m); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if got := m.GetGauge().GetValue(); got != 50 {
-		t.Fatalf("want 50 (Set must overwrite), got %v", got)
-	}
-}
-
 // TestBYOKMetrics_DecryptFailureIsRealCounter 替换 Task 8 stub：sanitize 路径
 // .Inc() 调用必须命中真实 prometheus Counter（不是 noop），从 DefaultGatherer
 // 能 scrape 出 byok_decrypt_failure_total 数值。
@@ -88,20 +53,16 @@ func TestBYOKMetrics_DecryptFailureIsRealCounter(t *testing.T) {
 	}
 }
 
-// TestBYOKMetrics_AllRegistered 验证 6 个 metric 都注册到 DefaultGatherer，
+// TestBYOKMetrics_AllRegistered 验证 3 个保留 metric 都注册到 DefaultGatherer，
 // 防止有人加 metric 忘了 MustRegister。
 func TestBYOKMetrics_AllRegistered(t *testing.T) {
 	expected := map[string]bool{
-		"byok_private_channel_count":        false,
-		"byok_visible_set_cache_size":       false,
-		"byok_visible_set_cache_hit_total":  false,
-		"byok_visible_set_cache_miss_total": false,
-		"byok_request_total":                false,
-		"byok_decrypt_failure_total":        false,
+		"byok_private_channel_count": false,
+		"byok_request_total":         false,
+		"byok_decrypt_failure_total": false,
 	}
 	// 触发样本，否则 Gather 可能跳过未观测的 label-less Counter。
 	BYOKPrivateChannelCount.WithLabelValues("0").Set(0)
-	BYOKVisibleSetCacheSize.Set(0)
 	BYOKRequestTotal.WithLabelValues("init", "init").Add(0)
 
 	families, err := prometheus.DefaultGatherer.Gather()

@@ -2,6 +2,7 @@
 package inflight
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,10 +18,13 @@ type Meta struct {
 	Model       string
 	IsStream    bool
 	StartTime   time.Time
+	// Cancel 取消该请求(打断用)。由 Relay 传入从请求 context 派生的 cancel;可为 nil。
+	Cancel context.CancelFunc
 }
 
 // Snapshot 是某一时刻一条在途请求的只读视图(给 RPC / 看门狗用)。
 type Snapshot struct {
+	ID          int64  `json:"id"` // registry 内部自增 key,打断按此定位(避免 ReqID 缺失/重复)
 	ReqID       string `json:"req_id"`
 	ChannelID   uint   `json:"channel_id"`
 	ChannelName string `json:"channel_name"`
@@ -37,6 +41,7 @@ type Entry struct {
 	startTime time.Time
 	reg       *Registry
 	id        int64
+	cancel    context.CancelFunc
 
 	mu          sync.RWMutex
 	stage       string
@@ -74,6 +79,7 @@ func (e *Entry) snapshot(now time.Time) Snapshot {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return Snapshot{
+		ID:          e.id,
 		ReqID:       e.reqID,
 		ChannelID:   e.channelID,
 		ChannelName: e.channelName,
@@ -111,6 +117,7 @@ func (r *Registry) Track(meta Meta) *Entry {
 		startTime:   meta.StartTime,
 		reg:         r,
 		id:          r.nextID.Add(1),
+		cancel:      meta.Cancel,
 		stage:       "",
 		model:       meta.Model,
 		isStream:    meta.IsStream,
@@ -129,6 +136,23 @@ func (r *Registry) Snapshot() []Snapshot {
 		return true
 	})
 	return out
+}
+
+// Interrupt 取消 id 对应的在途请求(调其 cancel)。命中且 cancel 非空返回 true。
+func (r *Registry) Interrupt(id int64) bool {
+	v, ok := r.entries.Load(id)
+	if !ok {
+		return false
+	}
+	e := v.(*Entry)
+	e.mu.RLock()
+	cancel := e.cancel
+	e.mu.RUnlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 // StartWatchdog 每 interval 扫一遍,任何存活超过 warnAge 的请求打一条 WARN。

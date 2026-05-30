@@ -67,6 +67,10 @@ func (h *privateChannelsVisibleFetchHandler) Fetch(_ context.Context, q dao.Admi
 		}
 		set.Channels = append(set.Channels, *synced)
 	}
+	// 无可见私有通道 → found=false，让 agent 走 NegativeTTL 自愈（避免空集被永久正缓存）。
+	if len(set.Channels) == 0 {
+		return nil, nil, false, nil
+	}
 	payload, err := json.Marshal(set)
 	if err != nil {
 		return nil, nil, false, err

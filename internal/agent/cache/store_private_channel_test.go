@@ -1,9 +1,17 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/VaalaCat/ai-gateway/internal/agent/cache/entitycache"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
@@ -102,5 +110,48 @@ func TestStore_HandleSyncEvent_InvalidatesShare(t *testing.T) {
 
 	if got := s.GetVisiblePrivateChannelsForUser(7, "gpt-4o"); got != nil {
 		t.Fatalf("share invalidation didn't drop cache: %+v", got)
+	}
+}
+
+type failingPrivLoader struct{}
+
+func (failingPrivLoader) Load(_ context.Context, _ uint) (*protocol.VisiblePrivateChannelSet, error) {
+	return nil, errors.New("rpc down")
+}
+
+func TestStore_GetVisiblePrivateChannels_LoaderErrorWarns(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	s := newTestStoreNoClient(t)
+	s.SetLogger(zap.New(core))
+	lru, err := entitycache.NewLRUCache(entitycache.Config[uint, *protocol.VisiblePrivateChannelSet]{
+		Capacity: 8, Loader: failingPrivLoader{}, NegativeTTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.visiblePrivateChannels = lru
+
+	_ = s.GetVisiblePrivateChannelsForUser(42, "gpt-4o")
+	if got := logs.FilterMessage("load visible private channels failed").Len(); got != 1 {
+		t.Fatalf("expected 1 loader-error warn, got %d", got)
+	}
+}
+
+func TestStore_HandleSyncEvent_LogsInvalidation(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	s := newTestStoreNoClient(t)
+	s.SetLogger(zap.New(core))
+
+	payload, _ := json.Marshal(protocol.PrivateChannelInvalidatePayload{
+		Action: "invalidate", AffectedUserIDs: []uint{1, 2},
+	})
+	s.HandleSyncEvent(events.EntityPrivateChannel, "invalidate", payload)
+
+	found := logs.FilterMessage("private channel invalidation received").All()
+	if len(found) != 1 {
+		t.Fatalf("expected 1 invalidation log, got %d", len(found))
+	}
+	if got := found[0].ContextMap()["affected_users"]; got != int64(2) {
+		t.Fatalf("affected_users = %v, want 2", got)
 	}
 }

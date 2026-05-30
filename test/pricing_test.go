@@ -265,23 +265,23 @@ func TestFetchPricing_WithExternalSources(t *testing.T) {
 		t.Skip("no matches from external sources (network may be restricted)")
 	}
 
-	// Verify matched models have source data with positive prices
+	// Verify matched models carry a single recommendation backed by candidates.
 	matchedNames := make(map[string]bool)
 	for _, m := range result.Matches {
 		name := m["model_name"].(string)
 		matchedNames[name] = true
-		sources := m["sources"].(map[string]any)
-		if len(sources) == 0 {
-			t.Errorf("model %s matched but has no source data", name)
+		rec, ok := m["recommended"].(map[string]any)
+		if !ok {
+			t.Errorf("model %s matched but has no recommended price", name)
+			continue
 		}
-		// Check that at least one source has positive input_price
-		for srcName, srcData := range sources {
-			src := srcData.(map[string]any)
-			if src["input_price"].(float64) > 0 || src["output_price"].(float64) > 0 {
-				t.Logf("  %s matched by %s: in=$%.4f out=$%.4f match=%s",
-					name, srcName, src["input_price"], src["output_price"], src["match_type"])
-			}
+		if cands, ok := m["candidates"].([]any); !ok || len(cands) == 0 {
+			t.Errorf("model %s matched but has no candidates", name)
 		}
+		in, _ := rec["input_price"].(float64)
+		out, _ := rec["output_price"].(float64)
+		t.Logf("  %s recommended via %v (%v): in=$%.4f out=$%.4f",
+			name, m["provenance"], m["confidence"], in, out)
 	}
 
 	// custom-nonexistent-model-xyz should be in unmatched

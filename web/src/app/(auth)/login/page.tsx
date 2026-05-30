@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api/client";
 import { oauthApi } from "@/lib/api/oauth";
+import { usePublicConfig } from "@/lib/api/system";
 import type { PublicProvider } from "@/lib/types-oauth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,14 +36,9 @@ function LoginContent() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [providers, setProviders] = useState<PublicProvider[]>([]);
-
-  useEffect(() => {
-    api.get<{ registration_enabled: boolean }>("/system/registration-status")
-      .then(res => setRegistrationEnabled(res.registration_enabled))
-      .catch(() => {});
-  }, []);
+  const { data: publicConfig } = usePublicConfig();
+  const registrationEnabled = publicConfig?.registration_enabled ?? false;
 
   useEffect(() => {
     oauthApi.publicProviders().then(setProviders).catch(() => {});

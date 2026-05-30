@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sort"
 	"strings"
@@ -21,7 +22,6 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
@@ -54,6 +54,8 @@ type Store struct {
 
 	logger *zap.Logger
 
+	scripts *scriptStore
+
 	onChannelChange []func(old, new *models.Channel)
 }
 
@@ -79,6 +81,7 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		s.settings.Store(&snap)
 	}
 	s.logger = zap.NewNop()
+	s.scripts = newScriptStore(s.logger)
 
 	negTTL := resolveNegativeTTL(cfg.NegativeTTLSeconds)
 
@@ -147,6 +150,9 @@ func (s *Store) SetLogger(l *zap.Logger) {
 		l = zap.NewNop()
 	}
 	s.logger = l
+	if s.scripts != nil {
+		s.scripts.setLogger(l)
+	}
 }
 
 func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration) (entitycache.EntityCache[uint, *protocol.SyncedUser], error) {
@@ -361,6 +367,11 @@ func (s *Store) GetChannelsForModel(model string) []*models.Channel {
 		return nil
 	}
 	return v
+}
+
+// HasRealModel 判断 name 是否有 channel 支撑的真实模型（不含 routing）。
+func (s *Store) HasRealModel(name string) bool {
+	return len(s.GetChannelsForModel(name)) > 0
 }
 
 // GetAllModelNames 返回所有暴露给 /v1/models 的 model 名：
@@ -589,6 +600,9 @@ func (s *Store) HandleSyncEvent(entity, action string, data []byte) {
 		if err := json.Unmarshal(data, &payload); err != nil {
 			return
 		}
+		s.logger.Info("private channel invalidation received",
+			zap.String("action", action),
+			zap.Int("affected_users", len(payload.AffectedUserIDs)))
 		for _, uid := range payload.AffectedUserIDs {
 			s.InvalidateVisiblePrivateChannels(uid)
 		}
@@ -599,6 +613,16 @@ func (s *Store) HandleSyncEvent(entity, action string, data []byte) {
 		}
 		for _, uid := range payload.AffectedUserIDs {
 			s.InvalidateVisiblePrivateChannels(uid)
+		}
+	case events.EntityScript:
+		var sc models.AdminScript
+		if err := json.Unmarshal(data, &sc); err != nil {
+			return
+		}
+		if action == events.ActionDelete {
+			s.scripts.remove(sc.ID)
+		} else {
+			s.scripts.set(sc)
 		}
 	}
 }
@@ -767,21 +791,21 @@ func (s *Store) ResolveRouting(name string, userID uint) *protocol.SyncedRouting
 // GetVisiblePrivateChannelsForUser 返回某 user 可见的、enabled 的、对应 model 的
 // private channels（未投影成 *models.Channel——投影在 upstream/private_channel_adapter
 // 内进行，避免 Store 与 channel 表示层耦合）。
+// getVisiblePrivateSet 取某 user 的可见私有通道集；loader 真错误（非 ErrNotFound）记 warn。
+func (s *Store) getVisiblePrivateSet(userID uint) *protocol.VisiblePrivateChannelSet {
+	set, _, err := s.visiblePrivateChannels.Get(context.Background(), userID)
+	if err != nil && !errors.Is(err, entitycache.ErrNotFound) {
+		s.logger.Warn("load visible private channels failed",
+			zap.Uint("user_id", userID), zap.Error(err))
+	}
+	return set
+}
+
 func (s *Store) GetVisiblePrivateChannelsForUser(userID uint, model string) []*protocol.SyncedPrivateChannel {
 	if userID == 0 {
 		return nil
 	}
-	// 用 Peek 区分 hit/miss：Peek 命中说明本地 LRU 已有；否则 Get 会触发 loader。
-	// 负缓存条目对 Peek 表现为 miss，与"需要外部拉取"语义对齐。
-	_, localHit := s.visiblePrivateChannels.Peek(userID)
-	if localHit {
-		metrics.BYOKVisibleSetCacheHit.Inc()
-	} else {
-		metrics.BYOKVisibleSetCacheMiss.Inc()
-	}
-	set, _, _ := s.visiblePrivateChannels.Get(context.Background(), userID)
-	// 写入或负缓存后，size 可能变化；Get 内部 Add 不暴露事件，这里 Set 当前 Len。
-	metrics.BYOKVisibleSetCacheSize.Set(float64(s.visiblePrivateChannels.Len()))
+	set := s.getVisiblePrivateSet(userID)
 	if set == nil {
 		return nil
 	}
@@ -806,7 +830,7 @@ func (s *Store) ListVisibleBYOKModelNamesForUser(userID uint) []string {
 	if userID == 0 {
 		return nil
 	}
-	set, _, _ := s.visiblePrivateChannels.Get(context.Background(), userID)
+	set := s.getVisiblePrivateSet(userID)
 	if set == nil {
 		return nil
 	}
@@ -832,7 +856,6 @@ func (s *Store) ListVisibleBYOKModelNamesForUser(userID uint) []string {
 // share 表变更 / channel CRUD / user 离开 group 都触发。
 func (s *Store) InvalidateVisiblePrivateChannels(userID uint) {
 	s.visiblePrivateChannels.Delete(userID)
-	metrics.BYOKVisibleSetCacheSize.Set(float64(s.visiblePrivateChannels.Len()))
 }
 
 // VisiblePrivateChannelsCount 返回当前 LRU 中缓存的 user-scope private channel 块数。
@@ -898,12 +921,14 @@ func (s *Store) CacheSnapshot() map[string]protocol.CacheEntityStats {
 	snap := map[string]protocol.CacheEntityStats{}
 	put := func(name string, stats entitycache.Stats) {
 		snap[name] = protocol.CacheEntityStats{
-			Hits:         stats.Hits,
-			Misses:       stats.Misses,
-			Evictions:    stats.Evictions,
-			NegativeHits: stats.NegativeHits,
-			Size:         stats.Size,
-			Capacity:     stats.Capacity,
+			Hits:          stats.Hits,
+			Misses:        stats.Misses,
+			Evictions:     stats.Evictions,
+			NegativeHits:  stats.NegativeHits,
+			LoadErrors:    stats.LoadErrors,
+			Invalidations: stats.Invalidations,
+			Size:          stats.Size,
+			Capacity:      stats.Capacity,
 		}
 	}
 	put("token", s.tokenStore.PrimaryStats())

@@ -425,3 +425,37 @@ func TestUsageLogList_BoundaryStartInclusiveEndExclusive(t *testing.T) {
 		t.Errorf("expected only the row ts=1000, got %+v", logs)
 	}
 }
+
+func TestUsageLogTrace_MultipleAttemptsPerRequest(t *testing.T) {
+	ctx, _ := setupAdminContext(t)
+	m := NewAdminMutation(ctx).UsageLog()
+	q := NewAdminQuery(ctx).UsageLog()
+
+	// Insert two traces with same request_id but different attempt_index.
+	// This proves the unique index is composite (request_id, attempt_index),
+	// not on request_id alone.
+	for i := 0; i < 2; i++ {
+		if err := m.CreateTrace(&models.UsageLogTrace{
+			RequestID:      "req-x",
+			AttemptIndex:   i,
+			UpstreamStatus: 500 + i,
+		}); err != nil {
+			t.Fatalf("create trace %d: %v", i, err)
+		}
+	}
+
+	got, err := q.GetTracesByRequestID("req-x")
+	if err != nil {
+		t.Fatalf("GetTracesByRequestID: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 traces for req-x, got %d", len(got))
+	}
+	// Verify ordering by attempt_index asc.
+	if got[0].AttemptIndex != 0 || got[1].AttemptIndex != 1 {
+		t.Fatalf("expected ordered by attempt_index: got [%d, %d]", got[0].AttemptIndex, got[1].AttemptIndex)
+	}
+	if got[0].UpstreamStatus != 500 || got[1].UpstreamStatus != 501 {
+		t.Fatalf("unexpected upstream statuses: [%d, %d]", got[0].UpstreamStatus, got[1].UpstreamStatus)
+	}
+}

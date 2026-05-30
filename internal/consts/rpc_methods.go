@@ -13,6 +13,7 @@ const (
 	RPCAgentCheckConnectivity = "agent.checkConnectivity"
 	RPCAgentInflight          = "agent.inflight"
 	RPCAgentGoroutines        = "agent.goroutines"
+	RPCAgentInterrupt         = "agent.interrupt"
 	RPCChannelTest            = "channel.test"
 	RPCChannelFetchModels     = "channel.fetchModels"
 	RPCReportUsage            = "report.usage"

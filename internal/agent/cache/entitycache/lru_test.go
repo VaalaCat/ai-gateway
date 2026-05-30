@@ -504,3 +504,52 @@ func TestLRU_ApplySetClearsNegative(t *testing.T) {
 		t.Fatalf("Apply(Set) should clear negative; got ok=%v v=%d", ok, v)
 	}
 }
+
+// errLoader 返回固定错误，触发 loadAndStore 的非 ErrNotFound 分支。
+type errLoader struct{ err error }
+
+func (l errLoader) Load(_ context.Context, _ uint) (string, error) { return "", l.err }
+
+func TestLRU_LoadErrorsCounter(t *testing.T) {
+	c, err := NewLRUCache(Config[uint, string]{
+		Capacity:    4,
+		Loader:      errLoader{err: errors.New("rpc down")},
+		NegativeTTL: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, gerr := c.Get(context.Background(), uint(1)); gerr == nil {
+		t.Fatal("expected loader error to propagate")
+	}
+	if got := c.Stats().LoadErrors; got != 1 {
+		t.Fatalf("LoadErrors = %d, want 1", got)
+	}
+	c2, _ := NewLRUCache(Config[uint, string]{
+		Capacity: 4, Loader: errLoader{err: ErrNotFound}, NegativeTTL: time.Minute,
+	})
+	_, _, _ = c2.Get(context.Background(), uint(1))
+	if got := c2.Stats().LoadErrors; got != 0 {
+		t.Fatalf("ErrNotFound should not count as LoadError, got %d", got)
+	}
+}
+
+func TestLRU_InvalidationsCounter(t *testing.T) {
+	c, _ := NewLRUCache(Config[uint, string]{Capacity: 4})
+	c.Set(uint(1), "v")
+	c.Delete(uint(1))
+	c.Delete(uint(2)) // 删不存在的也计数（显式失效意图）
+	if got := c.Stats().Invalidations; got != 2 {
+		t.Fatalf("Invalidations = %d, want 2", got)
+	}
+}
+
+func TestLRU_InvalidationsCounter_Apply(t *testing.T) {
+	c, _ := NewLRUCache(Config[uint, string]{Capacity: 4})
+	c.Set(1, "v")
+	c.Apply(ActionDelete, 1, "")
+	c.Apply(ActionDelete, 2, "") // 不存在的也计数（与 Delete 一致，意图驱动）
+	if got := c.Stats().Invalidations; got != 2 {
+		t.Fatalf("Apply(ActionDelete) Invalidations = %d, want 2", got)
+	}
+}

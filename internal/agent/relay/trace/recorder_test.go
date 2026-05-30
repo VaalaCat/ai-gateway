@@ -611,6 +611,53 @@ func TestRecorder_StageHookFires(t *testing.T) {
 	}
 }
 
+func TestRecorder_SnapshotAttemptAccumulates(t *testing.T) {
+	r := NewRecorder(true, 0) // enabled=true
+	r.WithFail(StageUpstreamStatus, errors.New("status err"))
+	r.SnapshotAttempt()
+	r.ResetAttempt()
+	r.WithFail(StageUpstreamDispatch, errors.New("dispatch err"))
+	r.SnapshotAttempt()
+
+	got := r.Attempts()
+	if len(got) != 2 {
+		t.Fatalf("want 2 snapshots, got %d", len(got))
+	}
+	if got[0].FailStage != StageUpstreamStatus {
+		t.Fatalf("snapshot[0] FailStage = %q, want %q", got[0].FailStage, StageUpstreamStatus)
+	}
+	if got[1].FailStage != StageUpstreamDispatch {
+		t.Fatalf("snapshot[1] FailStage = %q, want %q", got[1].FailStage, StageUpstreamDispatch)
+	}
+	// 两条快照必须独立：修改 got[0] 不影响 got[1]。
+	if got[0] == got[1] {
+		t.Fatalf("snapshots must be independent records, got same pointer")
+	}
+}
+
+func TestRecorder_LastSnapshotVerbose(t *testing.T) {
+	var nilRec *Recorder
+	if nilRec.LastSnapshotVerbose() {
+		t.Fatal("nil 接收者应返回 false")
+	}
+
+	r := NewRecorder(false, 0) // 关 trace
+	if r.LastSnapshotVerbose() {
+		t.Fatal("无快照时应返回 false")
+	}
+
+	r.SnapshotAttempt() // 关 trace + 无失败 → 非 verbose
+	if r.LastSnapshotVerbose() {
+		t.Fatal("非 verbose 快照应返回 false")
+	}
+
+	r.WithFail(StageUpstreamStatus, errors.New("boom"))
+	r.SnapshotAttempt() // 有失败 → verbose
+	if !r.LastSnapshotVerbose() {
+		t.Fatal("verbose 快照应返回 true")
+	}
+}
+
 // TestTraceRecordHasNoFailErr: 防回归——TraceRecord 不再含 FailErr 字段。
 // 历史上该字段从未在 MarshalJSON 输出，删除后任何外部读都是编译错。
 func TestTraceRecordHasNoFailErr(t *testing.T) {

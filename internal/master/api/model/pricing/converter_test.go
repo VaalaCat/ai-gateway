@@ -16,48 +16,24 @@ func TestConvertBaseLLM(t *testing.T) {
 		CompletionRatio: map[string]float64{"gpt-4o": 4.0},
 		CacheRatio:      map[string]float64{"claude-3-5-sonnet": 0.1},
 	}
-	data, err := json.Marshal(raw)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
+	data, _ := json.Marshal(raw)
 	result, err := ConvertBaseLLM(data)
 	if err != nil {
 		t.Fatalf("ConvertBaseLLM: %v", err)
 	}
-
-	// gpt-4o: ratio=1.25 → input=2.5, completion_ratio=4 → output=10.0
-	gpt4o, ok := result["gpt-4o"]
-	if !ok {
-		t.Fatal("gpt-4o not found in result")
+	gpt := result["gpt-4o"]
+	if len(gpt) != 1 || gpt[0].Provider != "" {
+		t.Fatalf("gpt-4o: want 1 candidate w/ empty provider, got %+v", gpt)
 	}
-	if gpt4o.InputPrice != 2.5 {
-		t.Errorf("gpt-4o input price: got %v, want 2.5", gpt4o.InputPrice)
+	if gpt[0].Pricing.InputPrice != 2.5 || gpt[0].Pricing.OutputPrice != 10.0 {
+		t.Errorf("gpt-4o price: got %+v", gpt[0].Pricing)
 	}
-	if gpt4o.OutputPrice != 10.0 {
-		t.Errorf("gpt-4o output price: got %v, want 10.0", gpt4o.OutputPrice)
+	claude := result["claude-3-5-sonnet"][0].Pricing
+	if claude.InputPrice != 3.0 || claude.OutputPrice != 3.0 {
+		t.Errorf("claude price: got %+v", claude)
 	}
-	if gpt4o.CacheReadPrice != nil {
-		t.Errorf("gpt-4o cache read price: got %v, want nil", gpt4o.CacheReadPrice)
-	}
-
-	// claude: ratio=1.5 → input=3.0, no completion_ratio → output=3.0, cache_ratio=0.1 → cache_read=0.3
-	claude, ok := result["claude-3-5-sonnet"]
-	if !ok {
-		t.Fatal("claude-3-5-sonnet not found in result")
-	}
-	if claude.InputPrice != 3.0 {
-		t.Errorf("claude input price: got %v, want 3.0", claude.InputPrice)
-	}
-	if claude.OutputPrice != 3.0 {
-		t.Errorf("claude output price: got %v, want 3.0", claude.OutputPrice)
-	}
-	if claude.CacheReadPrice == nil {
-		t.Fatal("claude cache read price: got nil, want non-nil")
-	}
-	// cache_read = 3.0 * 0.1 = 0.3 (approximate due to float64 arithmetic)
-	if !approxEqual(*claude.CacheReadPrice, 0.3, 1e-9) {
-		t.Errorf("claude cache read price: got %v, want ~0.3", *claude.CacheReadPrice)
+	if claude.CacheReadPrice == nil || !approxEqual(*claude.CacheReadPrice, 0.3, 1e-9) {
+		t.Errorf("claude cache read: got %v", claude.CacheReadPrice)
 	}
 }
 
@@ -109,29 +85,49 @@ func TestConvertModelsDev(t *testing.T) {
 	}
 
 	// gpt-4o should be present with direct cost values
-	gpt4o, ok := result["gpt-4o"]
-	if !ok {
-		t.Fatal("gpt-4o not found")
+	gpt4o := result["gpt-4o"]
+	if len(gpt4o) != 1 {
+		t.Fatalf("gpt-4o: want 1 candidate, got %d", len(gpt4o))
 	}
-	if gpt4o.InputPrice != 5.0 {
-		t.Errorf("gpt-4o input: got %v, want 5.0", gpt4o.InputPrice)
+	if gpt4o[0].Pricing.InputPrice != 5.0 {
+		t.Errorf("gpt-4o input: got %v, want 5.0", gpt4o[0].Pricing.InputPrice)
 	}
-	if gpt4o.OutputPrice != 15.0 {
-		t.Errorf("gpt-4o output: got %v, want 15.0", gpt4o.OutputPrice)
+	if gpt4o[0].Pricing.OutputPrice != 15.0 {
+		t.Errorf("gpt-4o output: got %v, want 15.0", gpt4o[0].Pricing.OutputPrice)
 	}
-	if gpt4o.CacheReadPrice == nil || *gpt4o.CacheReadPrice != 0.5 {
-		t.Errorf("gpt-4o cache read: got %v, want 0.5", gpt4o.CacheReadPrice)
+	if gpt4o[0].Pricing.CacheReadPrice == nil || *gpt4o[0].Pricing.CacheReadPrice != 0.5 {
+		t.Errorf("gpt-4o cache read: got %v, want 0.5", gpt4o[0].Pricing.CacheReadPrice)
 	}
-	if gpt4o.CacheWritePrice != nil {
-		t.Errorf("gpt-4o cache write: got %v, want nil", gpt4o.CacheWritePrice)
+	if gpt4o[0].Pricing.CacheWritePrice != nil {
+		t.Errorf("gpt-4o cache write: got %v, want nil", gpt4o[0].Pricing.CacheWritePrice)
 	}
 
 	// no-cost-model and partial-model should be skipped
-	if _, ok := result["no-cost-model"]; ok {
+	if len(result["no-cost-model"]) != 0 {
 		t.Error("no-cost-model should be skipped")
 	}
-	if _, ok := result["partial-model"]; ok {
+	if len(result["partial-model"]) != 0 {
 		t.Error("partial-model (missing output) should be skipped")
+	}
+}
+
+func TestConvertModelsDev_MultiProvider(t *testing.T) {
+	in1, out1, in2, out2 := 2.5, 10.0, 5.0, 20.0
+	raw := map[string]modelsDevProvider{
+		"openai": {Models: map[string]modelsDevModel{
+			"gpt-4o": {Cost: &modelsDevCost{Input: &in1, Output: &out1}},
+		}},
+		"azure": {Models: map[string]modelsDevModel{
+			"gpt-4o": {Cost: &modelsDevCost{Input: &in2, Output: &out2}},
+		}},
+	}
+	data, _ := json.Marshal(raw)
+	result, err := ConvertModelsDev(data)
+	if err != nil {
+		t.Fatalf("ConvertModelsDev: %v", err)
+	}
+	if len(result["gpt-4o"]) != 2 {
+		t.Fatalf("gpt-4o: want 2 provider candidates, got %d", len(result["gpt-4o"]))
 	}
 }
 

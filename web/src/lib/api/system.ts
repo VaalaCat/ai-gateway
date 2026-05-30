@@ -61,3 +61,16 @@ export function useUpdateSettings() {
     },
   });
 }
+
+export interface PublicConfig {
+  registration_enabled: boolean;
+  invite_enabled: boolean;
+  invite_user_max_codes: number;
+}
+
+export function usePublicConfig() {
+  return useQuery({
+    queryKey: ["public-config"],
+    queryFn: () => api.get<PublicConfig>("/system/public-config"),
+  });
+}

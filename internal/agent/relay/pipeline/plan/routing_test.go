@@ -5,6 +5,8 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/config"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
@@ -200,5 +202,77 @@ func TestResolve_AfterMarkExhausted_Nested(t *testing.T) {
 	second := ResolveToRealModel(s, "my", 42, ctx)
 	if second == first || (second != "deepseek" && second != "qwen") {
 		t.Errorf("after MarkMemberExhausted nested: first=%q second=%q (should differ, both real models)", first, second)
+	}
+}
+
+// 路由 gpt-5.5 的最高优先级成员就是同名真实模型 gpt-5.5：应解析为该真实模型，而非误判成环。
+func TestResolve_SelfNameShadowsRealModel(t *testing.T) {
+	s := newTestStore()
+	ch1 := &models.Channel{Models: "gpt-5.5"}
+	ch1.ID = 1
+	ch1.Status = consts.StatusEnabled
+	s.SetChannel(ch1)
+	s.RebuildModelIndex()
+	s.SetGlobalRouting("gpt-5.5", &protocol.SyncedRouting{
+		ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
+		Members: []protocol.RoutingMember{
+			{Ref: "gpt-5.5", Priority: 10, Weight: 1}, // 主：同名真实模型
+			{Ref: "gpt-4o", Priority: 0, Weight: 1},   // 降级
+		},
+	})
+	ctx := NewResolveCtx()
+	if got := ResolveToRealModel(s, "gpt-5.5", 0, ctx); got != "gpt-5.5" {
+		t.Errorf("self-name member should resolve to real model gpt-5.5, got %q", got)
+	}
+}
+
+// off-path 同名冲突：路由 outer 的成员 N 既是全局路由又有同名真实模型。
+// N 不在当前路径上 → 应展开为路由（routing wins），最终解析到 N 的成员 realM，
+// 而非短路成同名真实模型 N。这道防线防止有人把 HasRealModel 判断挪到 visited 检查之前。
+func TestResolve_OffPathRoutingWinsOverSameNameModel(t *testing.T) {
+	s := newTestStore()
+	// channel 同时提供 "N" 和 "realM" 两个真实模型名
+	ch1 := &models.Channel{Models: "N,realM"}
+	ch1.ID = 1
+	ch1.Status = consts.StatusEnabled
+	s.SetChannel(ch1)
+	s.RebuildModelIndex()
+	s.SetGlobalRouting("N", &protocol.SyncedRouting{
+		ID: 1, Name: "N", Scope: "global", Enabled: true,
+		Members: []protocol.RoutingMember{{Ref: "realM", Priority: 0, Weight: 1}},
+	})
+	s.SetGlobalRouting("outer", &protocol.SyncedRouting{
+		ID: 2, Name: "outer", Scope: "global", Enabled: true,
+		Members: []protocol.RoutingMember{{Ref: "N", Priority: 0, Weight: 1}},
+	})
+	ctx := NewResolveCtx()
+	if got := ResolveToRealModel(s, "outer", 0, ctx); got != "realM" {
+		t.Errorf("off-path routing N should expand to its member realM (routing wins), got %q", got)
+	}
+}
+
+// 主成员（同名真实模型）耗尽后，应降级到次成员。
+func TestResolve_SelfNameFallbackAfterExhaust(t *testing.T) {
+	s := newTestStore()
+	ch1 := &models.Channel{Models: "gpt-5.5"}
+	ch1.ID = 1
+	ch1.Status = consts.StatusEnabled
+	s.SetChannel(ch1)
+	s.RebuildModelIndex()
+	s.SetGlobalRouting("gpt-5.5", &protocol.SyncedRouting{
+		ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
+		Members: []protocol.RoutingMember{
+			{Ref: "gpt-5.5", Priority: 10, Weight: 1},
+			{Ref: "gpt-4o", Priority: 0, Weight: 1},
+		},
+	})
+	ctx := NewResolveCtx()
+	first := ResolveToRealModel(s, "gpt-5.5", 0, ctx)
+	if first != "gpt-5.5" {
+		t.Fatalf("first resolve should be gpt-5.5, got %q", first)
+	}
+	ctx.MarkMemberExhausted(first)
+	if second := ResolveToRealModel(s, "gpt-5.5", 0, ctx); second != "gpt-4o" {
+		t.Errorf("after exhaust primary, should fall back to gpt-4o, got %q", second)
 	}
 }

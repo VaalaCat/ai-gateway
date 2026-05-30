@@ -12,6 +12,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ErrorSample } from "@/lib/api/insights";
+import { formatDate } from "@/lib/utils/format";
 
 export function ErrorsSection({ rows }: { rows: ErrorSample[] }) {
   const t = useTranslations("insights.section");
@@ -38,7 +39,7 @@ export function ErrorsSection({ rows }: { rows: ErrorSample[] }) {
               {rows.map((r, i) => (
                 <TableRow key={i}>
                   <TableCell className="text-muted-foreground">
-                    {new Date(r.ts * 1000).toLocaleString()}
+                    {formatDate(r.ts)}
                   </TableCell>
                   <TableCell>{r.stage ?? ""}</TableCell>
                   <TableCell>{r.channel ?? ""}</TableCell>

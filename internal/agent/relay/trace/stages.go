@@ -34,6 +34,9 @@ type TraceRecord struct {
 	UpstreamStatus     int
 	FailStage          Stage
 	Timings            map[Stage]time.Duration
+	// Verbose 表示该次 trace 值得落库:开启了 trace 或该次尝试失败。
+	// 非 verbose(关 trace 的成功尝试)只带 Timings/FailStage,不应写 trace 行。
+	Verbose bool
 }
 
 // HasBody 表示当前 record 是否包含 verbose 字段（4 body / 4 headers / upstream_status）。

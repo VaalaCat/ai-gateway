@@ -19,4 +19,16 @@ package settings
 type AgentSettings struct {
 	TraceMaxBodySize int `setting:"trace_max_body_size,65536,4096,16777216"`
 	FallbackSleepMs  int `setting:"fallback_sleep_ms,1000,0,60000"`
+	AffinityEnabled  int `setting:"affinity_enabled,1,0,1"`
+	AffinityTTLSec   int `setting:"affinity_ttl_sec,300,0,86400"`
+
+	// Channel 韧性(failsafe)默认参数;每 channel 可在渠道表单覆盖。
+	MaxRetriesPerChannel int `setting:"max_retries_per_channel,2,0,10"`
+	RetryBackoffBaseMs   int `setting:"retry_backoff_base_ms,200,0,60000"`
+	RetryBackoffMaxMs    int `setting:"retry_backoff_max_ms,2000,0,60000"`
+	BreakerThreshold     int `setting:"breaker_threshold,5,1,1000"`
+	BreakerCooldownMs    int `setting:"breaker_cooldown_ms,30000,0,3600000"`
+
+	// RetryMaxChannels 是跨 channel 降级轮数(attempt 总预算);plan 按此截断候选链。
+	RetryMaxChannels int `setting:"retry_max_channels,5,1,100"`
 }

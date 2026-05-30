@@ -60,6 +60,30 @@ export interface Channel {
   role_mapping: string;
   system_prompt_in_input?: boolean;
   disable_keepalive?: boolean;
+  price_ratio?: number;
+  free?: boolean;
+  resilience?: {
+    max_retries?: number;
+    backoff_base_ms?: number;
+    backoff_max_ms?: number;
+    breaker_threshold?: number;
+    breaker_cooldown_ms?: number;
+  };
+  limit?: {
+    disable_at?: number;
+    rules?: Array<{
+      metric: "calls" | "cost";
+      window: "lifetime" | "daily" | "weekly" | "monthly" | "rolling_days";
+      days?: number;
+      threshold: number;
+    }>;
+  };
+  limit_state?: {
+    tripped?: boolean;
+    reason?: string;
+    auto_recover?: boolean;
+    tripped_at?: number;
+  };
   created_at: number;
   updated_at: number;
 }
@@ -161,6 +185,8 @@ export interface CacheEntityStats {
   negative_hits: number;
   size: number;
   capacity: number;
+  load_errors: number;
+  invalidations: number;
 }
 
 export interface AgentRuntime {
@@ -213,6 +239,15 @@ export interface UsageLog {
   input_cost: number;
   output_cost: number;
   total_cost: number;
+  cache_read_cost?: number;
+  cache_write_cost?: number;
+  raw_input_cost?: number | null;
+  raw_output_cost?: number | null;
+  raw_cache_read_cost?: number | null;
+  raw_cache_write_cost?: number | null;
+  billing_factor?: number | null;
+  free?: boolean;
+  price_ratio?: number;
   is_stream: boolean;
   duration: number;
   request_id: string;
@@ -222,6 +257,8 @@ export interface UsageLog {
   first_response_ms: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  affinity_status?: string;
+  affinity_recorded?: boolean;
   inbound_protocol: string;
   outbound_protocol: string;
   use_legacy: boolean;
@@ -230,11 +267,28 @@ export interface UsageLog {
   other: string;
   has_trace: boolean;
   created_at: number;
+  fallback_chain?: Array<{
+    seq: number;
+    channel_id: number;
+    channel_name: string;
+    source: string;
+    real_model: string;
+    retries: number;
+    by_affinity?: boolean;
+    breaker_open?: boolean;
+    http_status?: number;
+    status: string;
+    error_type?: string;
+    error_message?: string;
+    duration_ms: number;
+    has_trace?: boolean;
+  }>;
 }
 
 export interface UsageLogTrace {
   id: number;
   request_id: string;
+  attempt_index: number;
   inbound_path: string;
   outbound_path: string;
   inbound_headers: string;
@@ -535,6 +589,8 @@ export interface ClusterEntityStats {
   capacity: number;
   hit_rate: number | null;
   util: number | null;
+  load_errors: number;
+  invalidations: number;
 }
 
 export interface AgentCacheSnapshot {
@@ -560,6 +616,7 @@ export const CACHE_ENTITY_NAMES = [
   "user_group",
   "model_routing",
   "user_routings",
+  "private_channels_visible",
 ] as const;
 export type CacheEntityName = typeof CACHE_ENTITY_NAMES[number];
 
@@ -629,4 +686,32 @@ export interface TokenTemplateSyncResponse {
   template_id: number;
   synced: number;
   skipped_unchanged: number;
+}
+
+export interface ScriptScope {
+  channel_ids?: number[];
+  model_names?: string[];
+}
+
+export interface AdminScript {
+  id: number;
+  name: string;
+  code: string;
+  enabled: boolean;
+  priority: number;
+  scope: ScriptScope;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface InviteCodeRow {
+  id: number;
+  code: string;
+  creator_id: number;
+  max_uses: number;
+  used_count: number;
+  expires_at: number;
+  note: string;
+  created_at: number;
+  updated_at: number;
 }

@@ -2,31 +2,36 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
 import type { ModelConfig, PaginatedResponse, PaginatedParams } from "@/lib/types";
 
-// Pricing types
-interface SourcePricing {
+export interface PricingValues {
   input_price: number;
   output_price: number;
-  cache_read_price: number | null;
-  cache_write_price: number | null;
-  match_type: string;
-  matched_name: string;
+  cache_read_price: number;
+  cache_write_price: number;
 }
 
-export interface PricingMatch {
+export interface PriceCandidate {
+  source: string;
+  provider: string;
+  match_type: string;
+  matched_name: string;
+  price: PricingValues;
+}
+
+export interface PricingRecommendation {
   model_id: number;
   model_name: string;
-  current: {
-    input_price: number;
-    output_price: number;
-    cache_read_price: number;
-    cache_write_price: number;
-  };
-  sources: Record<string, SourcePricing>;
+  current: PricingValues;
   has_price: boolean;
+  recommended: PricingValues;
+  provenance: string;
+  confidence: "high" | "needs_review";
+  review_reasons?: string[];
+  has_change: boolean;
+  candidates: PriceCandidate[];
 }
 
 export interface FetchPricingResponse {
-  matches: PricingMatch[];
+  matches: PricingRecommendation[];
   unmatched_models: string[];
   source_errors?: Record<string, string>;
 }

@@ -179,7 +179,7 @@ func TestPublishCtxBuildFailFillsBaseOnly(t *testing.T) {
 	rctx.State.Err = state.ErrReadBody
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -211,7 +211,7 @@ func TestPublishPlanFailFillsRoutingName(t *testing.T) {
 	rctx.State.Plan.RoutingName = "smart"
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -241,7 +241,7 @@ func TestPublishPlanFail_RoutingFallback_SkipsRoutingName(t *testing.T) {
 	rctx.State.Plan.RoutingName = "smart" // Planner 已写入，但 state.ErrRoutingFallback 路径不应外露
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -279,7 +279,7 @@ func TestPublishExecuteSuccess(t *testing.T) {
 	}
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -315,7 +315,7 @@ func TestPublishForwardedSkipped(t *testing.T) {
 	rctx.State.Forwarded = true
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -340,7 +340,7 @@ func TestPublishExecuteFailSetsStatus0(t *testing.T) {
 	}
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -418,7 +418,7 @@ func TestPublishErrorMessage_ParityWithMain(t *testing.T) {
 			}
 
 			cb := newCaptureBus(t)
-			p := NewPublisher(cb.bus, zap.NewNop())
+			p := NewPublisher(cb.bus, zap.NewNop(), nil)
 			p.Publish(rctx)
 			cb.wait()
 
@@ -466,7 +466,7 @@ func TestPublishExecuteFailWritten_NoCacheNoFirstResponseMs(t *testing.T) {
 	}
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -532,7 +532,7 @@ func TestPublish_ExecuteFail_NotWritten_AllTokenFieldsZero(t *testing.T) {
 	}
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 
@@ -576,7 +576,7 @@ func TestPublish_ExecuteFail_NotWritten_AllTokenFieldsZero(t *testing.T) {
 
 func TestPublishNilRelayContext_NoPanicNoPublish(t *testing.T) {
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -593,7 +593,7 @@ func TestPublishNilRelayContext_NoPanicNoPublish(t *testing.T) {
 
 func TestPublishNilState_NoPanicNoPublish(t *testing.T) {
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 
 	rctx := &state.RelayContext{Context: newGinCtxForTest(nil), State: nil}
 	defer func() {
@@ -613,7 +613,7 @@ func TestPublishForwardedAfterNilGuard(t *testing.T) {
 	// boundary: rctx + State 都有，但 Forwarded=true → 跳过 publish。
 	// 跟前面 nil 防御共用一条短路链路，独立断言一次防止合并 regression。
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 
 	rctx := newPublishTestRctx()
 	rctx.State.Forwarded = true
@@ -622,6 +622,123 @@ func TestPublishForwardedAfterNilGuard(t *testing.T) {
 
 	if cb.count() != 0 {
 		t.Errorf("Forwarded=true must not emit usage log, got %d", cb.count())
+	}
+}
+
+// ---------- H4: FallbackChain + AttemptTraces 透传 ----------
+
+// TestPublish_FallbackChainCarried 验证 Execution.History 出现在发出的 UsageLogEntry.FallbackChain。
+func TestPublish_FallbackChainCarried(t *testing.T) {
+	rctx := newPublishTestRctx()
+	rctx.State.FailPhase = state.PhaseNone
+	rctx.State.Execution = state.ExecutionResult{
+		Used: state.Attempt{
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 7, Type: consts.ChannelTypeOpenAI, Name: "ch7"}},
+			RealModel: "gpt-4",
+			Mode:      state.ModeNative,
+		},
+		Outcome: state.AttemptResult{},
+		History: []models.AttemptRecord{
+			{Seq: 1, ChannelName: "a", Status: "fail", HTTPStatus: 503},
+			{Seq: 2, ChannelName: "b", Status: "ok"},
+		},
+	}
+
+	cb := newCaptureBus(t)
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
+	p.Publish(rctx)
+	cb.wait()
+
+	got := cb.last()
+	if len(got.FallbackChain) != 2 {
+		t.Fatalf("FallbackChain len = %d, want 2", len(got.FallbackChain))
+	}
+	if got.FallbackChain[0].Status != "fail" || got.FallbackChain[0].HTTPStatus != 503 {
+		t.Errorf("FallbackChain[0] wrong: %+v", got.FallbackChain[0])
+	}
+	if got.FallbackChain[1].Status != "ok" {
+		t.Errorf("FallbackChain[1] wrong: %+v", got.FallbackChain[1])
+	}
+}
+
+// TestPublish_AttemptTracesCarried 验证 recorder.Attempts() 快照被转成 AttemptTraces
+// 并附在发出的 UsageLogEntry 上；slice 顺序即候选顺序（AttemptIndex 由 settler 赋值）。
+func TestPublish_AttemptTracesCarried(t *testing.T) {
+	rec := trace.NewRecorder(true, 0)
+	// 模拟两候选快照
+	rec.WithFail(trace.StageUpstreamStatus, errors.New("503"))
+	rec.SnapshotAttempt()
+	rec.ResetAttempt()
+	// 第二候选：无失败
+	rec.SnapshotAttempt()
+
+	rctx := newPublishTestRctx()
+	rctx.State.Recorder = rec
+	rctx.State.FailPhase = state.PhaseNone
+	rctx.State.Execution = state.ExecutionResult{
+		Used: state.Attempt{
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 3, Type: consts.ChannelTypeOpenAI, Name: "ch3"}},
+			RealModel: "gpt-4",
+			Mode:      state.ModeNative,
+		},
+		Outcome: state.AttemptResult{},
+	}
+
+	cb := newCaptureBus(t)
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
+	p.Publish(rctx)
+	cb.wait()
+
+	got := cb.last()
+	if len(got.AttemptTraces) != 2 {
+		t.Fatalf("AttemptTraces len = %d, want 2", len(got.AttemptTraces))
+	}
+	// 第一条应有 error_stage（因为 WithFail 调过）
+	if got.AttemptTraces[0].ErrorStage != string(trace.StageUpstreamStatus) {
+		t.Errorf("AttemptTraces[0].ErrorStage = %q, want %q",
+			got.AttemptTraces[0].ErrorStage, trace.StageUpstreamStatus)
+	}
+	// 有快照时不应回退到旧 TraceData 字段
+	if got.TraceData != "" {
+		t.Errorf("TraceData should be empty when AttemptTraces is populated, got %q", got.TraceData)
+	}
+}
+
+// TestAttachTraceData_EmptyAttempts_FallsBackToTraceData 验证无快照时回退旧行为：
+// AttemptTraces 为空；TraceData 按旧逻辑（HasBody()）填写。
+// 本用例不关心 TraceData 是否非空（HasBody() 由 InboundPath 决定，无 inbound 则为空），
+// 重点是 AttemptTraces 必须为空且 error_stage 正确填写。
+func TestAttachTraceData_EmptyAttempts_FallsBackToTraceData(t *testing.T) {
+	rec := trace.NewRecorder(false, 0)
+	rec.WithFail(trace.StageInternal, errors.New("oops"))
+
+	var e protocol.UsageLogEntry
+	attachTraceData(&e, rec)
+
+	// 无快照时 AttemptTraces 必须为空（走旧兜底路径）。
+	if len(e.AttemptTraces) != 0 {
+		t.Errorf("AttemptTraces should be empty when no snapshots, got %d", len(e.AttemptTraces))
+	}
+	// error_stage 仍然正确填写。
+	if e.ErrorStage != string(trace.StageInternal) {
+		t.Errorf("ErrorStage = %q, want %q", e.ErrorStage, trace.StageInternal)
+	}
+}
+
+// TestAttachTraceData_NonVerboseSnapshotSkipped 回归:关闭 trace 的【成功】尝试
+// 即使被 SnapshotAttempt 快照,也不得落 trace 行(否则每个请求都写空 trace + has_trace)。
+func TestAttachTraceData_NonVerboseSnapshotSkipped(t *testing.T) {
+	rec := trace.NewRecorder(false, 0) // trace 关
+	rec.SnapshotAttempt()              // 成功尝试:非 verbose
+
+	var e protocol.UsageLogEntry
+	attachTraceData(&e, rec)
+
+	if len(e.AttemptTraces) != 0 {
+		t.Errorf("非 verbose(关 trace 的成功)快照不得写入 AttemptTraces,got %d", len(e.AttemptTraces))
+	}
+	if e.TraceData != "" {
+		t.Errorf("关 trace 的成功请求不得设 TraceData,got %q", e.TraceData)
 	}
 }
 
@@ -643,7 +760,7 @@ func TestPublishExecuteLegacyAndUpstreamFallback(t *testing.T) {
 	}
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop())
+	p := NewPublisher(cb.bus, zap.NewNop(), nil)
 	p.Publish(rctx)
 	cb.wait()
 

@@ -21,7 +21,7 @@ func TestNewHandler_WiresStageFields(t *testing.T) {
 	logger := zap.NewNop()
 	pool := upstream.NewTransportPool(8, 4, 5*time.Second, upstream.KeepaliveConfig{Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 3})
 	cfg := &config.AgentRuntimeConfig{
-		Runtime: config.RuntimeConfig{RetryMax: 7},
+		Runtime: config.RuntimeConfig{RelayTimeout: 30},
 		Relay:   config.RelayConfig{Timeout: 30},
 	}
 	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, cfg, pool)
@@ -44,9 +44,10 @@ func TestNewHandler_WiresStageFields(t *testing.T) {
 	if h.publisher == nil {
 		t.Error("publisher not constructed")
 	}
-	// 间接验证：Agent 的 config / transport pool 仍能从 GetXxx 接口拿到。
-	if h.Agent.GetConfig() == nil || h.Agent.GetConfig().Runtime.RetryMax != 7 {
-		t.Errorf("Agent.GetConfig().RetryMax = %v, want 7",
+	// 间接验证：Agent 的 config / transport pool 仍能从 GetXxx 接口拿到，
+	// 且构造器把传入的 Runtime 配置原样接上。
+	if h.Agent.GetConfig() == nil || h.Agent.GetConfig().Runtime.RelayTimeout != 30 {
+		t.Errorf("Agent.GetConfig().Runtime.RelayTimeout = %v, want 30",
 			h.Agent.GetConfig())
 	}
 	if h.Agent.GetLogger() == nil {

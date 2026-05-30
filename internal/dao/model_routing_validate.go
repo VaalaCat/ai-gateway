@@ -91,6 +91,8 @@ func ValidateRouting(r *models.ModelRouting, np NameProvider) *ValidateError {
 }
 
 func dfsCycleAndDepth(start *models.ModelRouting, np NameProvider, startMembers []models.RoutingMember) *ValidateError {
+	// start 由此处种入 visited，但它不一定在 np 的 routings map 里（如校验 A 时 map 只注册了 B）；
+	// 因此 dfsRouting 必须先判 visited 再查 GetGlobalRouting，否则回边会被当真实模型漏检。
 	visited := map[string]bool{start.Name: true}
 	path := []string{start.Name}
 	return dfsRouting(startMembers, np, visited, path, 1)
@@ -103,15 +105,18 @@ func dfsRouting(members []models.RoutingMember, np NameProvider,
 		return newErr(ErrCodeMaxDepth, "nesting depth exceeds 5", map[string]any{"path": path})
 	}
 	for _, m := range members {
-		// 如果 ref 名称已在当前路径上，直接判环（包含 start 本身不在 np 的情形）。
 		if visited[m.Ref] {
+			// ref 命中当前路径上的路由：存在同名真实模型则当叶子终结，否则才是真环。
+			if np.HasModel(m.Ref) {
+				continue
+			}
 			cycle := append(append([]string{}, path...), m.Ref)
 			return newErr(ErrCodeCycleDetected, "cycle in routing graph",
 				map[string]any{"path": cycle})
 		}
 		r := np.GetGlobalRouting(m.Ref)
 		if r == nil {
-			continue // 真实 model，跳过
+			continue // 真实 model 叶子
 		}
 		var childMembers []models.RoutingMember
 		_ = json.Unmarshal([]byte(r.Members), &childMembers)

@@ -1,6 +1,10 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/VaalaCat/ai-gateway/internal/models"
+)
 
 type SyncPushParams struct {
 	Entity  string `json:"entity"`
@@ -68,23 +72,41 @@ type UsageLogEntry struct {
 	TokenSource      string `json:"token_source,omitempty"`
 	RoutingName      string `json:"routing_name,omitempty"`
 
+	// Channel affinity（渠道缓存粘性）
+	AffinityStatus   string `json:"affinity_status,omitempty"` // "hit" | "fallback" | "none" | ""
+	AffinityRecorded bool   `json:"affinity_recorded,omitempty"`
+
 	ErrorStage         string `json:"error_stage,omitempty"`
 	InboundDecodeMs    int    `json:"inbound_decode_ms,omitempty"`
 	OutboundEncodeMs   int    `json:"outbound_encode_ms,omitempty"`
 	UpstreamDispatchMs int    `json:"upstream_dispatch_ms,omitempty"`
 	UpstreamDecodeMs   int    `json:"upstream_decode_ms,omitempty"`
 	ClientEncodeMs     int    `json:"client_encode_ms,omitempty"`
+
+	// PriceRatio 是 relay 选中的公共 channel 在请求时刻的计费倍率快照。
+	// 零值 0(旧 agent 未发 / channel 未配)= 原价,settler 归一到 1.0。
+	PriceRatio float64 `json:"price_ratio,omitempty"`
+
+	// Free 是 relay 选中的公共 channel 在请求时刻的"免费渠道"标记快照。
+	// private 行不填,保持 false。settler 见 true 则四桶成本清零。
+	Free bool `json:"free,omitempty"`
+
+	// FallbackChain 是本次请求的候选链路（每候选一条）；空表示无链路信息。
+	FallbackChain []models.AttemptRecord `json:"fallback_chain,omitempty"`
+	// AttemptTraces 是逐候选 mask 过的 header/body trace，index 对应 FallbackChain 的 Seq-1。
+	// AttemptIndex assigned by settler from slice order until Task 5 adds the field.
+	AttemptTraces []models.UsageLogTrace `json:"attempt_traces,omitempty"`
 }
 
 type HeartbeatParams struct {
-	Uptime            int64 `json:"uptime"`
-	CachedTokens      int   `json:"cached_tokens"`
-	CachedChannels    int   `json:"cached_channels"`
-	CachedModels      int   `json:"cached_models"`
+	Uptime               int64 `json:"uptime"`
+	CachedTokens         int   `json:"cached_tokens"`
+	CachedChannels       int   `json:"cached_channels"`
+	CachedModels         int   `json:"cached_models"`
 	CachedGlobalRoutings int   `json:"cached_global_routings"`
 	CachedUserRoutings   int   `json:"cached_user_routings"`
-	ActiveConnections int   `json:"active_connections"`
-	Version           int64 `json:"version"`
+	ActiveConnections    int   `json:"active_connections"`
+	Version              int64 `json:"version"`
 
 	HTTPAddresses json.RawMessage `json:"http_addresses,omitempty"`
 	Tags          string          `json:"tags,omitempty"`
@@ -97,12 +119,14 @@ type HeartbeatParams struct {
 // CacheEntityStats 是单个实体缓存的运行统计。
 // LRU 模式实体上报全字段；Full 模式实体仅 Size 有意义、其他字段为 0。
 type CacheEntityStats struct {
-	Hits         int64 `json:"hits"`
-	Misses       int64 `json:"misses"`
-	Evictions    int64 `json:"evictions"`
-	NegativeHits int64 `json:"negative_hits"`
-	Size         int   `json:"size"`
-	Capacity     int   `json:"capacity"`
+	Hits          int64 `json:"hits"`
+	Misses        int64 `json:"misses"`
+	Evictions     int64 `json:"evictions"`
+	NegativeHits  int64 `json:"negative_hits"`
+	LoadErrors    int64 `json:"load_errors"`
+	Invalidations int64 `json:"invalidations"`
+	Size          int   `json:"size"`
+	Capacity      int   `json:"capacity"`
 }
 
 // FetchEntityRequest 是 sync.fetchEntity 的入参。

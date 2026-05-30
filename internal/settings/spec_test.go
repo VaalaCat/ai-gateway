@@ -63,6 +63,28 @@ func TestValidate_NoMutation(t *testing.T) {
 
 func TestKeys_DeclarationOrder(t *testing.T) {
 	keys := Keys()
-	require.Equal(t, []string{"trace_max_body_size", "fallback_sleep_ms"}, keys,
-		"Keys 应按 struct 字段声明顺序")
+	require.Equal(t, []string{
+		"trace_max_body_size", "fallback_sleep_ms", "affinity_enabled", "affinity_ttl_sec",
+		"max_retries_per_channel", "retry_backoff_base_ms", "retry_backoff_max_ms",
+		"breaker_threshold", "breaker_cooldown_ms", "retry_max_channels",
+	}, keys, "Keys 应按 struct 字段声明顺序")
+}
+
+func TestRetryMaxChannelsDefault(t *testing.T) {
+	if got := Defaults()["retry_max_channels"]; got != "5" {
+		t.Errorf("retry_max_channels default = %q, want 5", got)
+	}
+}
+
+func TestAffinityDefaults(t *testing.T) {
+	defs := Defaults()
+	require.Equal(t, "1", defs["affinity_enabled"])
+	require.Equal(t, "300", defs["affinity_ttl_sec"])
+	var s AgentSettings
+	for k, v := range Defaults() {
+		require.NoError(t, Apply(&s, k, v))
+	}
+	require.Equal(t, 1, s.AffinityEnabled)
+	require.Equal(t, 300, s.AffinityTTLSec)
+	require.Error(t, Validate("affinity_enabled", "2"), "affinity_enabled=2 should be rejected")
 }

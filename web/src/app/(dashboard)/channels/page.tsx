@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 import { StatusBadge } from "@/components/business/status-badge";
+import { ChannelLimitBadge } from "@/components/business/channel-limit-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 
 import { ExpandedModelsView } from "@/components/business/expanded-models-view";
@@ -400,7 +401,12 @@ export default function ChannelsPage() {
     {
       accessorKey: "status",
       header: ({ column }) => <DataTableColumnHeader column={column} title={tc("status")} />,
-      cell: ({ row }) => <StatusBadge status={row.original.status} />,
+      cell: ({ row }) => (
+        <div className="flex items-center gap-1.5">
+          <StatusBadge status={row.original.status} />
+          <ChannelLimitBadge channel={row.original} />
+        </div>
+      ),
     },
     {
       id: "test",
@@ -446,6 +452,9 @@ export default function ChannelsPage() {
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={() => router.push(`/channels/edit?id=${row.original.id}`)}>
               {tc("edit")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => router.push(`/channels/new?from=${row.original.id}`)}>
+              {tc("copy")}
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"

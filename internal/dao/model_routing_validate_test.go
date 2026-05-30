@@ -152,3 +152,56 @@ func TestValidate_DisabledRoutingStillBlocksCycle(t *testing.T) {
 		t.Fatalf("disabled A should still be visible to cycle detection, got %v", err)
 	}
 }
+
+// 路由名与真实模型同名：成员引用该名字时，应解析为真实模型，不报环。
+func TestValidate_SelfNameModelAllowed(t *testing.T) {
+	self := &models.ModelRouting{
+		ID: 1, Name: "gpt-5.5", Scope: "global",
+		Members: `[{"ref":"gpt-5.5","priority":10,"weight":1},{"ref":"gpt-4o","priority":0,"weight":1}]`,
+	}
+	nv := &fakeNames{
+		models:   map[string]bool{"gpt-5.5": true, "gpt-4o": true},
+		routings: map[string]*models.ModelRouting{"gpt-5.5": self},
+	}
+	if err := dao.ValidateRouting(self, nv); err != nil {
+		t.Fatalf("self-name with same real model should pass, got %v", err)
+	}
+}
+
+// 路由名引用自身、但不存在同名真实模型：仍是真环。
+func TestValidate_SelfNameNoModelCycle(t *testing.T) {
+	self := &models.ModelRouting{
+		ID: 1, Name: "loop", Scope: "global",
+		Members: `[{"ref":"loop","priority":0,"weight":1}]`,
+	}
+	nv := &fakeNames{
+		models:   map[string]bool{"gpt-4o": true},
+		routings: map[string]*models.ModelRouting{"loop": self},
+	}
+	err := dao.ValidateRouting(self, nv)
+	if err == nil || err.Code() != "cycle_detected" {
+		t.Fatalf("self-loop without real model should be cycle, got %v", err)
+	}
+}
+
+// 间接同名：A(=真实模型A) → B → A。有真实模型 A 时放行，无则报环。
+func TestValidate_IndirectSameNameModel(t *testing.T) {
+	a := &models.ModelRouting{ID: 1, Name: "A", Scope: "global", Members: `[{"ref":"B","priority":0,"weight":1}]`}
+	b := &models.ModelRouting{ID: 2, Name: "B", Scope: "global", Members: `[{"ref":"A","priority":0,"weight":1}]`}
+	routings := map[string]*models.ModelRouting{"A": a, "B": b}
+
+	withModelA := &fakeNames{models: map[string]bool{"A": true}, routings: routings}
+	if err := dao.ValidateRouting(a, withModelA); err != nil {
+		t.Fatalf("A→B→A with real model A should pass, got %v", err)
+	}
+
+	noModelA := &fakeNames{models: map[string]bool{}, routings: routings}
+	err := dao.ValidateRouting(a, noModelA)
+	if err == nil || err.Code() != "cycle_detected" {
+		t.Fatalf("A→B→A without real model A should be cycle, got %v", err)
+	}
+	path := err.Details()["path"].([]string)
+	if len(path) != 3 || path[0] != "A" || path[1] != "B" || path[2] != "A" {
+		t.Errorf("want cycle path [A B A], got %v", path)
+	}
+}

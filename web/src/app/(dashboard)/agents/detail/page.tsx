@@ -27,8 +27,9 @@ import { DateCell } from "@/components/business/date-cell";
 import { CopyableText } from "@/components/business/copyable-text";
 import { CacheStatsTable } from "@/components/business/cache-stats-table";
 
-import { useAgentDetail, useConnectivityReport, useCheckConnectivity, useFullSyncAgents, useAgentInflight, useAgentGoroutines } from "@/lib/api/agents";
+import { useAgentDetail, useConnectivityReport, useCheckConnectivity, useFullSyncAgents, useAgentInflight, useAgentGoroutines, useInterruptInflight } from "@/lib/api/agents";
 import type { GoroutineDump } from "@/lib/api/agents";
+import { InflightTable } from "@/components/business/inflight-table";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { formatDuration, formatUptime } from "@/lib/utils/format";
 import type { AgentAddress } from "@/lib/types";
@@ -84,6 +85,7 @@ function InflightSection({ agentId }: { agentId: number }) {
   const tc = useTranslations("common");
   const { data: rows = [], isFetching, refetch } = useAgentInflight(agentId);
   const goroutinesMutation = useAgentGoroutines();
+  const interrupt = useInterruptInflight();
   const [dumpOpen, setDumpOpen] = useState(false);
   const [dumpData, setDumpData] = useState<GoroutineDump | null>(null);
 
@@ -124,61 +126,21 @@ function InflightSection({ agentId }: { agentId: number }) {
           </Button>
         </div>
       </div>
-      {rows.length > 0 ? (
-        <div className="border-t">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="h-8">{t("inflightColModel")}</TableHead>
-                <TableHead className="h-8">{t("inflightColChannel")}</TableHead>
-                <TableHead className="h-8">{t("inflightColStage")}</TableHead>
-                <TableHead className="h-8">{t("inflightColElapsed")}</TableHead>
-                <TableHead className="h-8">{t("inflightColStream")}</TableHead>
-                <TableHead className="h-8">{t("inflightColReqId")}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((row) => {
-                const elapsedSec = (row.elapsed_ms / 1000).toFixed(1);
-                const isSlow = row.elapsed_ms > 60000;
-                return (
-                  <TableRow key={row.req_id}>
-                    <TableCell className="py-1.5">{row.model}</TableCell>
-                    <TableCell className="py-1.5">
-                      <span>{row.channel_name}</span>
-                      <span className="ml-1 text-muted-foreground">#{row.channel_id}</span>
-                    </TableCell>
-                    <TableCell className="py-1.5">{row.stage}</TableCell>
-                    <TableCell className="py-1.5">
-                      {isSlow ? (
-                        <span className="text-destructive font-medium">
-                          {elapsedSec}s ({t("inflightSlowHint")})
-                        </span>
-                      ) : (
-                        <span>{elapsedSec}s</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="py-1.5">
-                      {row.is_stream ? (
-                        <Badge variant="secondary" className="text-xs px-1.5 py-0">{t("inflightStreamYes")}</Badge>
-                      ) : (
-                        <span className="text-muted-foreground">{t("inflightStreamNo")}</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="py-1.5 font-mono">
-                      <CopyableText text={row.req_id} />
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      ) : (
-        <div className="border-t px-4 py-3">
-          <p className="text-xs text-muted-foreground">{t("inflightEmpty")}</p>
-        </div>
-      )}
+      <div className="border-t">
+        <InflightTable
+          rows={rows}
+          emptyText={t("inflightEmpty")}
+          onInterrupt={(row) =>
+            interrupt.mutate(
+              { agent_id: agentId, id: row.id },
+              {
+                onSuccess: () => { toast.success(t("inflightInterrupted")); },
+                onError: (e) => toast.error(formatErrorToast(e, tc("error"))),
+              },
+            )
+          }
+        />
+      </div>
       <GoroutineDumpDialog open={dumpOpen} onOpenChange={setDumpOpen} data={dumpData} />
     </div>
   );

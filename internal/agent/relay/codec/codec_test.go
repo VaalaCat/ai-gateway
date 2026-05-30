@@ -2,6 +2,36 @@ package codec
 
 import "testing"
 
+func TestJoinUpstreamURL(t *testing.T) {
+	t.Run("normal path preserved", func(t *testing.T) {
+		got, err := JoinUpstreamURL("https://api.openai.com", "/v1/chat/completions")
+		if err != nil || got != "https://api.openai.com/v1/chat/completions" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	t.Run("trailing slash on base", func(t *testing.T) {
+		got, err := JoinUpstreamURL("https://api.openai.com/", "/v1/messages")
+		if err != nil || got != "https://api.openai.com/v1/messages" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	t.Run("at-sign exfil rejected", func(t *testing.T) {
+		if _, err := JoinUpstreamURL("https://api.openai.com", "@evil.example/v1/chat/completions"); err == nil {
+			t.Fatal("want error, got nil")
+		}
+	})
+	t.Run("suffix host change rejected", func(t *testing.T) {
+		if _, err := JoinUpstreamURL("https://api.openai.com", ".evil.com/v1/chat/completions"); err == nil {
+			t.Fatal("want error, got nil")
+		}
+	})
+	t.Run("invalid base rejected", func(t *testing.T) {
+		if _, err := JoinUpstreamURL("not-a-url", "/v1/x"); err == nil {
+			t.Fatal("want error, got nil")
+		}
+	})
+}
+
 func TestNegotiateOutboundProtocol_Override(t *testing.T) {
 	endpointsAll := `{"chat_completions":"/v1/chat/completions","responses":"/v1/responses","messages":"/v1/messages"}`
 	endpointsChatOnly := `{"chat_completions":"/v1/chat/completions"}`

@@ -52,7 +52,6 @@ type AgentConfig struct {
 	ReportBufferSize    int               `mapstructure:"report_buffer_size"`
 	ReportFlushInterval int               `mapstructure:"report_flush_interval"`
 	HeartbeatInterval   int               `mapstructure:"heartbeat_interval"`
-	RetryMax            int               `mapstructure:"retry_max"`
 	HTTPAddresses       []AgentAddress    `mapstructure:"http_addresses"`
 	Tags                string            `mapstructure:"tags"`
 	ProxyURL            string            `mapstructure:"proxy_url"`
@@ -89,7 +88,6 @@ type RuntimeConfig struct {
 	ReportBufferSize    int `mapstructure:"report_buffer_size"`
 	ReportFlushInterval int `mapstructure:"report_flush_interval"`
 	HeartbeatInterval   int `mapstructure:"heartbeat_interval"`
-	RetryMax            int `mapstructure:"retry_max"`
 }
 
 type FileConfig struct {
@@ -163,7 +161,6 @@ func (c *Config) ToMasterRuntimeConfig() *MasterRuntimeConfig {
 		ReportBufferSize:    c.Agent.ReportBufferSize,
 		ReportFlushInterval: c.Agent.ReportFlushInterval,
 		HeartbeatInterval:   c.Agent.HeartbeatInterval,
-		RetryMax:            c.Agent.RetryMax,
 	})
 
 	return &MasterRuntimeConfig{
@@ -210,7 +207,6 @@ func (c *Config) ToAgentRuntimeConfig() *AgentRuntimeConfig {
 		ReportBufferSize:    c.Agent.ReportBufferSize,
 		ReportFlushInterval: c.Agent.ReportFlushInterval,
 		HeartbeatInterval:   c.Agent.HeartbeatInterval,
-		RetryMax:            c.Agent.RetryMax,
 	})
 
 	return &AgentRuntimeConfig{
@@ -234,7 +230,6 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("agent.report_buffer_size", 1000)
 	viper.SetDefault("agent.report_flush_interval", 5)
 	viper.SetDefault("agent.heartbeat_interval", 30)
-	viper.SetDefault("agent.retry_max", 5)
 	viper.SetDefault("agent.cache.token_capacity", 20000)
 	viper.SetDefault("agent.cache.user_capacity", 20000)
 	viper.SetDefault("agent.cache.user_routings_capacity", 5000)
@@ -330,14 +325,12 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	v.SetDefault("agent.report_buffer_size", 1000)
 	v.SetDefault("agent.report_flush_interval", 5)
 	v.SetDefault("agent.heartbeat_interval", 30)
-	v.SetDefault("agent.retry_max", 3)
 	v.SetDefault("agent.proxy_url", "")
 	v.SetDefault("runtime.relay_timeout", 300)
 	v.SetDefault("runtime.full_sync_interval", 300)
 	v.SetDefault("runtime.report_buffer_size", 1000)
 	v.SetDefault("runtime.report_flush_interval", 5)
 	v.SetDefault("runtime.heartbeat_interval", 30)
-	v.SetDefault("runtime.retry_max", 3)
 
 	if path != "" {
 		v.SetConfigFile(path)
@@ -486,7 +479,6 @@ func normalizeRuntimeConfig(cfg RuntimeConfig) RuntimeConfig {
 	cfg.ReportBufferSize = normalizeDefaultInt(cfg.ReportBufferSize, 1000)
 	cfg.ReportFlushInterval = normalizeDefaultInt(cfg.ReportFlushInterval, 5)
 	cfg.HeartbeatInterval = normalizeDefaultInt(cfg.HeartbeatInterval, 30)
-	cfg.RetryMax = normalizeDefaultInt(cfg.RetryMax, 5)
 	return cfg
 }
 

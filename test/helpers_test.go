@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,7 @@ func setupFullEnv(t *testing.T, agentID string, retryMax int) *testEnv {
 
 	agentBus := eventbus.NewMemoryBus()
 	store := cache.NewStore(client, config.AgentCacheConfig{})
+	store.LoadSettings([]models.Setting{{Key: "retry_max_channels", Value: strconv.Itoa(retryMax)}})
 	bridge := cache.NewWSBridge(client, store, agentBus, logger)
 	syncer := cache.NewSyncer(store, client, agentBus, logger, 5*time.Minute)
 	bridge.Syncer = syncer
@@ -107,8 +109,7 @@ func setupFullEnv(t *testing.T, agentID string, retryMax int) *testEnv {
 
 	pool := upstream.NewTransportPool(100, 10, 30*time.Second, upstream.KeepaliveConfig{Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 3})
 	relayCfg := &config.AgentRuntimeConfig{
-		Runtime: config.RuntimeConfig{RetryMax: retryMax},
-		Relay:   config.RelayConfig{Timeout: 30},
+		Relay: config.RelayConfig{Timeout: 30},
 	}
 	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, relayCfg, pool)
 	relayHandler := agentrelay.NewHandler(agentBus, agentApp, backend.NewDispatcher(agentApp), nil)

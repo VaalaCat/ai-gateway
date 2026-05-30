@@ -690,8 +690,8 @@ func TestRegistration(t *testing.T) {
 		return w
 	}
 
-	// 1. Registration status returns false by default
-	w := doPublic("GET", "/api/system/registration-status", nil)
+	// 1. public-config reports registration disabled by default
+	w := doPublic("GET", "/api/system/public-config", nil)
 	if w.Code != 200 {
 		t.Fatalf("registration status: %d %s", w.Code, w.Body.String())
 	}
@@ -1223,15 +1223,29 @@ func TestTokenEditRestrictions(t *testing.T) {
 		t.Fatalf("models should be unchanged: expected %q, got %q", origModels, got["models"])
 	}
 
-	// Normal user attempts to update status (should be ignored)
+	// Normal user can self-disable their token (status -> 0 is always allowed)
+	if origStatus != 1 {
+		t.Fatalf("precondition: expected origStatus=1 to exercise self-disable, got %d", origStatus)
+	}
 	w = doUser("PUT", tokPath, map[string]any{"status": 0})
 	if w.Code != 200 {
-		t.Fatalf("user update status: %d %s", w.Code, w.Body.String())
+		t.Fatalf("user disable token: %d %s", w.Code, w.Body.String())
 	}
 	w = doUser("GET", tokPath, nil)
 	got = jsonBody(t, w)
-	if int(got["status"].(float64)) != origStatus {
-		t.Fatalf("status should be unchanged: expected %d, got %v", origStatus, got["status"])
+	if int(got["status"].(float64)) != 0 {
+		t.Fatalf("user disable should persist status=0, got %v", got["status"])
+	}
+
+	// Normal user can self-enable when balance > 0
+	w = doUser("PUT", tokPath, map[string]any{"status": 1})
+	if w.Code != 200 {
+		t.Fatalf("user enable token with balance: %d %s", w.Code, w.Body.String())
+	}
+	w = doUser("GET", tokPath, nil)
+	got = jsonBody(t, w)
+	if int(got["status"].(float64)) != 1 {
+		t.Fatalf("user enable should persist status=1, got %v", got["status"])
 	}
 
 	// Normal user attempts to update expired_at (should be ignored)

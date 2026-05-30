@@ -48,6 +48,7 @@ var byokValidators = []validatorFn{
 	validateFieldLengthsCtx,
 	validateNameUniquenessCtx,
 	validateBaseURLAllowlistCtx,
+	validateEndpointsCtx,
 	validateModelsNonEmptyCtx,
 	validateModelsSubsetOfModelConfigsCtx,
 	validateModelMappingTargetsCtx,
@@ -178,6 +179,9 @@ func validateBaseURLAllowlistCtx(c ValidatorCtx) error {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return api.BadRequestError("base_url malformed", nil)
 	}
+	if u.User != nil {
+		return api.BadRequestError("base_url must not contain credentials", nil)
+	}
 
 	extra := readBaseURLAllowlistExtraFromQuery(c.Query)
 	all := make([]string, 0, len(consts.SystemBYOKBaseURLs)+len(extra))
@@ -191,7 +195,7 @@ func validateBaseURLAllowlistCtx(c ValidatorCtx) error {
 		if u.Scheme != p.Scheme {
 			continue
 		}
-		if u.Host != p.Host {
+		if !strings.EqualFold(u.Host, p.Host) {
 			continue
 		}
 		if !hasPathSegmentPrefix(u.Path, p.Path) {
@@ -215,6 +219,59 @@ func hasPathSegmentPrefix(child, parent string) bool {
 	}
 	rest := child[len(parent):]
 	return rest == "" || rest[0] == '/'
+}
+
+// isSafeRelativePath reports whether p is a safe upstream endpoint path: a
+// rooted relative path ("/...") that cannot redirect the request to a different
+// host when appended to base_url. Rejects userinfo ("@"), protocol-relative
+// ("//"), absolute URLs (scheme/host), backslashes, and control characters —
+// all of which are SSRF / credential-exfil vectors via the BYOK endpoints field.
+func isSafeRelativePath(p string) bool {
+	if p == "" || p[0] != '/' {
+		return false
+	}
+	if strings.HasPrefix(p, "//") {
+		return false
+	}
+	if strings.ContainsAny(p, "@\\") {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] < 0x20 || p[i] == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(p)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return false
+	}
+	return true
+}
+
+// validateEndpointsCtx rejects BYOK endpoints whose path values could redirect
+// the request off the allowlisted base_url host (SSRF / credential exfil). The
+// endpoints field is a JSON object of {endpoint_key: path}; every path must be a
+// safe rooted relative path. Invalid JSON is rejected here rather than silently
+// ignored downstream (codec.ParseEndpoints would fall back to defaults).
+func validateEndpointsCtx(c ValidatorCtx) error {
+	if !c.IsDirty("endpoints") {
+		return nil
+	}
+	raw, _ := c.Req["endpoints"].(string)
+	if raw == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return api.BadRequestError("endpoints must be a JSON object of string paths", nil)
+	}
+	for k, v := range m {
+		if !isSafeRelativePath(v) {
+			return api.BadRequestError(
+				fmt.Sprintf("endpoint path for %q must be an absolute path like /v1/chat/completions", k), nil)
+		}
+	}
+	return nil
 }
 
 func validateModelsSubsetOfModelConfigsCtx(c ValidatorCtx) error {
@@ -352,6 +409,7 @@ func createRequestToMap(req *CreateRequest) map[string]any {
 	return map[string]any{
 		"name":          req.Name,
 		"base_url":      req.BaseURL,
+		"endpoints":     req.Endpoints,
 		"models":        req.Models,
 		"model_mapping": req.ModelMapping,
 		"weight":        req.Weight,

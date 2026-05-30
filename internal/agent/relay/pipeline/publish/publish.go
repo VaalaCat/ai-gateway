@@ -15,6 +15,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
@@ -28,13 +29,14 @@ import (
 // 通过 EventBus 发布 protocol.UsageLogEntry。所有路径（成功 / ctxBuild fail /
 // plan fail / execute fail / forwarded）汇聚到 Publish() 一处。
 type Publisher struct {
-	bus    app.EventBus
-	logger *zap.Logger
+	bus      app.EventBus
+	logger   *zap.Logger
+	affinity *affinity.Engine
 }
 
 // NewPublisher 构造 Publisher。logger 为 nil 时 Publish 默默吞 publish 错误。
-func NewPublisher(bus app.EventBus, logger *zap.Logger) *Publisher {
-	return &Publisher{bus: bus, logger: logger}
+func NewPublisher(bus app.EventBus, logger *zap.Logger, aff *affinity.Engine) *Publisher {
+	return &Publisher{bus: bus, logger: logger, affinity: aff}
 }
 
 // Publish 把 rctx 累加的状态收成 UsageLogEntry 并发 usage.completed。
@@ -145,6 +147,8 @@ func (p *Publisher) fillExecution(e *protocol.UsageLogEntry, rctx *state.RelayCo
 			e.ChannelID = u.Channel.ID
 		}
 		e.OwnerType = "admin"
+		e.PriceRatio = u.Channel.PriceRatio // 公共 channel 才快照倍率;private 分支不填,保持零值 0
+		e.Free = u.Channel.Free             // 免费渠道标记快照;private 分支不填,保持 false
 	}
 	e.ModelName = u.RealModel
 	e.RoutingName = rctx.State.Plan.RoutingName
@@ -192,6 +196,37 @@ func (p *Publisher) fillExecution(e *protocol.UsageLogEntry, rctx *state.RelayCo
 		e.ErrorMessage = exec.Err.Error()
 	} else {
 		e.Status = 1
+	}
+	e.FallbackChain = exec.History
+	p.fillAffinity(e, rctx, u, exec.Err == nil)
+}
+
+// fillAffinity 推导三态 AffinityStatus 并在成功 + 有缓存活动时记录/续期。
+// engine 为 nil 或开关关闭时全部留空，不影响原行为。
+func (p *Publisher) fillAffinity(e *protocol.UsageLogEntry, rctx *state.RelayContext, u state.Attempt, success bool) {
+	if p.affinity == nil || rctx.Input.UserInfo == nil || rctx.Input.UserInfo.UserID == 0 {
+		return
+	}
+	uid := rctx.Input.UserInfo.UserID
+	dec := p.affinity.Decide(affinity.Subject{UserID: uid, RealModel: u.RealModel})
+	// 两者全关 = 粘性整体关闭，直接跳过；只要 Apply 或 Record 任一开启就推导 status，
+	// 是否写记录再由下面的 dec.Record 单独把关。
+	if !dec.Apply && !dec.Record {
+		return
+	}
+	// AffinityStatus 反映 routing 是否用了粘性 channel，与请求成功/失败无关：
+	// 失败请求一样会标记 hit/fallback/none。只有写记录（AffinityRecorded）才要求 success。
+	switch {
+	case u.ByAffinity:
+		e.AffinityStatus = affinity.StatusHit
+	case rctx.State.Plan.HadAffinityEntry:
+		e.AffinityStatus = affinity.StatusFallback
+	default:
+		e.AffinityStatus = affinity.StatusNone
+	}
+	if success && dec.Record && (e.CacheReadTokens > 0 || e.CacheWriteTokens > 0) {
+		p.affinity.Remember(affinity.Key{UserID: uid, RealModel: u.RealModel}, u.Source, u.SourceID)
+		e.AffinityRecorded = true
 	}
 }
 

@@ -8,6 +8,7 @@ type AdminChannelQuery interface {
 	ListAll() ([]models.Channel, error)
 	ListByTag(tag string) ([]models.Channel, error)
 	ListEnabled() ([]models.Channel, error)
+	ChannelWindowUsage(channelID uint, wf WindowFilter) (calls int64, cost int64, err error)
 }
 
 type AdminChannelMutation interface {
@@ -74,4 +75,24 @@ func (m *adminChannelMutation) Update(id uint, updates map[string]any) error {
 
 func (m *adminChannelMutation) Delete(id uint) error {
 	return m.ctx.GetDB().Delete(&models.Channel{}, id).Error
+}
+
+func (q *adminChannelQuery) ChannelWindowUsage(channelID uint, wf WindowFilter) (int64, int64, error) {
+	db := q.ctx.GetDB().Model(&models.ChannelDailyBilling{}).
+		Where("channel_id = ? AND private_channel_id = 0", channelID)
+	switch wf.Kind {
+	case "since":
+		db = db.Where("date >= ?", wf.SinceDate)
+	case "month":
+		db = db.Where("date LIKE ?", wf.MonthPrefix+"%")
+	case "all":
+		// 无日期过滤
+	}
+	var row struct {
+		Calls int64
+		Cost  int64
+	}
+	err := db.Select("COALESCE(SUM(request_count),0) AS calls, COALESCE(SUM(total_cost),0) AS cost").
+		Scan(&row).Error
+	return row.Calls, row.Cost, err
 }

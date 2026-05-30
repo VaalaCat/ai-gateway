@@ -62,6 +62,11 @@ type TokenTemplateListFilter struct {
 	Status *int
 }
 
+type InviteCodeListFilter struct {
+	CreatorID *uint
+	Search    string
+}
+
 type UserGroupListFilter struct {
 	Search string
 	Status *int

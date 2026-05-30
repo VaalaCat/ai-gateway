@@ -2,79 +2,38 @@ package pricing
 
 import "testing"
 
-func makeSource() map[string]ModelPricing {
-	input := 5.0
-	output := 15.0
-	return map[string]ModelPricing{
-		"gpt-4o":            {InputPrice: input, OutputPrice: output},
-		"claude-3-5-sonnet": {InputPrice: 3.0, OutputPrice: 3.0},
+func makeSourceData() SourceData {
+	return SourceData{
+		"gpt-4o": {
+			{Provider: "openai", Pricing: ModelPricing{InputPrice: 2.5, OutputPrice: 10}},
+			{Provider: "azure", Pricing: ModelPricing{InputPrice: 5, OutputPrice: 20}},
+		},
+		"claude-3-5-sonnet": {
+			{Provider: "anthropic", Pricing: ModelPricing{InputPrice: 3, OutputPrice: 15}},
+		},
 	}
 }
 
-func TestMatch_Exact(t *testing.T) {
-	source := makeSource()
-	result := Match("gpt-4o", source)
-	if result == nil {
-		t.Fatal("expected match, got nil")
+func TestMatchAll_Exact(t *testing.T) {
+	mt, name, prices, ok := MatchAll("gpt-4o", makeSourceData())
+	if !ok || mt != "exact" || name != "gpt-4o" {
+		t.Fatalf("got ok=%v mt=%q name=%q", ok, mt, name)
 	}
-	if result.MatchType != "exact" {
-		t.Errorf("match type: got %q, want %q", result.MatchType, "exact")
-	}
-	if result.MatchedName != "gpt-4o" {
-		t.Errorf("matched name: got %q, want %q", result.MatchedName, "gpt-4o")
-	}
-	if result.Pricing.InputPrice != 5.0 {
-		t.Errorf("input price: got %v, want 5.0", result.Pricing.InputPrice)
+	if len(prices) != 2 {
+		t.Errorf("want 2 provider candidates, got %d", len(prices))
 	}
 }
 
-func TestMatch_FuzzyWithOpenAIPrefix(t *testing.T) {
-	source := makeSource()
-	// "openai--gpt-4o" should normalize to "gpt-4o" matching source "gpt-4o"
-	result := Match("openai--gpt-4o", source)
-	if result == nil {
-		t.Fatal("expected fuzzy match, got nil")
-	}
-	if result.MatchType != "fuzzy" {
-		t.Errorf("match type: got %q, want %q", result.MatchType, "fuzzy")
-	}
-	if result.MatchedName != "gpt-4o" {
-		t.Errorf("matched name: got %q, want %q", result.MatchedName, "gpt-4o")
+func TestMatchAll_Fuzzy(t *testing.T) {
+	mt, name, prices, ok := MatchAll("openai/gpt-4o", makeSourceData())
+	if !ok || mt != "fuzzy" || name != "gpt-4o" || len(prices) != 2 {
+		t.Fatalf("got ok=%v mt=%q name=%q n=%d", ok, mt, name, len(prices))
 	}
 }
 
-func TestMatch_FuzzyWithSlashPrefix(t *testing.T) {
-	source := makeSource()
-	// "openai/gpt-4o" should normalize to "gpt-4o" matching source "gpt-4o"
-	result := Match("openai/gpt-4o", source)
-	if result == nil {
-		t.Fatal("expected fuzzy match, got nil")
-	}
-	if result.MatchType != "fuzzy" {
-		t.Errorf("match type: got %q, want %q", result.MatchType, "fuzzy")
-	}
-	if result.MatchedName != "gpt-4o" {
-		t.Errorf("matched name: got %q, want %q", result.MatchedName, "gpt-4o")
-	}
-}
-
-func TestMatch_CaseInsensitive(t *testing.T) {
-	source := makeSource()
-	// uppercase should still match via fuzzy normalize
-	result := Match("GPT-4O", source)
-	if result == nil {
-		t.Fatal("expected case-insensitive match, got nil")
-	}
-	if result.MatchType != "fuzzy" {
-		t.Errorf("match type: got %q, want %q", result.MatchType, "fuzzy")
-	}
-}
-
-func TestMatch_NoMatch(t *testing.T) {
-	source := makeSource()
-	result := Match("unknown-model-xyz", source)
-	if result != nil {
-		t.Errorf("expected nil, got match: %+v", result)
+func TestMatchAll_NoMatch(t *testing.T) {
+	if _, _, _, ok := MatchAll("unknown-xyz", makeSourceData()); ok {
+		t.Error("expected ok=false")
 	}
 }
 

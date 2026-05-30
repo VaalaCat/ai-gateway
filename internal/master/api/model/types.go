@@ -39,17 +39,30 @@ type FetchPricingRequest struct {
 }
 
 type FetchPricingResponse struct {
-	Matches         []PricingMatch    `json:"matches"`
-	UnmatchedModels []string          `json:"unmatched_models"`
-	SourceErrors    map[string]string `json:"source_errors,omitempty"`
+	Matches         []PricingRecommendation `json:"matches"`
+	UnmatchedModels []string                `json:"unmatched_models"`
+	SourceErrors    map[string]string       `json:"source_errors,omitempty"`
 }
 
-type PricingMatch struct {
-	ModelID   uint                     `json:"model_id"`
-	ModelName string                   `json:"model_name"`
-	Current   PricingValues            `json:"current"`
-	Sources   map[string]SourcePricing `json:"sources"`
-	HasPrice  bool                     `json:"has_price"`
+type PricingRecommendation struct {
+	ModelID       uint             `json:"model_id"`
+	ModelName     string           `json:"model_name"`
+	Current       PricingValues    `json:"current"`
+	HasPrice      bool             `json:"has_price"`
+	Recommended   PricingValues    `json:"recommended"`
+	Provenance    string           `json:"provenance"`
+	Confidence    string           `json:"confidence"`
+	ReviewReasons []string         `json:"review_reasons,omitempty"`
+	HasChange     bool             `json:"has_change"`
+	Candidates    []PriceCandidate `json:"candidates"`
+}
+
+type PriceCandidate struct {
+	Source      string        `json:"source"`
+	Provider    string        `json:"provider"`
+	MatchType   string        `json:"match_type"`
+	MatchedName string        `json:"matched_name"`
+	Price       PricingValues `json:"price"`
 }
 
 type PricingValues struct {
@@ -57,15 +70,6 @@ type PricingValues struct {
 	OutputPrice     float64 `json:"output_price"`
 	CacheReadPrice  float64 `json:"cache_read_price"`
 	CacheWritePrice float64 `json:"cache_write_price"`
-}
-
-type SourcePricing struct {
-	InputPrice      float64  `json:"input_price"`
-	OutputPrice     float64  `json:"output_price"`
-	CacheReadPrice  *float64 `json:"cache_read_price"`
-	CacheWritePrice *float64 `json:"cache_write_price"`
-	MatchType       string   `json:"match_type"`
-	MatchedName     string   `json:"matched_name"`
 }
 
 type ApplyPricingRequest struct {

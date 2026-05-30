@@ -158,6 +158,39 @@ export function BasicSection<Entity>({
         />
       </div>
 
+      {/* Free channel (admin only) */}
+      {!hiddenFields?.has("free") && (
+        <div className="flex items-center justify-between">
+          <Label>
+            {t("free")}
+            <FieldTip text={t("freeTip")} />
+          </Label>
+          <Switch
+            checked={form.free}
+            onCheckedChange={(v) => setForm({ ...form, free: v })}
+          />
+        </div>
+      )}
+
+      {/* Price Ratio (admin only) */}
+      {!hiddenFields?.has("price_ratio") && (
+        <div className="space-y-2">
+          <Label>
+            {t("priceRatio")}
+            <FieldTip text={t("priceRatioTip")} />
+          </Label>
+          <Input
+            type="number"
+            step="0.01"
+            min="0"
+            max="1000"
+            value={form.price_ratio}
+            disabled={form.free}
+            onChange={(e) => setForm({ ...form, price_ratio: e.target.value })}
+          />
+        </div>
+      )}
+
       {/* Tag & Remark */}
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">

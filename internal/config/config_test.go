@@ -50,9 +50,6 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Relay.Timeout != 300 {
 		t.Errorf("expected default timeout 300, got %d", cfg.Relay.Timeout)
 	}
-	if cfg.Agent.RetryMax != 5 {
-		t.Errorf("expected default retry_max 5, got %d", cfg.Agent.RetryMax)
-	}
 	if cfg.Master.DBPath != "./data/master.db?_pragma=journal_mode(WAL)" {
 		t.Errorf("expected default db_path with WAL pragma, got %s", cfg.Master.DBPath)
 	}

@@ -5,6 +5,7 @@ import { byokChannelAdapter } from "./adapters/byok-channel";
 import { channelAdapter } from "./adapters/channel";
 import { modelAdapter } from "./adapters/model";
 import { agentAdapter } from "./adapters/agent";
+import { tokenTemplateAdapter } from "./adapters/token-template";
 
 export const ENTITY_ADAPTERS = {
   token: tokenAdapter,
@@ -14,6 +15,7 @@ export const ENTITY_ADAPTERS = {
   channel: channelAdapter,
   model: modelAdapter,
   agent: agentAdapter,
+  "token-template": tokenTemplateAdapter,
 } as const;
 
 export type EntityName = keyof typeof ENTITY_ADAPTERS;

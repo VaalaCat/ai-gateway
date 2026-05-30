@@ -33,7 +33,7 @@ import { StatusBadge } from "@/components/business/status-badge";
 import { StatusSelect } from "@/components/business/status-select";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
-import { ChannelMultiSelect } from "@/components/business/channel-multi-select";
+import { EntityMultiPicker } from "@/components/business/entity-picker/entity-multi-picker";
 import { TokenTemplateSyncDialog } from "@/components/business/token-template-sync-dialog";
 import { formatErrorToast } from "@/lib/api/error-toast";
 
@@ -288,9 +288,10 @@ export default function TokenTemplatesPage() {
             </div>
             <div className="space-y-2">
               <Label>{t("allowedChannels")}</Label>
-              <ChannelMultiSelect
-                value={createForm.allowed_channel_ids}
-                onChange={(ids) => setCreateForm({ ...createForm, allowed_channel_ids: ids })}
+              <EntityMultiPicker
+                entity="channel"
+                value={createForm.allowed_channel_ids.map(String)}
+                onChange={(vals) => setCreateForm({ ...createForm, allowed_channel_ids: vals.map(Number) })}
                 placeholder={t("allowedChannelsPlaceholder")}
               />
               <p className="text-xs text-muted-foreground">{t("allowedChannelsEmptyHint")}</p>
@@ -338,9 +339,10 @@ export default function TokenTemplatesPage() {
             </div>
             <div className="space-y-2">
               <Label>{t("allowedChannels")}</Label>
-              <ChannelMultiSelect
-                value={editForm.allowed_channel_ids}
-                onChange={(ids) => setEditForm({ ...editForm, allowed_channel_ids: ids })}
+              <EntityMultiPicker
+                entity="channel"
+                value={editForm.allowed_channel_ids.map(String)}
+                onChange={(vals) => setEditForm({ ...editForm, allowed_channel_ids: vals.map(Number) })}
                 placeholder={t("allowedChannelsPlaceholder")}
               />
               <p className="text-xs text-muted-foreground">{t("allowedChannelsEmptyHint")}</p>

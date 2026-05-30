@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/config"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
@@ -400,5 +401,24 @@ func TestHandleSyncEvent_UserApplyIfPresent_DropsAbsent(t *testing.T) {
 	s.HandleSyncEvent(events.EntityUser, events.ActionCreate, data)
 	if got := s.GetUser(context.Background(), 77); got != nil {
 		t.Errorf("LRU apply-if-present: push user.create on absent must not warm, got %+v", got)
+	}
+}
+
+func TestStore_HasRealModel(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-5.5,gpt-4o"})
+	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 2, Status: consts.StatusDisabled}, Models: "claude-x"})
+	s.RebuildModelIndex()
+	if !s.HasRealModel("gpt-5.5") {
+		t.Error("enabled channel model should be present")
+	}
+	if !s.HasRealModel("gpt-4o") {
+		t.Error("comma-split model should be present")
+	}
+	if s.HasRealModel("claude-x") {
+		t.Error("disabled channel model must NOT count")
+	}
+	if s.HasRealModel("nonexistent") {
+		t.Error("unknown name must be false")
 	}
 }

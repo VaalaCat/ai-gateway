@@ -166,3 +166,51 @@ func TestPrivateChannelsVisibleFetch_NilCipher(t *testing.T) {
 		t.Fatal("expected not-found on cipher error")
 	}
 }
+
+// TestPrivateChannelsVisibleFetch_EmptyReturnsNotFound 行为修复：用户存在但无可见
+// 私有通道时返回 found=false，使 agent 走 NegativeTTL 自愈，而非永久缓存空集。
+func TestPrivateChannelsVisibleFetch_EmptyReturnsNotFound(t *testing.T) {
+	cipher := newTestCipher(t)
+	a, q := setupPrivChanDB(t)
+	a.db.Create(&models.User{ID: 1, GroupID: 1, Username: "alice"})
+	// 注意：不创建任何 PrivateChannel。
+
+	h := &privateChannelsVisibleFetchHandler{cipher: cipher}
+	_, _, found, err := h.Fetch(context.Background(), q, "1")
+	if err != nil {
+		t.Fatalf("fetch err=%v", err)
+	}
+	if found {
+		t.Fatal("expected found=false for user with zero visible channels")
+	}
+}
+
+// TestPrivateChannelsVisibleFetch_AllUndecryptableReturnsNotFound: 通道存在但全部解密失败
+// → 投影后 set.Channels 为空 → found=false（走 NegativeTTL 自愈），与零通道场景一致。
+func TestPrivateChannelsVisibleFetch_AllUndecryptableReturnsNotFound(t *testing.T) {
+	cipherB := newTestCipher(t)
+	cipherA := newTestCipher(t) // 不同 KEK，cipherB 无法解开 cipherA 的密文
+
+	a, q := setupPrivChanDB(t)
+	a.db.Create(&models.User{ID: 1, GroupID: 1, Username: "alice"})
+
+	ct1, err := cipherA.Seal("dead-1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct2, err := cipherA.Seal("dead-2", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "bad1", Status: 1, KeyCipher: ct1, Models: datatypes.JSONSlice[string]{"gpt-4o"}})
+	a.db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "bad2", Status: 1, KeyCipher: ct2, Models: datatypes.JSONSlice[string]{"gpt-4o"}})
+
+	h := &privateChannelsVisibleFetchHandler{cipher: cipherB}
+	_, _, found, err := h.Fetch(context.Background(), q, "1")
+	if err != nil {
+		t.Fatalf("fetch err=%v", err)
+	}
+	if found {
+		t.Fatal("expected found=false when all channels are undecryptable")
+	}
+}

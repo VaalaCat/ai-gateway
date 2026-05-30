@@ -10,6 +10,7 @@ import type { ChannelFormAdapter } from "./adapter";
 
 export type ChannelFormMode =
   | { kind: "create" }
+  | { kind: "copy"; id: number }
   | { kind: "edit"; id: number };
 
 export interface UseChannelFormResult<Entity> {
@@ -37,6 +38,7 @@ interface FormState<Entity> {
 type FormAction<Entity> =
   | { type: "SET_FORM"; form: ChannelForm }
   | { type: "LOAD_ENTITY"; entity: Entity; id: number }
+  | { type: "LOAD_COPY"; form: ChannelForm; entity: Entity; id: number }
   | { type: "CLEAR_DIRTY" };
 
 function makeReducer<Entity>(mapEntityToForm: (e: Entity) => ChannelForm) {
@@ -53,6 +55,15 @@ function makeReducer<Entity>(mapEntityToForm: (e: Entity) => ChannelForm) {
         return {
           form: f,
           initial: f,
+          entity: action.entity,
+          loadedEntityId: action.id,
+        };
+      }
+      case "LOAD_COPY": {
+        if (state.loadedEntityId === action.id) return state;
+        return {
+          form: action.form,
+          initial: action.form,
           entity: action.entity,
           loadedEntityId: action.id,
         };
@@ -90,8 +101,9 @@ export function useChannelForm<Entity>(
   const tc = useTranslations("common");
   const router = useRouter();
 
-  const editId = mode.kind === "edit" ? mode.id : 0;
-  const { data: entityData, isLoading, isError } = adapter.useEntity(editId);
+  const fetchId =
+    mode.kind === "edit" || mode.kind === "copy" ? mode.id : 0;
+  const { data: entityData, isLoading, isError } = adapter.useEntity(fetchId);
   const notFound =
     mode.kind === "edit" && !isLoading && (isError || entityData === undefined);
 
@@ -111,9 +123,16 @@ export function useChannelForm<Entity>(
   // Sync when entity data arrives. useReducer dispatch is allowed in effects.
   useEffect(() => {
     if (mode.kind === "edit" && entityData) {
-      dispatch({ type: "LOAD_ENTITY", entity: entityData, id: editId });
+      dispatch({ type: "LOAD_ENTITY", entity: entityData, id: fetchId });
     }
-  }, [mode.kind, entityData, editId]);
+  }, [mode.kind, entityData, fetchId]);
+
+  useEffect(() => {
+    if (mode.kind === "copy" && entityData) {
+      const mapCopy = adapter.mapEntityToCopyForm ?? adapter.mapEntityToForm;
+      dispatch({ type: "LOAD_COPY", form: mapCopy(entityData), entity: entityData, id: fetchId });
+    }
+  }, [mode.kind, entityData, fetchId, adapter]);
 
   const { form, initial, entity } = state;
   const isDirty = !shallowEqual(form, initial);
@@ -129,7 +148,7 @@ export function useChannelForm<Entity>(
 
   const submit = useCallback(async () => {
     try {
-      if (mode.kind === "create") {
+      if (mode.kind === "create" || mode.kind === "copy") {
         await createMutation.mutateAsync(adapter.buildCreatePayload(form));
         toast.success(t("createSuccess"));
         router.push(adapter.listPath);
@@ -183,7 +202,7 @@ export function useChannelForm<Entity>(
     entity,
     isDirty,
     dirtyFieldCount,
-    isLoading: mode.kind === "edit" ? isLoading : false,
+    isLoading: mode.kind === "edit" || mode.kind === "copy" ? isLoading : false,
     notFound,
     saving:
       createMutation.isPending ||

@@ -21,7 +21,6 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
 	"github.com/VaalaCat/ai-gateway/internal/config"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
@@ -31,14 +30,16 @@ import (
 	apicache "github.com/VaalaCat/ai-gateway/internal/master/api/cache"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/channel"
 	apiinsights "github.com/VaalaCat/ai-gateway/internal/master/api/insights"
+	apiinvite "github.com/VaalaCat/ai-gateway/internal/master/api/invite"
 	apilog "github.com/VaalaCat/ai-gateway/internal/master/api/log"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/model"
 	apimodelrouting "github.com/VaalaCat/ai-gateway/internal/master/api/model_routing"
 	apimonitoring "github.com/VaalaCat/ai-gateway/internal/master/api/monitoring"
-	"github.com/VaalaCat/ai-gateway/internal/master/api/private_channel"
 	apioauth "github.com/VaalaCat/ai-gateway/internal/master/api/oauth"
 	apioap "github.com/VaalaCat/ai-gateway/internal/master/api/oauth_provider_admin"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/private_channel"
+	apiscript "github.com/VaalaCat/ai-gateway/internal/master/api/script"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/stats"
 	apisystem "github.com/VaalaCat/ai-gateway/internal/master/api/system"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/token"
@@ -49,6 +50,7 @@ import (
 	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ginutil"
 	webassets "github.com/VaalaCat/ai-gateway/web"
@@ -91,6 +93,10 @@ type Server struct {
 	// the gc loop spawns inside NewRebuildRunner. Stopped in Shutdown
 	// between Aggregator and Heartbeat (spec §9).
 	RebuildRunner *billing.RebuildRunner
+
+	// LimitEvaluator periodically evaluates per-channel usage limits,
+	// toggling Status + LimitState. Stopped in Shutdown.
+	LimitEvaluator *billing.LimitEvaluator
 
 	// BYOKProvider 是 BYOK cipher 的注入点。private_channel.Handler
 	// 通过它获取 *Cipher，避免污染 app.Application 顶层接口。
@@ -265,6 +271,12 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	checker := billing.NewQuotaChecker(application, bus, logger)
 	checker.Start()
 
+	limitEvalSec := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
+		"channel.limit_eval_interval_seconds", 30,
+	)
+	s.LimitEvaluator = billing.NewLimitEvaluator(application, bus, logger, time.Duration(limitEvalSec)*time.Second)
+	s.LimitEvaluator.Start()
+
 	s.setupMiddleware()
 	s.setupRoutes()
 
@@ -298,10 +310,12 @@ func (s *Server) setupRoutes() {
 		Tracker:           s.Heartbeat,
 	}
 
+	systemH := &apisystem.Handler{ConnectedCount: s.Hub.ConnectedAgents}
+
 	// Public endpoints
 	s.Router.POST("/api/login", api.Adapt(adapter, api.BindJSON, userH.Login))
 	s.Router.POST("/api/register", api.Adapt(adapter, api.BindJSON, userH.Register))
-	s.Router.GET("/api/system/registration-status", api.Adapt(adapter, api.BindNone, userH.RegistrationStatus))
+	s.Router.GET("/api/system/public-config", api.Adapt(adapter, api.BindNone, systemH.PublicConfig))
 	s.Router.POST("/api/agents/enroll", api.Adapt(adapter, api.BindJSON, agentH.Enroll))
 
 	s.oauthHandler = apioauth.NewHandler(s.App, s.Bus, s.Cfg.Master.JWTSecret, s.oauthAllowlist)
@@ -327,9 +341,13 @@ func (s *Server) setupRoutes() {
 	userAuth.GET("/oauth/identities", api.Adapt(adapter, api.BindNone, oauthH.ListMyIdentities))
 	userAuth.DELETE("/oauth/identities/:id", api.Adapt(adapter, api.BindURI, oauthH.DeleteIdentity))
 	tplH := &token_template.Handler{}
+	inviteH := &apiinvite.Handler{}
 	ugH := &user_group.Handler{Bus: s.Bus}
 	oapH := &apioap.Handler{Bus: s.Bus}
 	userAuth.GET("/token-templates", api.Adapt(adapter, api.BindQuery, tplH.ListEnabled))
+	userAuth.GET("/invite-codes", api.Adapt(adapter, api.BindQuery, inviteH.ListMine))
+	userAuth.POST("/invite-codes", api.Adapt(adapter, api.BindJSON, inviteH.Create))
+	userAuth.DELETE("/invite-codes/:id", api.Adapt(adapter, api.BindURI, inviteH.DeleteMine))
 
 	// Portal model-routings (user-owned, scope forced to user)
 	userAuth.GET("/model-routings", api.Adapt(adapter, api.BindQuery, mrH.PortalList))
@@ -376,6 +394,9 @@ func (s *Server) setupRoutes() {
 	auth.POST("/token-templates/:id/sync-preview", api.Adapt(adapter, api.BindURI, tplH.SyncPreview))
 	auth.POST("/token-templates/:id/sync", api.Adapt(adapter, api.BindURI, tplH.Sync))
 
+	auth.GET("/invite-codes", api.Adapt(adapter, api.BindQuery, inviteH.AdminList))
+	auth.DELETE("/invite-codes/:id", api.Adapt(adapter, api.BindURI, inviteH.AdminDelete))
+
 	auth.GET("/user-groups", api.Adapt(adapter, api.BindQuery, ugH.List))
 	auth.POST("/user-groups", api.Adapt(adapter, api.BindJSON, ugH.Create))
 	auth.GET("/user-groups/:id", api.Adapt(adapter, api.BindURI, ugH.Get))
@@ -396,6 +417,13 @@ func (s *Server) setupRoutes() {
 	auth.DELETE("/channels/:id", api.Adapt(adapter, api.BindURI, channelH.Delete))
 	auth.POST("/channels/:id/test", api.Adapt(adapter, api.BindURIAndOptionalJSON, channelH.Test))
 	auth.POST("/channels/fetch-models", api.Adapt(adapter, api.BindJSON, channelH.FetchModels))
+
+	scriptH := &apiscript.Handler{}
+	auth.GET("/scripts", api.Adapt(adapter, api.BindQuery, scriptH.List))
+	auth.POST("/scripts", api.Adapt(adapter, api.BindJSON, scriptH.Create))
+	auth.GET("/scripts/:id", api.Adapt(adapter, api.BindURI, scriptH.Get))
+	auth.PUT("/scripts/:id", api.Adapt(adapter, api.BindURIAndBodyMap, scriptH.Update))
+	auth.DELETE("/scripts/:id", api.Adapt(adapter, api.BindURI, scriptH.Delete))
 
 	// Admin private-channels (BYOK cross-user view + kill switch)
 	auth.GET("/private-channels", api.Adapt(adapter, api.BindQuery, pcH.AdminList))
@@ -424,6 +452,8 @@ func (s *Server) setupRoutes() {
 	auth.POST("/agents/:id/connectivity", api.Adapt(adapter, api.BindURI, agentH.CheckConnectivity))
 	auth.GET("/agents/:id/connectivity", api.Adapt(adapter, api.BindURI, agentH.GetConnectivity))
 	auth.GET("/agents/inflight", api.Adapt(adapter, api.BindQuery, agentH.GetInflight))
+	auth.GET("/agents/inflight/all", api.Adapt(adapter, api.BindNone, agentH.GetAllInflight))
+	auth.POST("/agents/inflight/interrupt", api.Adapt(adapter, api.BindJSON, agentH.Interrupt))
 	auth.GET("/agents/goroutines", api.Adapt(adapter, api.BindQuery, agentH.GetGoroutines))
 
 	agentRouteH := &agent_route.Handler{}
@@ -490,7 +520,6 @@ func (s *Server) setupRoutes() {
 
 	auth.GET("/stats", api.Adapt(adapter, api.BindNone, statsH.Overview))
 
-	systemH := &apisystem.Handler{ConnectedCount: s.Hub.ConnectedAgents}
 	auth.GET("/system/stats", api.Adapt(adapter, api.BindNone, systemH.Stats))
 	auth.GET("/system/cleanup/preview", api.Adapt(adapter, api.BindQuery, systemH.CleanupPreview))
 	auth.POST("/system/cleanup", api.Adapt(adapter, api.BindJSON, systemH.Cleanup))
@@ -796,6 +825,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// their own goroutine then exit at the next ctx check. Idempotent.
 	if s.RebuildRunner != nil {
 		s.RebuildRunner.Stop()
+	}
+	if s.LimitEvaluator != nil {
+		s.LimitEvaluator.Stop()
 	}
 	// Force-flush in-memory last_seen before exit. Idempotent + safe even
 	// if Start was never called (e.g. in tests).

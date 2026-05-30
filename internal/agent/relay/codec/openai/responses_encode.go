@@ -234,7 +234,10 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 	if endpointPath == "" {
 		endpointPath = consts.RouteResponses
 	}
-	url := strings.TrimRight(cfg.BaseURL, "/") + endpointPath
+	url, err := codec.JoinUpstreamURL(cfg.BaseURL, endpointPath)
+	if err != nil {
+		return nil, fmt.Errorf("build upstream url: %w", err)
+	}
 	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

@@ -14,6 +14,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -122,57 +123,88 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 
 	totalCost := inputCost + outputCost + cacheReadCost + cacheWriteCost
 
-	// BYOK billing mode: adjust per-bucket costs (free → zero, service_fee → ratio).
+	// 原价快照(乘任何因子之前),供 UsageLog.Raw* 落库,让计费明细弹窗能展示
+	// "原价 → ×因子 → 实付" 完整公式。指针入库;老行 NULL → 前端降级不出公式。
+	rawIn, rawOut, rawCR, rawCW := inputCost, outputCost, cacheReadCost, cacheWriteCost
+
+	// 计费因子三分支:免费渠道 → BYOK 模式 → 公共倍率。billingFactor 记实际生效倍率。
 	// Daily rollups are always written regardless of mode—BYOK users still need
 	// per-channel/per-token usage stats in their portal even when costs are zero.
-	inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, byokMode :=
-		s.applyByokBillingMode(q, entry, inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost)
-	// 仅对 BYOK ("private") 行 +1。byokMode 为 "" 表示非 private 行，跳过 metric。
-	if byokMode != "" {
-		metrics.BYOKRequestTotal.WithLabelValues(entry.OwnerType, entry.ModelName).Inc()
+	priceRatio := 1.0 // 写入 UsageLog.PriceRatio;private 行保持 1,公共行取快照
+	var billingFactor float64
+	free := entry.Free // 仅公共渠道可能为 true;private 行恒 false
+	switch {
+	case free:
+		inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost = 0, 0, 0, 0, 0
+		billingFactor = 0
+	default:
+		var byokMode string
+		inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, byokMode, billingFactor =
+			s.applyByokBillingMode(q, entry, inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost)
+		// 仅对 BYOK ("private") 行 +1。byokMode 为 "" 表示非 private 行，跳过 metric。
+		if byokMode != "" {
+			metrics.BYOKRequestTotal.WithLabelValues(entry.OwnerType, entry.ModelName).Inc()
+		} else {
+			// 非 private(公共 channel):应用请求时倍率快照。
+			inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, priceRatio =
+				applyChannelPriceRatio(entry, inputCost, outputCost, cacheReadCost, cacheWriteCost)
+			billingFactor = priceRatio
+		}
 	}
 
 	channelName, channelType := parseChannelSnapshot(entry.Other)
 
 	log := models.UsageLog{
-		UserID:           entry.UserID,
-		TokenID:          entry.TokenID,
-		ChannelID:        entry.ChannelID,
-		PrivateChannelID: entry.PrivateChannelID,
-		OwnerType:        entry.OwnerType,
-		AgentID:          agentID,
-		ModelName:        entry.ModelName,
-		CreatedAt:        entry.Timestamp,
-		PromptTokens:     entry.PromptTokens,
-		CompletionTokens: entry.CompletionTokens,
-		InputCost:        inputCost,
-		OutputCost:       outputCost,
-		TotalCost:        totalCost,
-		IsStream:         entry.IsStream,
-		Duration:         entry.Duration,
-		RequestID:        entry.RequestID,
-		ClientIP:         entry.ClientIP,
-		TokenName:        entry.TokenName,
-		ChannelName:      channelName,
-		ChannelType:      channelType,
-		UpstreamModel:    entry.UpstreamModel,
-		FirstResponseMs:  entry.FirstResponseMs,
-		CacheReadTokens:  entry.CacheReadTokens,
-		CacheWriteTokens: entry.CacheWriteTokens,
-		InboundProtocol:  entry.InboundProtocol,
-		OutboundProtocol: entry.OutboundProtocol,
-		UseLegacy:        entry.UseLegacy,
-		Status:           entry.Status,
-		ErrorMessage:     entry.ErrorMessage,
-		Other:            entry.Other,
+		UserID:             entry.UserID,
+		TokenID:            entry.TokenID,
+		ChannelID:          entry.ChannelID,
+		PrivateChannelID:   entry.PrivateChannelID,
+		OwnerType:          entry.OwnerType,
+		AgentID:            agentID,
+		ModelName:          entry.ModelName,
+		CreatedAt:          entry.Timestamp,
+		PromptTokens:       entry.PromptTokens,
+		CompletionTokens:   entry.CompletionTokens,
+		InputCost:          inputCost,
+		OutputCost:         outputCost,
+		TotalCost:          totalCost,
+		CacheReadCost:      cacheReadCost,
+		CacheWriteCost:     cacheWriteCost,
+		RawInputCost:       &rawIn,
+		RawOutputCost:      &rawOut,
+		RawCacheReadCost:   &rawCR,
+		RawCacheWriteCost:  &rawCW,
+		BillingFactor:      &billingFactor,
+		Free:               free,
+		PriceRatio:         priceRatio,
+		IsStream:           entry.IsStream,
+		Duration:           entry.Duration,
+		RequestID:          entry.RequestID,
+		ClientIP:           entry.ClientIP,
+		TokenName:          entry.TokenName,
+		ChannelName:        channelName,
+		ChannelType:        channelType,
+		UpstreamModel:      entry.UpstreamModel,
+		FirstResponseMs:    entry.FirstResponseMs,
+		CacheReadTokens:    entry.CacheReadTokens,
+		CacheWriteTokens:   entry.CacheWriteTokens,
+		InboundProtocol:    entry.InboundProtocol,
+		OutboundProtocol:   entry.OutboundProtocol,
+		UseLegacy:          entry.UseLegacy,
+		Status:             entry.Status,
+		ErrorMessage:       entry.ErrorMessage,
+		Other:              entry.Other,
 		TokenSource:        entry.TokenSource,
 		RoutingName:        entry.RoutingName,
+		AffinityStatus:     entry.AffinityStatus,
+		AffinityRecorded:   entry.AffinityRecorded,
 		ErrorStage:         entry.ErrorStage,
 		InboundDecodeMs:    entry.InboundDecodeMs,
 		OutboundEncodeMs:   entry.OutboundEncodeMs,
 		UpstreamDispatchMs: entry.UpstreamDispatchMs,
 		UpstreamDecodeMs:   entry.UpstreamDecodeMs,
 		ClientEncodeMs:     entry.ClientEncodeMs,
+		FallbackChain:      datatypes.NewJSONSlice(entry.FallbackChain),
 	}
 
 	var depleted bool
@@ -188,11 +220,36 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		}
 		inserted = true
 
-		// Write trace data if present (any request with trace enabled or errors)
-		if entry.TraceData != "" {
+		// Write trace data if present (any request with trace enabled or errors).
+		// New path: AttemptTraces carries one row per candidate attempt.
+		// Backward-compat path: if AttemptTraces is empty but legacy TraceData is
+		// non-empty, write a single trace row at attempt_index=0.
+		if len(entry.AttemptTraces) > 0 {
+			wroteTrace := false
+			for _, tr := range entry.AttemptTraces {
+				tr := tr // avoid loop-variable aliasing
+				tr.RequestID = entry.RequestID
+				// AttemptIndex 由 agent 端按真实候选序号填好(可能不连续:空快照被跳过),
+				// 这里不再按切片位置重排,以免与链路 seq 错位。
+				if err := m.UsageLog().CreateTrace(&tr); err != nil {
+					s.Logger.Warn("failed to write attempt trace",
+						zap.String("request_id", entry.RequestID),
+						zap.Int("attempt_index", tr.AttemptIndex),
+						zap.Error(err),
+					)
+				} else {
+					wroteTrace = true
+				}
+			}
+			if wroteTrace {
+				txCtx.GetDB().Model(&log).Update("has_trace", true)
+			}
+		} else if entry.TraceData != "" {
+			// Legacy single-trace path (backward compat for old agents).
 			var trace models.UsageLogTrace
 			if err := json.Unmarshal([]byte(entry.TraceData), &trace); err == nil {
 				trace.RequestID = entry.RequestID
+				trace.AttemptIndex = 0
 				if err := m.UsageLog().CreateTrace(&trace); err != nil {
 					s.Logger.Warn("failed to write trace data",
 						zap.String("request_id", entry.RequestID),
@@ -294,10 +351,10 @@ func isDuplicateRequestIDError(err error) bool {
 // distinguish "not a BYOK row" from a BYOK row in a specific mode.
 func (s *Settler) applyByokBillingMode(q dao.AdminQuery, entry protocol.UsageLogEntry,
 	inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost int64) (
-	adjInput, adjOutput, adjCacheRead, adjCacheWrite, adjTotal int64, mode string) {
+	adjInput, adjOutput, adjCacheRead, adjCacheWrite, adjTotal int64, mode string, factor float64) {
 
 	if entry.OwnerType != "private" {
-		return inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, ""
+		return inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost, "", 0
 	}
 
 	mode = q.Setting().LookupString(consts.SettingKeyBYOKBillingMode, consts.BYOKDefaultBillingMode)
@@ -312,9 +369,31 @@ func (s *Settler) applyByokBillingMode(q dao.AdminQuery, entry protocol.UsageLog
 		adjCacheRead = int64(float64(cacheReadCost) * ratio)
 		adjCacheWrite = int64(float64(cacheWriteCost) * ratio)
 		adjTotal = adjInput + adjOutput + adjCacheRead + adjCacheWrite
-		return adjInput, adjOutput, adjCacheRead, adjCacheWrite, adjTotal, mode
+		return adjInput, adjOutput, adjCacheRead, adjCacheWrite, adjTotal, mode, ratio
 	}
 	// free / unknown mode: zero all costs.
-	return 0, 0, 0, 0, 0, mode
+	return 0, 0, 0, 0, 0, mode, 0
 }
 
+// applyChannelPriceRatio 对非 private(公共 channel)行应用请求时的倍率快照。
+// ratio 来自 entry.PriceRatio:
+//   - <= 0 → 原价(旧 agent 未发 / channel 未配 / 显式 0),归一到 1.0(不改成本)
+//   - 其他 → 逐桶乘,再把 total 重算为四桶之和(避免单独折 total 的截断漂移,
+//     与 applyByokBillingMode 同款不变式 total == input+output+cacheR+cacheW)
+//
+// 返回归一后实际所用 ratio,供 settleOne 写入 UsageLog.PriceRatio。
+func applyChannelPriceRatio(entry protocol.UsageLogEntry,
+	inputCost, outputCost, cacheReadCost, cacheWriteCost int64) (
+	adjInput, adjOutput, adjCacheRead, adjCacheWrite, adjTotal int64, ratio float64) {
+
+	ratio = entry.PriceRatio
+	if ratio <= 0 { // 0/负数都视为原价
+		ratio = 1.0
+	}
+	adjInput = int64(float64(inputCost) * ratio)
+	adjOutput = int64(float64(outputCost) * ratio)
+	adjCacheRead = int64(float64(cacheReadCost) * ratio)
+	adjCacheWrite = int64(float64(cacheWriteCost) * ratio)
+	adjTotal = adjInput + adjOutput + adjCacheRead + adjCacheWrite
+	return
+}

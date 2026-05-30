@@ -18,6 +18,7 @@ type AdminUsageLogQuery interface {
 	GetByRequestID(requestID string) (*models.UsageLog, error)
 	ExistsByRequestID(requestID string) (bool, error)
 	GetTraceByRequestID(requestID string) (*models.UsageLogTrace, error)
+	GetTracesByRequestID(requestID string) ([]*models.UsageLogTrace, error)
 }
 
 type AdminUsageLogMutation interface {
@@ -143,6 +144,14 @@ func (q *adminUsageLogQuery) GetTraceByRequestID(requestID string) (*models.Usag
 	var trace models.UsageLogTrace
 	err := q.ctx.GetDB().Where("request_id = ?", requestID).First(&trace).Error
 	return &trace, err
+}
+
+func (q *adminUsageLogQuery) GetTracesByRequestID(requestID string) ([]*models.UsageLogTrace, error) {
+	var traces []*models.UsageLogTrace
+	if err := q.ctx.GetDB().Where("request_id = ?", requestID).Order("attempt_index asc").Find(&traces).Error; err != nil {
+		return nil, err
+	}
+	return traces, nil
 }
 
 func (m *adminUsageLogMutation) Create(log *models.UsageLog) error {

@@ -174,8 +174,13 @@ func buildChildren(members []MemberInput, rIdx map[string]*models.ModelRouting,
 		}
 		if r, isRouting := rIdx[m.Ref]; isRouting {
 			if visited[m.Ref] {
-				node.Kind = "routing"
-				node.Error = "cycle"
+				// 重遇路径上的路由：存在同名真实模型则当 model 叶子终结，否则才是真环。
+				if modelSet[m.Ref] {
+					node.Kind = "model"
+				} else {
+					node.Kind = "routing"
+					node.Error = "cycle"
+				}
 			} else {
 				node.Kind = "routing"
 				node.Scope = r.Scope
@@ -214,8 +219,13 @@ func buildChildren(members []MemberInput, rIdx map[string]*models.ModelRouting,
 		}
 		if r, isRouting := rIdx[m.Ref]; isRouting {
 			if visited[m.Ref] {
-				node.Kind = "routing"
-				node.Error = "cycle"
+				// 重遇路径上的路由：存在同名真实模型则当 model 叶子终结，否则才是真环。
+				if modelSet[m.Ref] {
+					node.Kind = "model"
+				} else {
+					node.Kind = "routing"
+					node.Error = "cycle"
+				}
 			} else {
 				node.Kind = "routing"
 				node.Scope = r.Scope

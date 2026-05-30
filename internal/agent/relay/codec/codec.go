@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -159,6 +161,28 @@ func ResolveEndpointPath(endpoints string, proto Protocol) string {
 		return path
 	}
 	return DefaultEndpointPath(proto)
+}
+
+// JoinUpstreamURL appends path to baseURL and verifies the path did not rewrite
+// the scheme/host (e.g. via "@evil" userinfo or a non-rooted ".evil.com" suffix).
+// This is the egress-side backstop for the BYOK endpoints SSRF defense: even a
+// malicious endpoints row already in the DB cannot redirect the request — and
+// the BYOK key — to a host other than the allowlisted base_url host.
+func JoinUpstreamURL(baseURL, path string) (string, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Host == "" || base.Scheme == "" {
+		return "", fmt.Errorf("invalid upstream base url %q", baseURL)
+	}
+	joined := strings.TrimRight(baseURL, "/") + path
+	u, err := url.Parse(joined)
+	if err != nil {
+		return "", fmt.Errorf("invalid upstream url: %w", err)
+	}
+	if !strings.EqualFold(u.Host, base.Host) || !strings.EqualFold(u.Scheme, base.Scheme) {
+		return "", fmt.Errorf("upstream host mismatch: endpoint path would redirect %s://%s to %s://%s",
+			base.Scheme, base.Host, u.Scheme, u.Host)
+	}
+	return joined, nil
 }
 
 // fallbackPriority defines the order in which protocols are tried when the

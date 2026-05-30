@@ -24,6 +24,9 @@ func AutoMigrate(db *gorm.DB) error {
 		&PrivateChannel{},
 		&PrivateChannelShare{},
 		&UsageHourlyBucket{},
+		&AdminScript{},
+		&InviteCode{},
+		&InviteRedemption{},
 	); err != nil {
 		return err
 	}
@@ -34,7 +37,10 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := ensureUserEmailUniqueIndex(db); err != nil {
 		return err
 	}
-	return dropLegacyChannelBillingIndex(db)
+	if err := dropLegacyChannelBillingIndex(db); err != nil {
+		return err
+	}
+	return dropLegacyTraceRequestIDUniqueIndex(db)
 }
 
 // backfillPasswordSet 把已经设过密码的存量用户标记为 PasswordSet=true。
@@ -47,6 +53,14 @@ func backfillPasswordSet(db *gorm.DB) error {
 // 可重复执行（IF NOT EXISTS）。
 func ensureUserEmailUniqueIndex(db *gorm.DB) error {
 	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email != ''`).Error
+}
+
+// dropLegacyTraceRequestIDUniqueIndex 删除 usage_log_traces 表上的旧 request_id 单列唯一索引。
+// 升级到逐 attempt 一行后,唯一键改为 (request_id, attempt_index) 复合索引
+// (idx_trace_req_attempt),旧的单列唯一索引不再使用。
+// SQLite IF EXISTS 幂等,重复执行或新装部署无旧索引时均安全。
+func dropLegacyTraceRequestIDUniqueIndex(db *gorm.DB) error {
+	return db.Exec(`DROP INDEX IF EXISTS idx_usage_log_traces_request_id`).Error
 }
 
 // dropLegacyChannelBillingIndex 删除 channel_daily_billings 表上的旧 unique

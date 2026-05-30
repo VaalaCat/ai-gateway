@@ -31,13 +31,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { TagInput } from "@/components/ui/tag-input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
@@ -48,24 +41,26 @@ import { StatusSelect } from "@/components/business/status-select";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
-import { ChannelMultiSelect } from "@/components/business/channel-multi-select";
-import { UsernameCell } from "@/components/business/username-cell";
+import { EntityMultiPicker } from "@/components/business/entity-picker/entity-multi-picker";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
+import { EntityLabel } from "@/components/business/entity-label";
 import { TokenDetailPanel } from "@/components/business/token-detail-panel";
 import {
   DateRangeInputs,
   isDateRangeValid,
 } from "@/components/business/date-range-inputs";
+import { DateTimePicker } from "@/components/business/date-picker/date-time-picker";
 
 import { useBillingOverview, useTokenBilling } from "@/lib/api/billing";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { buildQuery } from "@/lib/api/client";
 import { useTokens, useCreateToken, useUpdateToken, useDeleteToken } from "@/lib/api/tokens";
-import { useEnabledTokenTemplates } from "@/lib/api/token-templates";
 import { useAuth } from "@/lib/auth";
 import { PAGE_SIZES } from "@/lib/constants";
 import { parseModels, serializeModels } from "@/lib/parse-models";
 import { formatSuccessRate, formatMoneyCompact } from "@/lib/utils/format";
 import { MoneyCell } from "@/components/business/money-cell";
+import { buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
 import type { BillingTokenRow, Token } from "@/lib/types";
 
 function isWeakToken(token: string): boolean {
@@ -182,8 +177,6 @@ function TokensPageContent() {
     if (billingRows.isError) toast.error(tc("error"));
   }, [billingRows.isError, tc]);
 
-  const templates = useEnabledTokenTemplates();
-
   const tokens = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
@@ -284,6 +277,7 @@ function TokensPageContent() {
         await updateMutation.mutateAsync({
           id: editItem.id,
           name: editForm.name,
+          status: Number(editForm.status),
           trace_enabled: editForm.trace_enabled,
         });
       }
@@ -343,7 +337,7 @@ function TokensPageContent() {
       cols.push({
         accessorKey: "user_id",
         header: ({ column }) => <DataTableColumnHeader column={column} title={t("user")} />,
-        cell: ({ row }) => <UsernameCell userId={row.original.user_id} />,
+        cell: ({ row }) => <EntityLabel entity="user" id={row.original.user_id} />,
       });
     }
 
@@ -385,7 +379,12 @@ function TokensPageContent() {
       {
         accessorKey: "template_id",
         header: t("template"),
-        cell: ({ row }) => row.original.template_id || "-",
+        cell: ({ row }) =>
+          row.original.template_id ? (
+            <EntityLabel entity="token-template" id={row.original.template_id} />
+          ) : (
+            "-"
+          ),
         enableHiding: true,
       },
       {
@@ -443,14 +442,7 @@ function TokensPageContent() {
       header: tb("successRate"),
       cell: ({ row }) => formatSuccessRate(row.original.success_count, row.original.request_count),
     },
-    {
-      accessorKey: "prompt_tokens",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={tb("promptTokens")} />,
-    },
-    {
-      accessorKey: "completion_tokens",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={tb("completionTokens")} />,
-    },
+    ...buildTokenBreakdownColumns<BillingTokenRow>(tb),
     {
       accessorKey: "last_used_at",
       header: ({ column }) => <DataTableColumnHeader column={column} title={tb("lastUsedAt")} />,
@@ -606,10 +598,10 @@ function TokensPageContent() {
               <>
                 <div className="space-y-2">
                   <Label>{t("user")} ID</Label>
-                  <Input
-                    type="number"
+                  <EntityPicker
+                    entity="user"
                     value={createForm.user_id}
-                    onChange={(e) => setCreateForm({ ...createForm, user_id: e.target.value })}
+                    onChange={(v) => setCreateForm({ ...createForm, user_id: v })}
                   />
                 </div>
                 <div className="space-y-2">
@@ -629,11 +621,10 @@ function TokensPageContent() {
                 </div>
                 <div className="space-y-2">
                   <Label>{t("expiredAt")}</Label>
-                  <Input
-                    type="number"
-                    placeholder="Unix timestamp"
-                    value={createForm.expired_at}
-                    onChange={(e) => setCreateForm({ ...createForm, expired_at: e.target.value })}
+                  <DateTimePicker
+                    value={createForm.expired_at ? Number(createForm.expired_at) : null}
+                    onChange={(v) => setCreateForm({ ...createForm, expired_at: v ? String(v) : "" })}
+                    placeholder={t("expiredAt")}
                   />
                 </div>
                 <div className="space-y-2">
@@ -647,9 +638,10 @@ function TokensPageContent() {
                 {isAdmin && (
                   <div className="space-y-2">
                     <Label>{tTpl("allowedChannels")}</Label>
-                    <ChannelMultiSelect
-                      value={createForm.allowed_channel_ids}
-                      onChange={(ids) => setCreateForm({ ...createForm, allowed_channel_ids: ids })}
+                    <EntityMultiPicker
+                      entity="channel"
+                      value={createForm.allowed_channel_ids.map(String)}
+                      onChange={(vals) => setCreateForm({ ...createForm, allowed_channel_ids: vals.map(Number) })}
                       placeholder={tTpl("allowedChannelsPlaceholder")}
                     />
                     <p className="text-meta text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>
@@ -657,14 +649,12 @@ function TokensPageContent() {
                 )}
                 <div className="space-y-2">
                   <Label>{t("template")}</Label>
-                  <Select value={String(createForm.template_id || "")} onValueChange={(v) => setCreateForm({ ...createForm, template_id: Number(v) })}>
-                    <SelectTrigger><SelectValue placeholder={t("selectTemplate")} /></SelectTrigger>
-                    <SelectContent>
-                      {templates.data?.data?.map((tpl) => (
-                        <SelectItem key={tpl.id} value={String(tpl.id)}>{tpl.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <EntityPicker
+                    entity="token-template"
+                    value={String(createForm.template_id || "")}
+                    onChange={(v) => setCreateForm({ ...createForm, template_id: Number(v) })}
+                    placeholder={t("selectTemplate")}
+                  />
                 </div>
                 <div className="flex items-center justify-between">
                   <Label>{t("traceEnabled")}</Label>
@@ -687,14 +677,12 @@ function TokensPageContent() {
                 </div>
                 <div className="space-y-2">
                   <Label>{t("template")}</Label>
-                  <Select value={String(createForm.template_id || "")} onValueChange={(v) => setCreateForm({ ...createForm, template_id: Number(v) })}>
-                    <SelectTrigger><SelectValue placeholder={t("selectTemplate")} /></SelectTrigger>
-                    <SelectContent>
-                      {templates.data?.data?.map((tpl) => (
-                        <SelectItem key={tpl.id} value={String(tpl.id)}>{tpl.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <EntityPicker
+                    entity="token-template"
+                    value={String(createForm.template_id || "")}
+                    onChange={(v) => setCreateForm({ ...createForm, template_id: Number(v) })}
+                    placeholder={t("selectTemplate")}
+                  />
                 </div>
                 <div className="flex items-center justify-between">
                   <Label>{t("traceEnabled")}</Label>
@@ -729,25 +717,24 @@ function TokensPageContent() {
                 onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
               />
             </div>
+            <StatusSelect value={editForm.status} onChange={(v) => setEditForm({ ...editForm, status: v })} />
             {isAdmin && (
               <>
                 <div className="space-y-2">
                   <Label>{t("user")} ID</Label>
-                  <Input
-                    type="number"
+                  <EntityPicker
+                    entity="user"
                     value={editForm.user_id}
-                    onChange={(e) => setEditForm({ ...editForm, user_id: e.target.value })}
+                    onChange={(v) => setEditForm({ ...editForm, user_id: v })}
                   />
                   <p className="text-meta text-muted-foreground">{t("ownerChangeHint")}</p>
                 </div>
-                <StatusSelect value={editForm.status} onChange={(v) => setEditForm({ ...editForm, status: v })} />
                 <div className="space-y-2">
                   <Label>{t("expiredAt")}</Label>
-                  <Input
-                    type="number"
-                    placeholder="Unix timestamp"
-                    value={editForm.expired_at}
-                    onChange={(e) => setEditForm({ ...editForm, expired_at: e.target.value })}
+                  <DateTimePicker
+                    value={editForm.expired_at ? Number(editForm.expired_at) : null}
+                    onChange={(v) => setEditForm({ ...editForm, expired_at: v ? String(v) : "" })}
+                    placeholder={t("expiredAt")}
                   />
                 </div>
                 <div className="space-y-2">
@@ -760,9 +747,10 @@ function TokensPageContent() {
                 </div>
                 <div className="space-y-2">
                   <Label>{tTpl("allowedChannels")}</Label>
-                  <ChannelMultiSelect
-                    value={editForm.allowed_channel_ids}
-                    onChange={(ids) => setEditForm({ ...editForm, allowed_channel_ids: ids })}
+                  <EntityMultiPicker
+                    entity="channel"
+                    value={editForm.allowed_channel_ids.map(String)}
+                    onChange={(vals) => setEditForm({ ...editForm, allowed_channel_ids: vals.map(Number) })}
                     placeholder={tTpl("allowedChannelsPlaceholder")}
                   />
                   <p className="text-meta text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>

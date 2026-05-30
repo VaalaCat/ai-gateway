@@ -10,6 +10,7 @@ import { useLogTrace } from "@/lib/api/logs";
 
 interface TraceDetailProps {
   requestId: string;
+  attemptIndex?: number;
 }
 
 function CollapsibleSection({
@@ -48,10 +49,11 @@ function tryFormatJSON(text: string): string {
   }
 }
 
-export function TraceDetail({ requestId }: TraceDetailProps) {
+export function TraceDetail({ requestId, attemptIndex }: TraceDetailProps) {
   const t = useTranslations("logs");
   const [loaded, setLoaded] = useState(false);
-  const { data: trace, isLoading, isError } = useLogTrace(loaded ? requestId : null);
+  const { data: traces, isLoading, isError } = useLogTrace(loaded ? requestId : null);
+  const trace = traces?.find((t) => t.attempt_index === (attemptIndex ?? 0));
 
   if (!loaded) {
     return (

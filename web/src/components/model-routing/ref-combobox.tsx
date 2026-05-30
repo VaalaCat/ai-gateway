@@ -46,8 +46,10 @@ export function RefCombobox({
   );
   const data = apiMode === "user" ? userQuery.data : adminQuery.data;
 
-  const models = data?.models ?? [];
   const routings = (data?.global_routings ?? []).filter((n) => n !== excludeSelf);
+  // 非自身路由名不混进 Models 组：同名时 off-path 解析为路由（见后端规则）。
+  // excludeSelf 已从 routings 排除，故编辑路由 X 时同名真实模型 X 仍保留在 Models 组。
+  const models = (data?.models ?? []).filter((n) => !routings.includes(n));
 
   const isAlreadyAdded = (n: string) => alreadyAdded.includes(n) && n !== value;
   const kindOf = (n: string) => (routings.includes(n) ? "routing" : "model");
@@ -108,6 +110,11 @@ export function RefCombobox({
                       )}
                     />
                     <span className="flex-1 truncate">{n}</span>
+                    {n === excludeSelf && (
+                      <Badge variant="outline" className="ml-2 text-xs">
+                        {t("refUnderlyingModel")}
+                      </Badge>
+                    )}
                     {isAlreadyAdded(n) && (
                       <span className="ml-2 text-xs text-muted-foreground">
                         {t("refAlreadyAdded")}

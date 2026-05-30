@@ -396,6 +396,17 @@ func (h *Hub) handleFullSync(conn *ws.Conn, req *jsonrpc.Request) {
 		}
 		items, _ = json.Marshal(synced)
 
+	case events.EntityScript:
+		records, t, err := q.AdminScript().List(
+			dao.ListOptions{Page: params.Page, PageSize: params.PageSize}, "",
+		)
+		if err != nil {
+			conn.SendResponse(jsonrpc.NewErrorResponse(req.ID, jsonrpc.ErrInternal, err.Error()))
+			return
+		}
+		total = t
+		items, _ = json.Marshal(records)
+
 	default:
 		conn.SendResponse(jsonrpc.NewErrorResponse(req.ID, jsonrpc.ErrInvalidParams, "unknown entity"))
 		return

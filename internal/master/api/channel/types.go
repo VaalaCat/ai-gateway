@@ -2,6 +2,7 @@ package channel
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
@@ -41,31 +42,35 @@ type ListRequest struct {
 }
 
 type CreateRequest struct {
-	Name               string `json:"name" binding:"required"`
-	Type               int    `json:"type"`
-	Key                string `json:"key"`
-	BaseURL            string `json:"base_url"`
-	Models             string `json:"models"`
-	ModelMapping       string `json:"model_mapping"`
-	Weight             uint   `json:"weight"`
-	Priority           int    `json:"priority"`
-	UseLegacyAdaptor   bool   `json:"use_legacy_adaptor"`
-	SupportedAPITypes  string `json:"supported_api_types"`
-	Endpoints          string `json:"endpoints"`
-	PassthroughEnabled bool   `json:"passthrough_enabled"`
-	SystemPrompt       string `json:"system_prompt"`
-	ProxyURL           string `json:"proxy_url"`
-	ParamOverride      string `json:"param_override"`
-	HeaderOverride     string `json:"header_override"`
-	Tag                string `json:"tag"`
-	Remark             string `json:"remark"`
-	Setting            string `json:"setting"`
-	Organization       string `json:"organization"`
-	ApiVersion         string `json:"api_version"`
-	TestModel          string `json:"test_model"`
-	AutoBan            int    `json:"auto_ban"`
-	StatusCodeMapping  string `json:"status_code_mapping"`
-	OtherSettings      string `json:"other_settings"`
+	Name               string                    `json:"name" binding:"required"`
+	Type               int                       `json:"type"`
+	Key                string                    `json:"key"`
+	BaseURL            string                    `json:"base_url"`
+	Models             string                    `json:"models"`
+	ModelMapping       string                    `json:"model_mapping"`
+	Weight             uint                      `json:"weight"`
+	Priority           int                       `json:"priority"`
+	UseLegacyAdaptor   bool                      `json:"use_legacy_adaptor"`
+	SupportedAPITypes  string                    `json:"supported_api_types"`
+	Endpoints          string                    `json:"endpoints"`
+	PassthroughEnabled bool                      `json:"passthrough_enabled"`
+	SystemPrompt       string                    `json:"system_prompt"`
+	ProxyURL           string                    `json:"proxy_url"`
+	ParamOverride      string                    `json:"param_override"`
+	HeaderOverride     string                    `json:"header_override"`
+	Tag                string                    `json:"tag"`
+	Remark             string                    `json:"remark"`
+	Setting            string                    `json:"setting"`
+	Organization       string                    `json:"organization"`
+	ApiVersion         string                    `json:"api_version"`
+	TestModel          string                    `json:"test_model"`
+	AutoBan            int                       `json:"auto_ban"`
+	StatusCodeMapping  string                    `json:"status_code_mapping"`
+	OtherSettings      string                    `json:"other_settings"`
+	Resilience         *models.ChannelResilience `json:"resilience,omitempty"`
+	PriceRatio         *float64                  `json:"price_ratio,omitempty"`
+	Free               *bool                     `json:"free,omitempty"`
+	Limit              *models.ChannelLimit      `json:"limit,omitempty"`
 }
 
 type UpdateRequest struct {
@@ -112,4 +117,19 @@ type TypeMeta struct {
 	ID      int    `json:"id"`
 	Name    string `json:"name"`
 	I18nKey string `json:"i18n_key"`
+}
+
+// PriceRatioMin / PriceRatioMax 是公共 channel 计费倍率的合法区间。
+// 0 合法(settler 归一到原价 1.0);上界 1000 防止误填把成本放大到离谱。
+const (
+	PriceRatioMin = 0.0
+	PriceRatioMax = 1000.0
+)
+
+// validatePriceRatio 校验 price_ratio 落在 [PriceRatioMin, PriceRatioMax]。
+func validatePriceRatio(v float64) error {
+	if v < PriceRatioMin || v > PriceRatioMax {
+		return fmt.Errorf("price_ratio must be between %g and %g, got %g", PriceRatioMin, PriceRatioMax, v)
+	}
+	return nil
 }

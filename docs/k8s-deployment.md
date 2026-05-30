@@ -73,7 +73,6 @@ data:
       report_buffer_size: 1000
       report_flush_interval: 5
       heartbeat_interval: 30
-      retry_max: 3
 
     relay:
       timeout: 300
@@ -244,7 +243,6 @@ data:
       report_buffer_size: 1000
       report_flush_interval: 5
       heartbeat_interval: 30
-      retry_max: 3
 
     relay:
       timeout: 300

@@ -22,7 +22,6 @@ func TestNewEmbedded(t *testing.T) {
 		},
 		Runtime: config.RuntimeConfig{
 			RelayTimeout:        30,
-			RetryMax:            3,
 			FullSyncInterval:    300,
 			ReportBufferSize:    100,
 			ReportFlushInterval: 5,
@@ -60,7 +59,6 @@ func TestMountRoutes(t *testing.T) {
 		},
 		Runtime: config.RuntimeConfig{
 			RelayTimeout:        30,
-			RetryMax:            3,
 			FullSyncInterval:    300,
 			ReportBufferSize:    100,
 			ReportFlushInterval: 5,
@@ -105,7 +103,6 @@ func TestRunBackground_Cancellation(t *testing.T) {
 		},
 		Runtime: config.RuntimeConfig{
 			RelayTimeout:        30,
-			RetryMax:            3,
 			FullSyncInterval:    300,
 			ReportBufferSize:    100,
 			ReportFlushInterval: 5,

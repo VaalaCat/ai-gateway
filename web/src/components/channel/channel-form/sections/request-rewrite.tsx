@@ -8,6 +8,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { JsonField } from "@/components/business/json-field";
 import { FieldTip } from "@/components/business/field-tip";
 import { ChannelForm } from "../types";
+import { ResilienceOverrideSection } from "./resilience-override";
+import { UsageLimitSection } from "./usage-limit";
 
 export interface RequestRewriteSectionProps {
   form: ChannelForm;
@@ -125,6 +127,12 @@ export function RequestRewriteSection({
         placeholder='{"502": 500}'
         tip={<FieldTip text={t("statusCodeMappingTip")} />}
       />
+
+      {/* Resilience Override */}
+      <ResilienceOverrideSection form={form} setForm={setForm} />
+
+      {/* Usage Limit */}
+      <UsageLimitSection form={form} setForm={setForm} />
     </div>
   );
 }

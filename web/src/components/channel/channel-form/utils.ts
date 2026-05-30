@@ -159,6 +159,46 @@ export function sanitizeOtherSettingsForSubmit(
   return stringifyOtherSettings(sanitized);
 }
 
+/* ── parseResilience / stringifyResilience ────────────────────────────── */
+
+export type ResilienceOverride = NonNullable<Channel["resilience"]>;
+
+export function parseResilience(raw: string): ResilienceOverride {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+export function stringifyResilience(r: ResilienceOverride): string {
+  const cleaned = Object.fromEntries(
+    Object.entries(r).filter(([, v]) => v !== undefined && v !== null),
+  );
+  return Object.keys(cleaned).length ? JSON.stringify(cleaned) : "";
+}
+
+/* ── parseLimit / stringifyLimit ──────────────────────────────────────── */
+
+export type ChannelLimit = NonNullable<Channel["limit"]>;
+
+export function parseLimit(raw: string): ChannelLimit {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+export function stringifyLimit(l: ChannelLimit): string {
+  const hasRules = Array.isArray(l.rules) && l.rules.length > 0;
+  const hasCutoff = typeof l.disable_at === "number" && l.disable_at > 0;
+  if (!hasRules && !hasCutoff) return "";
+  return JSON.stringify(l);
+}
+
 /* ── mapChannelToForm (used by edit-mode initial fill) ───────────────── */
 
 export function mapChannelToForm(channel: Channel): ChannelForm {
@@ -193,5 +233,9 @@ export function mapChannelToForm(channel: Channel): ChannelForm {
     role_mapping: channel.role_mapping ?? "",
     system_prompt_in_input: !!channel.system_prompt_in_input,
     disable_keepalive: !!channel.disable_keepalive,
+    price_ratio: String(channel.price_ratio ?? 1),
+    free: !!channel.free,
+    resilience: stringifyResilience(channel.resilience ?? {}),
+    limit: stringifyLimit(channel.limit ?? {}),
   };
 }

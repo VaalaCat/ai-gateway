@@ -7,6 +7,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import {
+  formatFactor,
   formatMoneyCompact,
   formatMoneyExact,
   formatPrice,
@@ -38,6 +39,15 @@ interface CostDetailCellProps {
   cacheWriteTokens?: number;
   inputCost: number;
   outputCost: number;
+  // 完整公式所需(新行才有)。rawInputCost == null/undefined → 走老行降级展示。
+  rawInputCost?: number | null;
+  rawOutputCost?: number | null;
+  rawCacheReadCost?: number | null;
+  rawCacheWriteCost?: number | null;
+  cacheReadCost?: number;
+  cacheWriteCost?: number;
+  billingFactor?: number | null;
+  modeLabel?: string;
 }
 
 export function CostDetailCell({
@@ -48,31 +58,75 @@ export function CostDetailCell({
   cacheWriteTokens = 0,
   inputCost,
   outputCost,
+  rawInputCost,
+  rawOutputCost,
+  rawCacheReadCost,
+  rawCacheWriteCost,
+  cacheReadCost = 0,
+  cacheWriteCost = 0,
+  billingFactor,
+  modeLabel,
 }: CostDetailCellProps) {
-  const rows: BreakdownRow[] = [
-    {
+  // 新行(有原价快照 + 因子)走完整四桶公式;老行降级到只列实付、cache 显示 —。
+  const hasFormula = rawInputCost != null && billingFactor != null;
+  const rows: BreakdownRow[] = [];
+
+  if (!hasFormula) {
+    rows.push({
       label: `Input · ${formatTokensCompact(promptTokens)} tokens`,
       value: formatMoneyCompact(inputCost),
-    },
-    {
+    });
+    rows.push({
       label: `Output · ${formatTokensCompact(completionTokens)} tokens`,
       value: formatMoneyCompact(outputCost),
-    },
-  ];
-  if (cacheReadTokens > 0) {
-    rows.push({
-      label: `Cache read · ${formatTokensCompact(cacheReadTokens)} tokens`,
-      value: "—",
-      accent: "success",
     });
-  }
-  if (cacheWriteTokens > 0) {
+    if (cacheReadTokens > 0) {
+      rows.push({
+        label: `Cache read · ${formatTokensCompact(cacheReadTokens)} tokens`,
+        value: "—",
+        accent: "success",
+      });
+    }
+    if (cacheWriteTokens > 0) {
+      rows.push({
+        label: `Cache write · ${formatTokensCompact(cacheWriteTokens)} tokens`,
+        value: "—",
+        accent: "info",
+      });
+    }
+  } else {
+    const showFactor = billingFactor !== 1;
+    const cell = (raw: number, final: number) =>
+      showFactor
+        ? `${formatMoneyCompact(raw)} ×${formatFactor(billingFactor)} = ${formatMoneyCompact(final)}`
+        : formatMoneyCompact(final);
     rows.push({
-      label: `Cache write · ${formatTokensCompact(cacheWriteTokens)} tokens`,
-      value: "—",
-      accent: "info",
+      label: `Input · ${formatTokensCompact(promptTokens)} tokens`,
+      value: cell(rawInputCost as number, inputCost),
     });
+    rows.push({
+      label: `Output · ${formatTokensCompact(completionTokens)} tokens`,
+      value: cell(rawOutputCost ?? 0, outputCost),
+    });
+    if (cacheReadTokens > 0) {
+      rows.push({
+        label: `Cache read · ${formatTokensCompact(cacheReadTokens)} tokens`,
+        value: cell(rawCacheReadCost ?? 0, cacheReadCost),
+        accent: "success",
+      });
+    }
+    if (cacheWriteTokens > 0) {
+      rows.push({
+        label: `Cache write · ${formatTokensCompact(cacheWriteTokens)} tokens`,
+        value: cell(rawCacheWriteCost ?? 0, cacheWriteCost),
+        accent: "info",
+      });
+    }
+    if (showFactor && modeLabel) {
+      rows.push({ label: modeLabel, value: "", muted: true });
+    }
   }
+
   return (
     <BreakdownPopover
       trigger={formatMoneyCompact(amount)}

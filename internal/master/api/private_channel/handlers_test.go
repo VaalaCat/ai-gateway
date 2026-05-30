@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	newAPIConstant "github.com/QuantumNous/new-api/constant"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -776,5 +777,67 @@ func TestPortalUpdate_SubsetCheckRunsForNonEmptyPatch(t *testing.T) {
 	apiErr := assertAPIStatus(t, err, http.StatusBadRequest)
 	if !strings.Contains(apiErr.Error(), "not-registered") {
 		t.Fatalf("expected subset error mentioning 'not-registered', got %q", apiErr.Error())
+	}
+}
+
+// TestPortalTest_JoinUpstreamURL_RejectsMaliciousEndpoint covers the SSRF
+// hardening at Site 1: a malicious endpoints path stored in the DB (e.g. via
+// a "@evil.example" userinfo redirect) must be rejected by codec.JoinUpstreamURL
+// before the bearer key is forwarded.
+func TestPortalTest_JoinUpstreamURL_RejectsMaliciousEndpoint(t *testing.T) {
+	cases := []struct {
+		name      string
+		baseURL   string
+		endpoints string // Endpoints JSON stored in DB
+		epType    string
+		wantErr   bool
+	}{
+		{
+			// "@evil.example/..." is parsed by url.Parse as having userinfo "api.openai.com"
+			// and host "evil.example", so JoinUpstreamURL catches the host mismatch.
+			name:      "userinfo redirect attack via @ in path",
+			baseURL:   "https://api.openai.com",
+			endpoints: `{"chat_completions":"@evil.example/v1/chat/completions"}`,
+			epType:    "chat_completions",
+			wantErr:   true,
+		},
+		{
+			// scheme-change attack: path that switches to http:// is caught by scheme check.
+			name:      "scheme redirect attack",
+			baseURL:   "https://api.openai.com",
+			endpoints: `{"chat_completions":"http://evil.example/v1/chat/completions"}`,
+			epType:    "chat_completions",
+			wantErr:   true,
+		},
+		{
+			name:      "legitimate custom path passes",
+			baseURL:   "https://api.openai.com",
+			endpoints: `{"chat_completions":"/custom/v1/chat/completions"}`,
+			epType:    "chat_completions",
+			wantErr:   false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := &models.PrivateChannel{
+				ChannelCore: models.ChannelCore{
+					Type:      newAPIConstant.ChannelTypeOpenAI,
+					BaseURL:   tc.baseURL,
+					Endpoints: tc.endpoints,
+				},
+			}
+			path, err := resolveTestPath(pc, tc.epType)
+			if err != nil {
+				t.Fatalf("resolveTestPath unexpected error: %v", err)
+			}
+			_, joinErr := codec.JoinUpstreamURL(pc.BaseURL, path)
+			if tc.wantErr && joinErr == nil {
+				t.Fatalf("expected JoinUpstreamURL to reject malicious path %q, but it passed", path)
+			}
+			if !tc.wantErr && joinErr != nil {
+				t.Fatalf("expected JoinUpstreamURL to accept path %q, got error: %v", path, joinErr)
+			}
+		})
 	}
 }

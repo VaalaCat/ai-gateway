@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	newAPIConstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	"github.com/QuantumNous/new-api/relay/channel/ollama"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -99,7 +99,10 @@ func doFetchModels(channelType int, baseURL, key, endpoints, proxyURL string) (F
 			}
 		}
 	}
-	modelsURL := strings.TrimRight(baseURL, "/") + modelsPath
+	modelsURL, err := codec.JoinUpstreamURL(baseURL, modelsPath)
+	if err != nil {
+		return FetchModelsResponse{Models: []string{}, Error: fmt.Sprintf("build models url: %v", err)}, nil
+	}
 	httpReq, _ := http.NewRequest("GET", modelsURL, nil)
 	httpReq.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+key)
 

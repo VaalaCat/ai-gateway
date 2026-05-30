@@ -11,9 +11,10 @@ import (
 // 来源标记保留到 Solver 装 Attempt 时一并传递，避免在 *models.Channel 字段上塞
 // 编码（如 Tag）这种破坏命名语义的做法。
 type ScoredCandidate struct {
-	Channel  *models.Channel
-	Source   state.ChannelSource
-	SourceID uint
+	Channel    *models.Channel
+	Source     state.ChannelSource
+	SourceID   uint
+	ByAffinity bool // 由 plan.applyAffinity 在置顶时打标，透传到 Attempt.ByAffinity
 }
 
 // ChannelPool 是 single-realModel 的候选 channel 提供者。

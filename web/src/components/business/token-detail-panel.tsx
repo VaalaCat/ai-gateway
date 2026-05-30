@@ -4,7 +4,7 @@ import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
-import { UsernameCell } from "@/components/business/username-cell";
+import { EntityLabel } from "@/components/business/entity-label";
 import { TokenAvailableModels } from "@/components/business/token-available-models";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -41,7 +41,7 @@ export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
           </Field>
           {isAdmin && (
             <Field label={t("fieldOwner")}>
-              <UsernameCell userId={token.user_id} />
+              <EntityLabel entity="user" id={token.user_id} />
             </Field>
           )}
           <Field label={t("fieldStatus")}>

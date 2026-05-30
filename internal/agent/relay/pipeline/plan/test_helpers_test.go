@@ -11,14 +11,16 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
 // stubRoutingStore 让 chain 测试不依赖真实 *cache.Store。
 type stubRoutingStore struct {
-	user   map[string]*protocol.SyncedRouting // by name
-	global map[string]*protocol.SyncedRouting
+	user       map[string]*protocol.SyncedRouting // by name
+	global     map[string]*protocol.SyncedRouting
+	realModels map[string]bool // name → 是否真实模型
 }
 
 func (s *stubRoutingStore) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
@@ -37,6 +39,10 @@ func (s *stubRoutingStore) GetGlobalRouting(name string) *protocol.SyncedRouting
 	return s.global[name]
 }
 
+func (s *stubRoutingStore) HasRealModel(name string) bool {
+	return s.realModels[name]
+}
+
 // stubAgentCache 用 embedded interface 技巧满足 app.AgentCache，
 // 只覆盖 ResolveRouting / GetGlobalRouting / GetChannelsForModel /
 // GetVisiblePrivateChannelsForUser 四个测试关心的方法。
@@ -47,7 +53,10 @@ type stubAgentCache struct {
 	channels       []*models.Channel
 	// privChannels: model → private channels，供 BYOK pool 测试使用。
 	privChannels map[string][]*protocol.SyncedPrivateChannel
+	settings     settings.AgentSettings
 }
+
+func (c *stubAgentCache) Settings() settings.AgentSettings { return c.settings }
 
 func (c *stubAgentCache) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
 	if c.rs == nil {
@@ -65,6 +74,12 @@ func (c *stubAgentCache) GetGlobalRouting(name string) *protocol.SyncedRouting {
 
 func (c *stubAgentCache) GetChannelsForModel(model string) []*models.Channel {
 	return c.channels
+}
+
+// HasRealModel: stub 简化——只看 c.channels 是否非空，不区分 name。
+// 现有用例 c.channels 为 nil 故恒 false；若将来需要 name-aware 行为，改为代理 c.rs.HasRealModel(name)。
+func (c *stubAgentCache) HasRealModel(name string) bool {
+	return len(c.channels) > 0
 }
 
 func (c *stubAgentCache) GetVisiblePrivateChannelsForUser(userID uint, model string) []*protocol.SyncedPrivateChannel {

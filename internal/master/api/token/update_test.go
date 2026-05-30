@@ -1,11 +1,14 @@
 package token
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
@@ -143,5 +146,130 @@ func TestUpdate_IllegalZeroChannelID_Reject(t *testing.T) {
 	}
 	if apiErr.Status != 400 {
 		t.Fatalf("expected 400, got %d (%s)", apiErr.Status, apiErr.Message)
+	}
+}
+
+func setScope(ctx *app.Context, isAdmin bool, userID uint) {
+	ctx.Context.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
+}
+
+func seedUserQuota(t *testing.T, db *gorm.DB, id uint, quota int64) {
+	t.Helper()
+	u := models.User{Quota: quota}
+	u.ID = id
+	u.Username = fmt.Sprintf("user-%d", id)
+	if err := db.Create(&u).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+}
+
+func seedTokenStatus(t *testing.T, db *gorm.DB, userID uint, status int) models.Token {
+	t.Helper()
+	tok := models.Token{Name: "tok", Key: fmt.Sprintf("sk-%d-%d", userID, status), UserID: userID, Status: status}
+	if err := db.Create(&tok).Error; err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	// models.Token.Status has `gorm:"default:1"`, so a struct value of 0 falls back
+	// to 1 at insert. Force the requested status explicitly so seeding is honest.
+	if err := db.Model(&models.Token{}).Where("id = ?", tok.ID).Update("status", status).Error; err != nil {
+		t.Fatalf("seed token status: %v", err)
+	}
+	tok.Status = status
+	return tok
+}
+
+// 普通用户、余额>0、status 0->1:成功。
+func TestUpdate_UserEnableWithBalance_Success(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	seedUserQuota(t, db, 1, 1000)
+	tok := seedTokenStatus(t, db, 1, 0)
+	setScope(ctx, false, 1)
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"status": float64(1)})
+
+	if _, err := h.Update(ctx, req); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	var reloaded models.Token
+	if err := db.First(&reloaded, tok.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Status != 1 {
+		t.Fatalf("expected status 1, got %d", reloaded.Status)
+	}
+}
+
+// 普通用户、余额<=0、status 0->1:被拒(400),token 仍禁用。
+func TestUpdate_UserEnableWithoutBalance_Reject(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	seedUserQuota(t, db, 1, 0)
+	tok := seedTokenStatus(t, db, 1, 0)
+	setScope(ctx, false, 1)
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"status": float64(1)})
+
+	_, err := h.Update(ctx, req)
+	if err == nil {
+		t.Fatal("expected 400 for zero balance enable")
+	}
+	apiErr, ok := err.(*api.APIError)
+	if !ok {
+		t.Fatalf("expected *api.APIError, got %T: %v", err, err)
+	}
+	if apiErr.Status != 400 {
+		t.Fatalf("expected 400, got %d (%s)", apiErr.Status, apiErr.Message)
+	}
+	var reloaded models.Token
+	if err := db.First(&reloaded, tok.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Status != 0 {
+		t.Fatalf("expected status unchanged 0, got %d", reloaded.Status)
+	}
+}
+
+// 普通用户、status ->0(禁用):始终成功(无视余额)。
+func TestUpdate_UserDisable_AlwaysAllowed(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	seedUserQuota(t, db, 1, 0)
+	tok := seedTokenStatus(t, db, 1, 1)
+	setScope(ctx, false, 1)
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"status": float64(0)})
+
+	if _, err := h.Update(ctx, req); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	var reloaded models.Token
+	if err := db.First(&reloaded, tok.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Status != 0 {
+		t.Fatalf("expected status 0, got %d", reloaded.Status)
+	}
+}
+
+// 管理员、余额<=0、status 0->1:成功(管理员不受余额校验影响)。
+func TestUpdate_AdminEnableWithoutBalance_Success(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	seedUserQuota(t, db, 1, 0)
+	tok := seedTokenStatus(t, db, 1, 0)
+	setScope(ctx, true, 99)
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"status": float64(1)})
+
+	if _, err := h.Update(ctx, req); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	var reloaded models.Token
+	if err := db.First(&reloaded, tok.ID).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Status != 1 {
+		t.Fatalf("expected status 1, got %d", reloaded.Status)
 	}
 }

@@ -834,6 +834,201 @@ func TestExecutor_DefaultFallback_SleepsBetween(t *testing.T) {
 	}
 }
 
+// ==================== Task 6 Resilience Runner 覆盖 ====================
+
+// stubRunner 把 dispatch 调用计数，并可选地重试 N 次再返回最终结果。
+type stubRunner struct{ retries int }
+
+func (s stubRunner) Run(_ *state.RelayContext, _ state.Attempt, dispatch func() state.AttemptResult) state.AttemptResult {
+	var res state.AttemptResult
+	for i := 0; i <= s.retries; i++ {
+		res = dispatch()
+		if res.Err == nil {
+			break
+		}
+	}
+	return res
+}
+
+// TestRun_ResilienceRunnerRetriesSameChannel 验证：注入 stubRunner{retries:2} 后，
+// 单候选 plan 在第 1 次 dispatch 失败时会再试第 2 次（同 channel），第 2 次成功后终态 Err=nil。
+func TestRun_ResilienceRunnerRetriesSameChannel(t *testing.T) {
+	calls := 0
+	d := &recordingDispatcher{
+		results: []state.AttemptResult{
+			{Err: &common.UpstreamError{Status: 503}},
+			{}, // 第 2 次成功
+		},
+	}
+	// 用自定义 dispatcher 计数，但让 stubRunner 驱动重试。
+	var countingD state.Dispatcher = dispatchCounterDispatcher{inner: d, counter: &calls}
+	e := &Executor{Dispatcher: countingD, Resilience: stubRunner{retries: 2}}
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	e.Run(rctx)
+	if calls != 2 {
+		t.Fatalf("runner should retry same channel until success, calls=%d want 2", calls)
+	}
+	if rctx.State.Execution.Err != nil {
+		t.Fatalf("expected success after retry, got %v", rctx.State.Execution.Err)
+	}
+}
+
+// dispatchCounterDispatcher 包装任意 Dispatcher，每次 Dispatch 前递增 *counter。
+type dispatchCounterDispatcher struct {
+	inner   state.Dispatcher
+	counter *int
+}
+
+func (d dispatchCounterDispatcher) Dispatch(rctx *state.RelayContext, a state.Attempt) state.AttemptResult {
+	*d.counter++
+	return d.inner.Dispatch(rctx, a)
+}
+
+// TestRun_NilResilienceFallsBackToPlainDispatch 验证：Resilience==nil 时退化为裸 dispatch，
+// 单候选 plan 恰好 dispatch 一次（向后兼容老 test stub 行为不变）。
+func TestRun_NilResilienceFallsBackToPlainDispatch(t *testing.T) {
+	calls := 0
+	var countingD state.Dispatcher = dispatchCounterDispatcher{
+		inner:   &recordingDispatcher{results: []state.AttemptResult{{}}},
+		counter: &calls,
+	}
+	e := &Executor{Dispatcher: countingD} // Resilience nil
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	e.Run(rctx)
+	if calls != 1 {
+		t.Fatalf("nil runner should dispatch exactly once, calls=%d want 1", calls)
+	}
+}
+
+// ==================== Task 2: History 记录 ====================
+
+// TestRun_HistoryRecordsEachCandidate 验证:两候选时,History 里有两条记录。
+// 候选 1 返回 503 失败 → 候选 2 成功;History[0] seq=1/status=fail/HTTP=503/errorType,
+// History[1] seq=2/status=ok。
+func TestRun_HistoryRecordsEachCandidate(t *testing.T) {
+	d := &recordingDispatcher{results: []state.AttemptResult{
+		{Err: &common.UpstreamError{Status: 503, ProviderErrorType: "server_error"}, Written: false},
+		{}, // 第 2 个候选成功
+	}}
+	e := &Executor{Dispatcher: d}
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	e.Run(rctx)
+
+	h := rctx.State.Execution.History
+	if len(h) != 2 {
+		t.Fatalf("want 2 history entries, got %d", len(h))
+	}
+	if h[0].Seq != 1 || h[0].Status != "fail" || h[0].HTTPStatus != 503 || h[0].ErrorType != "server_error" {
+		t.Fatalf("entry[0] wrong: %+v", h[0])
+	}
+	if h[1].Seq != 2 || h[1].Status != "ok" {
+		t.Fatalf("entry[1] wrong: %+v", h[1])
+	}
+}
+
+// TestRun_HistoryCountsInnerRetries 验证:单候选 + stubRunner{retries:2} 时,
+// stubRunner 在 runAttempt 内调 dispatch 3 次(2 失败 + 1 成功),
+// History 应有 1 条记录且 Retries==2(= dispatch 次数 - 1)。
+func TestRun_HistoryCountsInnerRetries(t *testing.T) {
+	d := &recordingDispatcher{results: []state.AttemptResult{
+		{Err: &common.UpstreamError{Status: 503}, Written: false},
+		{Err: &common.UpstreamError{Status: 503}, Written: false},
+		{}, // 第 3 次成功
+	}}
+	e := &Executor{
+		Dispatcher: d,
+		Resilience: stubRunner{retries: 2}, // 最多 3 次 dispatch(0..2)
+	}
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	e.Run(rctx)
+
+	h := rctx.State.Execution.History
+	if len(h) != 1 {
+		t.Fatalf("want 1 history entry, got %d", len(h))
+	}
+	if h[0].Retries != 2 {
+		t.Fatalf("want Retries=2 (3 dispatches - 1), got %d; entry=%+v", h[0].Retries, h[0])
+	}
+	if h[0].Status != "ok" {
+		t.Fatalf("want Status=ok after eventual success, got %q", h[0].Status)
+	}
+}
+
+// TestRun_AttemptRecordHasTrace 验证 History 条目的 HasTrace 精确反映该候选是否写 trace 行。
+func TestRun_AttemptRecordHasTrace(t *testing.T) {
+	// case 1: 关 trace + 单次成功 → 非 verbose → HasTrace=false
+	{
+		d := &recorderMutatingDispatcher{results: []state.AttemptResult{{}}}
+		e := &Executor{Dispatcher: d}
+		plan := state.AttemptPlan{Attempts: []state.Attempt{
+			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
+		}}
+		rctx := &state.RelayContext{
+			Context: nil, Agent: &stubExecAgent{},
+			Input: state.RelayInput{Body: []byte(`{"model":"x"}`), UserInfo: &app.UserInfo{TokenID: 1}},
+			State: &state.RelayState{Recorder: trace.NewRecorder(false, 0), Plan: plan},
+		}
+		e.Run(rctx)
+		if got := rctx.State.Execution.History[0].HasTrace; got {
+			t.Errorf("关 trace 单成功候选 HasTrace=%v,应为 false", got)
+		}
+	}
+	// case 2: 关 trace + 候选失败(WithFail → verbose) → HasTrace=true; 第2候选成功(关trace) → false
+	{
+		d := &recorderMutatingDispatcher{results: []state.AttemptResult{
+			{Err: &common.UpstreamError{Status: 500}},
+			{}, // 第 2 候选成功
+		}}
+		e := &Executor{Dispatcher: d}
+		plan := state.AttemptPlan{Attempts: []state.Attempt{
+			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
+			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
+		}}
+		rctx := &state.RelayContext{
+			Context: nil, Agent: &stubExecAgent{},
+			Input: state.RelayInput{Body: []byte(`{"model":"x"}`), UserInfo: &app.UserInfo{TokenID: 1}},
+			State: &state.RelayState{Recorder: trace.NewRecorder(false, 0), Plan: plan},
+		}
+		e.Run(rctx)
+		if got := rctx.State.Execution.History[0].HasTrace; !got {
+			t.Errorf("失败候选 HasTrace=%v,应为 true", got)
+		}
+		if got := rctx.State.Execution.History[1].HasTrace; got {
+			t.Errorf("第 2 候选成功(关 trace) HasTrace=%v,应为 false", got)
+		}
+	}
+	// case 3: 开 trace + 成功 → verbose → HasTrace=true
+	{
+		d := &recorderMutatingDispatcher{results: []state.AttemptResult{{}}}
+		e := &Executor{Dispatcher: d}
+		plan := state.AttemptPlan{Attempts: []state.Attempt{
+			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
+		}}
+		rctx := &state.RelayContext{
+			Context: nil, Agent: &stubExecAgent{},
+			Input: state.RelayInput{Body: []byte(`{"model":"x"}`), UserInfo: &app.UserInfo{TokenID: 1}},
+			State: &state.RelayState{Recorder: trace.NewRecorder(true, 0), Plan: plan}, // 开 trace
+		}
+		e.Run(rctx)
+		if got := rctx.State.Execution.History[0].HasTrace; !got {
+			t.Errorf("开 trace 成功候选 HasTrace=%v,应为 true", got)
+		}
+	}
+}
+
 // TestRun_AttemptFailLog_LegacyModePath 钉死审计 D-C2 / 审计 #3：
 // 当 Attempt.Mode == state.ModeLegacy 失败时，"relay attempt failed" Warn 日志
 // 的 `path` 字段必须是 "legacy"（对齐 main:handler.go 老主循环的 nativeOrLegacy(useLegacy)

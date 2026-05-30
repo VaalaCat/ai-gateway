@@ -27,31 +27,6 @@ var (
 		[]string{"owner_id"},
 	)
 
-	// BYOKVisibleSetCacheSize 是 agent 端 visible private channel LRU 当前块数。
-	// 在 LRU 写入/失效后 Set(len)；用于观测 cache 容量利用率。
-	BYOKVisibleSetCacheSize = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "byok_visible_set_cache_size",
-			Help: "Current entry count in agent-side visible private-channel LRU.",
-		},
-	)
-
-	// BYOKVisibleSetCacheHit 在 agent 端从 LRU 命中 visible private channel 块时 +1。
-	BYOKVisibleSetCacheHit = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: "byok_visible_set_cache_hit_total",
-			Help: "Agent-side visible private-channel cache hits.",
-		},
-	)
-
-	// BYOKVisibleSetCacheMiss 在 agent 端未命中、走 loader 拉取时 +1。
-	BYOKVisibleSetCacheMiss = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: "byok_visible_set_cache_miss_total",
-			Help: "Agent-side visible private-channel cache misses.",
-		},
-	)
-
 	// BYOKRequestTotal 在每条 BYOK relay usage 结算完成时按 (owner_type, model) +1。
 	// owner_type 必为 "private"（admin 走非 BYOK 路径不入此 metric）。
 	BYOKRequestTotal = prometheus.NewCounterVec(
@@ -76,9 +51,6 @@ var (
 func init() {
 	prometheus.MustRegister(
 		BYOKPrivateChannelCount,
-		BYOKVisibleSetCacheSize,
-		BYOKVisibleSetCacheHit,
-		BYOKVisibleSetCacheMiss,
 		BYOKRequestTotal,
 		BYOKDecryptFailureTotal,
 	)

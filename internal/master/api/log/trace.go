@@ -12,7 +12,7 @@ type TraceRequest struct {
 	RequestID string `uri:"request_id" binding:"required"`
 }
 
-func (h *Handler) GetTrace(c *app.Context, req TraceRequest) (*models.UsageLogTrace, error) {
+func (h *Handler) GetTrace(c *app.Context, req TraceRequest) ([]*models.UsageLogTrace, error) {
 	scope := middleware.GetScope(c.Context)
 	daoCtx := dao.NewContext(c.App)
 	q := dao.NewAdminQuery(daoCtx)
@@ -28,9 +28,13 @@ func (h *Handler) GetTrace(c *app.Context, req TraceRequest) (*models.UsageLogTr
 		}
 	}
 
-	trace, err := q.UsageLog().GetTraceByRequestID(req.RequestID)
+	traces, err := q.UsageLog().GetTracesByRequestID(req.RequestID)
 	if err != nil {
 		return nil, api.NotFoundError("trace not found")
 	}
-	return trace, nil
+	// Find 对零行不报错,显式判空 → 404,保持既有 not-found 契约(前端按 404 优雅降级)。
+	if len(traces) == 0 {
+		return nil, api.NotFoundError("trace not found")
+	}
+	return traces, nil
 }

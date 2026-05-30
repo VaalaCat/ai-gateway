@@ -22,13 +22,16 @@ const (
 
 	EntityPrivateChannel      = "private_channel"
 	EntityPrivateChannelShare = "private_channel_share"
+
+	EntityScript = "script"
 )
 
 // CRUD action 常量。
 const (
-	ActionCreate = "create"
-	ActionUpdate = "update"
-	ActionDelete = "delete"
+	ActionCreate     = "create"
+	ActionUpdate     = "update"
+	ActionDelete     = "delete"
+	ActionInvalidate = "invalidate"
 )
 
 const (
@@ -73,6 +76,10 @@ const (
 	topicUserGroupDelete = "user_group.delete"
 	topicUserSyncUpdate  = "user.sync_update"
 	topicUserSyncDelete  = "user.sync_delete"
+
+	topicScriptCreate = "script.create"
+	topicScriptUpdate = "script.update"
+	topicScriptDelete = "script.delete"
 )
 
 const (
@@ -95,6 +102,10 @@ const (
 
 	patternSyncUserGroupAll = "sync.user_group.*"
 	patternSyncUserAll      = "sync.user.*"
+
+	patternSyncPrivateChannelAll = "sync.private_channel.*"
+
+	patternSyncScriptAll = "sync.script.*"
 )
 
 func entityTopic(entity, action string) string {
@@ -171,6 +182,16 @@ var (
 
 	SyncUserGroupAllPattern = newPattern[protocol.SyncPushParams](patternSyncUserGroupAll)
 	SyncUserAllPattern      = newPattern[protocol.SyncPushParams](patternSyncUserAll)
+
+	SyncPrivateChannelAllPattern = newPattern[protocol.SyncPushParams](patternSyncPrivateChannelAll)
+
+	PrivateChannelInvalidateTopic = newTopic[protocol.PrivateChannelInvalidatePayload](entityTopic(EntityPrivateChannel, ActionInvalidate))
+
+	ScriptCreateTopic = newTopic[models.AdminScript](topicScriptCreate)
+	ScriptUpdateTopic = newTopic[models.AdminScript](topicScriptUpdate)
+	ScriptDeleteTopic = newTopic[models.AdminScript](topicScriptDelete)
+
+	SyncScriptAllPattern = newPattern[protocol.SyncPushParams](patternSyncScriptAll)
 )
 
 func SyncPushTopic(entity, action string) Topic[protocol.SyncPushParams] {

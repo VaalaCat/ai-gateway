@@ -16,8 +16,8 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { useAgentRoutes, useCreateAgentRoute, useDeleteAgentRoute } from "@/lib/api/agent-routes";
-import { useAgents } from "@/lib/api/agents";
 import { formatErrorToast } from "@/lib/api/error-toast";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 
 interface AgentRouteEditorProps {
   sourceType: "token" | "channel";
@@ -47,13 +47,10 @@ export function AgentRouteEditor({ sourceType, sourceId }: AgentRouteEditorProps
     source_id: sourceId,
   });
 
-  const { data: agentsData } = useAgents({ page_size: 100 });
-
   const createMutation = useCreateAgentRoute();
   const deleteMutation = useDeleteAgentRoute();
 
   const routes = routesData?.data ?? [];
-  const agents = agentsData?.data ?? [];
 
   const handleDelete = async (id: number) => {
     try {
@@ -183,21 +180,12 @@ export function AgentRouteEditor({ sourceType, sourceId }: AgentRouteEditorProps
           <div className="flex items-center gap-2">
             <Label className="w-16 shrink-0 text-xs">{t("targetValue")}</Label>
             {newForm.targetType === "agent_id" ? (
-              <Select
+              <EntityPicker
+                entity="agent"
                 value={newForm.targetValue}
-                onValueChange={(v) => setNewForm({ ...newForm, targetValue: v })}
-              >
-                <SelectTrigger className="h-7 text-xs">
-                  <SelectValue placeholder={t("selectAgent")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {agents.map((agent) => (
-                    <SelectItem key={agent.agent_id} value={agent.agent_id}>
-                      {agent.name} ({agent.agent_id})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                onChange={(v) => setNewForm({ ...newForm, targetValue: v })}
+                placeholder={t("selectAgent")}
+              />
             ) : (
               <Input
                 className="h-7 text-xs"

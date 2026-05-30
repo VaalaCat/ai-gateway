@@ -26,13 +26,14 @@ import { DurationCell } from "@/components/business/duration-cell";
 import { StreamBadge } from "@/components/business/status-badge";
 import { ModelName } from "@/components/business/model-name";
 import { TraceDetail } from "@/components/business/trace-detail";
-import { UsernameCell } from "@/components/business/username-cell";
+import { FallbackChain } from "@/components/business/fallback-chain";
+import { EntityLabel } from "@/components/business/entity-label";
 import { KpiGrid } from "@/components/business/kpi-grid";
 import { StageDistributionBar } from "@/components/business/stage-distribution-bar";
 import { RELAY_STAGE_ORDER } from "@/lib/constants/relay/stages";
 import { toStageBuckets } from "@/lib/utils/to-stage-buckets";
 
-import { formatDuration, formatMoneyCompact } from "@/lib/utils/format";
+import { formatDuration, formatFactor, formatMoneyCompact } from "@/lib/utils/format";
 import { useLogs } from "@/lib/api/logs";
 import { useLogsInsights } from "@/lib/api/logs-insights";
 import { useChannels } from "@/lib/api/channels";
@@ -156,7 +157,37 @@ function LogsPageContent() {
     return JSON.stringify(rawLog, null, 2);
   }, [rawLog]);
 
+  const renderAffinityBadge = (status?: string) => {
+    if (status === "hit") {
+      return (
+        <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 font-normal text-xs">
+          {t("affinityHit")}
+        </Badge>
+      );
+    }
+    if (status === "fallback") {
+      return (
+        <Badge className="bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 font-normal text-xs">
+          {t("affinityFallback")}
+        </Badge>
+      );
+    }
+    return null;
+  };
+
   const columns: ColumnDef<UsageLog>[] = useMemo(() => {
+    const billingModeLabel = (row: UsageLog): string | undefined => {
+      const f = row.billing_factor;
+      if (f == null) return undefined; // 老行,无标注
+      if (row.free) return t("billingMode.free"); // 免费渠道 ×0
+      if (row.owner_type === "private") {
+        return f === 0
+          ? t("billingMode.byokFree")
+          : t("billingMode.byokFee", { factor: formatFactor(f) });
+      }
+      if (f === 1) return undefined; // 公共全价,不标注倍率
+      return t("billingMode.channelRatio", { factor: formatFactor(f) });
+    };
     const cols: ColumnDef<UsageLog>[] = [
       {
         id: "expand",
@@ -217,7 +248,7 @@ function LogsPageContent() {
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={t("userId")} />
         ),
-        cell: ({ row }) => <UsernameCell userId={row.original.user_id} />,
+        cell: ({ row }) => <EntityLabel entity="user" id={row.original.user_id} />,
       });
     }
 
@@ -237,14 +268,22 @@ function LogsPageContent() {
           const ownerType = log.owner_type || "admin";
           if (ownerType === "private") {
             return (
-              <Badge variant="secondary" className="font-normal">
-                <KeyRound className="size-3 mr-1" />
-                {log.channel_name || `${t("byokBadge")} #${log.private_channel_id}`}
-              </Badge>
+              <div className="flex items-center gap-1">
+                <Badge variant="secondary" className="font-normal">
+                  <KeyRound className="size-3 mr-1" />
+                  {log.channel_name || `${t("byokBadge")} #${log.private_channel_id}`}
+                </Badge>
+                {renderAffinityBadge(log.affinity_status)}
+              </div>
             );
           }
           if (isAdmin) {
-            return <span>{log.channel_name || "-"}</span>;
+            return (
+              <div className="flex items-center gap-1">
+                <span>{log.channel_name || "-"}</span>
+                {renderAffinityBadge(log.affinity_status)}
+              </div>
+            );
           }
           return <span className="text-muted-foreground">{tc("shared")}</span>;
         },
@@ -260,6 +299,24 @@ function LogsPageContent() {
             return <Badge variant="destructive" className="text-xs">{t("statusFailed")}</Badge>;
           }
           return <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 text-xs">{t("statusSuccess")}</Badge>;
+        },
+      },
+      {
+        id: "chain",
+        header: t("chain"),
+        cell: ({ row }) => {
+          const chain = row.original.fallback_chain ?? [];
+          if (chain.length <= 1) {
+            return <span className="text-muted-foreground">{chain.length === 1 ? "✓" : "-"}</span>;
+          }
+          const ok = chain[chain.length - 1]?.status === "ok";
+          return (
+            <Badge className={ok
+              ? "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 text-xs font-normal"
+              : "text-xs"} variant={ok ? undefined : "destructive"}>
+              {ok ? `⤵ ${chain.length}${t("chainTriesSuffix")}` : `✗ ${chain.length}${t("chainTriesSuffix")}`}
+            </Badge>
+          );
         },
       },
       {
@@ -304,6 +361,14 @@ function LogsPageContent() {
             cacheWriteTokens={row.original.cache_write_tokens}
             inputCost={row.original.input_cost}
             outputCost={row.original.output_cost}
+            cacheReadCost={row.original.cache_read_cost}
+            cacheWriteCost={row.original.cache_write_cost}
+            rawInputCost={row.original.raw_input_cost}
+            rawOutputCost={row.original.raw_output_cost}
+            rawCacheReadCost={row.original.raw_cache_read_cost}
+            rawCacheWriteCost={row.original.raw_cache_write_cost}
+            billingFactor={row.original.billing_factor}
+            modeLabel={billingModeLabel(row.original)}
           />
         ),
       },
@@ -384,6 +449,9 @@ function LogsPageContent() {
       [t("promptTokens"), log.prompt_tokens],
       [t("completionTokens"), log.completion_tokens],
       [t("totalCost"), formatMoneyCompact(log.total_cost)],
+      ...(log.price_ratio !== undefined && log.price_ratio !== 1
+        ? [[t("priceRatio"), String(log.price_ratio)]]
+        : []),
       [t("duration"), formatDuration(log.duration)],
       [t("firstResponseMs"), log.first_response_ms ? formatDuration(log.first_response_ms) : "-"],
       [t("stream"), log.is_stream ? "Yes" : "No"],
@@ -404,6 +472,20 @@ function LogsPageContent() {
             </div>
           ))}
         </div>
+        {log.affinity_status && (
+          <div>
+            <span className="text-muted-foreground">{t("affinityLabel")}: </span>
+            <span className="font-medium">
+              {renderAffinityBadge(log.affinity_status) ?? t("affinityNone")}
+              {log.affinity_recorded && (
+                <span className="ml-2 text-xs text-muted-foreground">{t("affinityRecorded")}</span>
+              )}
+            </span>
+          </div>
+        )}
+        {(log.fallback_chain?.length ?? 0) > 1 && (
+          <FallbackChain chain={log.fallback_chain!} requestId={log.request_id} />
+        )}
         {log.status === 0 && log.error_message && (
           <div>
             <span className="text-muted-foreground">{t("errorMessage")}: </span>
@@ -412,7 +494,7 @@ function LogsPageContent() {
             </pre>
           </div>
         )}
-        {log.has_trace && (
+        {(log.fallback_chain?.length ?? 0) <= 1 && log.has_trace && (
           <TraceDetail requestId={log.request_id} />
         )}
       </div>

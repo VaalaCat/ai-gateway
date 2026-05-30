@@ -15,9 +15,9 @@ import {
   CommandSeparator,
 } from "@/components/ui/command";
 import { AdminScopeToggle } from "@/components/business/admin-scope-toggle";
-import { useDebounce } from "@/hooks/use-debounce";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { useEntityOptions } from "./use-entity-options";
 import { ENTITY_ADAPTERS, type EntityName } from "./registry";
 import type { AdminScope, EntityAdapter } from "./types";
 
@@ -47,19 +47,14 @@ export function EntityPicker({
   const showScope = Boolean(adapter.supportsAdminScope && isAdmin);
 
   const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const debouncedSearch = useDebounce(search, 300);
   const [scope, setScope] = useState<AdminScope>("self");
 
-  const list = adapter.useList({
-    search: debouncedSearch,
-    scope,
-    page_size: PAGE_SIZE,
-  });
+  const { search, setSearch, items, isLoading, getValue, renderItem } =
+    useEntityOptions(adapter, { scope, pageSize: PAGE_SIZE });
   const one = adapter.useOne(value, { scope });
-
-  const items = list.data?.data ?? [];
-  const selectedLabel = one.data ? adapter.getLabel(one.data) : "";
+  const selectedLabel = one.data
+    ? adapter.getLabel(one.data)
+    : (adapter.labelForValue?.(value) ?? "");
   // Fallback placeholder: i18n placeholder.<entity-name> then prop then empty
   const placeholderText =
     placeholder || t(`placeholder.${entity}` as never) || "";
@@ -113,7 +108,7 @@ export function EntityPicker({
               </>
             )}
             <CommandList>
-              {list.isLoading ? (
+              {isLoading ? (
                 <div className="px-3 py-6 text-center text-sm text-muted-foreground">
                   {t("loading")}
                 </div>
@@ -121,7 +116,7 @@ export function EntityPicker({
                 <CommandEmpty>{t("noResults")}</CommandEmpty>
               ) : (
                 items.map((item) => {
-                  const itemValue = adapter.getValue(item);
+                  const itemValue = getValue(item);
                   return (
                     <CommandItem
                       key={itemValue}
@@ -134,7 +129,7 @@ export function EntityPicker({
                           value === itemValue ? "opacity-100" : "opacity-0",
                         )}
                       />
-                      {adapter.renderItem ? adapter.renderItem(item) : adapter.getLabel(item)}
+                      {renderItem(item)}
                     </CommandItem>
                   );
                 })

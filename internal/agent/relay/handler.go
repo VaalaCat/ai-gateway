@@ -1,14 +1,17 @@
 package relay
 
 import (
+	"context"
 	"errors"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/ctxbuild"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/exec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/publish"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/resilience"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -73,15 +76,22 @@ func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher stat
 		logger = agentApp.GetLogger()
 	}
 
-	h.planner = plan.NewSolver()
+	var aff *affinity.Engine
 	var sleepReader exec.SleepReader
+	var runner exec.ResilientRunner
 	if agentApp != nil {
 		if c := agentApp.GetCache(); c != nil {
 			sleepReader = c
+			aff = affinity.New(c) // app.AgentCache 满足 affinity.ConfigReader（含 Settings()）
+			// 韧性默认参数走管理后台 Settings(非 config.yaml);Runner 每请求实时读取,
+			// admin 改后经同步即时生效。Breakers 注册表每 handler 建一次、跨请求复用。
+			runner = &resilience.Runner{Settings: c, Breakers: resilience.NewRegistry()}
 		}
 	}
-	h.executor = &exec.Executor{Dispatcher: dispatcher, Sleep: sleepReader}
-	h.publisher = publish.NewPublisher(bus, logger)
+
+	h.planner = plan.NewSolver(aff)
+	h.executor = &exec.Executor{Dispatcher: dispatcher, Sleep: sleepReader, Affinity: aff, Resilience: runner}
+	h.publisher = publish.NewPublisher(bus, logger, aff)
 	return h
 }
 
@@ -93,10 +103,17 @@ func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher stat
 func (h *Handler) Relay(c *gin.Context) {
 	rctx := h.newRelayContext(c)
 
+	// 包一层可取消 context,使管理员打断(Registry.Interrupt → cancel)能中断上游调用。
+	// 子 context 继承客户端断连语义;defer cancel 防泄漏。
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	c.Request = c.Request.WithContext(ctx)
+	defer cancel()
+
 	if h.registry != nil {
 		rctx.Inflight = h.registry.Track(inflight.Meta{
 			ReqID:     c.GetHeader("X-Request-Id"),
 			StartTime: rctx.State.Recorder.StartedAt(),
+			Cancel:    cancel,
 		})
 		defer rctx.Inflight.Done()
 		rctx.State.Recorder.SetStageHook(func(s trace.Stage) {
@@ -108,6 +125,10 @@ func (h *Handler) Relay(c *gin.Context) {
 		rctx.State.Err, rctx.State.FailPhase = err, state.PhaseCtxBuild
 		h.finishRelay(rctx)
 		return
+	}
+
+	if h.applyRequestScripts(rctx) {
+		return // 已被脚本 reject 并写回响应
 	}
 
 	if rctx.Inflight != nil {

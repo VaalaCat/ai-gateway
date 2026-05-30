@@ -8,6 +8,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"gorm.io/datatypes"
 )
 
 func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.Channel], error) {
@@ -32,6 +33,28 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		ProxyURL:       req.ProxyURL,
 		HeaderOverride: req.HeaderOverride,
 		Tag:            req.Tag,
+	}
+	if req.Resilience != nil {
+		if err := req.Resilience.Validate(); err != nil {
+			return api.Created[models.Channel]{}, api.BadRequestError(err.Error(), err)
+		}
+		channel.Resilience = datatypes.NewJSONType(*req.Resilience)
+	}
+	channel.PriceRatio = 1
+	if req.PriceRatio != nil {
+		if err := validatePriceRatio(*req.PriceRatio); err != nil {
+			return api.Created[models.Channel]{}, api.BadRequestError(err.Error(), err)
+		}
+		channel.PriceRatio = *req.PriceRatio
+	}
+	if req.Free != nil {
+		channel.Free = *req.Free
+	}
+	if req.Limit != nil {
+		if err := req.Limit.Validate(); err != nil {
+			return api.Created[models.Channel]{}, api.BadRequestError(err.Error(), err)
+		}
+		channel.Limit = datatypes.NewJSONType(*req.Limit)
 	}
 	if channel.Weight == 0 {
 		channel.Weight = 1

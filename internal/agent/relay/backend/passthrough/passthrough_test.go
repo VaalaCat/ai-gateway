@@ -13,10 +13,13 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -97,6 +100,45 @@ func makeChannel(baseURL string) *models.Channel {
 	return &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: baseURL, Status: 1, Weight: 1, PassthroughEnabled: true}, Key: "k", Models: "gpt-4o"}
 }
 
+type passthroughScriptProvider struct {
+	scripts []*script.Compiled
+}
+
+func (p passthroughScriptProvider) MatchScripts(_ uint, _ string) []*script.Compiled {
+	return p.scripts
+}
+
+type passthroughScriptCache struct {
+	app.AgentCache
+	eng *script.Engine
+}
+
+func (c passthroughScriptCache) ScriptEngine() *script.Engine {
+	return c.eng
+}
+
+type passthroughScriptAgent struct {
+	app.AgentApplication
+	cache app.AgentCache
+}
+
+func (a passthroughScriptAgent) GetCache() app.AgentCache              { return a.cache }
+func (a passthroughScriptAgent) GetRouteForwarder() app.RouteForwarder { return nil }
+func (a passthroughScriptAgent) GetLogger() *zap.Logger                { return zap.NewNop() }
+func (a passthroughScriptAgent) GetConfig() *config.AgentRuntimeConfig { return nil }
+func (a passthroughScriptAgent) GetTransportPool() app.TransportPool   { return nil }
+func (a passthroughScriptAgent) RelayTimeout() time.Duration           { return 0 }
+
+func newScriptTestAgent(t *testing.T, code string) app.AgentApplication {
+	t.Helper()
+	compiled, err := script.Compile(models.AdminScript{Name: "test-script", Code: code})
+	if err != nil {
+		t.Fatalf("compile script: %v", err)
+	}
+	eng := script.NewEngine(passthroughScriptProvider{scripts: []*script.Compiled{compiled}}, zap.NewNop(), time.Second)
+	return passthroughScriptAgent{cache: passthroughScriptCache{eng: eng}}
+}
+
 // TestBackend_ParamOverrideApplied verifies that ch.ParamOverride is merged into the
 // outbound JSON body before reaching the upstream server (top-level shallow merge).
 func TestBackend_ParamOverrideApplied(t *testing.T) {
@@ -155,6 +197,95 @@ func TestBackend_HeaderOverrideApplied(t *testing.T) {
 	}
 	if gotVersion != "2023-06-01" {
 		t.Errorf("expected X-Anthropic-Version=2023-06-01, got %q", gotVersion)
+	}
+}
+
+func TestBackend_UpstreamScriptMutatesBody(t *testing.T) {
+	var gotAdded any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(b, &parsed)
+		gotAdded = parsed["script_added"]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	ch := makeChannel(upstream.URL)
+	rctx, _ := newPassthroughTestCtx(t,
+		[]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`), false)
+	rctx.Agent = newScriptTestAgent(t, `function onUpstreamRequest(ctx){ ctx.body.script_added = "yes" }`)
+	backend := &Backend{Agent: rctx.Agent}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4o"})
+	if got.Err != nil {
+		t.Fatalf("unexpected Err: %v", got.Err)
+	}
+	if gotAdded != "yes" {
+		t.Fatalf("script mutation did not reach upstream, got %v (%T)", gotAdded, gotAdded)
+	}
+}
+
+func TestBackend_UpstreamScriptRunsAfterHeaderOverride(t *testing.T) {
+	var gotOverride string
+	var gotRemove string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOverride = r.Header.Get("X-Override")
+		gotRemove = r.Header.Get("X-Remove")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	ch := makeChannel(upstream.URL)
+	ch.HeaderOverride = `{"X-Override":"channel","X-Remove":"channel"}`
+	rctx, _ := newPassthroughTestCtx(t, []byte(`{"model":"gpt-4o","messages":[]}`), false)
+	rctx.Agent = newScriptTestAgent(t, `function onUpstreamRequest(ctx){ ctx.setHeader("X-Override", "script"); ctx.removeHeader("X-Remove") }`)
+	backend := &Backend{Agent: rctx.Agent}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4o"})
+	if got.Err != nil {
+		t.Fatalf("unexpected Err: %v", got.Err)
+	}
+	if gotOverride != "script" {
+		t.Fatalf("script header should override channel header, got %q", gotOverride)
+	}
+	if gotRemove != "" {
+		t.Fatalf("script should remove channel header, got %q", gotRemove)
+	}
+}
+
+func TestBackend_UpstreamScriptRejectStopsPassthrough(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	ch := makeChannel(upstream.URL)
+	rctx, w := newPassthroughTestCtx(t, []byte(`{"model":"gpt-4o","messages":[]}`), false)
+	rctx.Agent = newScriptTestAgent(t, `function onUpstreamRequest(ctx){ ctx.reject(451, "blocked by script") }`)
+	backend := &Backend{Agent: rctx.Agent}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4o"})
+	if got.Err == nil {
+		t.Fatal("expected script reject error")
+	}
+	if !got.Written {
+		t.Fatalf("reject should mark Written=true to stop fallback, got %+v", got)
+	}
+	if called {
+		t.Fatal("upstream should not be called after script reject")
+	}
+	if w.Code != http.StatusUnavailableForLegalReasons {
+		t.Fatalf("response status = %d, want 451", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "blocked by script") || !strings.Contains(w.Body.String(), "script_rejected") {
+		t.Fatalf("reject response body missing script error shape: %s", w.Body.String())
 	}
 }
 
@@ -479,6 +610,20 @@ func TestPassthrough_DispatchHonorsCanceledContext(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("canceled context should fail fast, took %v", time.Since(start))
+	}
+}
+
+// TestBuildPassthroughRequest_RejectsHostRewrite verifies that a malicious endpoints
+// row (path containing "@evil.example" userinfo) is rejected at URL-build time and
+// never reaches the network.
+func TestBuildPassthroughRequest_RejectsHostRewrite(t *testing.T) {
+	ch := &models.Channel{}
+	ch.BaseURL = "https://api.openai.com"
+	ch.ChannelCore.Endpoints = `{"chat_completions":"@evil.example/v1/chat/completions"}`
+	req, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	_, err := buildPassthroughRequest(req, ch, codec.ProtocolOpenAIChat, []byte(`{}`))
+	if err == nil {
+		t.Fatal("want host-mismatch error, got nil")
 	}
 }
 

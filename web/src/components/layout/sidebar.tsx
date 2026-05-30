@@ -8,6 +8,7 @@ import {
   Bot,
   Brain,
   ChevronRight,
+  FileCode2,
   FileKey,
   Key,
   KeyRound,
@@ -17,6 +18,7 @@ import {
   Route,
   ScrollText,
   Server,
+  Ticket,
   Wallet,
   UserCircle,
   Users,
@@ -24,6 +26,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { usePublicConfig } from "@/lib/api/system";
 import {
   Sidebar,
   SidebarContent,
@@ -107,6 +110,7 @@ export function AppSidebar() {
   const pathname = usePathname();
   const t = useTranslations("nav");
   const { isAdmin } = useAuth();
+  const { data: publicConfig } = usePublicConfig();
 
   const userItems: Item[] = [
     { label: t("dashboard"), icon: LayoutDashboard, href: "/dashboard" },
@@ -116,6 +120,10 @@ export function AppSidebar() {
     { label: t("playground"), icon: MessageSquare, href: "/playground" },
     { label: t("byok"), icon: KeyRound, href: "/byok" },
     { label: t("myModelRoutings"), icon: Network, href: "/profile/model-routings" },
+    ...(publicConfig?.invite_enabled &&
+    (isAdmin || (publicConfig?.invite_user_max_codes ?? 0) > 0)
+      ? [{ label: t("invites"), icon: Ticket, href: "/invites" }]
+      : []),
   ];
 
   const adminSections: Section[] = isAdmin
@@ -150,6 +158,7 @@ export function AppSidebar() {
             { label: t("agents"), icon: Bot, href: "/agents" },
             { label: t("agentRoutes"), icon: Route, href: "/agent-routes" },
             { label: t("modelRoutings"), icon: Network, href: "/model-routings" },
+            { label: t("scripts"), icon: FileCode2, href: "/scripts" },
           ],
         },
         {

@@ -76,6 +76,9 @@ func (s *Syncer) FullSync(ctx context.Context) error {
 	if err := s.fullSyncEntity(ctx, "model_routing"); err != nil {
 		s.Logger.Error("full sync model_routing failed", zap.Error(err))
 	}
+	if err := s.fullSyncEntity(ctx, "script"); err != nil {
+		s.Logger.Error("full sync script failed", zap.Error(err))
+	}
 	s.Store.RebuildModelIndex()
 	s.Logger.Info("full sync complete (LRU entities skipped)",
 		zap.Int("user_groups", s.Store.UserGroupCount()),
@@ -139,6 +142,10 @@ func (s *Syncer) fullSyncEntity(ctx context.Context, entity string) error {
 			var items []models.ModelRouting
 			json.Unmarshal(resp.Items, &items)
 			s.Store.LoadGlobalRoutings(items)
+		case "script":
+			var items []models.AdminScript
+			json.Unmarshal(resp.Items, &items)
+			s.Store.LoadScripts(items)
 		}
 
 		s.Store.SetVersion(resp.Version)
@@ -164,6 +171,8 @@ func (s *Syncer) SubscribeEvents() {
 		events.SyncUserGroupAllPattern,
 		events.SyncUserAllPattern,
 		events.SyncModelRoutingAllPattern,
+		events.SyncPrivateChannelAllPattern,
+		events.SyncScriptAllPattern,
 	}
 
 	for _, pattern := range patterns {

@@ -99,3 +99,90 @@ func TestFillExecution_FallbackAdminWhenSourceEmpty(t *testing.T) {
 		t.Errorf("fallback: OwnerType = %q, want \"admin\"", e.OwnerType)
 	}
 }
+
+// TestFillExecution_AdminSource_SnapshotsPriceRatio 验证公共 channel 的 price_ratio
+// 在 relay 选中时被快照进 entry。
+func TestFillExecution_AdminSource_SnapshotsPriceRatio(t *testing.T) {
+	attempt := state.Attempt{
+		Channel: &models.Channel{
+			ChannelCore: models.ChannelCore{ID: 17, Name: "admin-ch", Type: 1},
+			PriceRatio:  0.5,
+		},
+		Source:    state.SourceAdmin,
+		SourceID:  17,
+		RealModel: "gpt-4o",
+		Mode:      state.ModeNative,
+	}
+	rctx := newByokRctx(attempt)
+
+	p := &Publisher{}
+	var e protocol.UsageLogEntry
+	p.fillExecution(&e, rctx)
+
+	if e.PriceRatio != 0.5 {
+		t.Errorf("admin: PriceRatio = %v, want 0.5", e.PriceRatio)
+	}
+}
+
+// TestFillExecution_PrivateSource_NoPriceRatio 验证 private 行不快照倍率(保持零值 0)。
+func TestFillExecution_PrivateSource_NoPriceRatio(t *testing.T) {
+	attempt := state.Attempt{
+		Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 9, Name: "byok-ch"}},
+		Source:    state.SourcePrivate,
+		SourceID:  9,
+		RealModel: "gpt-4o",
+		Mode:      state.ModeNative,
+	}
+	rctx := newByokRctx(attempt)
+
+	p := &Publisher{}
+	var e protocol.UsageLogEntry
+	p.fillExecution(&e, rctx)
+
+	if e.PriceRatio != 0 {
+		t.Errorf("private: PriceRatio = %v, want 0 (unset)", e.PriceRatio)
+	}
+}
+
+// TestFillExecution_AdminSource_SnapshotsFree 验证公共 channel 的 free 标记被快照进 entry。
+func TestFillExecution_AdminSource_SnapshotsFree(t *testing.T) {
+	attempt := state.Attempt{
+		Channel: &models.Channel{
+			ChannelCore: models.ChannelCore{ID: 21, Name: "free-ch", Type: 1},
+			Free:        true,
+		},
+		Source:    state.SourceAdmin,
+		SourceID:  21,
+		RealModel: "gpt-4o",
+		Mode:      state.ModeNative,
+	}
+	rctx := newByokRctx(attempt)
+
+	p := &Publisher{}
+	var e protocol.UsageLogEntry
+	p.fillExecution(&e, rctx)
+
+	if !e.Free {
+		t.Errorf("admin free channel: e.Free = false, want true")
+	}
+}
+
+// TestFillExecution_PrivateSource_FreeStaysFalse 验证 private 行不快照 free(保持 false)。
+func TestFillExecution_PrivateSource_FreeStaysFalse(t *testing.T) {
+	attempt := state.Attempt{
+		Channel:   &models.Channel{ChannelCore: models.ChannelCore{ID: 9, Name: "byok-ch"}, Free: true},
+		Source:    state.SourcePrivate,
+		SourceID:  9,
+		RealModel: "gpt-4o",
+		Mode:      state.ModeNative,
+	}
+	rctx := newByokRctx(attempt)
+
+	p := &Publisher{}
+	var e protocol.UsageLogEntry
+	p.fillExecution(&e, rctx)
+
+	if e.Free {
+		t.Errorf("private row: e.Free = true, want false (not snapshotted)")
+	}
+}

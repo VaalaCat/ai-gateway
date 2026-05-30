@@ -30,12 +30,14 @@ var ErrNotFound = errors.New("entity not found")
 
 // Stats 是缓存的运行计数。LRUCache 按调用累加；FullCache 仅维护 Size。
 type Stats struct {
-	Hits         int64
-	Misses       int64
-	Evictions    int64
-	NegativeHits int64
-	Size         int
-	Capacity     int
+	Hits          int64
+	Misses        int64
+	Evictions     int64
+	NegativeHits  int64
+	LoadErrors    int64
+	Invalidations int64
+	Size          int
+	Capacity      int
 }
 
 // Loader 封装一次 miss 时的远端拉取。

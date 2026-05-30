@@ -35,6 +35,9 @@ export interface ChannelFormAdapter<Entity> {
   /** Edit-mode init: backend entity → ChannelForm. */
   mapEntityToForm: (entity: Entity) => ChannelForm;
 
+  /** Copy-mode init: backend entity → ChannelForm (clone all params incl. key, suffixed name). 缺省回退 mapEntityToForm。 */
+  mapEntityToCopyForm?: (entity: Entity) => ChannelForm;
+
   /** Create-mode submit: ChannelForm → backend create payload. */
   buildCreatePayload: (form: ChannelForm) => unknown;
 

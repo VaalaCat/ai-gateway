@@ -997,6 +997,70 @@ func TestSettler_BehaviorEquivalentToLegacy(t *testing.T) {
 	}
 }
 
+// TestSettle_PersistsFallbackChainAndTraces 验证 settler 正确落库 FallbackChain 列
+// 和多条 usage_log_traces 行（每候选一条，AttemptIndex 从 slice 顺序取）。
+func TestSettle_PersistsFallbackChainAndTraces(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	bus := eventbus.NewMemoryBus()
+	logger, _ := zap.NewDevelopment()
+
+	db.Create(&models.User{Username: "fb-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
+	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+	settler := NewSettler(appProv, bus, logger)
+
+	entry := protocol.UsageLogEntry{
+		RequestID: "req-fb",
+		UserID:    1,
+		TokenID:   1,
+		ChannelID: 1,
+		ModelName: "gpt-4o",
+		Status:    1,
+		Timestamp: time.Now().Unix(),
+		FallbackChain: []models.AttemptRecord{
+			{Seq: 1, Status: "fail"},
+			{Seq: 2, Status: "ok"},
+		},
+		AttemptTraces: []models.UsageLogTrace{
+			{AttemptIndex: 0, UpstreamStatus: 503},
+			{AttemptIndex: 1, UpstreamStatus: 200},
+		},
+	}
+
+	settler.Settle(context.Background(), "agent-1", []protocol.UsageLogEntry{entry})
+
+	daoCtx := dao.NewContext(appProv)
+	q := dao.NewAdminQuery(daoCtx)
+
+	log, err := q.UsageLog().GetByRequestID("req-fb")
+	if err != nil {
+		t.Fatalf("GetByRequestID: %v", err)
+	}
+	if len(log.FallbackChain) != 2 {
+		t.Fatalf("want 2 chain entries persisted, got %d", len(log.FallbackChain))
+	}
+	if log.FallbackChain[0].Status != "fail" || log.FallbackChain[1].Status != "ok" {
+		t.Fatalf("chain entries wrong: %+v", log.FallbackChain)
+	}
+
+	traces, err := q.UsageLog().GetTracesByRequestID("req-fb")
+	if err != nil {
+		t.Fatalf("GetTracesByRequestID: %v", err)
+	}
+	if len(traces) != 2 {
+		t.Fatalf("want 2 traces persisted, got %d", len(traces))
+	}
+	if traces[0].AttemptIndex != 0 || traces[0].UpstreamStatus != 503 {
+		t.Fatalf("trace[0] wrong: %+v", traces[0])
+	}
+	if traces[1].AttemptIndex != 1 || traces[1].UpstreamStatus != 200 {
+		t.Fatalf("trace[1] wrong: %+v", traces[1])
+	}
+	if !log.HasTrace {
+		t.Fatalf("has_trace = false, want true when AttemptTraces present")
+	}
+}
+
 // TestSettler_NilAggregatorFallsBackToNoop 验证 NewSettlerWithAggregator(nil)
 // 不会 panic：构造函数会把 nil 替换为 noopAggregator。
 func TestSettler_NilAggregatorFallsBackToNoop(t *testing.T) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
@@ -32,7 +33,6 @@ import { StatusBadge } from "@/components/business/status-badge";
 import { StatusSelect } from "@/components/business/status-select";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
-import { PricingPreviewDialog } from "@/components/business/pricing-preview-dialog";
 
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
@@ -40,9 +40,6 @@ import {
   useUpdateModel,
   useDeleteModel,
   useSyncModels,
-  useFetchPricing,
-  useApplyPricing,
-  type FetchPricingResponse,
 } from "@/lib/api/models";
 import { PAGE_SIZES } from "@/lib/constants";
 import { formatPrice } from "@/lib/utils/format";
@@ -76,6 +73,7 @@ export default function ModelsPage() {
   const t = useTranslations("models");
   const tc = useTranslations("common");
   const isMobile = useIsMobile();
+  const router = useRouter();
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
@@ -115,12 +113,9 @@ export default function ModelsPage() {
   const updateMutation = useUpdateModel();
   const deleteMutation = useDeleteModel();
   const syncMutation = useSyncModels();
-  const fetchPricingMutation = useFetchPricing();
-  const applyPricingMutation = useApplyPricing();
 
   const [editItem, setEditItem] = useState<ModelConfig | null>(null);
   const [deleteItem, setDeleteItem] = useState<ModelConfig | null>(null);
-  const [pricingData, setPricingData] = useState<FetchPricingResponse | null>(null);
 
   const [editForm, setEditForm] = useState({
     model_name: "", input_price: "", output_price: "",
@@ -163,25 +158,6 @@ export default function ModelsPage() {
       status: String(model.status),
     });
     setEditItem(model);
-  };
-
-  const handleFetchPricing = async (source?: string) => {
-    try {
-      const result = await fetchPricingMutation.mutateAsync(source ? { source } : undefined);
-      if ((result.matches ?? []).length === 0) { toast.info(t("noMatches")); return; }
-      setPricingData(result);
-    } catch (e) { toast.error(formatErrorToast(e, t("fetchFailed"))); }
-  };
-
-  const handleApplyPricing = async (updates: Array<{
-    model_id: number; input_price: number; output_price: number;
-    cache_read_price: number; cache_write_price: number;
-  }>) => {
-    try {
-      const result = await applyPricingMutation.mutateAsync({ updates });
-      toast.success(t("pricingApplied", { count: result.updated }));
-      setPricingData(null);
-    } catch (e) { toast.error(formatErrorToast(e, tc("error"))); }
   };
 
   // --- Columns ---
@@ -255,17 +231,17 @@ export default function ModelsPage() {
     <div className="flex items-center gap-2">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="outline" size="sm" disabled={fetchPricingMutation.isPending}>
-            <DollarSign className={`mr-1.5 size-3.5 ${fetchPricingMutation.isPending ? "animate-pulse" : ""}`} />
-            {fetchPricingMutation.isPending ? t("fetching") : t("fetchPricing")}
+          <Button variant="outline" size="sm">
+            <DollarSign className="mr-1.5 size-3.5" />
+            {t("pricingSyncTitle")}
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
-          <DropdownMenuItem onClick={() => handleFetchPricing()}>
+          <DropdownMenuItem onClick={() => router.push("/models/pricing-sync")}>
             {t("filterAll")} (basellm + models.dev)
           </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => handleFetchPricing("basellm")}>basellm</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => handleFetchPricing("models.dev")}>models.dev</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => router.push("/models/pricing-sync?source=basellm")}>basellm</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => router.push("/models/pricing-sync?source=models.dev")}>models.dev</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -357,16 +333,6 @@ export default function ModelsPage() {
         onOpenChange={(open) => { if (!open) setDeleteItem(null); }}
         onConfirm={handleDelete}
       />
-
-      {pricingData && (
-        <PricingPreviewDialog
-          open={!!pricingData}
-          onOpenChange={(open) => { if (!open) setPricingData(null); }}
-          data={pricingData}
-          onApply={handleApplyPricing}
-          isApplying={applyPricingMutation.isPending}
-        />
-      )}
     </div>
   );
 }

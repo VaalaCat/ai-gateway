@@ -430,6 +430,9 @@ func (s *Server) connectLoop(ctx context.Context) {
 		client.OnNotification(consts.RPCAgentGoroutines, func(ctx context.Context, params json.RawMessage) (any, error) {
 			return rpc.HandleGoroutines()
 		})
+		client.OnNotification(consts.RPCAgentInterrupt, func(ctx context.Context, params json.RawMessage) (any, error) {
+			return rpc.HandleInterrupt(s.Inflight, params)
+		})
 		client.OnNotification(consts.RPCChannelFetchModels, func(ctx context.Context, params json.RawMessage) (any, error) {
 			return rpc.HandleFetchModels(ctx, params)
 		})
@@ -532,7 +535,6 @@ func (s *Server) buildRelayHandler(rf *agentproxy.RouteForwarder, relayTimeout t
 		Relay:   s.Cfg.Relay,
 		Agent:   s.Cfg.Agent,
 	}
-	runtimeCfg.Runtime.RetryMax = s.Cfg.Runtime.RetryMax
 	if runtimeCfg.Relay.Timeout == 0 {
 		runtimeCfg.Relay.Timeout = int(relayTimeout.Seconds())
 	}

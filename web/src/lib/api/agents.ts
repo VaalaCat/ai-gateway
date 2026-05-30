@@ -3,6 +3,7 @@ import { api, buildQuery } from "./client";
 import type { Agent, AgentDetail, OnlineAgentInfo, ConnectivityReport, PaginatedResponse, PaginatedParams } from "@/lib/types";
 
 export interface InflightSnapshot {
+  id: number;
   req_id: string;
   channel_id: number;
   channel_name: string;
@@ -10,6 +11,36 @@ export interface InflightSnapshot {
   is_stream: boolean;
   stage: string;
   elapsed_ms: number;
+}
+
+export interface GlobalInflightRow extends InflightSnapshot {
+  agent_id: number;
+  agent_name: string;
+}
+
+export interface AllInflightResponse {
+  requests: GlobalInflightRow[];
+  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+}
+
+export function useAllAgentsInflight() {
+  return useQuery({
+    queryKey: ["agents", "inflight-all"],
+    queryFn: () => api.get<AllInflightResponse>(`/admin/agents/inflight/all`),
+    refetchInterval: 5000,
+  });
+}
+
+export function useInterruptInflight() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { agent_id: number; id: number }) =>
+      api.post<{ interrupted: boolean }>(`/admin/agents/inflight/interrupt`, body),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["agents", "inflight-all"] });
+      queryClient.invalidateQueries({ queryKey: ["agents", variables.agent_id, "inflight"] });
+    },
+  });
 }
 
 export interface GoroutineDump {

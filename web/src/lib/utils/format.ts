@@ -98,6 +98,24 @@ export function formatTokensExact(n: number): string {
   return Math.trunc(n).toLocaleString("en-US");
 }
 
+/**
+ * 一行用量的真实总 token:prompt + completion + cache_read + cache_write。
+ * prompt_tokens 经后端 NormalizeUsage 已剔除 cache_read,四项互不重叠,相加即真实总量。
+ */
+export function totalTokens(row: {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+}): number {
+  return (
+    row.prompt_tokens +
+    row.completion_tokens +
+    row.cache_read_tokens +
+    row.cache_write_tokens
+  );
+}
+
 /** 同 formatTokensCompact, 语义复制保留, 调用方 grep 时一眼分辨 requests 列。 */
 export function formatRequestsCompact(n: number): string {
   return formatTokensCompact(n);
@@ -119,6 +137,12 @@ export function formatPercent(ratio: number, decimals = 1): string {
 
 export function formatPrice(price: number): string {
   return `$${price.toFixed(2)} / 1M`;
+}
+
+/** 计费倍率 → 简洁字符串(最多 4 位小数,去尾零)。×倍率 展示用,避免 float 噪声如 0.30000000000004。 */
+export function formatFactor(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  return Number(n.toFixed(4)).toString();
 }
 
 export function formatSuccessRate(successCount: number, requestCount: number): string {

@@ -45,10 +45,12 @@ type LRUCache[K comparable, V any] struct {
 	negativeTTL time.Duration
 	now         func() time.Time
 
-	hits         atomic.Int64
-	misses       atomic.Int64
-	evictions    atomic.Int64
-	negativeHits atomic.Int64
+	hits          atomic.Int64
+	misses        atomic.Int64
+	evictions     atomic.Int64
+	negativeHits  atomic.Int64
+	loadErrors    atomic.Int64
+	invalidations atomic.Int64
 
 	sf singleflight.Group
 }
@@ -130,6 +132,7 @@ func (c *LRUCache[K, V]) loadAndStore(ctx context.Context, key K) (V, bool, erro
 			var zero V
 			return zero, false, ErrNotFound
 		}
+		c.loadErrors.Add(1)
 		var zero V
 		return zero, false, err
 	}
@@ -163,6 +166,7 @@ func (c *LRUCache[K, V]) Apply(action Action, key K, value V) {
 			}
 		}
 	case ActionDelete:
+		c.invalidations.Add(1)
 		c.cache.Remove(key)
 	}
 }
@@ -176,6 +180,7 @@ func (c *LRUCache[K, V]) Set(key K, value V) {
 
 // Delete 删除。
 func (c *LRUCache[K, V]) Delete(key K) {
+	c.invalidations.Add(1)
 	c.cache.Remove(key)
 }
 
@@ -200,12 +205,14 @@ func (c *LRUCache[K, V]) Range(fn func(K, V) bool) {
 // Stats 返回快照。
 func (c *LRUCache[K, V]) Stats() Stats {
 	return Stats{
-		Hits:         c.hits.Load(),
-		Misses:       c.misses.Load(),
-		Evictions:    c.evictions.Load(),
-		NegativeHits: c.negativeHits.Load(),
-		Size:         c.cache.Len(),
-		Capacity:     c.cap,
+		Hits:          c.hits.Load(),
+		Misses:        c.misses.Load(),
+		Evictions:     c.evictions.Load(),
+		NegativeHits:  c.negativeHits.Load(),
+		LoadErrors:    c.loadErrors.Load(),
+		Invalidations: c.invalidations.Load(),
+		Size:          c.cache.Len(),
+		Capacity:      c.cap,
 	}
 }
 

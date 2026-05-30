@@ -1,6 +1,8 @@
 package rpc
 
 import (
+	"encoding/json"
+	"fmt"
 	"runtime"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
@@ -25,4 +27,25 @@ func HandleGoroutines() (GoroutineDump, error) {
 	buf := make([]byte, 1<<20) // 1MB
 	n := runtime.Stack(buf, true)
 	return GoroutineDump{Count: runtime.NumGoroutine(), Dump: string(buf[:n])}, nil
+}
+
+type interruptParams struct {
+	ID int64 `json:"id"`
+}
+
+// InterruptResult 是 agent.interrupt 的返回体。
+type InterruptResult struct {
+	Interrupted bool `json:"interrupted"`
+}
+
+// HandleInterrupt 按句柄 id 取消一条在途请求。reg 为 nil 或 id 不存在时 Interrupted=false。
+func HandleInterrupt(reg *inflight.Registry, params json.RawMessage) (any, error) {
+	if reg == nil {
+		return InterruptResult{Interrupted: false}, nil
+	}
+	var p interruptParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	return InterruptResult{Interrupted: reg.Interrupt(p.ID)}, nil
 }

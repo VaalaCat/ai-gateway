@@ -11,6 +11,7 @@ import (
 	"time"
 
 	newAPIConstant "github.com/QuantumNous/new-api/constant"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -91,7 +92,10 @@ func (h *Handler) PortalTest(c *app.Context, req PortalTestRequest) (TestResult,
 	if err != nil {
 		return TestResult{}, api.BadRequestError(err.Error(), nil)
 	}
-	endpoint := baseURL + path
+	endpoint, err := codec.JoinUpstreamURL(pc.BaseURL, path)
+	if err != nil {
+		return TestResult{OK: false, Detail: "invalid endpoint: " + err.Error()}, nil
+	}
 
 	body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"ping"}],"max_tokens":1}`)
 	httpReq, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))

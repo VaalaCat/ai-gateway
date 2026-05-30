@@ -48,7 +48,8 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 		}
 	}
 
-	// Normal users can only modify name and trace_enabled
+	// Normal users can modify name, trace_enabled, and status.
+	// Enabling a token requires positive balance; disabling is always allowed.
 	if scope != nil && !scope.IsAdmin {
 		allowed := map[string]any{}
 		if v, ok := updates["name"]; ok {
@@ -56,6 +57,18 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 		}
 		if v, ok := updates["trace_enabled"]; ok {
 			allowed["trace_enabled"] = v
+		}
+		if v, ok := updates["status"]; ok {
+			if api.StatusEqualsEnabled(v) {
+				owner, err := q.User().GetByID(existing.UserID)
+				if err != nil {
+					return models.Token{}, api.InternalError("load token owner failed", err)
+				}
+				if owner.Quota <= 0 {
+					return models.Token{}, api.BadRequestError("insufficient balance, cannot enable token", nil)
+				}
+			}
+			allowed["status"] = v
 		}
 		updates = allowed
 	}

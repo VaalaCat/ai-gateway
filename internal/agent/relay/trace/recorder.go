@@ -46,6 +46,8 @@ type Recorder struct {
 
 	failStage Stage
 	stageHook func(Stage) // 可选:每次 WithStage 时回调(供 in-flight 追踪)
+
+	attempts []*TraceRecord // 每候选 SnapshotAttempt() 追加一条
 }
 
 // NewRecorder 创建一个 request-scoped Recorder。enabled 控制 Finalize 是否产出
@@ -294,10 +296,54 @@ func (r *Recorder) ResetAttempt() {
 	r.clientBody.Reset()
 }
 
+// buildTraceRecord 用当前 attempt 状态构建一条 mask 过的 TraceRecord。
+// 调用方负责在 Finalize 场景下提前 flush 最后一个 stage 的耗时；
+// SnapshotAttempt 场景不 flush（mid-attempt 快照）。
+func (r *Recorder) buildTraceRecord() *TraceRecord {
+	rec := &TraceRecord{
+		Timings:        r.timings,
+		FailStage:      r.failStage,
+		UpstreamStatus: r.upstreamStatus, // 始终填入:消费方在 snapshot 上无视 verbose 直接读它(轻量字段,无安全风险)
+	}
+
+	// verbose 决策：enabled OR 任意失败。
+	// failStage != StageNone 表示 WithFail 被调过；这是回归 169892f 之前
+	// "失败请求强制落 body" 的老语义（见 design §背景.二次发现）。
+	verbose := r.enabled || r.failStage != StageNone
+	rec.Verbose = verbose
+	if !verbose {
+		return rec
+	}
+
+	secrets := channelSecrets(r.channelKey, r.channelBaseURL)
+	limit := r.maxBodySize
+	if limit <= 0 {
+		limit = defaultTraceMaxBodySize
+	}
+
+	rec.InboundPath = r.inboundPath
+	rec.InboundHeaders = http.Header(maskHeaders(r.inboundHeaders, secrets))
+	rec.InboundBody = truncateBodyWithLimit(maskText(string(r.inboundBody), secrets), limit)
+	rec.OutboundPath = r.outboundPath
+	rec.OutboundHeaders = http.Header(maskHeaders(r.outboundHeaders, secrets))
+	rec.OutboundBody = truncateBodyWithLimit(maskText(string(r.outboundBody), secrets), limit)
+	rec.ResponseHeaders = http.Header(maskHeaders(r.responseHeaders, secrets))
+	rec.UpstreamBody = truncateBodyWithLimit(maskText(r.upstreamBody.String(), secrets), limit)
+
+	// 客户端响应体：passthrough 路径若未独立采集（clientBody 空）则镜像 upstream。
+	clientRaw := r.clientBody.String()
+	if clientRaw == "" && r.passthrough {
+		clientRaw = r.upstreamBody.String()
+	}
+	rec.ClientResponseBody = truncateBodyWithLimit(maskText(clientRaw, secrets), limit)
+
+	return rec
+}
+
 // Finalize 是 Recorder 的终结方法，由 attachTraceData 唯一调用。
 // 永远返回非 nil TraceRecord：
-//   - 轻量字段（Timings / FailStage）始终填
-//   - 重字段（4 body + 4 headers + UpstreamStatus）按 verbose 条件填
+//   - 轻量字段（Timings / FailStage / UpstreamStatus）始终填
+//   - 重字段（4 body + 4 headers）按 verbose 条件填
 //     verbose = enabled || failStage != StageNone
 //
 // 内部对 panic 用 recover 兜底，确保 trace 系统再烂也不能拖垮业务路径。
@@ -329,43 +375,34 @@ func (r *Recorder) Finalize() (rec *TraceRecord) {
 		panic("recorder timings map is nil: corrupted internal state")
 	}
 
-	rec = &TraceRecord{
-		Timings:   r.timings,
-		FailStage: r.failStage,
+	return r.buildTraceRecord()
+}
+
+// SnapshotAttempt 把当前 attempt 的 mask trace 收进累加切片，供 publish 逐候选落库。
+// nil 接收者安全（no-op）。
+func (r *Recorder) SnapshotAttempt() {
+	if r == nil {
+		return
 	}
+	r.attempts = append(r.attempts, r.buildTraceRecord())
+}
 
-	// verbose 决策：enabled OR 任意失败。
-	// failStage != StageNone 表示 WithFail 被调过；这是回归 169892f 之前
-	// "失败请求强制落 body" 的老语义（见 design §背景.二次发现）。
-	verbose := r.enabled || r.failStage != StageNone
-	if !verbose {
-		return rec
+// Attempts 返回已快照的逐候选 TraceRecord（顺序即候选顺序）。
+// nil 接收者安全（返回 nil）。
+func (r *Recorder) Attempts() []*TraceRecord {
+	if r == nil {
+		return nil
 	}
+	return r.attempts
+}
 
-	secrets := channelSecrets(r.channelKey, r.channelBaseURL)
-	limit := r.maxBodySize
-	if limit <= 0 {
-		limit = defaultTraceMaxBodySize
+// LastSnapshotVerbose 返回最近一次 SnapshotAttempt 的 verbose 判定
+// (= 该候选是否会写 trace 行)。nil 接收者 / 无快照返回 false。
+func (r *Recorder) LastSnapshotVerbose() bool {
+	if r == nil || len(r.attempts) == 0 {
+		return false
 	}
-
-	rec.InboundPath = r.inboundPath
-	rec.InboundHeaders = http.Header(maskHeaders(r.inboundHeaders, secrets))
-	rec.InboundBody = truncateBodyWithLimit(maskText(string(r.inboundBody), secrets), limit)
-	rec.OutboundPath = r.outboundPath
-	rec.OutboundHeaders = http.Header(maskHeaders(r.outboundHeaders, secrets))
-	rec.OutboundBody = truncateBodyWithLimit(maskText(string(r.outboundBody), secrets), limit)
-	rec.ResponseHeaders = http.Header(maskHeaders(r.responseHeaders, secrets))
-	rec.UpstreamStatus = r.upstreamStatus
-	rec.UpstreamBody = truncateBodyWithLimit(maskText(r.upstreamBody.String(), secrets), limit)
-
-	// 客户端响应体：passthrough 路径若未独立采集（clientBody 空）则镜像 upstream。
-	clientRaw := r.clientBody.String()
-	if clientRaw == "" && r.passthrough {
-		clientRaw = r.upstreamBody.String()
-	}
-	rec.ClientResponseBody = truncateBodyWithLimit(maskText(clientRaw, secrets), limit)
-
-	return rec
+	return r.attempts[len(r.attempts)-1].Verbose
 }
 
 // Enabled 从 gin.Context 里 UserInfo 取 TraceEnabled 标志。

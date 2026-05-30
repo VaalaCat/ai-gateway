@@ -9,6 +9,17 @@ type ModelPricing struct {
 	CacheWritePrice *float64
 }
 
+// SourceModelPrice 是某个 modelID 在某个 provider 下的一条候选价。
+// basellm 没有 provider 概念，Provider 留空。
+type SourceModelPrice struct {
+	Provider string
+	Pricing  ModelPricing
+}
+
+// SourceData: modelID -> 该 modelID 在各 provider 下的全部候选。
+// basellm 每个 modelID 一条；models.dev 每个 modelID 可能多条（多 provider 托管）。
+type SourceData map[string][]SourceModelPrice
+
 const (
 	BaseLLMURL   = "https://basellm.github.io/llm-metadata/api/newapi/ratio_config-v1-base.json"
 	ModelsDevURL = "https://models.dev/api.json"
@@ -26,7 +37,7 @@ type baseLLMWrapper struct {
 	Success bool        `json:"success"`
 }
 
-func ConvertBaseLLM(data []byte) (map[string]ModelPricing, error) {
+func ConvertBaseLLM(data []byte) (SourceData, error) {
 	// Try wrapped format first: {"data": {...}, "success": true}
 	var wrapper baseLLMWrapper
 	if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Success {
@@ -40,47 +51,40 @@ func ConvertBaseLLM(data []byte) (map[string]ModelPricing, error) {
 	return convertBaseLLMInner(raw), nil
 }
 
-func convertBaseLLMInner(raw baseLLMData) map[string]ModelPricing {
-	result := make(map[string]ModelPricing, len(raw.ModelRatio)+len(raw.ModelPrice))
+func convertBaseLLMInner(raw baseLLMData) SourceData {
+	result := make(SourceData, len(raw.ModelRatio)+len(raw.ModelPrice))
+	put := func(name string, p ModelPricing) {
+		result[name] = []SourceModelPrice{{Provider: "", Pricing: p}}
+	}
 
 	// Process LLM models from model_ratio (primary source, ~1840 models)
-	// Formula: input_price = model_ratio × 2, output_price = input_price × completion_ratio
 	for name, ratio := range raw.ModelRatio {
-		inputPrice := ratio * 2.0
-		completionRatio := 1.0
-		if cr, ok := raw.CompletionRatio[name]; ok {
-			completionRatio = cr
-		}
-		outputPrice := inputPrice * completionRatio
-		p := ModelPricing{InputPrice: inputPrice, OutputPrice: outputPrice}
-		if cacheRatio, ok := raw.CacheRatio[name]; ok {
-			cr := inputPrice * cacheRatio
-			p.CacheReadPrice = &cr
-		}
-		result[name] = p
+		put(name, baseLLMPricing(ratio, raw, name))
 	}
 
 	// Process non-LLM models from model_price (fixed-price models, ~54 models)
-	// Same formula applies
 	for name, ratio := range raw.ModelPrice {
 		if _, exists := result[name]; exists {
 			continue // model_ratio takes precedence
 		}
-		inputPrice := ratio * 2.0
-		completionRatio := 1.0
-		if cr, ok := raw.CompletionRatio[name]; ok {
-			completionRatio = cr
-		}
-		outputPrice := inputPrice * completionRatio
-		p := ModelPricing{InputPrice: inputPrice, OutputPrice: outputPrice}
-		if cacheRatio, ok := raw.CacheRatio[name]; ok {
-			cr := inputPrice * cacheRatio
-			p.CacheReadPrice = &cr
-		}
-		result[name] = p
+		put(name, baseLLMPricing(ratio, raw, name))
 	}
 
 	return result
+}
+
+func baseLLMPricing(ratio float64, raw baseLLMData, name string) ModelPricing {
+	inputPrice := ratio * 2.0
+	completionRatio := 1.0
+	if cr, ok := raw.CompletionRatio[name]; ok {
+		completionRatio = cr
+	}
+	p := ModelPricing{InputPrice: inputPrice, OutputPrice: inputPrice * completionRatio}
+	if cacheRatio, ok := raw.CacheRatio[name]; ok {
+		cr := inputPrice * cacheRatio
+		p.CacheReadPrice = &cr
+	}
+	return p
 }
 
 // models.dev structure: {"provider": {"models": {"model_id": {"cost": {...}}}}}
@@ -99,23 +103,26 @@ type modelsDevCost struct {
 	CacheWrite *float64 `json:"cache_write"`
 }
 
-func ConvertModelsDev(data []byte) (map[string]ModelPricing, error) {
+func ConvertModelsDev(data []byte) (SourceData, error) {
 	var raw map[string]modelsDevProvider
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
-	result := make(map[string]ModelPricing)
-	for _, provider := range raw {
+	result := make(SourceData)
+	for provName, provider := range raw {
 		for modelID, model := range provider.Models {
 			if model.Cost == nil || model.Cost.Input == nil || model.Cost.Output == nil {
 				continue
 			}
-			result[modelID] = ModelPricing{
-				InputPrice:      *model.Cost.Input,
-				OutputPrice:     *model.Cost.Output,
-				CacheReadPrice:  model.Cost.CacheRead,
-				CacheWritePrice: model.Cost.CacheWrite,
-			}
+			result[modelID] = append(result[modelID], SourceModelPrice{
+				Provider: provName,
+				Pricing: ModelPricing{
+					InputPrice:      *model.Cost.Input,
+					OutputPrice:     *model.Cost.Output,
+					CacheReadPrice:  model.Cost.CacheRead,
+					CacheWritePrice: model.Cost.CacheWrite,
+				},
+			})
 		}
 	}
 	return result, nil

@@ -149,6 +149,8 @@ const HIDDEN: ReadonlySet<keyof ChannelForm> = new Set<keyof ChannelForm>([
   "proxy_url",
   "header_override",
   "use_legacy_adaptor",
+  "price_ratio",
+  "free",
 ]);
 
 export const byokChannelAdapter: ChannelFormAdapter<BYOKChannelDetail> = {

@@ -33,6 +33,7 @@ import { formatDuration } from "@/lib/utils/format";
 
 import { useObsRange } from "@/lib/hooks/use-obs-range";
 import { useMonitoringInsights } from "@/lib/api/monitoring-insights";
+import { InflightMonitorCard } from "@/components/business/inflight-monitor-card";
 
 export default function MonitoringPage() {
   return (
@@ -183,6 +184,9 @@ function Inner() {
           </Table>
         </CardContent>
       </Card>
+
+      {/* In-flight requests */}
+      <InflightMonitorCard />
 
       {/* Agents */}
       <Card>

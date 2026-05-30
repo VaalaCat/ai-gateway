@@ -34,6 +34,11 @@ export interface ChannelForm {
   role_mapping: string;
   system_prompt_in_input: boolean;
   disable_keepalive: boolean;
+  price_ratio: string;
+  free: boolean;
+  /** JSON-serialised ChannelResilience override; "" = all fields use global default. */
+  resilience: string;
+  limit: string;
 }
 
 export const emptyForm: ChannelForm = {
@@ -66,6 +71,10 @@ export const emptyForm: ChannelForm = {
   role_mapping: "",
   system_prompt_in_input: false,
   disable_keepalive: false,
+  price_ratio: "1",
+  free: false,
+  resilience: "",
+  limit: "",
 };
 
 export interface EndpointConfig {

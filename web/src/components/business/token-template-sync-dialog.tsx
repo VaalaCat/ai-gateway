@@ -27,6 +27,8 @@ import {
   useSyncTokenTemplate,
 } from "@/lib/api/token-templates";
 import { formatErrorToast } from "@/lib/api/error-toast";
+import { EntityLabel } from "@/components/business/entity-label";
+import type { EntityName } from "@/components/business/entity-picker/registry";
 
 interface Props {
   template: TokenTemplate | null;
@@ -55,9 +57,11 @@ function diff<T>(after: T[], before: T[]): { added: T[]; removed: T[] } {
 function DiffCell({
   beforeArr,
   afterArr,
+  entity,
 }: {
   beforeArr: (string | number)[];
   afterArr: (string | number)[];
+  entity?: EntityName;
 }) {
   const { added, removed } = diff(afterArr, beforeArr);
   if (added.length === 0 && removed.length === 0) {
@@ -67,12 +71,12 @@ function DiffCell({
     <span className="text-xs font-mono tabular-nums">
       {added.map((m) => (
         <span key={`a-${m}`} className="text-green-600 font-medium mr-1">
-          +{m}
+          +{entity ? <EntityLabel entity={entity} id={Number(m)} showId={false} /> : m}
         </span>
       ))}
       {removed.map((m) => (
         <span key={`r-${m}`} className="text-destructive font-medium mr-1">
-          -{m}
+          -{entity ? <EntityLabel entity={entity} id={Number(m)} showId={false} /> : m}
         </span>
       ))}
     </span>
@@ -87,7 +91,7 @@ function DiffRow({ item }: { item: SyncPreviewItem }) {
       <TableCell className="font-medium">{item.token_name}</TableCell>
       <TableCell><DiffCell beforeArr={before} afterArr={after} /></TableCell>
       <TableCell>
-        <DiffCell beforeArr={item.channels_before ?? []} afterArr={item.channels_after ?? []} />
+        <DiffCell beforeArr={item.channels_before ?? []} afterArr={item.channels_after ?? []} entity="channel" />
       </TableCell>
     </TableRow>
   );

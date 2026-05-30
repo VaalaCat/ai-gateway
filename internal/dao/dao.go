@@ -53,6 +53,8 @@ type AdminQuery interface {
 	ModelRouting() AdminModelRoutingQuery
 	PrivateChannel() AdminPrivateChannelQuery
 	PrivateChannelShare() AdminPrivateChannelShareQuery
+	AdminScript() AdminScriptQuery
+	InviteCode() AdminInviteCodeQuery
 }
 
 type AdminMutation interface {
@@ -73,6 +75,8 @@ type AdminMutation interface {
 	ModelRouting() AdminModelRoutingMutation
 	PrivateChannel() AdminPrivateChannelMutation
 	PrivateChannelShare() AdminPrivateChannelShareMutation
+	AdminScript() AdminScriptMutation
+	InviteCode() AdminInviteCodeMutation
 }
 
 // getBaseContext extracts *baseContext from any Context implementation.
@@ -135,6 +139,12 @@ func (q *compositeAdminQuery) PrivateChannel() AdminPrivateChannelQuery {
 func (q *compositeAdminQuery) PrivateChannelShare() AdminPrivateChannelShareQuery {
 	return &adminPrivateChannelShareQuery{ctx: q.ctx}
 }
+func (q *compositeAdminQuery) AdminScript() AdminScriptQuery {
+	return &adminScriptQuery{ctx: q.ctx}
+}
+func (q *compositeAdminQuery) InviteCode() AdminInviteCodeQuery {
+	return &adminInviteCodeQuery{ctx: q.ctx}
+}
 
 type compositeAdminMutation struct{ ctx *baseContext }
 
@@ -182,4 +192,10 @@ func (m *compositeAdminMutation) PrivateChannel() AdminPrivateChannelMutation {
 }
 func (m *compositeAdminMutation) PrivateChannelShare() AdminPrivateChannelShareMutation {
 	return &adminPrivateChannelShareMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) AdminScript() AdminScriptMutation {
+	return &adminScriptMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) InviteCode() AdminInviteCodeMutation {
+	return &adminInviteCodeMutation{ctx: m.ctx}
 }

@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/scripthook"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -85,6 +85,11 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	}
 
 	newBody = applyPassthroughOverrides(upstreamReq, newBody, ch, logger)
+
+	newBody, rejected, rejRes := scripthook.RunUpstreamScripts(b.Agent, c, rctx, ch, inboundProto, modelName, upstreamReq, newBody)
+	if rejected {
+		return rejRes
+	}
 
 	rec.WithOutbound(upstreamReq, newBody, ch)
 
@@ -269,7 +274,10 @@ func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundP
 	if endpointPath == "" {
 		endpointPath = origReq.URL.Path
 	}
-	upstreamURL := strings.TrimRight(ch.GetBaseURL(), "/") + endpointPath
+	upstreamURL, err := codec.JoinUpstreamURL(ch.GetBaseURL(), endpointPath)
+	if err != nil {
+		return nil, fmt.Errorf("build passthrough url: %w", err)
+	}
 
 	upstreamReq, err := http.NewRequest(origReq.Method, upstreamURL, bytes.NewReader(newBody))
 	if err != nil {

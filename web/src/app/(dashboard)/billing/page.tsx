@@ -9,7 +9,6 @@ import { toast } from "sonner";
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DateCell } from "@/components/business/date-cell";
@@ -32,9 +31,11 @@ import { useAuth } from "@/lib/auth";
 import { useObsRange } from "@/lib/hooks/use-obs-range";
 import { tsToDateStr } from "@/lib/utils/date-range";
 import { PAGE_SIZES } from "@/lib/constants";
-import { formatMoneyCompact, formatMoneyExact, formatSuccessRate } from "@/lib/utils/format";
+import { formatMoneyCompact, formatMoneyExact, formatSuccessRate, formatTokensCompact } from "@/lib/utils/format";
 import { MoneyCell } from "@/components/business/money-cell";
-import { TokensCell } from "@/components/business/tokens-cell";
+import { EntityLabel } from "@/components/business/entity-label";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
+import { buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
 import type {
   BillingChannelRow,
   BillingOverviewResponse,
@@ -171,6 +172,7 @@ function BillingPageContent() {
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={t("user")} />
         ),
+        cell: ({ row }) => <EntityLabel entity="user" id={row.original.user_id} />,
       });
     }
 
@@ -197,23 +199,7 @@ function BillingPageContent() {
             row.original.request_count
           ),
       },
-      {
-        accessorKey: "prompt_tokens",
-        header: ({ column }) => (
-          <DataTableColumnHeader column={column} title={t("promptTokens")} />
-        ),
-        cell: ({ row }) => <TokensCell tokens={row.original.prompt_tokens} />,
-      },
-      {
-        accessorKey: "completion_tokens",
-        header: ({ column }) => (
-          <DataTableColumnHeader
-            column={column}
-            title={t("completionTokens")}
-          />
-        ),
-        cell: ({ row }) => <TokensCell tokens={row.original.completion_tokens} />,
-      },
+      ...buildTokenBreakdownColumns<BillingTokenRow>(t),
       {
         accessorKey: "last_used_at",
         header: ({ column }) => (
@@ -296,23 +282,7 @@ function BillingPageContent() {
             row.original.request_count
           ),
       },
-      {
-        accessorKey: "prompt_tokens",
-        header: ({ column }) => (
-          <DataTableColumnHeader column={column} title={t("promptTokens")} />
-        ),
-        cell: ({ row }) => <TokensCell tokens={row.original.prompt_tokens} />,
-      },
-      {
-        accessorKey: "completion_tokens",
-        header: ({ column }) => (
-          <DataTableColumnHeader
-            column={column}
-            title={t("completionTokens")}
-          />
-        ),
-        cell: ({ row }) => <TokensCell tokens={row.original.completion_tokens} />,
-      },
+      ...buildTokenBreakdownColumns<BillingChannelRow>(t),
       {
         accessorKey: "last_used_at",
         header: ({ column }) => (
@@ -414,9 +384,9 @@ function BillingPageContent() {
                 label: t("kpi.cacheHit"),
                 value: noData ? "—" : `${cacheHitPct.toFixed(1)}%`,
                 sublabel: t("kpi.cacheSubFull", {
-                  n: savedTokens.toLocaleString(),
-                  r: cacheReadTokens.toLocaleString(),
-                  w: cacheWriteTokens.toLocaleString(),
+                  n: formatTokensCompact(savedTokens),
+                  r: formatTokensCompact(cacheReadTokens),
+                  w: formatTokensCompact(cacheWriteTokens),
                 }),
                 ratio: noData ? undefined : cacheHitPct,
               },
@@ -439,28 +409,22 @@ function BillingPageContent() {
         {isAdmin && tab === "token" && (
           <div className="space-y-1">
             <Label>{t("user")}</Label>
-            <Input
-              type="number"
-              placeholder={t("user")}
+            <EntityPicker
+              entity="user"
               value={userId}
-              onChange={(e) => {
-                setUserId(e.target.value);
-                setTokenPage(1);
-              }}
+              onChange={(v) => { setUserId(v); setTokenPage(1); }}
+              placeholder={t("user")}
             />
           </div>
         )}
         {isAdmin && tab === "channel" && (
           <div className="space-y-1">
             <Label>{t("channelId")}</Label>
-            <Input
-              type="number"
-              placeholder={t("channelId")}
+            <EntityPicker
+              entity="channel"
               value={channelId}
-              onChange={(e) => {
-                setChannelId(e.target.value);
-                setChannelPage(1);
-              }}
+              onChange={(v) => { setChannelId(v); setChannelPage(1); }}
+              placeholder={t("channelId")}
             />
           </div>
         )}

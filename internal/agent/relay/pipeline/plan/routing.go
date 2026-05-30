@@ -15,6 +15,9 @@ const routingMaxDepth = 5
 type RoutingStore interface {
 	ResolveRouting(name string, userID uint) *protocol.SyncedRouting
 	GetGlobalRouting(name string) *protocol.SyncedRouting
+	// HasRealModel 判断 name 是否有 channel 支撑的真实模型（不含 routing）。
+	// 用于：路由展开重遇自身/同名路由时，若存在同名真实模型则终结于它。
+	HasRealModel(name string) bool
 }
 
 // ResolveCtx 在单次请求内贯穿，记录已尝试成员、已访问 routing、深度、trace。
@@ -82,6 +85,12 @@ func resolveStep(store RoutingStore, ref string, userID uint, ctx *ResolveCtx, t
 		return ref
 	}
 	if ctx.visited[r.ID] {
+		// 重遇已展开路由：若存在同名真实模型则终结于它（如路由 gpt-5.5 引用真实模型 gpt-5.5），
+		// 否则才是真环。
+		if store.HasRealModel(ref) {
+			ctx.trace = append(ctx.trace, ref+":model")
+			return ref
+		}
 		ctx.trace = append(ctx.trace, ref+":cycle")
 		return ""
 	}

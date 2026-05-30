@@ -23,7 +23,7 @@ export function useLogs(params: UseLogsParams = {}) {
 export function useLogTrace(requestId: string | null) {
   return useQuery({
     queryKey: ["log-trace", requestId],
-    queryFn: () => api.get<UsageLogTrace>(`/logs/${requestId}/trace`),
+    queryFn: () => api.get<UsageLogTrace[]>(`/logs/${requestId}/trace`),
     enabled: !!requestId,
   });
 }

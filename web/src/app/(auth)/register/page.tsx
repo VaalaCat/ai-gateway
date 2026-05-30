@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { api } from "@/lib/api/client";
+import { usePublicConfig } from "@/lib/api/system";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,18 +12,20 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import Link from "next/link";
 
-export default function RegisterPage() {
+function RegisterForm() {
   const t = useTranslations("register");
   const router = useRouter();
-  const [form, setForm] = useState({ username: "", email: "", password: "", confirmPassword: "" });
+  const searchParams = useSearchParams();
+  const { data: publicConfig } = usePublicConfig();
+  const registrationEnabled = publicConfig?.registration_enabled;
+  const inviteEnabled = publicConfig?.invite_enabled;
+  const [form, setForm] = useState({ username: "", email: "", password: "", confirmPassword: "", inviteCode: "" });
   const [loading, setLoading] = useState(false);
-  const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null);
 
   useEffect(() => {
-    api.get<{ registration_enabled: boolean }>("/system/registration-status")
-      .then(res => setRegistrationEnabled(res.registration_enabled))
-      .catch(() => setRegistrationEnabled(false));
-  }, []);
+    const code = searchParams.get("invite");
+    if (code) setForm((f) => ({ ...f, inviteCode: code }));
+  }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +35,12 @@ export default function RegisterPage() {
     }
     setLoading(true);
     try {
-      await api.post("/register", { username: form.username, email: form.email, password: form.password });
+      await api.post("/register", {
+        username: form.username,
+        email: form.email,
+        password: form.password,
+        invite_code: form.inviteCode,
+      });
       toast.success(t("success"));
       router.push("/login");
     } catch (err: unknown) {
@@ -63,30 +71,27 @@ export default function RegisterPage() {
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label>{t("username")}</Label>
-              <Input value={form.username} onChange={e => setForm({...form, username: e.target.value})} required minLength={3} maxLength={32} />
+              <Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required minLength={3} maxLength={32} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="email">{t("email")}</Label>
-              <Input
-                id="email"
-                type="email"
-                value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
-                placeholder={t("emailPlaceholder")}
-                required
-              />
+              <Input id="email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder={t("emailPlaceholder")} required />
             </div>
             <div className="space-y-2">
               <Label>{t("password")}</Label>
-              <Input type="password" value={form.password} onChange={e => setForm({...form, password: e.target.value})} required minLength={8} />
+              <Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={8} />
             </div>
             <div className="space-y-2">
               <Label>{t("confirmPassword")}</Label>
-              <Input type="password" value={form.confirmPassword} onChange={e => setForm({...form, confirmPassword: e.target.value})} required minLength={8} />
+              <Input type="password" value={form.confirmPassword} onChange={(e) => setForm({ ...form, confirmPassword: e.target.value })} required minLength={8} />
             </div>
-            <Button type="submit" className="w-full" disabled={loading}>
-              {t("submit")}
-            </Button>
+            {inviteEnabled === true && (
+              <div className="space-y-2">
+                <Label>{t("inviteCode")}</Label>
+                <Input value={form.inviteCode} onChange={(e) => setForm({ ...form, inviteCode: e.target.value })} placeholder={t("inviteCodePlaceholder")} required />
+              </div>
+            )}
+            <Button type="submit" className="w-full" disabled={loading}>{t("submit")}</Button>
           </form>
           <p className="mt-4 text-center text-sm text-muted-foreground">
             <Link href="/login" className="underline">{t("loginLink")}</Link>
@@ -94,5 +99,13 @@ export default function RegisterPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
   );
 }

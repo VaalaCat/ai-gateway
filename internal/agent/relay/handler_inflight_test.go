@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -109,5 +110,53 @@ func TestRelay_InflightTrackedDuringExecution(t *testing.T) {
 	// Relay 完成后条目应被释放
 	if got := len(reg.Snapshot()); got != 0 {
 		t.Errorf("inflight not released after Relay completed, got %d", got)
+	}
+}
+
+// TestRelay_InterruptAbortsInflight 验证:打断在途请求会取消上游调用,
+// Relay 在不放行 upstream 的情况下也能返回(context.Canceled 终止)。
+func TestRelay_InterruptAbortsInflight(t *testing.T) {
+	reg := inflight.NewRegistry(nil, 0)
+
+	started := make(chan struct{})
+	quit := make(chan struct{})
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done(): // 客户端(relay)取消后连接关闭,server-side context 被取消
+		case <-quit: // 测试结束兜底
+		}
+	}))
+	defer func() { close(quit); upstreamSrv.Close() }()
+
+	h, _, bus := setupTestHandler([]*models.Channel{
+		{ChannelCore: models.ChannelCore{ID: 99, Type: consts.ChannelTypeOpenAI, BaseURL: upstreamSrv.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
+	})
+	h = NewHandler(bus, h.Agent, TestDispatcherFactory(h.Agent), reg)
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+	c.Set(consts.CtxKeyUserInfo, &app.UserInfo{UserID: 1, TokenID: 1})
+
+	done := make(chan struct{})
+	go func() { h.Relay(c); close(done) }()
+
+	<-started
+	snaps := reg.Snapshot()
+	if len(snaps) == 0 {
+		t.Fatal("no inflight snapshot to interrupt")
+	}
+	if !reg.Interrupt(snaps[0].ID) {
+		t.Fatalf("Interrupt(%d) returned false", snaps[0].ID)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Relay did not return after interrupt (cancel not propagated to upstream)")
 	}
 }

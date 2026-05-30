@@ -41,6 +41,18 @@ func PublishChannelDelete(ctx context.Context, bus app.EventBus, payload models.
 	return Publish(ctx, bus, ChannelDeleteTopic, payload)
 }
 
+func PublishScriptCreate(ctx context.Context, bus app.EventBus, payload models.AdminScript) error {
+	return Publish(ctx, bus, ScriptCreateTopic, payload)
+}
+
+func PublishScriptUpdate(ctx context.Context, bus app.EventBus, payload models.AdminScript) error {
+	return Publish(ctx, bus, ScriptUpdateTopic, payload)
+}
+
+func PublishScriptDelete(ctx context.Context, bus app.EventBus, payload models.AdminScript) error {
+	return Publish(ctx, bus, ScriptDeleteTopic, payload)
+}
+
 func PublishModelCreate(ctx context.Context, bus app.EventBus, payload models.ModelConfig) error {
 	return Publish(ctx, bus, ModelCreateTopic, payload)
 }
@@ -132,8 +144,8 @@ func SubscribeSyncPushPattern(bus app.EventBus, pattern Pattern[protocol.SyncPus
 // (owner ∪ share→user ∪ share→group members) into affectedUserIDs before calling.
 func PublishPrivateChannelInvalidate(ctx context.Context, bus app.EventBus, affectedUserIDs []uint) error {
 	payload := protocol.PrivateChannelInvalidatePayload{
-		Action:          "invalidate",
+		Action:          ActionInvalidate,
 		AffectedUserIDs: affectedUserIDs,
 	}
-	return PublishEntity(ctx, bus, EntityPrivateChannel, "invalidate", payload)
+	return PublishEntity(ctx, bus, EntityPrivateChannel, ActionInvalidate, payload)
 }

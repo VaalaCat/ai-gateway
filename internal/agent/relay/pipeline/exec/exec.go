@@ -7,8 +7,11 @@ import (
 	"io"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/resilience"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 )
 
 // SleepReader 解耦 exec 包对 cache 包的依赖。
@@ -16,6 +19,12 @@ import (
 // 测试可注入 stub。
 type SleepReader interface {
 	FallbackSleepMs() int
+}
+
+// ResilientRunner 给单次 channel dispatch 套重试/熔断/超时。
+// 生产由 *resilience.Runner 实现；nil 时 Executor 退化为裸 dispatch（向后兼容）。
+type ResilientRunner interface {
+	Run(rctx *state.RelayContext, a state.Attempt, dispatch func() state.AttemptResult) state.AttemptResult
 }
 
 // Executor 串行遍历 Plan.Attempts 派发到 Dispatcher，处理 retry 和 forward 决策。
@@ -28,7 +37,9 @@ type SleepReader interface {
 // Sleep 字段实现 SleepReader 接口，由生产 *cache.Store 满足；nil 时跳过 sleep（向后兼容老 test stub）。
 type Executor struct {
 	Dispatcher state.Dispatcher
-	Sleep      SleepReader // 可为 nil,空时跳过 sleep 行为(向后兼容老 test stub)
+	Sleep      SleepReader      // 可为 nil,空时跳过 sleep 行为(向后兼容老 test stub)
+	Affinity   *affinity.Engine // 可为 nil：nil 时不剔除粘性
+	Resilience ResilientRunner  // 可为 nil：nil 时裸 dispatch（向后兼容老 test stub）
 }
 
 // Run 主循环:每个 attempt 失败时按"3 类例外立即返回 / 否则 sleep + 推进"决策。
@@ -51,12 +62,15 @@ func (e *Executor) Run(rctx *state.RelayContext) {
 			return
 		}
 		rec.ResetAttempt()
-		if rctx.Context != nil && rctx.Context.Request != nil {
-			rctx.Context.Request.Body = io.NopCloser(bytes.NewReader(rctx.Input.Body))
-		}
-		res := e.Dispatcher.Dispatch(rctx, a)
+		started := time.Now()
+		res, dispatches := e.runAttempt(rctx, a)
+		durMs := int(time.Since(started).Milliseconds())
 		out.Used = a
 		out.Outcome = res
+		ar := buildAttemptRecord(idx+1, a, res, dispatches, durMs)
+		rec.SnapshotAttempt()
+		ar.HasTrace = rec.LastSnapshotVerbose()
+		out.History = append(out.History, ar)
 		if res.Err == nil {
 			return
 		}
@@ -80,8 +94,18 @@ func (e *Executor) Run(rctx *state.RelayContext) {
 			return
 		}
 
+		// 粘性 channel 发生可重试硬失败 → 剔除，避免下次继续优先打坏账号。
+		if a.ByAffinity && e.Affinity != nil && rctx.Input.UserInfo != nil && rctx.Input.UserInfo.UserID != 0 {
+			e.Affinity.Forget(affinity.Key{UserID: rctx.Input.UserInfo.UserID, RealModel: a.RealModel})
+		}
+
+		// 熔断 open 已跳过 dispatch，直接试下一候选，不必再 sleep。
+		if errors.Is(res.Err, resilience.ErrBreakerOpen) {
+			continue
+		}
+
 		// 默认: sleep + 推进
-		// rctx.Context / Request nil guard 与 L54 body-reset 保持一致,
+		// rctx.Context / Request nil guard 与 runAttempt 内 body-reset 保持一致,
 		// 测试场景注入 Sleep 但不构造完整 rctx 时不应 panic。
 		if idx+1 < len(attempts) && e.Sleep != nil && rctx.Context != nil && rctx.Context.Request != nil {
 			if ms := e.Sleep.FallbackSleepMs(); ms > 0 {
@@ -99,4 +123,66 @@ func (e *Executor) Run(rctx *state.RelayContext) {
 	if out.Used.Channel != nil {
 		out.Err = out.Outcome.Err
 	}
+}
+
+// runAttempt 单次候选的派发：有 Resilience 则套 failsafe（可能同 channel 重试多次），
+// 否则裸 dispatch。body reset 在每次实际 dispatch 前做（同 channel 重试要重发）。
+// 返回结果与该候选实际 dispatch 次数（含内层重试，最少 1）。
+func (e *Executor) runAttempt(rctx *state.RelayContext, a state.Attempt) (state.AttemptResult, int) {
+	dispatches := 0
+	dispatch := func() state.AttemptResult {
+		rctx.State.Recorder.ResetAttempt() // 每次内层 dispatch 前重置 attempt 级 trace 状态,避免失败→重试成功时旧失败泄漏
+		dispatches++
+		if rctx.Context != nil && rctx.Context.Request != nil {
+			rctx.Context.Request.Body = io.NopCloser(bytes.NewReader(rctx.Input.Body))
+		}
+		return e.Dispatcher.Dispatch(rctx, a)
+	}
+	if e.Resilience == nil {
+		return dispatch(), dispatches
+	}
+	return e.Resilience.Run(rctx, a, dispatch), dispatches
+}
+
+// buildAttemptRecord 把一次候选结果拼成链路条目（不含密钥，error 转 string 截断）。
+func buildAttemptRecord(seq int, a state.Attempt, res state.AttemptResult, dispatches, durMs int) models.AttemptRecord {
+	rec := models.AttemptRecord{
+		Seq:        seq,
+		RealModel:  a.RealModel,
+		Source:     string(a.Source),
+		ByAffinity: a.ByAffinity,
+		DurationMs: durMs,
+		Status:     "ok",
+	}
+	if a.Channel != nil {
+		rec.ChannelName = a.Channel.Name
+		if a.SourceID != 0 {
+			rec.ChannelID = a.SourceID
+		} else {
+			rec.ChannelID = a.Channel.ID
+		}
+	}
+	if dispatches > 1 {
+		rec.Retries = dispatches - 1
+	}
+	if res.Err != nil {
+		rec.Status = "fail"
+		rec.ErrorMessage = truncateErr(res.Err.Error())
+		if errors.Is(res.Err, resilience.ErrBreakerOpen) {
+			rec.BreakerOpen = true
+		}
+		var upErr *common.UpstreamError
+		if errors.As(res.Err, &upErr) {
+			rec.HTTPStatus = upErr.Status
+			rec.ErrorType = upErr.ProviderErrorType
+		}
+	}
+	return rec
+}
+
+func truncateErr(s string) string {
+	if len(s) > 256 {
+		return s[:256] + "..."
+	}
+	return s
 }

@@ -7,6 +7,27 @@ package consts
 var SystemBYOKBaseURLs = []string{
 	"https://api.openai.com",
 	"https://api.anthropic.com",
+	"https://api.groq.com",
+	"https://api.mistral.ai",
+	"https://api.cohere.com",
+	"https://api.x.ai",
+	"https://api.perplexity.ai",
+	"https://api.together.xyz",
+	"https://api.venice.ai",
+	"https://api.cerebras.ai",
+	"https://api.deepinfra.com",
+	"https://integrate.api.nvidia.com",
+	"https://openrouter.ai",
+	"https://api.llmgateway.io",
+	"https://zenmux.ai",
+	"https://api.kilo.ai",
+	"https://ai-gateway.vercel.sh",
+	"https://generativelanguage.googleapis.com",
+	"https://dashscope.aliyuncs.com",
+	"https://dashscope-intl.aliyuncs.com",
+	"https://api.githubcopilot.com",
+	"https://opencode.ai",
+	"https://api.cloudflare.com",
 }
 
 // BYOK 相关 settings 表 key。Setting.Value 是 string，按 typed runtime 语义

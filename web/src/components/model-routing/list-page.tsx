@@ -7,6 +7,8 @@ import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
 import { Network, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 
+import { EntityLabel } from "@/components/business/entity-label";
+
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
@@ -197,15 +199,18 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
       header: t("cols.scope"),
       cell: ({ row }) => <ScopeBadge scope={row.original.scope} />,
     },
-    {
-      accessorKey: "user_id",
-      header: t("cols.owner"),
-      cell: ({ row }) => (
-        <span className="text-sm text-muted-foreground">
-          {row.original.user_id || "—"}
-        </span>
-      ),
-    },
+    ...(isAdmin
+      ? [{
+          accessorKey: "user_id",
+          header: t("cols.owner"),
+          cell: ({ row }: { row: { original: ModelRouting } }) =>
+            row.original.user_id ? (
+              <EntityLabel entity="user" id={row.original.user_id} className="text-sm" />
+            ) : (
+              <span className="text-sm text-muted-foreground">—</span>
+            ),
+        }] satisfies ColumnDef<ModelRouting>[]
+      : []),
     {
       id: "members",
       header: t("cols.members"),

@@ -29,7 +29,7 @@ import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { StatusBadge } from "@/components/business/status-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
-import { UsernameCell } from "@/components/business/username-cell";
+import { EntityLabel } from "@/components/business/entity-label";
 import { ExpandedModelsView } from "@/components/business/expanded-models-view";
 import { ModelName } from "@/components/business/model-name";
 
@@ -182,7 +182,7 @@ function AdminBYOKPageInner() {
           <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-meta md:grid-cols-3">
             <div><span className="text-muted-foreground">{tByok("configPassthrough")}: </span>{pc.passthrough_enabled ? tByok("yes") : tByok("no")}</div>
             <div><span className="text-muted-foreground">{tByok("baseUrl")}: </span><span className="font-mono break-all">{pc.base_url}</span></div>
-            <div><span className="text-muted-foreground">{t("owner")}: </span><UsernameCell userId={pc.owner_id} /></div>
+            <div><span className="text-muted-foreground">{t("owner")}: </span><EntityLabel entity="user" id={pc.owner_id} /></div>
             <div><span className="text-muted-foreground">{tByok("createdAt")}: </span><DateCell timestamp={pc.created_at} /></div>
             {pc.test_model && <div><span className="text-muted-foreground">{tByok("testModel")}: </span><code className="text-meta">{pc.test_model}</code></div>}
             {pc.remark && <div><span className="text-muted-foreground">{tByok("remark")}: </span>{pc.remark}</div>}
@@ -221,7 +221,7 @@ function AdminBYOKPageInner() {
     {
       accessorKey: "owner_id",
       header: ({ column }) => <DataTableColumnHeader column={column} title={t("owner")} />,
-      cell: ({ row }) => <UsernameCell userId={row.original.owner_id} />,
+      cell: ({ row }) => <EntityLabel entity="user" id={row.original.owner_id} />,
     },
     {
       accessorKey: "name",

@@ -133,6 +133,13 @@ func TestSettleOne_PrivateServiceFeeMode_DiscountedCost(t *testing.T) {
 		t.Fatalf("service_fee cost should be discounted vs full admin cost 125; got %d", ul.TotalCost)
 	}
 
+	if ul.BillingFactor == nil || *ul.BillingFactor != 0.1 {
+		t.Fatalf("BillingFactor = %v, want 0.1 (service fee ratio)", ul.BillingFactor)
+	}
+	if ul.RawInputCost == nil || *ul.RawInputCost != 50 {
+		t.Fatalf("RawInputCost = %v, want 50 (pre-fee full price)", ul.RawInputCost)
+	}
+
 	// Quota should be deducted in service_fee mode
 	afterQuota := getByokUserQuota(t, db, 1)
 	if afterQuota >= 100000 {
@@ -220,7 +227,7 @@ func TestApplyByokBillingMode_ServiceFeeTotalClosed(t *testing.T) {
 	// while truncating the un-discounted total (4002 * 0.1 = 400.2 → 400) drifts
 	// by one. The bug is exactly that drift.
 	entry := protocol.UsageLogEntry{OwnerType: "private"}
-	in, out, cr, cw, total, mode := settler.applyByokBillingMode(q, entry, 999, 1000, 1001, 1002, 4002)
+	in, out, cr, cw, total, mode, _ := settler.applyByokBillingMode(q, entry, 999, 1000, 1001, 1002, 4002)
 
 	if mode != "service_fee" {
 		t.Fatalf("mode = %q, want %q", mode, "service_fee")

@@ -13,7 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusSelect } from "@/components/business/status-select";
 import { TagInput } from "@/components/ui/tag-input";
-import { ChannelMultiSelect } from "@/components/business/channel-multi-select";
+import { EntityMultiPicker } from "@/components/business/entity-picker/entity-multi-picker";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 
 import { ApiError } from "@/lib/api/client";
@@ -177,7 +177,11 @@ function PermissionsCard({ group }: { group: UserGroup }) {
       <CardContent className="space-y-4">
         <div className="space-y-2">
           <Label>{t("channels")}</Label>
-          <ChannelMultiSelect value={channels} onChange={setChannels} />
+          <EntityMultiPicker
+            entity="channel"
+            value={channels.map(String)}
+            onChange={(vals) => setChannels(vals.map(Number))}
+          />
         </div>
         <div className="space-y-2">
           <Label>{t("models")}</Label>

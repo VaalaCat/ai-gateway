@@ -7,7 +7,7 @@ import {
 } from "@/lib/api/channels";
 import type { Channel } from "@/lib/types";
 import type { ChannelFormAdapter } from "../adapter";
-import { mapChannelToForm, sanitizeOtherSettingsForSubmit } from "../utils";
+import { mapChannelToForm, sanitizeOtherSettingsForSubmit, parseResilience, parseLimit } from "../utils";
 import type { ChannelForm } from "../types";
 
 function buildPayload(form: ChannelForm): Partial<Channel> {
@@ -15,6 +15,17 @@ function buildPayload(form: ChannelForm): Partial<Channel> {
     form.other_settings,
     form.endpoints,
   );
+  const resilienceRaw = parseResilience(form.resilience);
+  const resilience = Object.keys(resilienceRaw).length > 0 ? resilienceRaw : undefined;
+  const limitRaw = parseLimit(form.limit);
+  const cleanRules = (limitRaw.rules ?? []).filter((r) => r.threshold > 0);
+  const hasCutoff = typeof limitRaw.disable_at === "number" && limitRaw.disable_at > 0;
+  // 始终发送 limit:空对象表示清空(后端 partial update 才能真正清掉旧配置);
+  // 同时丢弃 threshold<=0 的半成品规则,避免误存 "0 即永久禁用" 的规则。
+  const limit = {
+    ...(hasCutoff ? { disable_at: limitRaw.disable_at } : {}),
+    ...(cleanRules.length > 0 ? { rules: cleanRules } : {}),
+  };
   return {
     name: form.name,
     type: Number(form.type),
@@ -45,12 +56,21 @@ function buildPayload(form: ChannelForm): Partial<Channel> {
     proxy_url: form.proxy_url,
     role_mapping: form.role_mapping,
     disable_keepalive: form.disable_keepalive,
+    price_ratio: Number(form.price_ratio),
+    free: form.free,
+    ...(resilience !== undefined && { resilience }),
+    limit,
   } as Partial<Channel>;
 }
 
 export const adminChannelAdapter: ChannelFormAdapter<Channel> = {
   listPath: "/channels",
   mapEntityToForm: mapChannelToForm,
+  mapEntityToCopyForm: (c) => ({
+    ...mapChannelToForm(c),
+    name: `${c.name ?? ""}-copy`,
+    key: c.key ?? "",
+  }),
   buildCreatePayload: (form) => buildPayload(form),
   buildUpdatePayload: (form) => ({
     fields: buildPayload(form) as Record<string, unknown>,

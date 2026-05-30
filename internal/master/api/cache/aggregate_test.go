@@ -105,7 +105,7 @@ func TestAggregate_FullSyncEntityHitRateNull(t *testing.T) {
 	}
 }
 
-func TestAggregate_NoSnapshotsReturnsAllSixEntitiesZero(t *testing.T) {
+func TestAggregate_NoSnapshotsReturnsAllEntitiesZero(t *testing.T) {
 	got := Aggregate(nil)
 	for _, name := range EntityNames {
 		e, ok := got[name]
@@ -115,6 +115,23 @@ func TestAggregate_NoSnapshotsReturnsAllSixEntitiesZero(t *testing.T) {
 		if e.Hits != 0 || e.Misses != 0 || e.Size != 0 {
 			t.Fatalf("entity %s should be zero, got %+v", name, e)
 		}
+	}
+}
+
+func TestAggregate_NewFieldsAndPrivateChannel(t *testing.T) {
+	snaps := []AgentSnapshot{{
+		AgentID: "a1", Online: true,
+		CacheStats: map[string]protocol.CacheEntityStats{
+			"private_channels_visible": {Hits: 3, Misses: 1, LoadErrors: 2, Invalidations: 5, Size: 1, Capacity: 10},
+		},
+	}}
+	out := Aggregate(snaps)
+	pc, ok := out["private_channels_visible"]
+	if !ok {
+		t.Fatal("private_channels_visible missing from aggregate (EntityNames?)")
+	}
+	if pc.LoadErrors != 2 || pc.Invalidations != 5 {
+		t.Fatalf("new fields not aggregated: %+v", pc)
 	}
 }
 

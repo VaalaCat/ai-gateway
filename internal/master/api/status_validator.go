@@ -43,3 +43,10 @@ func toIntStrict(v any) (int, bool) {
 		return 0, false
 	}
 }
+
+// StatusEqualsEnabled reports whether v decodes to consts.StatusEnabled.
+// Call only after ValidateStatusValue has confirmed v is a legal status.
+func StatusEqualsEnabled(v any) bool {
+	n, ok := toIntStrict(v)
+	return ok && n == consts.StatusEnabled
+}

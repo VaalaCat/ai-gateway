@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -39,10 +40,52 @@ var settingDefs = map[string]struct {
 			return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 		},
 	},
+	"pricing_source_priority": {
+		Default: "models.dev,basellm",
+		Validate: func(v string) bool {
+			if v == "" {
+				return false
+			}
+			for _, p := range strings.Split(v, ",") {
+				if strings.TrimSpace(p) == "" {
+					return false
+				}
+			}
+			return true
+		},
+	},
+	"pricing_disagreement_threshold": {
+		Default: "0.2",
+		Validate: func(v string) bool {
+			f, err := strconv.ParseFloat(v, 64)
+			return err == nil && f >= 0 && f <= 1
+		},
+	},
 	"oauth_auto_create": {
 		Default: "false",
 		Validate: func(v string) bool {
 			return v == "true" || v == "false"
+		},
+	},
+	consts.SettingKeyInviteEnabled: {
+		Default: "false",
+		Validate: func(v string) bool {
+			return v == "true" || v == "false"
+		},
+	},
+	consts.SettingKeyInviteUserMaxCodes: {
+		Default: "5",
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			// 0 表示禁止普通用户建码;上限给个 sanity 值。
+			return err == nil && n >= 0 && n <= 10000
+		},
+	},
+	consts.SettingKeyInviteUserMaxUses: {
+		Default: "1",
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 1 && n <= 10000
 		},
 	},
 	consts.SettingKeyBYOKEnabled: {

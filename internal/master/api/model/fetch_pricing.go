@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"math"
+	"strings"
 	"sync"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -15,7 +17,7 @@ import (
 type sourceConfig struct {
 	name    string
 	url     string
-	convert func([]byte) (map[string]pricing.ModelPricing, error)
+	convert func([]byte) (pricing.SourceData, error)
 }
 
 var allSources = []sourceConfig{
@@ -58,7 +60,7 @@ func (h *Handler) FetchPricing(c *app.Context, req FetchPricingRequest) (FetchPr
 
 	type sourceResult struct {
 		name string
-		data map[string]pricing.ModelPricing
+		data pricing.SourceData
 		err  error
 	}
 
@@ -93,7 +95,7 @@ func (h *Handler) FetchPricing(c *app.Context, req FetchPricingRequest) (FetchPr
 	wg.Wait()
 	close(results)
 
-	sourcePricings := make(map[string]map[string]pricing.ModelPricing)
+	sourcePricings := make(map[string]pricing.SourceData)
 	sourceErrors := make(map[string]string)
 	for r := range results {
 		if r.err != nil {
@@ -116,42 +118,58 @@ func (h *Handler) FetchPricing(c *app.Context, req FetchPricingRequest) (FetchPr
 		zap.Int("available_sources", len(sourcePricings)),
 	)
 
-	var matches []PricingMatch
+	// 读解析配置（缺失/非法回落默认）
+	cfg := pricing.ResolveConfig{
+		SourcePriority:        parseSourcePriority(q.Setting().LookupString("pricing_source_priority", "models.dev,basellm")),
+		DisagreementThreshold: q.Setting().LookupFloat("pricing_disagreement_threshold", 0.2),
+	}
+
+	var matches []PricingRecommendation
 	var unmatched []string
 
 	for _, mc := range allModels {
-		matchSources := make(map[string]SourcePricing)
+		var candidates []pricing.PriceCandidate
 		for srcName, srcData := range sourcePricings {
-			result := pricing.Match(mc.ModelName, srcData)
-			if result == nil {
+			matchType, matchedName, prices, ok := pricing.MatchAll(mc.ModelName, srcData)
+			if !ok {
 				continue
 			}
-			matchSources[srcName] = SourcePricing{
-				InputPrice:      result.Pricing.InputPrice,
-				OutputPrice:     result.Pricing.OutputPrice,
-				CacheReadPrice:  result.Pricing.CacheReadPrice,
-				CacheWritePrice: result.Pricing.CacheWritePrice,
-				MatchType:       result.MatchType,
-				MatchedName:     result.MatchedName,
+			for _, p := range prices {
+				candidates = append(candidates, pricing.PriceCandidate{
+					Source:      srcName,
+					Provider:    p.Provider,
+					MatchType:   matchType,
+					MatchedName: matchedName,
+					Pricing:     p.Pricing,
+				})
 			}
 		}
 
-		if len(matchSources) == 0 {
+		if len(candidates) == 0 {
 			unmatched = append(unmatched, mc.ModelName)
 			continue
 		}
 
-		matches = append(matches, PricingMatch{
-			ModelID:   mc.ID,
-			ModelName: mc.ModelName,
-			Current: PricingValues{
-				InputPrice:      mc.InputPrice,
-				OutputPrice:     mc.OutputPrice,
-				CacheReadPrice:  mc.CacheReadPrice,
-				CacheWritePrice: mc.CacheWritePrice,
-			},
-			Sources:  matchSources,
-			HasPrice: mc.InputPrice > 0 || mc.OutputPrice > 0,
+		rec := pricing.ResolvePrice(candidates, cfg)
+		current := PricingValues{
+			InputPrice:      mc.InputPrice,
+			OutputPrice:     mc.OutputPrice,
+			CacheReadPrice:  mc.CacheReadPrice,
+			CacheWritePrice: mc.CacheWritePrice,
+		}
+		recommended := resolvedToValues(rec.Price)
+
+		matches = append(matches, PricingRecommendation{
+			ModelID:       mc.ID,
+			ModelName:     mc.ModelName,
+			Current:       current,
+			HasPrice:      mc.InputPrice > 0 || mc.OutputPrice > 0,
+			Recommended:   recommended,
+			Provenance:    rec.Provenance,
+			Confidence:    rec.Confidence,
+			ReviewReasons: rec.ReviewReasons,
+			HasChange:     !pricingValuesEq(current, recommended),
+			Candidates:    toCandidates(candidates),
 		})
 	}
 
@@ -169,4 +187,58 @@ func (h *Handler) FetchPricing(c *app.Context, req FetchPricingRequest) (FetchPr
 		resp.SourceErrors = sourceErrors
 	}
 	return resp, nil
+}
+
+func parseSourcePriority(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"models.dev", "basellm"}
+	}
+	return out
+}
+
+func resolvedToValues(r pricing.ResolvedPrice) PricingValues {
+	return PricingValues{
+		InputPrice:      r.InputPrice,
+		OutputPrice:     r.OutputPrice,
+		CacheReadPrice:  r.CacheReadPrice,
+		CacheWritePrice: r.CacheWritePrice,
+	}
+}
+
+func modelPricingToValues(p pricing.ModelPricing) PricingValues {
+	v := PricingValues{InputPrice: p.InputPrice, OutputPrice: p.OutputPrice}
+	if p.CacheReadPrice != nil {
+		v.CacheReadPrice = *p.CacheReadPrice
+	}
+	if p.CacheWritePrice != nil {
+		v.CacheWritePrice = *p.CacheWritePrice
+	}
+	return v
+}
+
+func toCandidates(cs []pricing.PriceCandidate) []PriceCandidate {
+	out := make([]PriceCandidate, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, PriceCandidate{
+			Source:      c.Source,
+			Provider:    c.Provider,
+			MatchType:   c.MatchType,
+			MatchedName: c.MatchedName,
+			Price:       modelPricingToValues(c.Pricing),
+		})
+	}
+	return out
+}
+
+func pricingValuesEq(a, b PricingValues) bool {
+	eq := func(x, y float64) bool { return math.Abs(x-y) < 1e-4 }
+	return eq(a.InputPrice, b.InputPrice) && eq(a.OutputPrice, b.OutputPrice) &&
+		eq(a.CacheReadPrice, b.CacheReadPrice) && eq(a.CacheWritePrice, b.CacheWritePrice)
 }

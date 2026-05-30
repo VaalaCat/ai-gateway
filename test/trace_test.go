@@ -90,15 +90,21 @@ func TestTrace_500Error(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("GET trace API: expected 200, got %d", resp.StatusCode)
 	}
-	var apiTrace map[string]any
-	json.NewDecoder(resp.Body).Decode(&apiTrace)
+	// GetTrace returns an array of per-attempt trace rows (channel resilience records
+	// one usage_log_trace per attempt), so decode into a slice and assert on a row.
+	var apiTraces []map[string]any
+	json.NewDecoder(resp.Body).Decode(&apiTraces)
 	resp.Body.Close()
 
-	if apiTrace["request_id"] != requestID {
-		t.Errorf("API trace request_id = %v, want %s", apiTrace["request_id"], requestID)
+	if len(apiTraces) == 0 {
+		t.Fatalf("API trace returned empty array")
 	}
-	if apiTrace["upstream_status"].(float64) != 500 {
-		t.Errorf("API trace upstream_status = %v, want 500", apiTrace["upstream_status"])
+	first := apiTraces[0]
+	if first["request_id"] != requestID {
+		t.Errorf("API trace request_id = %v, want %s", first["request_id"], requestID)
+	}
+	if status, ok := first["upstream_status"].(float64); !ok || status != 500 {
+		t.Errorf("API trace upstream_status = %v, want 500", first["upstream_status"])
 	}
 
 	// Verify 404 for nonexistent trace

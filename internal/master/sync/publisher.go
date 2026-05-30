@@ -14,8 +14,14 @@ import (
 
 var _ app.Publisher = (*Publisher)(nil)
 
+// broadcaster 是 Publisher 对 sync hub 的最小依赖：向所有已连接 agent 推送通知。
+// 收窄成接口便于测试注入 fake 捕获广播；生产实现是 *Hub（hub.go:567 Broadcast）。
+type broadcaster interface {
+	Broadcast(method string, params any)
+}
+
 type Publisher struct {
-	hub     *Hub
+	hub     broadcaster
 	bus     app.EventBus
 	version *atomic.Int64
 	logger  *zap.Logger
@@ -58,6 +64,12 @@ func (p *Publisher) Start() {
 
 	subscribeTopic(p, events.EntityUser, events.ActionUpdate, events.UserSyncUpdateTopic)
 	subscribeTopic(p, events.EntityUser, events.ActionDelete, events.UserSyncDeleteTopic)
+
+	subscribeTopic(p, events.EntityPrivateChannel, events.ActionInvalidate, events.PrivateChannelInvalidateTopic)
+
+	subscribeTopic(p, events.EntityScript, events.ActionCreate, events.ScriptCreateTopic)
+	subscribeTopic(p, events.EntityScript, events.ActionUpdate, events.ScriptUpdateTopic)
+	subscribeTopic(p, events.EntityScript, events.ActionDelete, events.ScriptDeleteTopic)
 }
 
 func subscribeTopic[T any](p *Publisher, entity, action string, topic events.Topic[T]) {

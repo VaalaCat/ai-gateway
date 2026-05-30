@@ -7,23 +7,21 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
-	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 )
 
 // newPlannerTestRctx 构造 Planner 测试用的最小 state.RelayContext。
-// 复用 test_helpers_chain_test.go 的 stubAgentApp / stubAgentCache，仅注入 RetryMax。
+// 复用 test_helpers_chain_test.go 的 stubAgentApp / stubAgentCache，仅注入 RetryMaxChannels。
 func newPlannerTestRctx(channels []*models.Channel, ui *app.UserInfo, model string, retryMax int) *state.RelayContext {
-	cache := &stubAgentCache{channels: channels}
-	rctx := newTestRelayContext(cache, model, ui, 0)
-	// 注入 RetryMax 配置——stubAgentApp 默认 cfg=nil 不满足 Planner 需求。
-	rctx.Agent.(*stubAgentApp).cfg = &config.AgentRuntimeConfig{
-		Runtime: config.RuntimeConfig{RetryMax: retryMax},
+	cache := &stubAgentCache{
+		channels: channels,
+		settings: settings.AgentSettings{RetryMaxChannels: retryMax},
 	}
-	return rctx
+	return newTestRelayContext(cache, model, ui, 0)
 }
 
 // TestPlanner_Success: 链长 1 个 model + 2 个 enabled channel → Attempts 长度 2。
@@ -34,7 +32,7 @@ func TestPlanner_Success(t *testing.T) {
 	}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v, want nil", err)
 	}
 	if len(rctx.State.Plan.Attempts) != 2 {
@@ -49,7 +47,7 @@ func TestPlanner_Success(t *testing.T) {
 func TestPlanner_NoRoutableModel(t *testing.T) {
 	rctx := newPlannerTestRctx(nil, &app.UserInfo{}, "", 5)
 
-	err := NewSolver().Solve(rctx)
+	err := NewSolver(nil).Solve(rctx)
 	if err != state.ErrNoRoutableModel {
 		t.Errorf("err = %v, want state.ErrNoRoutableModel", err)
 	}
@@ -59,7 +57,7 @@ func TestPlanner_NoRoutableModel(t *testing.T) {
 func TestPlanner_NoChannelAvailable(t *testing.T) {
 	rctx := newPlannerTestRctx(nil, &app.UserInfo{}, "gpt-4", 5)
 
-	err := NewSolver().Solve(rctx)
+	err := NewSolver(nil).Solve(rctx)
 	if err != state.ErrNoChannelAvailable {
 		t.Errorf("err = %v, want state.ErrNoChannelAvailable", err)
 	}
@@ -74,7 +72,7 @@ func TestPlanner_RetryMaxTruncates(t *testing.T) {
 	}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 2)
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v, want nil", err)
 	}
 	if got := len(rctx.State.Plan.Attempts); got != 2 {
@@ -99,7 +97,7 @@ func TestSolve_RetryMaxOne_SingleAttempt(t *testing.T) {
 		1,
 	)
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v, want nil", err)
 	}
 	if got := len(rctx.State.Plan.Attempts); got != 1 {
@@ -112,7 +110,7 @@ func TestSolve_RetryMaxOne_SingleAttempt(t *testing.T) {
 }
 
 // TestSolve_RetryMaxZero_ReturnsRoutingFallback：B-C1 行为修复——
-// Runtime.RetryMax <= 0 时 Plan.Solve 必须返回 state.ErrRoutingFallback
+// budget (RetryMaxChannels) <= 0 时 Plan.Solve 必须返回 state.ErrRoutingFallback
 // （而非 state.ErrNoChannelAvailable）。
 //
 // 旧 HEAD（Task 9 done）：404 + "no channel available for model X (whitelist 后缀)"
@@ -125,7 +123,7 @@ func TestSolve_RetryMaxZero_ReturnsRoutingFallback(t *testing.T) {
 	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 0)
 
-	err := NewSolver().Solve(rctx)
+	err := NewSolver(nil).Solve(rctx)
 	if err != state.ErrRoutingFallback {
 		t.Errorf("err = %v, want state.ErrRoutingFallback (RetryMax=0 → 502 fallback)", err)
 	}
@@ -143,7 +141,7 @@ func TestPlanner_WhitelistSkipsAllChannels(t *testing.T) {
 	ui := &app.UserInfo{AllowedChannelIDs: []uint{999}}
 	rctx := newPlannerTestRctx(chs, ui, "gpt-4", 5)
 
-	err := NewSolver().Solve(rctx)
+	err := NewSolver(nil).Solve(rctx)
 	if err != state.ErrNoChannelAvailable {
 		t.Errorf("err = %v, want state.ErrNoChannelAvailable (whitelist 全部排除)", err)
 	}
@@ -157,7 +155,7 @@ func TestPlanner_TokenModelsBlocks(t *testing.T) {
 	ui := &app.UserInfo{TokenModels: []string{"only-this-one"}}
 	rctx := newPlannerTestRctx(chs, ui, "gpt-4", 5)
 
-	err := NewSolver().Solve(rctx)
+	err := NewSolver(nil).Solve(rctx)
 	if err != state.ErrModelNotAllowed {
 		t.Errorf("err = %v, want state.ErrModelNotAllowed (TokenModels 排除 gpt-4，整条链被拦)", err)
 	}
@@ -169,7 +167,7 @@ func TestPlanner_NilUserInfo(t *testing.T) {
 	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, nil, "gpt-4", 5)
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v, want nil (nil ui 应放行)", err)
 	}
 	if len(rctx.State.Plan.Attempts) != 1 {
@@ -199,13 +197,14 @@ func TestPlanner_RoutingFallback_AllMembersEmpty_Returns502Sentinel(t *testing.T
 			},
 		},
 	}
-	cache := &stubAgentCache{rs: rs, channels: nil} // 每个 member 都 0 channel
-	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 1}, 0)
-	rctx.Agent.(*stubAgentApp).cfg = &config.AgentRuntimeConfig{
-		Runtime: config.RuntimeConfig{RetryMax: 5},
+	cache := &stubAgentCache{
+		rs:       rs,
+		channels: nil, // 每个 member 都 0 channel
+		settings: settings.AgentSettings{RetryMaxChannels: 5},
 	}
+	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 1}, 0)
 
-	err := NewSolver().Solve(rctx)
+	err := NewSolver(nil).Solve(rctx)
 	if err != state.ErrRoutingFallback {
 		t.Fatalf("err = %v, want state.ErrRoutingFallback (routing 链耗尽走 502 分支)", err)
 	}
@@ -222,7 +221,7 @@ func TestPlanner_RoutingFallback_AllMembersEmpty_Returns502Sentinel(t *testing.T
 func TestPlanner_NonRoutingNoChannel_StaysAt404Sentinel(t *testing.T) {
 	rctx := newPlannerTestRctx(nil, &app.UserInfo{}, "gpt-4", 5)
 
-	err := NewSolver().Solve(rctx)
+	err := NewSolver(nil).Solve(rctx)
 	if err != state.ErrNoChannelAvailable {
 		t.Errorf("err = %v, want state.ErrNoChannelAvailable (非 routing 路径)", err)
 	}
@@ -244,15 +243,16 @@ func TestPlanner_TracePropagatedToPlan(t *testing.T) {
 			},
 		},
 	}
-	cache := &stubAgentCache{rs: rs, channels: []*models.Channel{
-		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
-	}}
-	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 1}, 0)
-	rctx.Agent.(*stubAgentApp).cfg = &config.AgentRuntimeConfig{
-		Runtime: config.RuntimeConfig{RetryMax: 5},
+	cache := &stubAgentCache{
+		rs: rs,
+		channels: []*models.Channel{
+			{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
+		},
+		settings: settings.AgentSettings{RetryMaxChannels: 5},
 	}
+	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 1}, 0)
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v", err)
 	}
 	if len(rctx.State.Plan.Trace) == 0 {
@@ -278,16 +278,17 @@ func TestPlanner_RoutingResolvedLogEmitted(t *testing.T) {
 			},
 		},
 	}
-	cache := &stubAgentCache{rs: rs, channels: []*models.Channel{
-		{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
-	}}
-	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 42}, 0)
-	rctx.Agent.(*stubAgentApp).cfg = &config.AgentRuntimeConfig{
-		Runtime: config.RuntimeConfig{RetryMax: 5},
+	cache := &stubAgentCache{
+		rs: rs,
+		channels: []*models.Channel{
+			{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}},
+		},
+		settings: settings.AgentSettings{RetryMaxChannels: 5},
 	}
+	rctx := newTestRelayContext(cache, "smart", &app.UserInfo{UserID: 42}, 0)
 	rctx.Agent.(*stubAgentApp).logger = logger
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v", err)
 	}
 
@@ -320,7 +321,7 @@ func TestPlanner_RoutingResolvedLogSkippedWhenNoTrace(t *testing.T) {
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 	rctx.Agent.(*stubAgentApp).logger = logger
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v", err)
 	}
 
@@ -334,7 +335,7 @@ func TestPlanner_TraceEmptyOnPassthrough(t *testing.T) {
 	chs := []*models.Channel{{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}}}
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v", err)
 	}
 	if len(rctx.State.Plan.Trace) != 0 {
@@ -349,7 +350,7 @@ func TestPlanner_ModePickerInvoked(t *testing.T) {
 	rctx := newPlannerTestRctx(chs, &app.UserInfo{}, "gpt-4", 5)
 	// 不设置 InboundProto → ProtocolUnknown → 走 legacy 分支。
 
-	if err := NewSolver().Solve(rctx); err != nil {
+	if err := NewSolver(nil).Solve(rctx); err != nil {
 		t.Fatalf("Plan() err = %v", err)
 	}
 	if len(rctx.State.Plan.Attempts) != 1 {

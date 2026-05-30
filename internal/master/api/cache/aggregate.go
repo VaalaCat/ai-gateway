@@ -7,7 +7,7 @@ import (
 // EntityNames 是固定的实体顺序，前后端共用。
 var EntityNames = []string{
 	"token", "user", "channel", "model_config", "agent", "user_group",
-	"model_routing", "user_routings",
+	"model_routing", "user_routings", "private_channels_visible",
 }
 
 // AgentSnapshot 是某个 agent 的 cache 快照与在线状态。
@@ -21,18 +21,20 @@ type AgentSnapshot struct {
 // ClusterEntityStats 是单实体跨 agent 聚合后的结果。
 // HitRate 与 Util 在分母为 0 时为 nil（前端渲染为 "—"）。
 type ClusterEntityStats struct {
-	Hits         int64    `json:"hits"`
-	Misses       int64    `json:"misses"`
-	Evictions    int64    `json:"evictions"`
-	NegativeHits int64    `json:"negative_hits"`
-	Size         int      `json:"size"`
-	Capacity     int      `json:"capacity"`
-	HitRate      *float64 `json:"hit_rate"`
-	Util         *float64 `json:"util"`
+	Hits          int64    `json:"hits"`
+	Misses        int64    `json:"misses"`
+	Evictions     int64    `json:"evictions"`
+	NegativeHits  int64    `json:"negative_hits"`
+	LoadErrors    int64    `json:"load_errors"`
+	Invalidations int64    `json:"invalidations"`
+	Size          int      `json:"size"`
+	Capacity      int      `json:"capacity"`
+	HitRate       *float64 `json:"hit_rate"`
+	Util          *float64 `json:"util"`
 }
 
 // Aggregate 把多个 agent 的快照按实体维度求和。
-// 输入空 / 全 offline 时仍返回 6 个实体的零值，前端就不必判 nil。
+// 输入空 / 全 offline 时仍返回 EntityNames 中所有实体的零值，前端就不必判 nil。
 func Aggregate(snapshots []AgentSnapshot) map[string]ClusterEntityStats {
 	out := make(map[string]ClusterEntityStats, len(EntityNames))
 	for _, name := range EntityNames {
@@ -52,6 +54,8 @@ func Aggregate(snapshots []AgentSnapshot) map[string]ClusterEntityStats {
 			cur.Misses += s.Misses
 			cur.Evictions += s.Evictions
 			cur.NegativeHits += s.NegativeHits
+			cur.LoadErrors += s.LoadErrors
+			cur.Invalidations += s.Invalidations
 			cur.Size += s.Size
 			cur.Capacity += s.Capacity
 			out[name] = cur
