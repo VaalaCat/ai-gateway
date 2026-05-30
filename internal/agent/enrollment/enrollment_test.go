@@ -2,6 +2,7 @@ package enrollment
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -64,6 +65,37 @@ func TestRegister(t *testing.T) {
 	}
 	if loaded.AgentID != "new-agent" {
 		t.Error("saved credentials mismatch")
+	}
+}
+
+func TestRegister_UnixSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "enroll.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/agents/enroll", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(Credentials{AgentID: "unix-agent", Secret: "unix-secret"})
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	logger, _ := zap.NewDevelopment()
+	dir := t.TempDir()
+	cfg := &config.AgentConfig{
+		MasterURL:       "unix:" + sock,
+		EnrollmentToken: "test-token",
+		CredentialsFile: filepath.Join(dir, "creds.json"),
+	}
+	creds, err := LoadOrRegister(cfg, logger)
+	if err != nil {
+		t.Fatalf("LoadOrRegister over unix: %v", err)
+	}
+	if creds.AgentID != "unix-agent" {
+		t.Errorf("agent_id = %s, want unix-agent", creds.AgentID)
 	}
 }
 

@@ -28,6 +28,7 @@ type Client struct {
 	logger   *zap.Logger
 }
 
+// Dial 用默认 dialer 拨号（行为与历史一致）。
 func Dial(ctx context.Context, url string, logger *zap.Logger, headers ...http.Header) (*Client, error) {
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 45 * time.Second,
@@ -36,6 +37,11 @@ func Dial(ctx context.Context, url string, logger *zap.Logger, headers ...http.H
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
+	return DialWithDialer(ctx, dialer, url, logger, headers...)
+}
+
+// DialWithDialer 用调用方提供的 dialer 拨号，便于注入 unix NetDialContext。
+func DialWithDialer(ctx context.Context, dialer *websocket.Dialer, url string, logger *zap.Logger, headers ...http.Header) (*Client, error) {
 	var h http.Header
 	if len(headers) > 0 {
 		h = headers[0]

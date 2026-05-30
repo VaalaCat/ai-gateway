@@ -13,7 +13,6 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { RoutingFormValues } from "../types";
 
@@ -23,7 +22,6 @@ export interface BasicSectionProps {
   // 仅 user 模式生效——由 RoutingForm 透传：
   selectedTokenID?: string;
   onSelectTokenID?: (id: string) => void;
-  tokenOptions?: { id: string; name: string }[];
 }
 
 export function BasicSection({
@@ -31,7 +29,6 @@ export function BasicSection({
   apiMode = "admin",
   selectedTokenID,
   onSelectTokenID,
-  tokenOptions,
 }: BasicSectionProps) {
   const t = useTranslations("modelRoutings");
   const isUserMode = apiMode === "user";
@@ -62,15 +59,11 @@ export function BasicSection({
       {apiMode === "user" && (
         <FormItem>
           <FormLabel>{t("field.token")}</FormLabel>
-          <SearchableSelect
+          <EntityPicker
+            entity="token"
             value={selectedTokenID ?? ""}
             onChange={(v) => onSelectTokenID?.(v)}
-            placeholder={t("field.token")}
-            searchPlaceholder={t("field.token")}
-            items={(tokenOptions ?? []).map((opt) => ({
-              value: opt.id,
-              label: opt.name || `Token #${opt.id}`,
-            }))}
+            className="w-full"
           />
           <p className="text-xs text-muted-foreground">{t("field.tokenHint")}</p>
         </FormItem>

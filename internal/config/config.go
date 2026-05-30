@@ -18,7 +18,7 @@ const (
 
 type Config struct {
 	Role     string         `mapstructure:"role"`
-	Listen   string         `mapstructure:"listen"`
+	Listen   string         `mapstructure:"listen"` // ":8140" | "unix:/run/gw.sock" | "unix:@name"(abstract, Linux)
 	LogLevel string         `mapstructure:"log_level"`
 	Master   MasterConfig   `mapstructure:"master"`
 	Agent    AgentConfig    `mapstructure:"agent"`
@@ -27,7 +27,7 @@ type Config struct {
 }
 
 type MasterConfig struct {
-	Listen             string   `mapstructure:"listen"`
+	Listen             string   `mapstructure:"listen"` // ":8140" | "unix:/run/gw.sock" | "unix:@name"(abstract, Linux)
 	DBPath             string   `mapstructure:"db_path"`
 	JWTSecret          string   `mapstructure:"jwt_secret"`
 	BYOKKEK            string   `mapstructure:"byok_kek"` // base64 32B; empty → HKDF derive from JWTSecret
@@ -44,19 +44,19 @@ type AgentAddress struct {
 }
 
 type AgentConfig struct {
-	Listen              string            `mapstructure:"listen"`
-	MasterURL           string            `mapstructure:"master_url"`
-	EnrollmentToken     string            `mapstructure:"enrollment_token"`
-	CredentialsFile     string            `mapstructure:"credentials_file"`
-	FullSyncInterval    int               `mapstructure:"full_sync_interval"`
-	ReportBufferSize    int               `mapstructure:"report_buffer_size"`
-	ReportFlushInterval int               `mapstructure:"report_flush_interval"`
-	HeartbeatInterval   int               `mapstructure:"heartbeat_interval"`
-	HTTPAddresses       []AgentAddress    `mapstructure:"http_addresses"`
-	Tags                string            `mapstructure:"tags"`
-	ProxyURL            string            `mapstructure:"proxy_url"`
-	PreferredAddrTag    string            `mapstructure:"preferred_address_tag"`
-	Cache               AgentCacheConfig  `mapstructure:"cache"`
+	Listen              string           `mapstructure:"listen"`     // ":8139" | "unix:/run/gw.sock" | "unix:@name"(abstract, Linux)
+	MasterURL           string           `mapstructure:"master_url"` // "http://host:port" | "unix:/run/gw.sock"(same-host UDS)
+	EnrollmentToken     string           `mapstructure:"enrollment_token"`
+	CredentialsFile     string           `mapstructure:"credentials_file"`
+	FullSyncInterval    int              `mapstructure:"full_sync_interval"`
+	ReportBufferSize    int              `mapstructure:"report_buffer_size"`
+	ReportFlushInterval int              `mapstructure:"report_flush_interval"`
+	HeartbeatInterval   int              `mapstructure:"heartbeat_interval"`
+	HTTPAddresses       []AgentAddress   `mapstructure:"http_addresses"`
+	Tags                string           `mapstructure:"tags"`
+	ProxyURL            string           `mapstructure:"proxy_url"`
+	PreferredAddrTag    string           `mapstructure:"preferred_address_tag"`
+	Cache               AgentCacheConfig `mapstructure:"cache"`
 }
 
 // AgentCacheConfig 控制 agent 端 LRU 缓存的容量与负缓存 TTL。

@@ -283,6 +283,9 @@ export function EndpointsProtocolSection({ form, setForm }: EndpointsProtocolSec
           </CollapsibleContent>
         </Collapsible>
       )}
+      {enabledCount < 2 && (
+        <p className="text-xs text-muted-foreground">{t("protocolOverrideLocked")}</p>
+      )}
     </div>
   );
 }

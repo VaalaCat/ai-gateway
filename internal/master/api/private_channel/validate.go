@@ -296,8 +296,6 @@ func validateModelsSubsetOfModelConfigsCtx(c ValidatorCtx) error {
 }
 
 func validateModelMappingTargetsCtx(c ValidatorCtx) error {
-	// model_mapping legality depends on the model registry; we re-check whenever
-	// either model_mapping or models is dirty.
 	if !c.IsDirty("model_mapping") && !c.IsDirty("models") {
 		return nil
 	}
@@ -305,14 +303,23 @@ func validateModelMappingTargetsCtx(c ValidatorCtx) error {
 	if len(mapping) == 0 {
 		return nil
 	}
-	cfgs, _ := c.Query.ModelConfig().ListAll()
-	set := modelNameSet(cfgs)
-	for k, v := range mapping {
-		if _, ok := set[k]; !ok {
-			return api.BadRequestError("model mapping key not registered: "+k, nil)
+	// BYOK 映射 = 「本渠道对外 model -> 用户自己上游真实 model」。
+	// target(value) 由用户上游决定，平台不要求其注册 —— 不校验。
+	// source(key) 应是本渠道声明的 model；请求带 models 时校验 key ∈ models，
+	// 否则（mapping-only PATCH，ValidatorCtx 无渠道现存 models）回退全局 ModelConfig。
+	var sourceSet map[string]struct{}
+	if raw, ok := c.Req["models"]; ok {
+		sourceSet = make(map[string]struct{})
+		for _, m := range stringSliceFromAny(raw) {
+			sourceSet[m] = struct{}{}
 		}
-		if _, ok := set[v]; !ok {
-			return api.BadRequestError("model mapping value not registered: "+v, nil)
+	} else {
+		cfgs, _ := c.Query.ModelConfig().ListAll()
+		sourceSet = modelNameSet(cfgs)
+	}
+	for k := range mapping {
+		if _, ok := sourceSet[k]; !ok {
+			return api.BadRequestError("model mapping source not in channel models: "+k, nil)
 		}
 	}
 	return nil

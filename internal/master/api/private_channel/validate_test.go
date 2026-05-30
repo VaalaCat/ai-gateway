@@ -279,12 +279,16 @@ func TestValidateModelMappingTargets_KeyMissing(t *testing.T) {
 	}
 }
 
+// TestValidateModelMappingTargets_ValueMissing: BYOK target (value) は
+// ユーザー自身の上流モデル名であり、プラットフォーム登録不要 —— 通過を期待する。
+// (旧: value も ModelConfig 必須だったが、BYOK 対応で緩和。intentional behavior change)
 func TestValidateModelMappingTargets_ValueMissing(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
 	appCtx.App.GetDB().Create(&models.ModelConfig{ModelName: "gpt-4o"})
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"model_mapping": map[string]string{"gpt-4o": "unknown"}})
-	if err := validateModelMappingTargetsCtx(c); err == nil {
-		t.Fatal("mapping value not in ModelConfig should reject")
+	// target (value) は任意文字列を許容するため、エラーにならない。
+	if err := validateModelMappingTargetsCtx(c); err != nil {
+		t.Fatalf("BYOK target (value) should be allowed even if not in ModelConfig, got: %v", err)
 	}
 }
 
@@ -410,18 +414,20 @@ func TestRunValidators_PatchPath_RunsDirtyFields(t *testing.T) {
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o"})
 
 	q := dao.NewAdminQuery(dao.NewContext(appCtx.App))
-	// Patch model_mapping with an unregistered target — should reject.
+	// Patch model_mapping with an unregistered source (key) — should reject.
+	// (intentional behavior change: target/value は任意文字列を許容するため、
+	//  source/key が未登録の場合のみ拒否に変更。)
 	c := ValidatorCtx{
 		Query:   q,
 		OwnerID: 1,
 		GroupID: 1,
 		Dirty:   map[string]bool{"model_mapping": true},
 		Req: map[string]any{
-			"model_mapping": map[string]string{"gpt-4o": "unknown-target"},
+			"model_mapping": map[string]string{"unknown-source": "gpt-4o"},
 		},
 	}
 	if err := RunValidators(c); err == nil {
-		t.Fatal("patch path should reject illegal model_mapping")
+		t.Fatal("patch path should reject model_mapping with unregistered source key")
 	}
 }
 

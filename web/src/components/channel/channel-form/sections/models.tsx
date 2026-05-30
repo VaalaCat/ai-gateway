@@ -77,6 +77,40 @@ function CatalogModelsBlock({ form, setForm, useModelsCatalog }: CatalogModelsBl
         />
       </div>
 
+      {/* Model Mapping */}
+      <div className="space-y-2">
+        <Label>{t("modelMapping")}</Label>
+        <ModelMappingInput
+          value={form.model_mapping}
+          onChange={(json) => setForm({ ...form, model_mapping: json })}
+          onMappingAdd={(sourceModel) => {
+            const modelList = splitModels(form.models);
+            if (!modelList.includes(sourceModel)) {
+              setForm({ ...form, models: [...modelList, sourceModel].join(",") });
+            }
+          }}
+          onMappingRemove={(sourceModel) => {
+            const modelList = form.models
+              .split(",")
+              .map((s) => s.trim())
+              .filter((m) => m && m !== sourceModel);
+            setForm({ ...form, models: modelList.join(",") });
+          }}
+        />
+      </div>
+
+      {/* Test Model */}
+      <div className="space-y-2">
+        <Label>
+          {t("testModel")}
+          <FieldTip text={t("testModelTip")} />
+        </Label>
+        <Input
+          value={form.test_model}
+          onChange={(e) => setForm({ ...form, test_model: e.target.value })}
+        />
+      </div>
+
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
           <Label>{t("weight")}</Label>

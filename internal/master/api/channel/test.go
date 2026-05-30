@@ -8,18 +8,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/netaddr"
 )
 
 func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
@@ -85,21 +86,24 @@ func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
 	}
 	tokenKey := token.Key
 
-	relayPath, reqBody := buildTestRequest(req.EndpointType, model, req.Stream)
+	relayPath, reqBody, err := codec.BuildConnectivityTestRequest(
+		channel.Endpoints, channel.SupportedAPITypes, req.EndpointType, model, req.Stream)
+	if err != nil {
+		return TestResponse{}, api.BadRequestError(err.Error(), nil)
+	}
 	bodyBytes, _ := json.Marshal(reqBody)
 
-	_, port, splitErr := net.SplitHostPort(h.MasterListen)
-	if splitErr != nil {
-		return TestResponse{}, api.InternalError("invalid master listen address", splitErr)
-	}
-	testURL := fmt.Sprintf("http://127.0.0.1:%s%s", port, relayPath)
+	client, base := netaddr.SelfClient(h.MasterListen)
+	testURL := base + relayPath
 
-	httpReq, _ := http.NewRequest("POST", testURL, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequest("POST", testURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return TestResponse{}, api.InternalError("failed to build relay request", err)
+	}
 	httpReq.Header.Set(consts.HeaderContentType, consts.ContentTypeJSON)
 	httpReq.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+tokenKey)
 	httpReq.Header.Set(consts.HeaderXChannelID, req.ID)
 
-	client := &http.Client{Timeout: 30 * time.Second}
 	start := time.Now()
 	resp, err := client.Do(httpReq)
 	elapsed := time.Since(start).Seconds()
@@ -138,37 +142,6 @@ func pickTestModel(requested string, ch models.Channel) string {
 		}
 	}
 	return ""
-}
-
-func buildTestRequest(endpointType, model string, stream bool) (string, map[string]any) {
-	if endpointType == "" {
-		endpointType = "chat-completion"
-	}
-
-	var relayPath string
-	var reqBody map[string]any
-
-	switch endpointType {
-	case "responses":
-		relayPath = "/v1/responses"
-		reqBody = map[string]any{"model": model, "input": "Say 'ok' and nothing else."}
-	case "anthropic":
-		relayPath = "/v1/messages"
-		reqBody = map[string]any{
-			"model": model, "max_tokens": 10,
-			"messages": []map[string]string{{"role": "user", "content": "Say 'ok' and nothing else."}},
-		}
-	default:
-		relayPath = "/v1/chat/completions"
-		reqBody = map[string]any{
-			"model": model, "max_tokens": 10,
-			"messages": []map[string]string{{"role": "user", "content": "Say 'ok' and nothing else."}},
-		}
-	}
-	if stream {
-		reqBody["stream"] = true
-	}
-	return relayPath, reqBody
 }
 
 func getOrCreateTestToken(daoCtx dao.Context, bus app.EventBus) (*models.Token, error) {

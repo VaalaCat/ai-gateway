@@ -502,6 +502,7 @@
     "builtinToolFallbackPassthrough": "Pass through to upstream",
     "protocolOverride": "Protocol Override",
     "protocolOverrideTip": "Force each inbound protocol to a fixed outbound protocol for this channel, overriding default negotiation. Enabled only when 2+ Endpoints are checked. Auto = default negotiation.",
+    "protocolOverrideLocked": "Enable ≥2 endpoints to configure protocol override mapping",
     "protocolOverrideAuto": "Auto (default negotiation)",
     "protocolOverrideTargetNotInEndpoints": "Target protocol is not enabled in Endpoints; check the corresponding Endpoint first",
     "protocolOverrideInboundLabel": "Inbound Protocol",

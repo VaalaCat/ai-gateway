@@ -129,10 +129,14 @@ export function RequestRewriteSection({
       />
 
       {/* Resilience Override */}
-      <ResilienceOverrideSection form={form} setForm={setForm} />
+      {!hiddenFields?.has("resilience") && (
+        <ResilienceOverrideSection form={form} setForm={setForm} />
+      )}
 
       {/* Usage Limit */}
-      <UsageLimitSection form={form} setForm={setForm} />
+      {!hiddenFields?.has("limit") && (
+        <UsageLimitSection form={form} setForm={setForm} />
+      )}
     </div>
   );
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/netaddr"
 	"go.uber.org/zap"
 )
 
@@ -78,22 +79,16 @@ func saveToFile(path string, creds *Credentials) error {
 }
 
 func register(cfg *config.AgentConfig) (*Credentials, error) {
-	// Convert ws:// URL to http:// for enrollment API
-	enrollURL := cfg.MasterURL
-	enrollURL = strings.Replace(enrollURL, "ws://", "http://", 1)
-	enrollURL = strings.Replace(enrollURL, "wss://", "https://", 1)
-	// Strip path and use /api/agents/enroll
-	u, err := url.Parse(enrollURL)
-	if err != nil {
-		return nil, err
-	}
-	u.Path = "/api/agents/enroll"
-
 	body, _ := json.Marshal(map[string]string{
 		"enrollment_token": cfg.EnrollmentToken,
 	})
 
-	resp, err := http.Post(u.String(), consts.ContentTypeJSON, bytes.NewReader(body))
+	client, enrollURL, err := enrollTarget(cfg.MasterURL)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.Post(enrollURL, consts.ContentTypeJSON, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -108,4 +103,22 @@ func register(cfg *config.AgentConfig) (*Credentials, error) {
 		return nil, err
 	}
 	return &creds, nil
+}
+
+// enrollTarget builds the HTTP client and full enroll URL for the master.
+// A unix: master_url dials the socket (base "http://unix"); otherwise the
+// ws(s):// scheme is normalized to http(s):// and the path is set to the
+// enroll endpoint (preserving the original scheme://host).
+func enrollTarget(masterURL string) (*http.Client, string, error) {
+	if strings.HasPrefix(masterURL, "unix:") {
+		return netaddr.UnixHTTPClient(masterURL), "http://unix/api/agents/enroll", nil
+	}
+	raw := strings.Replace(masterURL, "ws://", "http://", 1)
+	raw = strings.Replace(raw, "wss://", "https://", 1)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	u.Path = "/api/agents/enroll"
+	return &http.Client{}, u.String(), nil
 }

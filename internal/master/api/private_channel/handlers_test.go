@@ -507,24 +507,66 @@ func TestPatchUpdateKey_DisabledBYOKBlocks(t *testing.T) {
 	}
 }
 
-// === §4.8 test endpoint path routing by provider type ===
+func TestValidateModelMappingTargets_TargetUnregisteredAllowed(t *testing.T) {
+	c := ValidatorCtx{
+		Req: map[string]any{
+			"models":        []string{"gpt-4"},
+			"model_mapping": map[string]string{"gpt-4": "my-private-upstream-model"},
+		},
+		Dirty: map[string]bool{"model_mapping": true, "models": true},
+	}
+	if err := validateModelMappingTargetsCtx(c); err != nil {
+		t.Fatalf("unregistered target should be allowed for BYOK, got: %v", err)
+	}
+}
 
-// TestTestPathForType covers §4.8: PortalTest must hit the correct upstream path
-// for the channel's provider type (e.g. /v1/messages for Anthropic, /v1/chat/completions
-// for OpenAI / Azure). Unknown types fall back to /v1/chat/completions.
-func TestTestPathForType(t *testing.T) {
+func TestValidateModelMappingTargets_SourceNotInModelsRejected(t *testing.T) {
+	c := ValidatorCtx{
+		Req: map[string]any{
+			"models":        []string{"gpt-3.5"},
+			"model_mapping": map[string]string{"gpt-4": "x"},
+		},
+		Dirty: map[string]bool{"model_mapping": true, "models": true},
+	}
+	if err := validateModelMappingTargetsCtx(c); err == nil {
+		t.Fatal("source not in channel models should be rejected")
+	}
+}
+
+func TestValidateModelMappingTargets_EmptyMappingOK(t *testing.T) {
+	c := ValidatorCtx{
+		Req:   map[string]any{"models": []string{"gpt-4"}, "model_mapping": map[string]string{}},
+		Dirty: map[string]bool{"model_mapping": true},
+	}
+	if err := validateModelMappingTargetsCtx(c); err != nil {
+		t.Fatalf("empty mapping should pass: %v", err)
+	}
+}
+
+// === §4.8 test endpoint path routing by protocol ===
+
+// TestResolveTestPath_ProtocolRouting covers §4.8: PortalTest must hit the correct
+// upstream path driven by pc.Endpoints/SupportedAPITypes (never numeric type).
+// The deprecated testPathForType(numeric) function has been removed; this test
+// covers equivalent cases via the new codec resolver.
+func TestResolveTestPath_ProtocolRouting(t *testing.T) {
 	cases := []struct {
-		typ      int
-		wantPath string
+		name         string
+		endpoints    string
+		endpointType string
+		wantPath     string
 	}{
-		{newAPIConstant.ChannelTypeOpenAI, "/v1/chat/completions"},
-		{newAPIConstant.ChannelTypeAnthropic, "/v1/messages"},
-		{newAPIConstant.ChannelTypeAzure, "/v1/chat/completions"},
-		{9999, "/v1/chat/completions"}, // default fallback
+		{"openai explicit", `{"chat_completions":"/v1/chat/completions"}`, "chat_completions", "/v1/chat/completions"},
+		{"anthropic explicit", `{"messages":"/v1/messages"}`, "messages", "/v1/messages"},
+		{"anthropic alias", `{"messages":"/v1/messages"}`, "anthropic", "/v1/messages"},
+		{"default fallback no endpoints", "", "chat_completions", "/v1/chat/completions"},
 	}
 	for _, c := range cases {
-		if got := testPathForType(c.typ); got != c.wantPath {
-			t.Fatalf("typ=%d got=%s want=%s", c.typ, got, c.wantPath)
+		pc := &models.PrivateChannel{}
+		pc.Endpoints = c.endpoints
+		got, err := resolveTestPath(pc, c.endpointType)
+		if err != nil || got != c.wantPath {
+			t.Fatalf("%s: got=%q err=%v want=%s", c.name, got, err, c.wantPath)
 		}
 	}
 }
@@ -545,8 +587,9 @@ func TestModelInChannelWhitelist(t *testing.T) {
 }
 
 func TestResolveTestPathEmptyEndpointType(t *testing.T) {
-	// 空 endpointType → 走 testPathForType(pc.Type) 旧逻辑
-	pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Type: newAPIConstant.ChannelTypeOpenAI}}
+	// 空 endpointType + 空 Endpoints → codec 按 fallbackPriority 默认 chat_completions
+	// （numeric channel type 已弃用，不再参与路由）
+	pc := &models.PrivateChannel{}
 	path, err := resolveTestPath(pc, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -615,6 +658,31 @@ func TestResolveTestPathEndpointsJSONMissingProtocol(t *testing.T) {
 	}
 	if path != "/v1/chat/completions" {
 		t.Fatalf("expected fallback /v1/chat/completions, got %s", path)
+	}
+}
+
+func TestResolveTestPath_AnthropicAlias(t *testing.T) {
+	pc := &models.PrivateChannel{}
+	pc.Endpoints = `{"messages":"/v1/messages"}`
+	path, err := resolveTestPath(pc, "anthropic")
+	if err != nil || path != "/v1/messages" {
+		t.Fatalf("anthropic alias => (%q,%v), want /v1/messages", path, err)
+	}
+}
+
+func TestResolveTestPath_EmptyUsesEndpoints(t *testing.T) {
+	pc := &models.PrivateChannel{}
+	pc.Endpoints = `{"messages":"/v1/messages"}`
+	path, err := resolveTestPath(pc, "")
+	if err != nil || path != "/v1/messages" {
+		t.Fatalf("empty => (%q,%v), want /v1/messages", path, err)
+	}
+}
+
+func TestResolveTestPath_Invalid(t *testing.T) {
+	pc := &models.PrivateChannel{}
+	if _, err := resolveTestPath(pc, "embeddings"); err == nil {
+		t.Fatal("embeddings should error")
 	}
 }
 

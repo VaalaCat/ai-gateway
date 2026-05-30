@@ -21,3 +21,14 @@ func TestBuildEmbeddedAgentConfig_PropagatesCache(t *testing.T) {
 		t.Fatal("bootstrap fields must be set")
 	}
 }
+
+func TestBuildEmbeddedAgentConfig_UnixMasterURL(t *testing.T) {
+	mc := &config.MasterRuntimeConfig{LogLevel: "info"}
+	got := buildEmbeddedAgentConfig(mc, "unix:/tmp/m.sock", "unix:/tmp/m.sock")
+	if got.Agent.MasterURL != "unix:/tmp/m.sock" {
+		t.Errorf("unix MasterURL = %q, want unix:/tmp/m.sock", got.Agent.MasterURL)
+	}
+	if got.Agent.Listen != "unix:/tmp/m.sock" {
+		t.Errorf("unix Listen = %q", got.Agent.Listen)
+	}
+}

@@ -51,11 +51,6 @@ export function RoutingForm({ mode, apiMode = "admin" }: RoutingFormProps) {
   const selectedToken = userTokens.find((tok) => String(tok.id) === selectedTokenID);
   const tokenKey = selectedToken?.key ?? null;
 
-  const tokenOptions = userTokens.map((tok) => ({
-    id: String(tok.id),
-    name: tok.name,
-  }));
-
   const handleSelectTokenID = (id: string) => setStoredTokenID(id);
 
   const onSubmit = async (values: RoutingFormValues) => {
@@ -129,7 +124,6 @@ export function RoutingForm({ mode, apiMode = "admin" }: RoutingFormProps) {
             apiMode={apiMode}
             selectedTokenID={selectedTokenID}
             onSelectTokenID={handleSelectTokenID}
-            tokenOptions={tokenOptions}
           />
           <MembersSection form={form} apiMode={apiMode} tokenKey={tokenKey} />
         </div>

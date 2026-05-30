@@ -53,6 +53,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ginutil"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/netaddr"
 	webassets "github.com/VaalaCat/ai-gateway/web"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -705,11 +706,15 @@ func (s *Server) startVersionPersistence(ctx context.Context) {
 // 可下发字段(LogLevel/Relay/Runtime/Agent.Cache 等)从 master 配置透传;
 // 引导/身份字段(Listen/MasterURL)由 master 现场决定。
 func buildEmbeddedAgentConfig(mc *config.MasterRuntimeConfig, masterListen, listenAddr string) *config.AgentRuntimeConfig {
+	masterURL := "http://" + listenAddr
+	if strings.HasPrefix(listenAddr, "unix:") {
+		masterURL = listenAddr // 已是 unix:/path 或 unix:@name，WSDial 直接识别
+	}
 	return &config.AgentRuntimeConfig{
 		LogLevel: mc.LogLevel,
 		Agent: config.AgentConfig{
 			Listen:    masterListen,
-			MasterURL: "http://" + listenAddr,
+			MasterURL: masterURL,
 			Cache:     mc.Agent.Cache,
 		},
 		Runtime: mc.Runtime,
@@ -772,7 +777,7 @@ func (s *Server) Run() error {
 	}
 	go s.runStateSweeper(ctx, s.oauthHandler.StateStore)
 
-	ln, err := net.Listen("tcp", s.Cfg.Master.Listen)
+	ln, err := netaddr.Listen(s.Cfg.Master.Listen)
 	if err != nil {
 		return err
 	}
@@ -781,10 +786,16 @@ func (s *Server) Run() error {
 	// Channel test handler was constructed with the configured listen string
 	// (e.g. ":0" in tests); now that the OS has assigned a real port, point
 	// the handler at it so its loopback URL resolves.
-	s.SetChannelMasterListen(ln.Addr().String())
+	// unix 监听时 ln.Addr().String() 是裸 socket 路径（会被 Parse 误判为 tcp），
+	// 故 self-call / embedded 回连统一用配置里的 unix: 原串。
+	selfListen := ln.Addr().String()
+	if ln.Addr().Network() == "unix" {
+		selfListen = s.Cfg.Master.Listen
+	}
+	s.SetChannelMasterListen(selfListen)
 
 	// Start embedded agent (needs actual listen address)
-	if err := s.setupEmbeddedAgent(ln.Addr().String()); err != nil {
+	if err := s.setupEmbeddedAgent(selfListen); err != nil {
 		return fmt.Errorf("embedded agent: %w", err)
 	}
 

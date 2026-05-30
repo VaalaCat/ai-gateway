@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ginutil"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/netaddr"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
 	"github.com/gin-gonic/gin"
@@ -207,7 +207,7 @@ func (s *Server) Run() error {
 	go s.heartbeatLoop(ctx)
 
 	// Start HTTP server
-	ln, err := net.Listen("tcp", s.Cfg.Agent.Listen)
+	ln, err := netaddr.Listen(s.Cfg.Agent.Listen)
 	if err != nil {
 		return err
 	}
@@ -448,26 +448,11 @@ func (s *Server) connectLoop(ctx context.Context) {
 	}
 }
 
-// toWSURL converts master URL to WebSocket URL.
-// Accepts http://, https://, ws://, wss:// schemes.
-// Ensures the path ends with /ws/agent.
-func toWSURL(raw string) string {
-	u := raw
-	u = strings.Replace(u, "https://", "wss://", 1)
-	u = strings.Replace(u, "http://", "ws://", 1)
-	u = strings.TrimRight(u, "/")
-	if !strings.HasSuffix(u, "/ws/agent") {
-		u += "/ws/agent"
-	}
-	return u
-}
-
 func (s *Server) dial(ctx context.Context) (*ws.Client, error) {
 	headers := http.Header{}
 	headers.Set(consts.HeaderXAgentID, s.Creds.AgentID)
 	headers.Set(consts.HeaderXAgentSecret, s.Creds.Secret)
-	wsURL := toWSURL(s.Cfg.Agent.MasterURL)
-	return ws.Dial(ctx, wsURL, s.Logger, headers)
+	return netaddr.WSDial(ctx, s.Cfg.Agent.MasterURL, s.Logger, headers)
 }
 
 func (s *Server) setClient(client *ws.Client) {

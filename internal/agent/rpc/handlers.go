@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/netaddr"
 	"go.uber.org/zap"
 )
 
@@ -36,10 +38,14 @@ func HandleChannelTest(ctx context.Context, params json.RawMessage, store *cache
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
-	relayPath, reqBody := buildTestRequest(p.EndpointType, p.Model, p.Stream)
+	relayPath, reqBody, err := codec.BuildConnectivityTestRequest("", "", p.EndpointType, p.Model, p.Stream)
+	if err != nil {
+		return &ChannelTestResult{Success: false, Error: err.Error(), Model: p.Model}, nil
+	}
 	bodyBytes, _ := json.Marshal(reqBody)
 
-	testURL := fmt.Sprintf("http://localhost%s%s", listenAddr, relayPath)
+	client, base := netaddr.SelfClient(listenAddr)
+	testURL := base + relayPath
 
 	// Get test token from store
 	token := store.GetSystemTestToken()
@@ -51,12 +57,18 @@ func HandleChannelTest(ctx context.Context, params json.RawMessage, store *cache
 		}, nil
 	}
 
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", testURL, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", testURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return &ChannelTestResult{
+			Success: false,
+			Error:   fmt.Sprintf("failed to build request: %v", err),
+			Model:   p.Model,
+		}, nil
+	}
 	httpReq.Header.Set(consts.HeaderContentType, consts.ContentTypeJSON)
 	httpReq.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+token.Key)
 	httpReq.Header.Set(consts.HeaderXChannelID, p.ChannelID)
 
-	client := &http.Client{Timeout: 30 * time.Second}
 	start := time.Now()
 	resp, err := client.Do(httpReq)
 	elapsed := time.Since(start).Seconds()
@@ -81,31 +93,3 @@ func HandleChannelTest(ctx context.Context, params json.RawMessage, store *cache
 	}, nil
 }
 
-func buildTestRequest(endpointType, model string, stream bool) (string, map[string]any) {
-	if endpointType == "" {
-		endpointType = "chat-completion"
-	}
-	var relayPath string
-	var reqBody map[string]any
-	switch endpointType {
-	case "responses":
-		relayPath = "/v1/responses"
-		reqBody = map[string]any{"model": model, "input": "Say 'ok' and nothing else."}
-	case "anthropic":
-		relayPath = "/v1/messages"
-		reqBody = map[string]any{
-			"model": model, "max_tokens": 10,
-			"messages": []map[string]string{{"role": "user", "content": "Say 'ok' and nothing else."}},
-		}
-	default:
-		relayPath = "/v1/chat/completions"
-		reqBody = map[string]any{
-			"model": model, "max_tokens": 10,
-			"messages": []map[string]string{{"role": "user", "content": "Say 'ok' and nothing else."}},
-		}
-	}
-	if stream {
-		reqBody["stream"] = true
-	}
-	return relayPath, reqBody
-}

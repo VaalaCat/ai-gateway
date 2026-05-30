@@ -145,13 +145,34 @@ function buildBYOKUpdate(form: ChannelForm, initial: ChannelForm) {
   return { fields, rotateKey };
 }
 
-const HIDDEN: ReadonlySet<keyof ChannelForm> = new Set<keyof ChannelForm>([
-  "proxy_url",
-  "header_override",
-  "use_legacy_adaptor",
-  "price_ratio",
-  "free",
-]);
+// BYOK 持久化字段：buildBYOKCreate/buildBYOKUpdate 实际写给后端的字段集合。
+const BYOK_PERSISTED_FIELDS = [
+  "name", "type", "key", "base_url", "models", "model_mapping", "weight",
+  "priority", "status", "supported_api_types", "endpoints", "organization",
+  "api_version", "system_prompt", "system_prompt_in_input", "role_mapping",
+  "param_override", "setting", "tag", "remark", "test_model", "auto_ban",
+  "status_code_mapping", "other_settings", "passthrough_enabled",
+] as const satisfies ReadonlyArray<keyof ChannelForm>;
+
+// BYOK 隐藏字段：不持久化、表单中不渲染编辑入口。
+const HIDDEN_FIELDS = [
+  "proxy_url", "header_override", "use_legacy_adaptor", "price_ratio", "free",
+  "disable_keepalive", "resilience", "limit",
+] as const satisfies ReadonlyArray<keyof ChannelForm>;
+
+const HIDDEN: ReadonlySet<keyof ChannelForm> = new Set(HIDDEN_FIELDS);
+
+// 编译期一致性守卫：persisted ∪ hidden 必须覆盖全部 ChannelForm 字段。
+// 新增字段若既不持久化也不隐藏，Uncovered 非 never，下行类型检查失败（pnpm build 报错），
+// 强制开发者显式归类，杜绝「表单可见却被 adapter 丢弃」的假输入 bug。
+type Uncovered = Exclude<
+  keyof ChannelForm,
+  (typeof BYOK_PERSISTED_FIELDS)[number] | (typeof HIDDEN_FIELDS)[number]
+>;
+const _byokFieldCoverage: Uncovered extends never
+  ? true
+  : ["BYOK field neither persisted nor hidden:", Uncovered] = true;
+void _byokFieldCoverage;
 
 export const byokChannelAdapter: ChannelFormAdapter<BYOKChannelDetail> = {
   listPath: "/byok",

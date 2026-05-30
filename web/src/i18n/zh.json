@@ -502,6 +502,7 @@
     "builtinToolFallbackPassthrough": "原样透传给上游",
     "protocolOverride": "协议映射覆盖",
     "protocolOverrideTip": "为该渠道指定每个入站协议固定走哪个出站协议，覆盖默认协商。仅在 Endpoints 勾选了 ≥2 个时启用。Auto = 走默认协商。",
+    "protocolOverrideLocked": "勾选 ≥2 个 Endpoint 后可设置协议映射覆盖",
     "protocolOverrideAuto": "Auto（默认协商）",
     "protocolOverrideTargetNotInEndpoints": "目标协议未在 Endpoints 中启用，请先勾选对应 Endpoint",
     "protocolOverrideInboundLabel": "入站协议",
