@@ -97,6 +97,10 @@ func PublishUserQuotaDepleted(ctx context.Context, bus app.EventBus, payload mod
 	return Publish(ctx, bus, UserQuotaDepletedTopic, payload)
 }
 
+func PublishUserQuotaSync(ctx context.Context, bus app.EventBus, payload protocol.UserQuotaSync) error {
+	return Publish(ctx, bus, UserQuotaSyncTopic, payload)
+}
+
 func PublishAgentRouteCreate(ctx context.Context, bus app.EventBus, payload models.AgentRoute) error {
 	return Publish(ctx, bus, AgentRouteCreateTopic, payload)
 }
@@ -127,6 +131,10 @@ func SubscribeUsageCompleted(bus app.EventBus, handler func(context.Context, pro
 
 func SubscribeUserQuotaDepleted(bus app.EventBus, handler func(context.Context, models.User) error) (eventbus.Subscription, error) {
 	return Subscribe(bus, UserQuotaDepletedTopic, handler)
+}
+
+func SubscribeUserQuotaSync(bus app.EventBus, handler func(context.Context, protocol.UserQuotaSync) error) (eventbus.Subscription, error) {
+	return Subscribe(bus, UserQuotaSyncTopic, handler)
 }
 
 func SubscribeSyncFullSyncRequested(bus app.EventBus, handler func(context.Context) error) (eventbus.Subscription, error) {

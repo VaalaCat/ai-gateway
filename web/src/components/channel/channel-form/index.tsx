@@ -1,74 +1,68 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import type { ChannelFormAdapter } from "./adapter";
+import type { ChannelForm as ChannelFormShape } from "./types";
 import { useChannelForm, ChannelFormMode } from "./use-channel-form";
 import { isSectionAllHidden, type SectionId } from "./section-visibility";
+import { LifecycleStepper, LifecycleStepperMobile, type StageNavItem } from "./lifecycle-stepper";
 import { SaveBar } from "./save-bar";
+import { parseEndpoints } from "./utils";
 import { LegacyChannelForm } from "./legacy-form";
-import { BasicSection } from "./sections/basic";
-import { EndpointsProtocolSection } from "./sections/endpoints-protocol";
-import { ModelsSection } from "./sections/models";
-import { ProtocolBehaviorSection } from "./sections/protocol-behavior";
-import { RequestRewriteSection } from "./sections/request-rewrite";
-import { RouteRolesSection } from "./sections/route-roles";
+import { MetaSection } from "./sections/meta";
+import { RoutingSection } from "./sections/routing";
+import { ProcessingSection } from "./sections/processing";
+import { ConnectionSection } from "./sections/connection";
+import { ResilienceSection } from "./sections/resilience";
+import { ResponseSection } from "./sections/response";
 
 export interface ChannelFormProps<Entity = unknown> {
   mode: ChannelFormMode;
   adapter: ChannelFormAdapter<Entity>;
-  /** Resolved default agent id for fetch-models in edit mode (optional). */
   agentId?: string;
 }
 
-const SECTIONS: ReadonlyArray<{
-  id: SectionId;
-  number: string;
-  titleKey: string;
-  descKey: string;
-}> = [
-  { id: "basic", number: "①", titleKey: "sectionBasic", descKey: "sectionBasicDescription" },
-  { id: "endpoints-protocol", number: "②", titleKey: "sectionEndpointsProtocol", descKey: "sectionEndpointsProtocolDescription" },
-  { id: "models", number: "③", titleKey: "sectionModels", descKey: "sectionModelsDescription" },
-  { id: "protocol-behavior", number: "④", titleKey: "sectionProtocolBehavior", descKey: "sectionProtocolBehaviorDescription" },
-  { id: "request-rewrite", number: "⑤", titleKey: "sectionRequestRewrite", descKey: "sectionRequestRewriteDescription" },
-  { id: "route-roles", number: "⑥", titleKey: "sectionRouteRoles", descKey: "sectionRouteRolesDescription" },
+const STAGES: ReadonlyArray<{ id: SectionId; titleKey: string; descKey: string }> = [
+  { id: "meta", titleKey: "stageMeta", descKey: "stageMetaDesc" },
+  { id: "routing", titleKey: "stageRouting", descKey: "stageRoutingDesc" },
+  { id: "processing", titleKey: "stageProcessing", descKey: "stageProcessingDesc" },
+  { id: "connection", titleKey: "stageConnection", descKey: "stageConnectionDesc" },
+  { id: "resilience", titleKey: "stageResilience", descKey: "stageResilienceDesc" },
+  { id: "response", titleKey: "stageResponse", descKey: "stageResponseDesc" },
 ];
 
-export function ChannelForm<Entity>({
-  mode,
-  adapter,
-  agentId,
-}: ChannelFormProps<Entity>) {
+function stageConfigured(id: SectionId, form: ChannelFormShape): boolean {
+  switch (id) {
+    case "meta":
+    case "routing":
+    case "processing":
+      return true;
+    case "connection":
+      return !!(form.organization || form.api_version || form.proxy_url || form.disable_keepalive);
+    case "resilience":
+      return form.resilience !== "";
+    case "response":
+      return form.status_code_mapping !== "" || form.free || (form.price_ratio !== "" && form.price_ratio !== "1");
+  }
+}
+
+export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps<Entity>) {
   const t = useTranslations("channels");
   const router = useRouter();
   const { data: channelTypes = [] } = adapter.useTypes();
   const state = useChannelForm(mode, adapter);
-  const visibleSections = SECTIONS.filter(
-    (s) => !isSectionAllHidden(s.id, adapter.hiddenFields),
-  );
-  const [activeId, setActiveId] = useState<SectionId>(
-    (visibleSections[0]?.id ?? "basic") as SectionId,
-  );
+  const visibleStages = STAGES.filter((s) => !isSectionAllHidden(s.id, adapter.hiddenFields));
+  const [activeId, setActiveId] = useState<SectionId>((visibleStages[0]?.id ?? "meta") as SectionId);
 
   if (mode.kind === "edit" && state.notFound) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-lg text-muted-foreground">{t("channelNotFound")}</p>
-        <Button onClick={() => router.push(adapter.listPath)}>
-          {t("backToList")}
-        </Button>
+        <Button onClick={() => router.push(adapter.listPath)}>{t("backToList")}</Button>
       </div>
     );
   }
@@ -77,175 +71,64 @@ export function ChannelForm<Entity>({
     return (
       <div className="grid overflow-hidden rounded-lg border md:grid-cols-[200px_1fr]">
         <div className="hidden space-y-2 bg-muted/30 p-3 md:block">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-9" />
-          ))}
+          {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-9" />)}
         </div>
-        <div className="space-y-4 p-6">
-          <Skeleton className="h-6 w-1/3" />
-          <Skeleton className="h-9" />
-          <Skeleton className="h-9" />
-          <Skeleton className="h-9" />
-        </div>
+        <div className="space-y-4 p-6"><Skeleton className="h-6 w-1/3" /><Skeleton className="h-9" /><Skeleton className="h-9" /><Skeleton className="h-9" /></div>
       </div>
     );
   }
 
-  // Legacy mode keeps its own collapsible layout untouched.
   if (state.form.use_legacy_adaptor) {
     return (
       <div className="space-y-4">
         <div className="overflow-hidden rounded-lg border bg-background shadow-sm">
           <div className="p-6">
-            <LegacyChannelForm
-              form={state.form}
-              setForm={state.setForm}
-              channelTypes={channelTypes}
-              showStatus={mode.kind === "edit"}
-              agentId={agentId}
-              channelId={mode.kind === "edit" ? mode.id : undefined}
-            />
+            <LegacyChannelForm form={state.form} setForm={state.setForm} channelTypes={channelTypes} showStatus={mode.kind === "edit"} agentId={agentId} channelId={mode.kind === "edit" ? mode.id : undefined} />
           </div>
         </div>
-        <SaveBar
-          isDirty={state.isDirty}
-          dirtyFieldCount={state.dirtyFieldCount}
-          saving={state.saving}
-          onSave={state.submit}
-          onCancel={state.cancel}
-        />
+        <SaveBar isDirty={state.isDirty} dirtyFieldCount={state.dirtyFieldCount} saving={state.saving} onSave={state.submit} onCancel={state.cancel} />
       </div>
     );
   }
 
-  const renderSectionBody = (id: SectionId) => {
+  const channelId = mode.kind === "edit" ? mode.id : undefined;
+  const renderStagePanel = (id: SectionId): JSX.Element => {
     switch (id) {
-      case "basic":
-        return (
-          <BasicSection
-            form={state.form}
-            setForm={state.setForm}
-            channelTypes={channelTypes}
-            showStatus={mode.kind === "edit"}
-            hiddenFields={adapter.hiddenFields}
-            keyFieldHelpText={adapter.keyFieldHelpText}
-            entity={state.entity}
-          />
-        );
-      case "endpoints-protocol":
-        return (
-          <EndpointsProtocolSection form={state.form} setForm={state.setForm} />
-        );
-      case "models":
-        return (
-          <ModelsSection
-            form={state.form}
-            setForm={state.setForm}
-            agentId={agentId}
-            useModelsCatalog={adapter.useModelsCatalog}
-          />
-        );
-      case "protocol-behavior":
-        return (
-          <ProtocolBehaviorSection form={state.form} setForm={state.setForm} />
-        );
-      case "request-rewrite":
-        return (
-          <RequestRewriteSection
-            form={state.form}
-            setForm={state.setForm}
-            hiddenFields={adapter.hiddenFields}
-          />
-        );
-      case "route-roles":
-        return (
-          <RouteRolesSection
-            form={state.form}
-            setForm={state.setForm}
-            channelId={mode.kind === "edit" ? mode.id : undefined}
-          />
-        );
+      case "meta":
+        return <MetaSection<Entity> form={state.form} setForm={state.setForm} channelTypes={channelTypes} hiddenFields={adapter.hiddenFields} keyFieldHelpText={adapter.keyFieldHelpText} entity={state.entity} />;
+      case "routing":
+        return <RoutingSection form={state.form} setForm={state.setForm} agentId={agentId} useModelsCatalog={adapter.useModelsCatalog} hiddenFields={adapter.hiddenFields} showStatus={mode.kind === "edit"} channelId={channelId} />;
+      case "processing":
+        return <ProcessingSection form={state.form} setForm={state.setForm} channelId={channelId} hiddenFields={adapter.hiddenFields} scriptsHref={adapter.scriptsHref} />;
+      case "connection":
+        return <ConnectionSection form={state.form} setForm={state.setForm} hiddenFields={adapter.hiddenFields} />;
+      case "resilience":
+        return <ResilienceSection form={state.form} setForm={state.setForm} />;
+      case "response":
+        return <ResponseSection form={state.form} setForm={state.setForm} hiddenFields={adapter.hiddenFields} />;
     }
   };
 
-  const handleSelect = (v: string) => setActiveId(v as SectionId);
+  const stages: StageNavItem[] = visibleStages.map((s) => ({ id: s.id, titleKey: s.titleKey, configured: stageConfigured(s.id, state.form) }));
+  const activeStage = STAGES.find((s) => s.id === activeId) ?? STAGES[0];
+  // 上游协议必填:至少配置一个端点,否则禁止保存。
+  const endpointMissing = Object.keys(parseEndpoints(state.form.endpoints)).length === 0;
 
   return (
     <div className="space-y-4">
-      {/* Mobile section picker — independent of Tabs.Root, just shares activeId state. */}
-      <div className="sticky top-0 z-10 -mx-2 border-b bg-background/80 px-2 py-2 backdrop-blur md:hidden">
-        <Select value={activeId} onValueChange={handleSelect}>
-          <SelectTrigger className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {visibleSections.map((s) => (
-              <SelectItem key={s.id} value={s.id}>
-                <span className="mr-2 tabular-nums text-muted-foreground">
-                  {s.number}
-                </span>
-                {t(s.titleKey)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      {/* 移动端 strip 必须在带边框卡片之外:卡片有 overflow-hidden,会让 sticky 失效。 */}
+      <LifecycleStepperMobile stages={stages} activeId={activeId} onSelect={setActiveId} />
+      <div className="overflow-hidden rounded-lg border bg-background shadow-sm md:flex">
+        <LifecycleStepper stages={stages} activeId={activeId} onSelect={setActiveId} />
+        <div className="min-w-0 flex-1 space-y-6 p-6">
+          <header className="space-y-1">
+            <h2 className="text-lg font-semibold tracking-tight">{t(activeStage.titleKey)}</h2>
+            <p className="text-sm text-muted-foreground">{t(activeStage.descKey)}</p>
+          </header>
+          {renderStagePanel(activeId)}
+        </div>
       </div>
-
-      <div className="overflow-hidden rounded-lg border bg-background shadow-sm">
-        <Tabs
-          value={activeId}
-          onValueChange={handleSelect}
-          orientation="vertical"
-          className="gap-0"
-        >
-          {/* Desktop tab list (vertical). Hidden on mobile — picker handles switching there. */}
-          <TabsList
-            variant="line"
-            className="hidden h-auto w-[200px] shrink-0 flex-col items-stretch justify-start gap-0.5 border-r bg-muted/20 p-2 md:flex"
-          >
-            {visibleSections.map((s) => (
-              <TabsTrigger
-                key={s.id}
-                value={s.id}
-                className="justify-start font-normal data-[state=active]:font-medium"
-              >
-                <span className="mr-2 tabular-nums text-muted-foreground">
-                  {s.number}
-                </span>
-                {t(s.titleKey)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-
-          <div className="min-w-0 flex-1 overflow-x-hidden">
-            {visibleSections.map((s) => (
-              <TabsContent
-                key={s.id}
-                value={s.id}
-                className="mt-0 space-y-6 p-6 outline-hidden"
-              >
-                <header className="space-y-1">
-                  <h2 className="text-lg font-semibold tracking-tight">
-                    {t(s.titleKey)}
-                  </h2>
-                  <p className="text-sm text-muted-foreground">
-                    {t(s.descKey)}
-                  </p>
-                </header>
-                {renderSectionBody(s.id)}
-              </TabsContent>
-            ))}
-          </div>
-        </Tabs>
-      </div>
-
-      <SaveBar
-        isDirty={state.isDirty}
-        dirtyFieldCount={state.dirtyFieldCount}
-        saving={state.saving}
-        onSave={state.submit}
-        onCancel={state.cancel}
-      />
+      <SaveBar isDirty={state.isDirty} dirtyFieldCount={state.dirtyFieldCount} saving={state.saving} onSave={state.submit} onCancel={state.cancel} blockReason={endpointMissing ? t("encodeEndpointsRequired") : undefined} />
     </div>
   );
 }

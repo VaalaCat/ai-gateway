@@ -7,6 +7,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/limiter"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/ctxbuild"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/exec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
@@ -65,7 +66,7 @@ type Handler struct {
 //
 // bus 入参收窄自 app.Application（17 方法）→ app.EventBus（1 方法），
 // 因为 NewHandler 只需要 EventBus 一项；让测试 stub 不必满足 Application 全集。
-func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher state.Dispatcher, registry *inflight.Registry) *Handler {
+func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher state.Dispatcher, registry *inflight.Registry, permit limiter.PermitStore) *Handler {
 	h := &Handler{
 		Agent:    agentApp,
 		registry: registry,
@@ -79,6 +80,7 @@ func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher stat
 	var aff *affinity.Engine
 	var sleepReader exec.SleepReader
 	var runner exec.ResilientRunner
+	var gate state.RateGate
 	if agentApp != nil {
 		if c := agentApp.GetCache(); c != nil {
 			sleepReader = c
@@ -86,11 +88,20 @@ func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher stat
 			// 韧性默认参数走管理后台 Settings(非 config.yaml);Runner 每请求实时读取,
 			// admin 改后经同步即时生效。Breakers 注册表每 handler 建一次、跨请求复用。
 			runner = &resilience.Runner{Settings: c, Breakers: resilience.NewRegistry()}
+			// PermitStore 每 handler 建一次、跨请求复用（同 Breakers 注册表）。
+			// c 是 app.AgentCache，满足 limiter.Resolver（EffectiveRequest/AttemptLimiters）。
+			ps := permit
+			if ps == nil {
+				ps = limiter.NewMemStore()
+			}
+			rlGate := limiter.NewGate(c, ps)
+			rlGate.Settings = c
+			gate = rlGate
 		}
 	}
 
 	h.planner = plan.NewSolver(aff)
-	h.executor = &exec.Executor{Dispatcher: dispatcher, Sleep: sleepReader, Affinity: aff, Resilience: runner}
+	h.executor = &exec.Executor{Dispatcher: dispatcher, Sleep: sleepReader, Affinity: aff, Resilience: runner, Gate: gate}
 	h.publisher = publish.NewPublisher(bus, logger, aff)
 	return h
 }
@@ -132,8 +143,7 @@ func (h *Handler) Relay(c *gin.Context) {
 	}
 
 	if rctx.Inflight != nil {
-		rctx.Inflight.SetModel(rctx.Input.Model)
-		rctx.Inflight.SetStream(rctx.Input.IsStream)
+		rctx.Inflight.Update(publish.ProjectUsageEntry(rctx))
 	}
 
 	if err := h.planner.Solve(rctx); err != nil {
@@ -149,7 +159,17 @@ func (h *Handler) Relay(c *gin.Context) {
 		h.finishRelay(rctx)
 		return
 	}
+
+	if rctx.Inflight != nil {
+		rctx.Inflight.Update(publish.ProjectUsageEntry(rctx))
+	}
+
 	h.executor.Run(rctx)
+
+	if rctx.Inflight != nil {
+		rctx.Inflight.Update(publish.ProjectUsageEntry(rctx))
+	}
+
 	if rctx.State.Forwarded {
 		return
 	}
@@ -197,6 +217,13 @@ func (h *Handler) writeResponse(rctx *state.RelayContext) {
 		return
 	}
 	if rctx.State.Execution.Outcome.Written {
+		return
+	}
+	if rctx.State.StreamOpened {
+		// 流已开（哪怕只发过保活）：错误只能走 SSE error event，回不了 JSON。
+		if rctx.State.Err != nil {
+			limiter.WriteSSEError(rctx.Writer, string(rctx.Input.InboundProto), state.UserFacingErrorMessage(rctx))
+		}
 		return
 	}
 	if rctx.State.Err == nil {

@@ -89,6 +89,20 @@ type RelayState struct {
 	FailPhase Phase
 	Err       error
 	Forwarded bool
+	// StreamOpened：限流 wait 期间已为 stream 写出 SSE 头+保活帧（但未必写过真实内容）。
+	// 与 Execution.Outcome.Written（已写真实内容）区分：仅保活时仍可 fallback，
+	// 最终失败要走 SSE error event 而非 JSON。
+	StreamOpened bool
+	// RateLimit 累积本请求的限流决策，供 publish 落 usage_log；无命中时为 nil。
+	RateLimit *RateLimitRecord
+}
+
+// RateLimitRecord 累积本请求的限流决策，供 publish 落 usage_log。
+type RateLimitRecord struct {
+	Decision string // allow|queued|rejected（取最严）
+	WaitMs   int    // 累计排队
+	Reason   string // 人话原因
+	Hits     []models.RateLimitHit
 }
 
 // AttemptPlan 是 Planner 产出，Executor 按序遍历。
@@ -166,6 +180,25 @@ var (
 	ErrModelNotAllowed    = errors.New("model not allowed")
 	ErrRoutingFallback    = errors.New(consts.ErrNoChannelAvailable) // "no available channels"
 )
+
+// ErrInsufficientQuota 是 quota-gate filter 阶段的哨兵 error：
+// 整条候选链里只剩付费 channel、且用户余额不足以保留 → planner 返回该 sentinel，
+// StatusFromState 映射到 HTTP 402 Payment Required。
+var ErrInsufficientQuota = errors.New(consts.ErrInsufficientQuota)
+
+// ErrRateLimited：RequestLimiter 闸门拒绝或排队超时 → StatusFromState 映射 429。
+var ErrRateLimited = errors.New("rate limited")
+
+// RateGate 是 Executor 调用的限流闸门抽象（具体实现在 relay/limiter，DI 注入避免循环依赖）。
+type RateGate interface {
+	AcquireRequest(rctx *RelayContext) (RateLease, error)
+	AcquireAttempt(rctx *RelayContext, a Attempt) (RateLease, error)
+}
+
+// RateLease 是持有的限流名额，Release 归还（频率项 Release 为 no-op）。
+type RateLease interface {
+	Release()
+}
 
 // ApplyModelMapping resolves a model name through the channel's model mapping.
 // If no mapping is configured or the model is not mapped, the original name is returned.

@@ -187,6 +187,8 @@ export interface CacheEntityStats {
   capacity: number;
   load_errors: number;
   invalidations: number;
+  kind?: "lru" | "index";
+  extra?: Record<string, number>;
 }
 
 export interface AgentRuntime {
@@ -283,6 +285,23 @@ export interface UsageLog {
     duration_ms: number;
     has_trace?: boolean;
   }>;
+  rate_limit_decision?: string;
+  rate_limit_wait_ms?: number;
+  rate_limit_reason?: string;
+  rate_limit_hits?: RateLimitHit[];
+}
+
+/** 一条限流规则在某次请求里的命中明细，对应后端 models.RateLimitHit。 */
+export interface RateLimitHit {
+  limiter_id: number;
+  name: string;
+  /** metric/key_by，如 "concurrency/per_channel" */
+  dimension: string;
+  /** 命中的分桶键（后端 bucketOf），如 "c:channel:42"/"u:123"，排障定位到具体桶 */
+  bucket?: string;
+  /** allow | queued | rejected */
+  decision: string;
+  wait_ms: number;
 }
 
 export interface UsageLogTrace {
@@ -307,6 +326,7 @@ export interface BillingOverviewResponse {
   request_count: number;
   success_rate: number;
   active_tokens: number;
+  total_tokens: number;
 }
 
 export interface BillingTokenRow {
@@ -505,6 +525,7 @@ export interface TokenTemplate {
   created_at: number;
   updated_at: number;
   allowed_channel_ids?: number[];
+  allowed_group_ids?: number[];
 }
 
 export interface UserGroup {
@@ -591,6 +612,8 @@ export interface ClusterEntityStats {
   util: number | null;
   load_errors: number;
   invalidations: number;
+  kind?: "lru" | "index";
+  extra?: Record<string, number>;
 }
 
 export interface AgentCacheSnapshot {
@@ -605,20 +628,6 @@ export interface CacheStatsResponse {
   agents: AgentCacheSnapshot[];
   cluster: Record<string, ClusterEntityStats>;
 }
-
-/** cache entity 固定顺序，前后端共享；最后两项 routing 见 spec §3.4。 */
-export const CACHE_ENTITY_NAMES = [
-  "token",
-  "user",
-  "channel",
-  "model_config",
-  "agent",
-  "user_group",
-  "model_routing",
-  "user_routings",
-  "private_channels_visible",
-] as const;
-export type CacheEntityName = typeof CACHE_ENTITY_NAMES[number];
 
 export interface RoutingMember {
   ref: string;
@@ -714,4 +723,129 @@ export interface InviteCodeRow {
   note: string;
   created_at: number;
   updated_at: number;
+}
+
+export interface ChannelDataFlowStep {
+  key: string;
+  title: string;
+  config_ref: string;
+  active: boolean;
+  detail?: string;
+}
+
+export interface ChannelDataFlowResponse {
+  channel_id: number;
+  resolved_protocol: string;
+  steps: ChannelDataFlowStep[];
+}
+
+export type LimiterMetric = "concurrency" | "rate";
+export type LimiterKeyBy =
+  | "shared"
+  | "per_user"
+  | "per_group"
+  | "per_channel"
+  | "per_channel_user";
+export type LimiterChannelScope = "admin" | "private" | "all";
+export type LimiterAction = "reject" | "wait";
+export type LimiterTargetType = "global" | "channel" | "user_group" | "user";
+
+export interface RequestLimiter {
+  id: number;
+  name: string;
+  enabled: boolean;
+  metric: LimiterMetric;
+  capacity: number;
+  window_ms: number;
+  key_by: LimiterKeyBy;
+  channel_scope: LimiterChannelScope;
+  action: LimiterAction;
+  queue_size: number;
+  queue_time_ms: number;
+  priority: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface LimiterBinding {
+  id: number;
+  limiter_id: number;
+  target_type: LimiterTargetType;
+  target_id: number;
+  enabled: boolean;
+  created_at: number;
+}
+
+export interface UsageView {
+  user_id: number;
+  token_name?: string;
+  channel_id: number;
+  private_channel_id?: number;
+  owner_type?: string;
+  model_name: string;
+  upstream_model?: string;
+  inbound_protocol?: string;
+  outbound_protocol?: string;
+  is_stream: boolean;
+  status?: number;
+  rate_limit_decision?: string;
+  rate_limit_wait_ms?: number;
+  rate_limit_reason?: string;
+  // 以下字段已在 master→浏览器的 inflight 响应里（Snapshot.View 即完整 UsageLogEntry），
+  // 此前只是没在前端类型里声明。mid-flight 为部分值，故全部可选。
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  first_response_ms?: number;
+  client_ip?: string;
+  duration?: number;
+  routing_name?: string;
+  fallback_chain?: UsageLog["fallback_chain"];
+  rate_limit_hits?: RateLimitHit[];
+}
+export interface InflightSnapshot {
+  id: number;
+  req_id: string;
+  view: UsageView;
+  stage: string;
+  elapsed_ms: number;
+  queued_ms: number;
+  queued_reason: string;
+}
+export interface GlobalInflightRow extends InflightSnapshot {
+  agent_id: number;
+  agent_name: string;
+}
+export interface AllInflightResponse {
+  requests: GlobalInflightRow[];
+  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+}
+export interface LimiterBucketRow {
+  limiter_id: number;
+  name: string;
+  bucket: string;
+  metric: string;
+  key_by: string;
+  occupied: number;
+  capacity: number;
+  waiters: number;
+  window_end_ms: number;
+  per_agent: { agent_id: number; agent_name: string; occupied: number; capacity: number; waiters: number }[];
+}
+export interface LimiterUsageResponse {
+  buckets: LimiterBucketRow[];
+  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+}
+export interface AgentHealthRow {
+  agent_id: string;
+  requests: number;
+  failed: number;
+  error_rate: number;
+  qps: number;
+  window_secs: number;
+}
+export interface RecentHealthResponse {
+  agents: AgentHealthRow[];
+  window_secs: number;
 }

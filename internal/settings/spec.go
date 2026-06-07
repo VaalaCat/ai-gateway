@@ -31,4 +31,31 @@ type AgentSettings struct {
 
 	// RetryMaxChannels 是跨 channel 降级轮数(attempt 总预算);plan 按此截断候选链。
 	RetryMaxChannels int `setting:"retry_max_channels,5,1,100"`
+
+	// BYOKBillingMode 同步自全局 byok_billing_mode,供闸门判定 BYOK 渠道是否扣额度。
+	BYOKBillingMode string `setting:"byok_billing_mode,free"`
+
+	// MinQuotaReserve 付费渠道放行所需的最低剩余额度;Quota<=此值拦付费、只放免费。
+	MinQuotaReserve int64 `setting:"min_quota_reserve,0,0,9223372036854775807"`
+
+	// 请求级限流器（RequestLimiter）
+	RateLimiterEnabled int `setting:"rate_limiter_enabled,1,0,1"`        // 全局总开关，0=整体 bypass
+	SSEKeepaliveMs     int `setting:"sse_keepalive_ms,15000,1000,60000"` // stream 排队保活帧间隔
+	QueueTimeMs        int `setting:"queue_time_ms,120000,0,600000"`     // 默认最长排队（limiter QueueTimeMs=0 时取此）
+
+	// 集群健康状态阈值（前端红绿灯 / 管理员后台可配）
+	HealthErrorRateYellowPct  int `setting:"health_error_rate_yellow_pct,2,0,100"`    // 错误率黄阈(%)
+	HealthErrorRateRedPct     int `setting:"health_error_rate_red_pct,10,0,100"`      // 错误率红阈(%)
+	HealthSaturationYellowPct int `setting:"health_saturation_yellow_pct,80,0,100"`   // 限流饱和黄阈(%)
+	HealthSaturationRedPct    int `setting:"health_saturation_red_pct,95,0,100"`      // 限流饱和红阈(%)
+	HealthOfflineSeconds      int `setting:"health_offline_seconds,90,10,3600"`       // 超此 last_seen 算掉线
+	HealthWindowSeconds       int `setting:"health_window_seconds,300,60,3600"`       // 错误率/QPS 近窗
+
+	// 实体缓存 stale-while-revalidate(详见 2026-06-06-ws-call-hang-swr-cache spec)
+	CacheLoadTimeoutMs        int `setting:"cache_load_timeout_ms,5000,1000,60000"`            // 冷 miss 阻塞加载超时
+	CacheRefreshAfterMs       int `setting:"cache_refresh_after_ms,172800000,0,604800000"`     // 条目多旧触发后台刷新(48h),0=关
+	CacheRefreshTimeoutMs     int `setting:"cache_refresh_timeout_ms,5000,1000,60000"`         // 单次后台刷新尝试超时
+	CacheRefreshMaxRetries    int `setting:"cache_refresh_max_retries,3,0,10"`                 // 单次触发内重试次数
+	CacheRefreshBackoffBaseMs int `setting:"cache_refresh_backoff_base_ms,200,0,60000"`        // 退避初始
+	CacheRefreshBackoffMaxMs  int `setting:"cache_refresh_backoff_max_ms,5000,0,60000"`        // 退避上限
 }

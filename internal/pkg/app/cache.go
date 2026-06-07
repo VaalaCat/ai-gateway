@@ -41,6 +41,10 @@ type Store interface {
 	RebuildModelIndex()
 	GetAllModelNames() []string
 
+	// --- User 操作 ---
+	GetUser(ctx context.Context, id uint) *protocol.SyncedUser
+	SetUserQuota(id uint, quota int64) // 更新已缓存 user 的 Quota;不在缓存则忽略
+
 	// --- BYOK 私有 channel ---
 	GetVisiblePrivateChannelsForUser(userID uint, model string) []*protocol.SyncedPrivateChannel
 	ListVisibleBYOKModelNamesForUser(userID uint) []string // 列举 user 全部 enabled BYOK channel 的 Models 并集（去重）

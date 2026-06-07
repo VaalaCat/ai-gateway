@@ -82,6 +82,42 @@ func (s *Settler) Settle(ctx context.Context, agentID string, logs []protocol.Us
 			)
 		}
 	}
+	s.publishQuotaSync(ctx, agentID, logs)
+}
+
+// publishQuotaSync 结算完一批 usage 后，把受影响 user 的最新 Quota 定向回送给来源
+// agent，让活跃 user 的本地缓存余额保持新鲜。冷门 user 走 token-load 旁路负载刷新，
+// 不依赖此通道。
+func (s *Settler) publishQuotaSync(ctx context.Context, agentID string, logs []protocol.UsageLogEntry) {
+	seen := map[uint]bool{}
+	var ids []uint
+	for _, e := range logs {
+		if e.UserID != 0 && !seen[e.UserID] {
+			seen[e.UserID] = true
+			ids = append(ids, e.UserID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	q := dao.NewAdminQuery(dao.NewContext(s.App))
+	users := make([]protocol.SyncedUser, 0, len(ids))
+	for _, id := range ids {
+		u, err := q.User().GetByID(id)
+		if err != nil || u == nil {
+			continue
+		}
+		gid := u.GroupID
+		if gid == 0 {
+			gid = 1
+		}
+		users = append(users, protocol.SyncedUser{ID: u.ID, GroupID: gid, Quota: u.Quota})
+	}
+	if len(users) > 0 {
+		if err := events.PublishUserQuotaSync(ctx, s.Bus, protocol.UserQuotaSync{AgentID: agentID, Users: users}); err != nil {
+			s.Logger.Warn("publish user.quota_synced failed", zap.Error(err))
+		}
+	}
 }
 
 func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.UsageLogEntry) error {
@@ -205,6 +241,10 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		UpstreamDecodeMs:   entry.UpstreamDecodeMs,
 		ClientEncodeMs:     entry.ClientEncodeMs,
 		FallbackChain:      datatypes.NewJSONSlice(entry.FallbackChain),
+		RateLimitDecision:  entry.RateLimitDecision,
+		RateLimitWaitMs:    entry.RateLimitWaitMs,
+		RateLimitReason:    entry.RateLimitReason,
+		RateLimitHits:      datatypes.NewJSONSlice(entry.RateLimitHits),
 	}
 
 	var depleted bool

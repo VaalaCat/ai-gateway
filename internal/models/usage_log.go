@@ -10,7 +10,7 @@ type UsageLog struct {
 	PrivateChannelID uint    `gorm:"index;default:0" json:"private_channel_id"` // 0 = 非 BYOK 请求
 	OwnerType        string  `gorm:"size:8;default:'admin'" json:"owner_type"`  // "admin" | "private"
 	AgentID          string  `gorm:"index;size:64" json:"agent_id"`
-	ModelName        string  `gorm:"size:128" json:"model_name"`
+	ModelName        string  `gorm:"size:128;index" json:"model_name"`
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
 	InputCost        int64   `json:"input_cost"`
@@ -62,4 +62,10 @@ type UsageLog struct {
 	UpstreamDispatchMs int                                `json:"upstream_dispatch_ms"`
 	UpstreamDecodeMs   int                                `json:"upstream_decode_ms"`
 	ClientEncodeMs     int                                `json:"client_encode_ms"`
+
+	// 请求级限流决策快照：Decision(allow|queued|rejected) / 累计等待 / 人话原因 / 命中明细。
+	RateLimitDecision string                            `gorm:"size:16;index" json:"rate_limit_decision"`
+	RateLimitWaitMs   int                               `json:"rate_limit_wait_ms"`
+	RateLimitReason   string                            `gorm:"size:256" json:"rate_limit_reason"`
+	RateLimitHits     datatypes.JSONSlice[RateLimitHit] `gorm:"type:text" json:"rate_limit_hits"`
 }

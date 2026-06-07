@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
-import type { Channel, ChannelTypeMeta, ChannelTestResponse, ChannelTestParams, PaginatedResponse, PaginatedParams } from "@/lib/types";
+import type { Channel, ChannelTypeMeta, ChannelTestResponse, ChannelTestParams, PaginatedResponse, PaginatedParams, ChannelDataFlowResponse } from "@/lib/types";
 
 interface QueryOptions {
   enabled?: boolean;
@@ -73,5 +73,13 @@ export function useDeleteChannel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["channels"] });
     },
+  });
+}
+
+export function useChannelDataFlow(id: number, options: QueryOptions = {}) {
+  return useQuery({
+    queryKey: ["channel-dataflow", id],
+    queryFn: () => api.get<ChannelDataFlowResponse>(`/admin/channels/${id}/dataflow`),
+    enabled: (options.enabled ?? true) && Number.isFinite(id) && id > 0,
   });
 }

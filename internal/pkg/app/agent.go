@@ -29,6 +29,8 @@ type AgentApplication interface {
 type AgentCache interface {
 	Store
 	MatchRoute(tokenID uint, model string, channelIDs []uint) *models.AgentRoute
+	EffectiveRequestLimiters(userID, groupID uint) []*models.RequestLimiter
+	EffectiveAttemptLimiters(userID, groupID uint, src string, channelID uint) []*models.RequestLimiter
 }
 
 // RouteForwarder 抽象 agent → agent 转发能力。

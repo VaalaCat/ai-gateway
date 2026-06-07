@@ -483,7 +483,17 @@ func (c *ResponsesCodec) decodeStream(resp *http.Response, ch chan<- codec.Event
 			}
 		}
 
-		switch currentEvent {
+		// Some upstreams omit the SSE `event:` line and carry the event type only in
+		// the data payload's `type` field (the OpenAI Responses spec puts `type` in
+		// the payload; the `event:` line is redundant). Fall back to raw.Type when no
+		// `event:` line was seen. When an `event:` line IS present it wins, so standard
+		// upstreams keep their exact prior behavior.
+		effectiveEvent := currentEvent
+		if effectiveEvent == "" {
+			effectiveEvent = raw.Type
+		}
+
+		switch effectiveEvent {
 		case sseconsts.ResponseCreated:
 			createdEvent := codec.Event{
 				Type: codec.EventStreamStart,

@@ -36,6 +36,7 @@ import { EntityLabel } from "@/components/business/entity-label";
 import { DateCell } from "@/components/business/date-cell";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { PAGE_SIZES } from "@/lib/constants";
+import { copyTextWithFeedback } from "@/lib/utils/clipboard";
 import { usePublicConfig } from "@/lib/api/system";
 import { useAuth } from "@/lib/auth";
 import {
@@ -186,10 +187,10 @@ function InvitesPageInner() {
   };
 
   const copyLink = (code: string) => {
-    navigator.clipboard
-      .writeText(`${window.location.origin}/register?invite=${code}`)
-      .then(() => toast.success(t("copiedLink")))
-      .catch(() => toast.error(t("copyFailed")));
+    copyTextWithFeedback(`${window.location.origin}/register?invite=${code}`, {
+      success: t("copiedLink"),
+      error: t("copyFailed"),
+    });
   };
 
   const columns = useMemo<ColumnDef<InviteCodeRow>[]>(() => {

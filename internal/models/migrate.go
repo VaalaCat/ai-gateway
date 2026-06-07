@@ -16,6 +16,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&Setting{},
 		&UsageLogTrace{},
 		&AgentRoute{},
+		&RequestLimiter{},
+		&LimiterBinding{},
 		&TokenTemplate{},
 		&UserGroup{},
 		&OAuthProvider{},

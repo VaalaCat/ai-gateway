@@ -40,6 +40,7 @@ type Executor struct {
 	Sleep      SleepReader      // 可为 nil,空时跳过 sleep 行为(向后兼容老 test stub)
 	Affinity   *affinity.Engine // 可为 nil：nil 时不剔除粘性
 	Resilience ResilientRunner  // 可为 nil：nil 时裸 dispatch（向后兼容老 test stub）
+	Gate       state.RateGate   // 可为 nil：nil 时不限流（向后兼容老 test stub）
 }
 
 // Run 主循环:每个 attempt 失败时按"3 类例外立即返回 / 否则 sleep + 推进"决策。
@@ -56,6 +57,14 @@ func (e *Executor) Run(rctx *state.RelayContext) {
 	rec := rctx.State.Recorder
 	out := &rctx.State.Execution
 	attempts := rctx.State.Plan.Attempts
+	if e.Gate != nil {
+		reqLease, err := e.Gate.AcquireRequest(rctx)
+		if err != nil {
+			out.Err = err // handler 会把 Execution.Err 升成 State.Err → 429
+			return
+		}
+		defer reqLease.Release()
+	}
 	for idx, a := range attempts {
 		if maybeForward(rctx, idx, &rctx.State.Plan) {
 			rctx.State.Forwarded = true
@@ -130,6 +139,14 @@ func (e *Executor) Run(rctx *state.RelayContext) {
 // 返回结果与该候选实际 dispatch 次数（含内层重试，最少 1）。
 func (e *Executor) runAttempt(rctx *state.RelayContext, a state.Attempt) (state.AttemptResult, int) {
 	dispatches := 0
+	if e.Gate != nil {
+		attLease, err := e.Gate.AcquireAttempt(rctx, a)
+		if err != nil {
+			// 尝试级拒绝：当作该渠道一次失败，让主循环 fallback 下一渠道。
+			return state.AttemptResult{Err: err}, dispatches
+		}
+		defer attLease.Release() // 该 attempt(含内层 resilience 重试)结束即还
+	}
 	dispatch := func() state.AttemptResult {
 		rctx.State.Recorder.ResetAttempt() // 每次内层 dispatch 前重置 attempt 级 trace 状态,避免失败→重试成功时旧失败泄漏
 		dispatches++

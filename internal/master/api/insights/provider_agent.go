@@ -160,7 +160,7 @@ func agentBucketAggregate(ctx Context, agentID string, r dao.ObsRange) (agentBuc
 		Select(`COALESCE(SUM(request_count), 0) AS requests,
 			COALESCE(SUM(success_count), 0) AS success,
 			COALESCE(SUM(total_cost), 0) AS cost,
-			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens), 0) AS tokens`).
+			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens`).
 		Scan(&a).Error
 	return a, err
 }
@@ -186,10 +186,10 @@ func agentBuckets(ctx Context, agentID string, r dao.ObsRange) ([]dao.TimeBucket
 	}
 	selectCols := groupCols + `,
 		COALESCE(SUM(request_count), 0) AS requests,
-		COALESCE(SUM(prompt_tokens) + SUM(completion_tokens), 0) AS tokens,
+		COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens,
 		COALESCE(SUM(total_cost), 0) AS cost`
 	if r.Gran == dao.GranDay {
-		selectCols = "date, 0 AS hour,\n\t\tCOALESCE(SUM(request_count), 0) AS requests,\n\t\tCOALESCE(SUM(prompt_tokens) + SUM(completion_tokens), 0) AS tokens,\n\t\tCOALESCE(SUM(total_cost), 0) AS cost"
+		selectCols = "date, 0 AS hour,\n\t\tCOALESCE(SUM(request_count), 0) AS requests,\n\t\tCOALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens,\n\t\tCOALESCE(SUM(total_cost), 0) AS cost"
 	}
 	var rows []row
 	if err := db.Model(&models.UsageHourlyBucket{}).
@@ -235,7 +235,7 @@ func agentBreakdownByModel(ctx Context, agentID string, r dao.ObsRange) ([]dao.L
 		Select(`model_name AS name,
 			COALESCE(SUM(total_cost), 0) AS cost,
 			COALESCE(SUM(request_count), 0) AS requests,
-			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens), 0) AS tokens`).
+			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens`).
 		Group("model_name").
 		Order("cost DESC").
 		Limit(10).
@@ -273,7 +273,7 @@ func agentBreakdownByChannel(ctx Context, agentID string, r dao.ObsRange) ([]dao
 			COALESCE(MIN(NULLIF(channel_name, '')), '') AS name,
 			COALESCE(SUM(total_cost), 0) AS cost,
 			COALESCE(SUM(request_count), 0) AS requests,
-			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens), 0) AS tokens`).
+			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens`).
 		Group("channel_id").
 		Order("cost DESC").
 		Limit(10).

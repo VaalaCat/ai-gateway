@@ -122,7 +122,7 @@ func TestInsights_Admin_PopulatesStackAndSaving(t *testing.T) {
 	}
 }
 
-func TestInsights_User_EmptyStackAndSaving(t *testing.T) {
+func TestInsights_User_ReadsUsageLogPath_NoBucketLeak(t *testing.T) {
 	h, db, application := newInsightsTestCtx(t)
 	start, end := insightsDayRange()
 	date := time.Unix(start, 0).UTC().Format("2006-01-02")
@@ -133,7 +133,10 @@ func TestInsights_User_EmptyStackAndSaving(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insights user: %v", err)
 	}
-	// Phase 1 admin-only: user scope 返回空 stacked,无 series。
+	// 非 admin 的 stacked/cache 走 usage_logs 路径(不是 usage_hourly_buckets)。
+	// 这里只 seed 了 uhb、没有该用户的 usage_logs 数据,故应为空 —— 验证 admin 的 uhb
+	// 数据不会泄漏进 per-user 路径。用户能看到自己 usage_logs 数据的正向行为,由
+	// dao 层 TestCostTrendStacked_AdminUserFilter_UsesUsageLog / _UserFilter_HourGran 覆盖。
 	if len(resp.CostTrendStacked.Buckets) != 0 {
 		t.Fatalf("user: CostTrendStacked.Buckets = %d, want 0", len(resp.CostTrendStacked.Buckets))
 	}
@@ -167,5 +170,67 @@ func TestInsights_RangeOutOfBounds_Returns400(t *testing.T) {
 	}
 	if apiErr.Code != "RangeOutOfBounds" {
 		t.Fatalf("Code = %q, want RangeOutOfBounds", apiErr.Code)
+	}
+}
+
+// TestInsights_ModelFilter_CacheSavingIsModelAgnostic 验证 spec §4:
+// 带 model 筛选时, CacheSaving 仍反映所有 model 的数据(缓存命中卡不随模型过滤)。
+func TestInsights_ModelFilter_CacheSavingIsModelAgnostic(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	date := time.Unix(start, 0).UTC().Format("2006-01-02")
+	// gpt-4o: cache_read=30, prompt=100; claude-3: cache_read=10, prompt=100
+	seedInsightsBucket(t, db, date, 10, "gpt-4o", 500, 100, 30, 200)
+	seedInsightsBucket(t, db, date, 11, "claude-3", 300, 100, 10, 150)
+
+	// 请求带 model=gpt-4o 筛选
+	ctx := makeInsightsCtx(application, 1, true)
+	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("Insights with model filter: %v", err)
+	}
+
+	// CacheSaving 必须反映两个 model(sum cache_read=40, sum prompt=200)
+	// hit_ratio = 40/240 ≈ 0.1666…
+	wantHit := 40.0 / 240.0
+	if resp.CacheSaving.HitRatio < wantHit-1e-6 || resp.CacheSaving.HitRatio > wantHit+1e-6 {
+		t.Fatalf("CacheSaving.HitRatio = %f, want %f (model-agnostic)", resp.CacheSaving.HitRatio, wantHit)
+	}
+	if resp.CacheSaving.SavedTokens != 40 {
+		t.Fatalf("CacheSaving.SavedTokens = %d, want 40 (includes claude-3 cache)", resp.CacheSaving.SavedTokens)
+	}
+
+	// CostTrendStacked 只含 gpt-4o
+	if len(resp.CostTrendStacked.SeriesOrder) != 1 || resp.CostTrendStacked.SeriesOrder[0] != "gpt-4o" {
+		t.Fatalf("CostTrendStacked.SeriesOrder = %v, want [gpt-4o]", resp.CostTrendStacked.SeriesOrder)
+	}
+}
+
+func TestInsights_Trend_IncludesCacheTokens(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	date := time.Unix(start, 0).UTC().Format("2006-01-02")
+	if err := db.Create(&models.UsageHourlyBucket{
+		Date: date, Hour: 10, ChannelID: 5, ChannelName: "ch-5", ModelName: "gpt-4o",
+		AgentID: "ag-1", OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
+		PromptTokens: 100, CompletionTokens: 200, CacheReadTokens: 30, CacheWriteTokens: 40,
+		TotalCost: 10,
+	}).Error; err != nil {
+		t.Fatalf("seed bucket: %v", err)
+	}
+	ctx := makeInsightsCtx(application, 1, true)
+	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day"})
+	if err != nil {
+		t.Fatalf("Insights: %v", err)
+	}
+	if len(resp.Trend) == 0 {
+		t.Fatalf("Trend empty; want >=1 bucket")
+	}
+	var tokens int64
+	for _, b := range resp.Trend {
+		tokens += b.Tokens
+	}
+	if tokens != 370 {
+		t.Fatalf("trend tokens = %d, want 370 (含 cache)", tokens)
 	}
 }

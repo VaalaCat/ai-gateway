@@ -138,6 +138,10 @@ export default function SystemMaintenancePage() {
   const [retryBackoffMaxInput, setRetryBackoffMaxInput] = useState<string | null>(null);
   const [breakerThresholdInput, setBreakerThresholdInput] = useState<string | null>(null);
   const [breakerCooldownInput, setBreakerCooldownInput] = useState<string | null>(null);
+  const [minQuotaReserveInput, setMinQuotaReserveInput] = useState<string | null>(null);
+  const [rateLimiterEnabledInput, setRateLimiterEnabledInput] = useState<boolean | null>(null);
+  const [sseKeepaliveInput, setSseKeepaliveInput] = useState<string | null>(null);
+  const [queueTimeInput, setQueueTimeInput] = useState<string | null>(null);
   const [cleanupTarget, setCleanupTarget] = useState("traces");
   const [retainDays, setRetainDays] = useState(30);
   const [showPreview, setShowPreview] = useState(false);
@@ -236,6 +240,29 @@ export default function SystemMaintenancePage() {
   const displayBreakerCooldown = breakerCooldownInput ?? String(currentBreakerCooldown);
   const breakerCooldownHasChanges = displayBreakerCooldown !== String(currentBreakerCooldown);
 
+  const currentMinQuotaReserve = settings?.settings?.min_quota_reserve
+    ? Number(settings.settings.min_quota_reserve)
+    : 0;
+  const displayMinQuotaReserve = minQuotaReserveInput ?? String(currentMinQuotaReserve);
+  const minQuotaReserveHasChanges = displayMinQuotaReserve !== String(currentMinQuotaReserve);
+
+  // 请求级限流的三项全局设置。rate_limiter_enabled 后端存 "0"/"1"（默认 1）。
+  const currentRateLimiterEnabled = settings?.settings?.rate_limiter_enabled !== "0";
+  const displayRateLimiterEnabled = rateLimiterEnabledInput ?? currentRateLimiterEnabled;
+  const rateLimiterEnabledHasChanges = displayRateLimiterEnabled !== currentRateLimiterEnabled;
+
+  const currentSseKeepalive = settings?.settings?.sse_keepalive_ms
+    ? Number(settings.settings.sse_keepalive_ms)
+    : 15000;
+  const displaySseKeepalive = sseKeepaliveInput ?? String(currentSseKeepalive);
+  const sseKeepaliveHasChanges = displaySseKeepalive !== String(currentSseKeepalive);
+
+  const currentQueueTime = settings?.settings?.queue_time_ms
+    ? Number(settings.settings.queue_time_ms)
+    : 120000;
+  const displayQueueTime = queueTimeInput ?? String(currentQueueTime);
+  const queueTimeHasChanges = displayQueueTime !== String(currentQueueTime);
+
   const currentAutoCreate = settings?.settings?.oauth_auto_create === "true";
   const [autoCreateInput, setAutoCreateInput] = useState<boolean | null>(null);
   const displayAutoCreate = autoCreateInput ?? currentAutoCreate;
@@ -272,6 +299,10 @@ export default function SystemMaintenancePage() {
     retryBackoffMaxHasChanges ||
     breakerThresholdHasChanges ||
     breakerCooldownHasChanges ||
+    minQuotaReserveHasChanges ||
+    rateLimiterEnabledHasChanges ||
+    sseKeepaliveHasChanges ||
+    queueTimeHasChanges ||
     pricingPriorityHasChanges ||
     pricingThresholdHasChanges;
 
@@ -364,6 +395,28 @@ export default function SystemMaintenancePage() {
       }
       updates.breaker_cooldown_ms = String(n);
     }
+    if (minQuotaReserveHasChanges) {
+      updates.min_quota_reserve = String(Number(minQuotaReserveInput) || 0);
+    }
+    if (rateLimiterEnabledHasChanges) {
+      updates.rate_limiter_enabled = displayRateLimiterEnabled ? "1" : "0";
+    }
+    if (sseKeepaliveHasChanges) {
+      const n = Number(sseKeepaliveInput);
+      if (!Number.isFinite(n) || n < 1000 || n > 60000) {
+        toast.error(t("sseKeepaliveRangeError"));
+        return;
+      }
+      updates.sse_keepalive_ms = String(n);
+    }
+    if (queueTimeHasChanges) {
+      const n = Number(queueTimeInput);
+      if (!Number.isFinite(n) || n < 0 || n > 600000) {
+        toast.error(t("queueTimeRangeError"));
+        return;
+      }
+      updates.queue_time_ms = String(n);
+    }
     if (affinityHasChanges) {
       updates.affinity_enabled = displayAffinityEnabled ? "1" : "0";
       updates.affinity_ttl_sec = String(parseInt(displayAffinityTTL, 10) || 300);
@@ -397,6 +450,10 @@ export default function SystemMaintenancePage() {
           setRetryBackoffMaxInput(null);
           setBreakerThresholdInput(null);
           setBreakerCooldownInput(null);
+          setMinQuotaReserveInput(null);
+          setRateLimiterEnabledInput(null);
+          setSseKeepaliveInput(null);
+          setQueueTimeInput(null);
           setPricingPriorityInput(null);
           setPricingThresholdInput(null);
         },
@@ -574,6 +631,54 @@ export default function SystemMaintenancePage() {
                 onChange={setBreakerCooldownInput}
               />
             </div>
+          </SettingsGroup>
+
+          <Separator />
+
+          {/* 额度管控 */}
+          <SettingsGroup title={t("secQuotaGate")}>
+            <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+              <NumField
+                label={t("minQuotaReserve")}
+                desc={t("minQuotaReserveDesc")}
+                value={displayMinQuotaReserve}
+                min={0}
+                max={1000000000}
+                onChange={setMinQuotaReserveInput}
+              />
+            </div>
+          </SettingsGroup>
+
+          <Separator />
+
+          {/* 请求级限流 */}
+          <SettingsGroup title={t("secRateLimiter")}>
+            <SwitchRow
+              label={t("rateLimiterEnabled")}
+              desc={t("rateLimiterEnabledDesc")}
+              checked={displayRateLimiterEnabled}
+              onChange={setRateLimiterEnabledInput}
+            />
+            {displayRateLimiterEnabled && (
+              <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+                <NumField
+                  label={t("sseKeepalive")}
+                  desc={t("sseKeepaliveDesc")}
+                  value={displaySseKeepalive}
+                  min={1000}
+                  max={60000}
+                  onChange={setSseKeepaliveInput}
+                />
+                <NumField
+                  label={t("queueTime")}
+                  desc={t("queueTimeDesc")}
+                  value={displayQueueTime}
+                  min={0}
+                  max={600000}
+                  onChange={setQueueTimeInput}
+                />
+              </div>
+            )}
           </SettingsGroup>
 
           <Separator />

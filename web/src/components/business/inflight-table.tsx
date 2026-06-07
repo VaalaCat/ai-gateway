@@ -24,7 +24,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { CopyableText } from "@/components/business/copyable-text";
-import type { InflightSnapshot } from "@/lib/api/agents";
+import { EntityLabel } from "@/components/business/entity-label";
+import type { InflightSnapshot } from "@/lib/types";
 
 export interface InflightRow extends InflightSnapshot {
   agent_id?: number;
@@ -35,10 +36,11 @@ interface InflightTableProps {
   rows: InflightRow[];
   showAgent?: boolean;
   onInterrupt?: (row: InflightRow) => void;
+  onSelectRow?: (row: InflightRow) => void;
   emptyText: string;
 }
 
-export function InflightTable({ rows, showAgent, onInterrupt, emptyText }: InflightTableProps) {
+export function InflightTable({ rows, showAgent, onInterrupt, onSelectRow, emptyText }: InflightTableProps) {
   const t = useTranslations("agents");
   const [target, setTarget] = useState<InflightRow | null>(null);
 
@@ -55,6 +57,7 @@ export function InflightTable({ rows, showAgent, onInterrupt, emptyText }: Infli
             <TableHead className="h-8">{t("inflightColModel")}</TableHead>
             <TableHead className="h-8">{t("inflightColChannel")}</TableHead>
             <TableHead className="h-8">{t("inflightColStage")}</TableHead>
+            <TableHead className="h-8">{t("inflightColQueue")}</TableHead>
             <TableHead className="h-8">{t("inflightColElapsed")}</TableHead>
             <TableHead className="h-8">{t("inflightColStream")}</TableHead>
             <TableHead className="h-8">{t("inflightColReqId")}</TableHead>
@@ -66,14 +69,27 @@ export function InflightTable({ rows, showAgent, onInterrupt, emptyText }: Infli
             const elapsedSec = (row.elapsed_ms / 1000).toFixed(1);
             const isSlow = row.elapsed_ms > 60000;
             return (
-              <TableRow key={`${row.agent_id ?? 0}-${row.id}`}>
+              <TableRow
+                key={`${row.agent_id ?? 0}-${row.id}`}
+                className={onSelectRow ? "cursor-pointer hover:bg-muted/30" : undefined}
+                onClick={onSelectRow ? () => onSelectRow(row) : undefined}
+              >
                 {showAgent && <TableCell className="py-1.5">{row.agent_name}</TableCell>}
-                <TableCell className="py-1.5">{row.model}</TableCell>
+                <TableCell className="py-1.5">{row.view.model_name}</TableCell>
                 <TableCell className="py-1.5">
-                  <span>{row.channel_name}</span>
-                  <span className="ml-1 text-muted-foreground">#{row.channel_id}</span>
+                  <EntityLabel entity="channel" id={row.view.channel_id} />
                 </TableCell>
                 <TableCell className="py-1.5">{row.stage}</TableCell>
+                <TableCell className="py-1.5">
+                  {row.queued_ms > 0 ? (
+                    <Badge variant="outline" className="text-xs px-1.5 py-0 border-amber-500/60 text-amber-600">
+                      {t("inflightQueuedFor", { s: (row.queued_ms / 1000).toFixed(1) })}
+                      {row.queued_reason ? ` · ${row.queued_reason}` : ""}
+                    </Badge>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
                 <TableCell className="py-1.5">
                   {isSlow ? (
                     <span className="text-destructive font-medium">
@@ -84,7 +100,7 @@ export function InflightTable({ rows, showAgent, onInterrupt, emptyText }: Infli
                   )}
                 </TableCell>
                 <TableCell className="py-1.5">
-                  {row.is_stream ? (
+                  {row.view.is_stream ? (
                     <Badge variant="secondary" className="text-xs px-1.5 py-0">
                       {t("inflightStreamYes")}
                     </Badge>
@@ -92,11 +108,11 @@ export function InflightTable({ rows, showAgent, onInterrupt, emptyText }: Infli
                     <span className="text-muted-foreground">{t("inflightStreamNo")}</span>
                   )}
                 </TableCell>
-                <TableCell className="py-1.5 font-mono">
+                <TableCell className="py-1.5 font-mono" onClick={(e) => e.stopPropagation()}>
                   <CopyableText text={row.req_id} />
                 </TableCell>
                 {onInterrupt && (
-                  <TableCell className="py-1.5">
+                  <TableCell className="py-1.5" onClick={(e) => e.stopPropagation()}>
                     <Button
                       variant="ghost"
                       size="sm"

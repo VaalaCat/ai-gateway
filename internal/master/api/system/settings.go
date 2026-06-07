@@ -168,17 +168,17 @@ type UpdateSettingsRequest struct {
 func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (SettingsResponse, error) {
 	agentKeys := settings.Defaults()
 	for key, value := range req.Settings {
-		if _, ok := agentKeys[key]; ok {
+		_, isAgent := agentKeys[key]
+		def, isDef := settingDefs[key]
+		if !isAgent && !isDef {
+			return SettingsResponse{}, api.BadRequestError("unknown setting: "+key, nil)
+		}
+		if isAgent {
 			if err := settings.Validate(key, value); err != nil {
 				return SettingsResponse{}, api.BadRequestError(err.Error(), nil)
 			}
-			continue
 		}
-		def, ok := settingDefs[key]
-		if !ok {
-			return SettingsResponse{}, api.BadRequestError("unknown setting: "+key, nil)
-		}
-		if !def.Validate(value) {
+		if isDef && !def.Validate(value) {
 			return SettingsResponse{}, api.BadRequestError("invalid value for "+key, nil)
 		}
 	}

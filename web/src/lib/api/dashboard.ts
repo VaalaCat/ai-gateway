@@ -76,15 +76,21 @@ export interface DashboardResponse {
 // ----- Hook -----
 
 export function useDashboard(
-  params: ObsRangeParams,
+  params: ObsRangeParams & { model?: string; user_id?: number },
   options?: { enabled?: boolean; refetchKey?: number },
 ) {
   return useQuery({
     queryKey: ["dashboard", params, options?.refetchKey ?? 0],
-    queryFn: () =>
-      api.get<DashboardResponse>(
-        `/stats/dashboard?start=${params.start}&end=${params.end}&gran=${params.gran}`,
-      ),
+    queryFn: () => {
+      const qs = new URLSearchParams({
+        start: String(params.start),
+        end: String(params.end),
+        gran: params.gran,
+      });
+      if (params.model) qs.set("model", params.model);
+      if (params.user_id) qs.set("user_id", String(params.user_id));
+      return api.get<DashboardResponse>(`/stats/dashboard?${qs.toString()}`);
+    },
     staleTime: 5 * 60 * 1000,
     enabled: options?.enabled ?? true,
   });

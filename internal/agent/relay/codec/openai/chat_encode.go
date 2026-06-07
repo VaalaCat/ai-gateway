@@ -277,6 +277,10 @@ func (c *ChatCodec) encodeNonStream(events <-chan codec.Event, w http.ResponseWr
 					}
 				}
 			}
+		case codec.EventRawPassthrough:
+			// Responses-native SSE frames have no chat.completion representation;
+			// intentionally drop (mirrors encodeStream).
+			continue
 		}
 	}
 
@@ -488,6 +492,13 @@ func (c *ChatCodec) encodeStream(events <-chan codec.Event, w http.ResponseWrite
 			// EventToolCallStart/ArgumentsDelta/End triple. To avoid duplicate chunks,
 			// ignore the deprecated event entirely. Once Task 12 removes the dual-track
 			// emit, this case will be removed as well.
+			continue
+		case codec.EventRawPassthrough:
+			// The chat.completion protocol has no representation for Responses-native
+			// SSE frames (response.created, output_item.added, …) or other upstream
+			// junk (e.g. a stray chatcmpl warmup chunk). Intentionally drop them.
+			// This is an explicit no-op — distinct from the implicit nil-skip below —
+			// so it is clear the drop is deliberate, not an unhandled event type.
 			continue
 		case codec.EventUsage:
 			// Buffer usage — will be emitted after the finish_reason chunk

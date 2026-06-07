@@ -36,9 +36,11 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api/model"
 	apimodelrouting "github.com/VaalaCat/ai-gateway/internal/master/api/model_routing"
 	apimonitoring "github.com/VaalaCat/ai-gateway/internal/master/api/monitoring"
+	apiobservability "github.com/VaalaCat/ai-gateway/internal/master/api/observability"
 	apioauth "github.com/VaalaCat/ai-gateway/internal/master/api/oauth"
 	apioap "github.com/VaalaCat/ai-gateway/internal/master/api/oauth_provider_admin"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/private_channel"
+	apiratelimiter "github.com/VaalaCat/ai-gateway/internal/master/api/request_limiter"
 	apiscript "github.com/VaalaCat/ai-gateway/internal/master/api/script"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/stats"
 	apisystem "github.com/VaalaCat/ai-gateway/internal/master/api/system"
@@ -305,6 +307,10 @@ func (s *Server) setupRoutes() {
 		HubCall:           s.Hub.Call,
 		Hub:               s.Hub,
 	}
+	obsH := &apiobservability.Handler{
+		HubCall:           s.Hub.Call,
+		GetOnlineAgentIDs: s.Hub.GetOnlineAgentIDs,
+	}
 	cacheH := &apicache.Handler{
 		GetOnlineAgentIDs: s.Hub.GetOnlineAgentIDs,
 		GetRuntime:        s.Hub.GetRuntime,
@@ -414,6 +420,7 @@ func (s *Server) setupRoutes() {
 	auth.POST("/channels", api.Adapt(adapter, api.BindJSON, channelH.Create))
 	auth.GET("/channels/types", api.Adapt(adapter, api.BindNone, channelH.Types))
 	auth.GET("/channels/:id", api.Adapt(adapter, api.BindURI, channelH.Get))
+	auth.GET("/channels/:id/dataflow", api.Adapt(adapter, api.BindURI, channelH.DataFlow))
 	auth.PUT("/channels/:id", api.Adapt(adapter, api.BindURIAndBodyMap, channelH.Update))
 	auth.DELETE("/channels/:id", api.Adapt(adapter, api.BindURI, channelH.Delete))
 	auth.POST("/channels/:id/test", api.Adapt(adapter, api.BindURIAndOptionalJSON, channelH.Test))
@@ -456,6 +463,8 @@ func (s *Server) setupRoutes() {
 	auth.GET("/agents/inflight/all", api.Adapt(adapter, api.BindNone, agentH.GetAllInflight))
 	auth.POST("/agents/inflight/interrupt", api.Adapt(adapter, api.BindJSON, agentH.Interrupt))
 	auth.GET("/agents/goroutines", api.Adapt(adapter, api.BindQuery, agentH.GetGoroutines))
+	auth.GET("/observability/limiter-usage", api.Adapt(adapter, api.BindNone, obsH.GetLimiterUsage))
+	auth.GET("/observability/recent-health", api.Adapt(adapter, api.BindNone, obsH.GetRecentHealth))
 
 	agentRouteH := &agent_route.Handler{}
 	auth.GET("/agent-routes", api.Adapt(adapter, api.BindQuery, agentRouteH.List))
@@ -464,6 +473,15 @@ func (s *Server) setupRoutes() {
 	auth.GET("/agent-routes/:id", api.Adapt(adapter, api.BindURI, agentRouteH.Get))
 	auth.PUT("/agent-routes/:id", api.Adapt(adapter, api.BindURIAndBodyMap, agentRouteH.Update))
 	auth.DELETE("/agent-routes/:id", api.Adapt(adapter, api.BindURI, agentRouteH.Delete))
+
+	rateLimiterH := &apiratelimiter.Handler{}
+	auth.GET("/rate-limiters", api.Adapt(adapter, api.BindQuery, rateLimiterH.List))
+	auth.POST("/rate-limiters", api.Adapt(adapter, api.BindJSON, rateLimiterH.Create))
+	auth.PUT("/rate-limiters/:id", api.Adapt(adapter, api.BindURIAndBodyMap, rateLimiterH.Update))
+	auth.DELETE("/rate-limiters/:id", api.Adapt(adapter, api.BindURI, rateLimiterH.Delete))
+	auth.GET("/limiter-bindings", api.Adapt(adapter, api.BindQuery, rateLimiterH.ListBindings))
+	auth.POST("/limiter-bindings", api.Adapt(adapter, api.BindJSON, rateLimiterH.CreateBinding))
+	auth.DELETE("/limiter-bindings/:id", api.Adapt(adapter, api.BindURI, rateLimiterH.DeleteBinding))
 
 	auth.GET("/model-routings", api.Adapt(adapter, api.BindQuery, mrH.List))
 	auth.POST("/model-routings", api.Adapt(adapter, api.BindJSON, mrH.Create))

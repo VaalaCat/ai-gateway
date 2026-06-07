@@ -18,7 +18,8 @@ import { DateCell } from "@/components/business/date-cell";
 import { useCacheStats } from "@/lib/api/cache-stats";
 
 export default function AgentsCachePage() {
-  const t = useTranslations("agents");
+  const t = useTranslations("observability");
+  const ta = useTranslations("agents");
   const tc = useTranslations("common");
   const { data, isLoading, refetch, isFetching, dataUpdatedAt } = useCacheStats();
 
@@ -44,13 +45,13 @@ export default function AgentsCachePage() {
       {/* Header */}
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h1 className="text-2xl font-bold">{t("cacheTitle")}</h1>
-          <p className="text-muted-foreground mt-1">{t("cacheSubtitle")}</p>
+          <h1 className="text-2xl font-bold">{t("cache")}</h1>
+          <p className="text-muted-foreground mt-1">{ta("cacheSubtitle")}</p>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0 mt-1">
           {dataUpdatedAt > 0 && (
             <span>
-              {t("lastUpdated")}: <DateCell timestamp={Math.floor(dataUpdatedAt / 1000)} relative />
+              {ta("lastUpdated")}: <DateCell timestamp={Math.floor(dataUpdatedAt / 1000)} relative />
             </span>
           )}
           <Button
@@ -61,7 +62,7 @@ export default function AgentsCachePage() {
             disabled={isFetching}
           >
             <RefreshCw className={`mr-1 size-3 ${isFetching ? "animate-spin" : ""}`} />
-            {t("refresh")}
+            {ta("refresh")}
           </Button>
         </div>
       </div>
@@ -75,7 +76,7 @@ export default function AgentsCachePage() {
           {/* Cluster aggregate */}
           <div className="rounded-md border">
             <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">{t("clusterAggregate")}</h2>
+              <h2 className="text-sm font-medium">{ta("clusterAggregate")}</h2>
             </div>
             <div className="p-4">
               <CacheStatsTable data={data.cluster} mode="cluster" />
@@ -85,11 +86,11 @@ export default function AgentsCachePage() {
           {/* Per-agent */}
           <div className="rounded-md border">
             <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">{t("perAgent")}</h2>
+              <h2 className="text-sm font-medium">{ta("perAgent")}</h2>
             </div>
             {data.agents.length === 0 ? (
               <div className="px-4 py-6 text-center text-muted-foreground text-sm">
-                {t("noData")}
+                {ta("noData")}
               </div>
             ) : (
               <Accordion
@@ -105,11 +106,11 @@ export default function AgentsCachePage() {
                         <span className="font-medium truncate">{a.name}</span>
                         {a.online ? (
                           <Badge variant="secondary" className="shrink-0 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
-                            {t("online")}
+                            {ta("online")}
                           </Badge>
                         ) : (
                           <Badge variant="outline" className="shrink-0 text-muted-foreground">
-                            {t("offline")}
+                            {ta("offline")}
                           </Badge>
                         )}
                         {a.last_seen > 0 && (
@@ -124,7 +125,7 @@ export default function AgentsCachePage() {
                         <CacheStatsTable data={a.cache_stats} mode="agent" />
                       ) : (
                         <div className="px-4 py-3 text-sm text-muted-foreground">
-                          {t("noData")}
+                          {ta("noData")}
                         </div>
                       )}
                     </AccordionContent>

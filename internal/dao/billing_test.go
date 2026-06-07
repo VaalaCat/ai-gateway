@@ -947,3 +947,20 @@ func TestDeleteHourlyBucketsBefore_BoundaryDateNotDeleted(t *testing.T) {
 	require.NoError(t, db.Model(&models.UsageHourlyBucket{}).Count(&remaining).Error)
 	require.Equal(t, int64(1), remaining)
 }
+
+func TestGetBillingOverview_TotalTokensIncludeCache(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+	require.NoError(t, db.Create(&models.TokenDailyBilling{
+		Date: "2026-05-20", UserID: 1, TokenID: 1, TokenName: "tok-a",
+		RequestCount: 2, SuccessCount: 2,
+		PromptTokens: 100, CompletionTokens: 200, CacheReadTokens: 30, CacheWriteTokens: 40,
+		TotalCost: 10,
+	}).Error)
+
+	overview, err := q.Billing().GetBillingOverview(TokenBillingListFilter{
+		StartDate: "2026-05-20", EndDate: "2026-05-20",
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(370), overview.TotalTokens, "100+200+30+40 含 cache")
+}

@@ -26,7 +26,8 @@ type defaultSolver struct {
 	Pool         ChannelPool
 	Sorter       ChannelSorter
 	Picker       ModePicker
-	Affinity     *affinity.Engine // 可为 nil：nil 时不做粘性重排
+	Affinity     *affinity.Engine  // 可为 nil：nil 时不做粘性重排
+	Filters      []CandidateFilter // 候选裁剪流水线（如 quota 闸门）；空时透明放行
 }
 
 // NewSolver 用生产默认实现装配 Solver。
@@ -38,6 +39,7 @@ func NewSolver(aff *affinity.Engine) Solver {
 		Sorter:       priorityWeightedSorter{},
 		Picker:       defaultModePicker{},
 		Affinity:     aff,
+		Filters:      []CandidateFilter{quotaFilter{}},
 	}
 }
 
@@ -93,12 +95,22 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 	}
 
 	whitelistBlockedAny := false
+	quotaBlockedAny := false
 	for _, realModel := range chain.Models {
 		if !s.allowedByWhitelist(realModel, rctx.Input.UserInfo) {
 			whitelistBlockedAny = true
 			continue
 		}
 		cands := s.Pool.Available(rctx, realModel)
+		if len(cands) == 0 {
+			continue
+		}
+		fctx := &FilterContext{Rctx: rctx, RealModel: realModel}
+		var dropCode DropCode
+		cands, dropCode = runFilters(fctx, cands, s.Filters)
+		if dropCode == DropInsufficientQuota {
+			quotaBlockedAny = true
+		}
 		if len(cands) == 0 {
 			continue
 		}
@@ -119,6 +131,11 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 	}
 
 	if len(plan.Attempts) == 0 {
+		// quota 闸门拦截优先级最高：只要任一 realModel 因余额不足把付费候选收空，
+		// 返回 402（state.ErrInsufficientQuota），盖过 403 白名单 / 404 无 channel。
+		if quotaBlockedAny {
+			return state.ErrInsufficientQuota
+		}
 		// 非 routing 路径 + 模型被白名单拦 → "model not allowed: <name>"。
 		// 仅在没有 RoutingName（顶层未走 routing）且整条链都被白名单拦的情况下生效。
 		if chain.RoutingName == "" && whitelistBlockedAny {

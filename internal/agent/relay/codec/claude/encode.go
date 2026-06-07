@@ -638,6 +638,19 @@ func (c *ClaudeCodec) encodeStream(events <-chan codec.Event, w http.ResponseWri
 			if err := writeSSE(sseconsts.MessageStop, stop); err != nil {
 				return err
 			}
+
+		case codec.EventError:
+			msg := "upstream error"
+			if ev.Error != nil && ev.Error.Message != "" {
+				msg = ev.Error.Message
+			}
+			errFrame := map[string]any{
+				"type":  "error",
+				"error": map[string]any{"type": "api_error", "message": msg},
+			}
+			if err := writeSSE("error", errFrame); err != nil {
+				return err
+			}
 		}
 	}
 

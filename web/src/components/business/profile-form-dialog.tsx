@@ -29,7 +29,7 @@ import {
 } from "@/components/business/profile-form-fields";
 import { PasswordInput } from "@/components/business/password-input";
 import { StatusSelect } from "@/components/business/status-select";
-import { GroupSelect } from "@/components/business/group-select";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 
 import { useUpdateProfile, useUpdateUser } from "@/lib/api/users";
 import { formatErrorToast } from "@/lib/api/error-toast";
@@ -265,9 +265,12 @@ function AdminDialog(props: AdminProps) {
             </div>
             <div className="space-y-1.5">
               <Label>{tu("group")}</Label>
-              <GroupSelect
-                value={state.group_id}
-                onChange={(id) => setState({ ...state, group_id: id })}
+              <EntityPicker
+                entity="user-group"
+                value={state.group_id ? String(state.group_id) : ""}
+                onChange={(v) =>
+                  setState({ ...state, group_id: v ? Number(v) : DEFAULT_GROUP_ID })
+                }
               />
             </div>
             <div className="space-y-1.5">

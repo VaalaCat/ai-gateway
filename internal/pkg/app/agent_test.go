@@ -75,6 +75,12 @@ type stubAgentCache struct {
 }
 
 func (stubAgentCache) MatchRoute(uint, string, []uint) *models.AgentRoute { return nil }
+func (stubAgentCache) EffectiveRequestLimiters(uint, uint) []*models.RequestLimiter {
+	return nil
+}
+func (stubAgentCache) EffectiveAttemptLimiters(uint, uint, string, uint) []*models.RequestLimiter {
+	return nil
+}
 
 type stubRouteForwarder struct{}
 
@@ -110,6 +116,8 @@ func (stubStore) ModelConfigCount() int                                 { return
 func (stubStore) GetChannelsForModel(string) []*models.Channel                          { return nil }
 func (stubStore) RebuildModelIndex()                                                    {}
 func (stubStore) GetAllModelNames() []string                                            { return nil }
+func (stubStore) GetUser(context.Context, uint) *protocol.SyncedUser                              { return nil }
+func (stubStore) SetUserQuota(uint, int64)                                                         {}
 func (stubStore) GetVisiblePrivateChannelsForUser(uint, string) []*protocol.SyncedPrivateChannel {
 	return nil
 }

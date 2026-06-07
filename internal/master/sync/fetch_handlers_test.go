@@ -202,6 +202,30 @@ func TestUserFetchHandler_NotFound(t *testing.T) {
 	}
 }
 
+func TestMarshalSyncedUser_IncludesQuota(t *testing.T) {
+	q, m := setupSyncDB(t)
+	if err := m.User().Create(&models.User{
+		Username: "quota-user", Password: "x", GroupID: 2, Quota: 123, Status: consts.StatusEnabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := q.User().GetByUsername("quota-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := marshalSyncedUser(q, user.ID)
+	if raw == nil {
+		t.Fatal("expected non-nil raw from marshalSyncedUser")
+	}
+	var su protocol.SyncedUser
+	if err := json.Unmarshal(raw, &su); err != nil {
+		t.Fatal(err)
+	}
+	if su.Quota != 123 {
+		t.Errorf("Quota = %d, want 123", su.Quota)
+	}
+}
+
 func TestUserFetchHandler_GroupIDZeroNormalizes(t *testing.T) {
 	q, m := setupSyncDB(t)
 	if err := m.User().Create(&models.User{

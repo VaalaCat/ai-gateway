@@ -327,7 +327,7 @@ function TokensPageContent() {
         header: t("key"),
         cell: ({ row }) => (
           <div onClick={(e) => e.stopPropagation()}>
-            <CopyableText text={row.original.key} display={row.original.key.slice(0, 8) + "..."} />
+            <CopyableText text={row.original.key} display={row.original.key.slice(0, 8) + "..."} revealable />
           </div>
         ),
       },

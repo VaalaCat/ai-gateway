@@ -627,6 +627,42 @@ func TestBuildPassthroughRequest_RejectsHostRewrite(t *testing.T) {
 	}
 }
 
+// TestBackend_ForwardsUAAndStripsClientCredentials 验证诚实透传:
+// 客户端 UA 透传到上游;客户端 x-api-key 被剥离(凭证泄漏修复);
+// 上游 Authorization 用渠道 key。
+func TestBackend_ForwardsUAAndStripsClientCredentials(t *testing.T) {
+	var gotUA, gotXAPIKey, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotXAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	ch := makeChannel(upstream.URL)
+	rctx, _ := newPassthroughTestCtx(t, []byte(`{"model":"gpt-4o","messages":[]}`), false)
+	rctx.Context.Request.Header.Set("User-Agent", "claude-cli/1.0")
+	rctx.Context.Request.Header.Set("x-api-key", "client-leak")
+	backend := &Backend{Agent: nil}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4o"})
+	if got.Err != nil {
+		t.Fatalf("unexpected Err: %v", got.Err)
+	}
+	if gotUA != "claude-cli/1.0" {
+		t.Errorf("upstream User-Agent = %q, want forwarded client UA", gotUA)
+	}
+	if gotXAPIKey != "" {
+		t.Errorf("upstream x-api-key = %q, want stripped (credential leak)", gotXAPIKey)
+	}
+	if gotAuth != "Bearer k" {
+		t.Errorf("upstream Authorization = %q, want channel key", gotAuth)
+	}
+}
+
 // TestHandlePassthroughError_400_NoProviderType 验证 handlePassthroughErrorStatus 对
 // HTTP 400 但 body 不含 error.type 的处理：ProviderErrorType 应为空字符串。
 func TestHandlePassthroughError_400_NoProviderType(t *testing.T) {

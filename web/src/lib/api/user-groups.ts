@@ -24,15 +24,6 @@ export function useUserGroups(params: ListParams = {}) {
   });
 }
 
-/** Lightweight hook for the GroupSelect picker — fetches up to 200 groups. */
-export function useUserGroupsAll() {
-  return useQuery({
-    queryKey: ["user-groups", "all"],
-    queryFn: () =>
-      api.get<PaginatedResponse<UserGroup>>(`/admin/user-groups?page=1&page_size=200`),
-  });
-}
-
 export function useUserGroup(id: number) {
   return useQuery({
     queryKey: ["user-group", id],

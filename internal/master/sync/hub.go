@@ -26,15 +26,15 @@ import (
 )
 
 type AgentRuntime struct {
-	Uptime            int64 `json:"uptime"`
-	CachedTokens      int   `json:"cached_tokens"`
-	CachedChannels    int   `json:"cached_channels"`
-	CachedModels      int   `json:"cached_models"`
+	Uptime               int64 `json:"uptime"`
+	CachedTokens         int   `json:"cached_tokens"`
+	CachedChannels       int   `json:"cached_channels"`
+	CachedModels         int   `json:"cached_models"`
 	CachedGlobalRoutings int   `json:"cached_global_routings"`
 	CachedUserRoutings   int   `json:"cached_user_routings"`
-	ActiveConnections int   `json:"active_connections"`
-	Version           int64 `json:"version"`
-	MasterVersion     int64 `json:"master_version"`
+	ActiveConnections    int   `json:"active_connections"`
+	Version              int64 `json:"version"`
+	MasterVersion        int64 `json:"master_version"`
 
 	CacheStats map[string]protocol.CacheEntityStats `json:"cache_stats,omitempty"`
 }
@@ -217,6 +217,26 @@ func (h *Hub) Call(agentID string, method string, params any, timeout time.Durat
 	}
 }
 
+// NotifyAgent 向指定 agent 单向推送一条通知(无响应)。agent 离线则静默丢弃。
+func (h *Hub) NotifyAgent(agentID, method string, params any) {
+	h.mu.RLock()
+	conn := h.agents[agentID]
+	h.mu.RUnlock()
+	if conn == nil {
+		return
+	}
+	notif, err := jsonrpc.NewNotification(method, params)
+	if err != nil {
+		h.Logger.Warn("build agent notification failed",
+			zap.String("agent_id", agentID), zap.String("method", method), zap.Error(err))
+		return
+	}
+	if err := conn.WriteJSON(notif); err != nil {
+		h.Logger.Warn("notify agent failed",
+			zap.String("agent_id", agentID), zap.String("method", method), zap.Error(err))
+	}
+}
+
 // GetOnlineAgentIDs returns IDs of currently connected agents.
 func (h *Hub) GetOnlineAgentIDs() []string {
 	h.mu.RLock()
@@ -352,6 +372,25 @@ func (h *Hub) handleFullSync(conn *ws.Conn, req *jsonrpc.Request) {
 		total = t
 		items, _ = json.Marshal(records)
 
+	case events.EntityRequestLimiter:
+		// ListAll：limiter 全量随每次 full-sync 整体替换缓存，分页会让 >PageSize 条
+		// 只剩最后一页，其余规则在 agent 上静默丢失（对齐下方 LimiterBinding 写法）。
+		records, err := q.RequestLimiter().ListAll()
+		if err != nil {
+			conn.SendResponse(jsonrpc.NewErrorResponse(req.ID, jsonrpc.ErrInternal, err.Error()))
+			return
+		}
+		total = int64(len(records))
+		items, _ = json.Marshal(records)
+	case events.EntityLimiterBinding:
+		records, err := q.LimiterBinding().ListAll()
+		if err != nil {
+			conn.SendResponse(jsonrpc.NewErrorResponse(req.ID, jsonrpc.ErrInternal, err.Error()))
+			return
+		}
+		total = int64(len(records))
+		items, _ = json.Marshal(records)
+
 	case events.EntityModelRouting:
 		records, t, err := q.ModelRouting().List(
 			dao.ListOptions{Page: params.Page, PageSize: params.PageSize},
@@ -460,16 +499,16 @@ func (h *Hub) handleHeartbeat(conn *ws.Conn, agentID string, req *jsonrpc.Reques
 	// Store runtime info
 	h.mu.Lock()
 	h.runtimes[agentID] = &AgentRuntime{
-		Uptime:            params.Uptime,
-		CachedTokens:      params.CachedTokens,
-		CachedChannels:    params.CachedChannels,
-		CachedModels:      params.CachedModels,
+		Uptime:               params.Uptime,
+		CachedTokens:         params.CachedTokens,
+		CachedChannels:       params.CachedChannels,
+		CachedModels:         params.CachedModels,
 		CachedGlobalRoutings: params.CachedGlobalRoutings,
 		CachedUserRoutings:   params.CachedUserRoutings,
-		ActiveConnections: params.ActiveConnections,
-		Version:           params.Version,
-		MasterVersion:     h.GetVersion(),
-		CacheStats:        params.CacheStats,
+		ActiveConnections:    params.ActiveConnections,
+		Version:              params.Version,
+		MasterVersion:        h.GetVersion(),
+		CacheStats:           params.CacheStats,
 	}
 	h.mu.Unlock()
 

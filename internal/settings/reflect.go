@@ -34,15 +34,21 @@ func Apply(s *AgentSettings, key, value string) error {
 		if !ok || fk != key {
 			continue
 		}
-		n, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return &ParseError{Key: key, Value: value, Cause: err}
+		switch f := v.Field(i); f.Kind() {
+		case reflect.String:
+			f.SetString(value) // master 写入时已校验枚举;agent 信任同步值
+			return nil
+		default:
+			n, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return &ParseError{Key: key, Value: value, Cause: err}
+			}
+			if n < fmin || n > fmax {
+				return &RangeError{Key: key, Value: n, Min: fmin, Max: fmax}
+			}
+			f.SetInt(n)
+			return nil
 		}
-		if n < fmin || n > fmax {
-			return &RangeError{Key: key, Value: n, Min: fmin, Max: fmax}
-		}
-		v.Field(i).SetInt(n)
-		return nil
 	}
 	return nil
 }

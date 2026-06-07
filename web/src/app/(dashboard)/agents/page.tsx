@@ -6,6 +6,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
 import { ChevronRight, Copy, Database, MoreHorizontal, Plus, RefreshCw, Ticket, Info } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { copyTextWithFeedback } from "@/lib/utils/clipboard";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
@@ -66,6 +67,10 @@ import {
 } from "@/lib/api/agents";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { Agent } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { useAgentHealth } from "@/lib/hooks/use-agent-health";
+import { StatusDot, SaturationBar } from "@/components/business/health-status-dot";
+import { AgentHealthSummary } from "@/components/business/agent-health-summary";
 
 export default function AgentsPage() {
   const t = useTranslations("agents");
@@ -99,6 +104,12 @@ export default function AgentsPage() {
   const agents = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
+
+  const ht = useTranslations("observability.health");
+  const health = useAgentHealth();
+  const [anomalyOnly, setAnomalyOnly] = useState(false);
+  const tableData = anomalyOnly ? health.anomalies : agents;
+  const defaultColumnVisibility = { id: false, agent_id: false, tags: false, created_at: false };
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -278,7 +289,73 @@ export default function AgentsPage() {
     {
       id: "online_status",
       header: tc("status"),
-      cell: ({ row }) => <OnlineBadge lastSeen={row.original.last_seen} />,
+      cell: ({ row }) => {
+        const h = health.byId.get(row.original.id);
+        return h ? (
+          <StatusDot status={h.status} red={h.red} />
+        ) : (
+          <OnlineBadge lastSeen={row.original.last_seen} />
+        );
+      },
+    },
+    {
+      id: "health_inflight",
+      header: ht("field.inflight"),
+      cell: ({ row }) => {
+        const h = health.byId.get(row.original.id);
+        return h ? (
+          <span className="tabular-nums">{h.inflight}</span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        );
+      },
+    },
+    {
+      id: "health_qps",
+      header: ht("field.qps"),
+      cell: ({ row }) => {
+        const h = health.byId.get(row.original.id);
+        return h ? (
+          <span className="tabular-nums">{h.qps.toFixed(2)}</span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        );
+      },
+    },
+    {
+      id: "health_error",
+      header: ht("field.errorRate"),
+      cell: ({ row }) => {
+        const h = health.byId.get(row.original.id);
+        if (!h) return <span className="text-muted-foreground">—</span>;
+        const pct = h.errorRate * 100;
+        return (
+          <span
+            className={cn(
+              "tabular-nums",
+              pct >= health.thresholds.errRedPct
+                ? "text-red-600 dark:text-red-400"
+                : pct >= health.thresholds.errYellowPct
+                  ? "text-amber-600 dark:text-amber-400"
+                  : "",
+            )}
+          >
+            {pct.toFixed(1)}%
+          </span>
+        );
+      },
+    },
+    {
+      id: "health_saturation",
+      header: ht("field.saturation"),
+      cell: ({ row }) => {
+        const h = health.byId.get(row.original.id);
+        return h ? (
+          <SaturationBar pct={h.saturationPct} hasWaiters={h.hasWaiters} />
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        );
+      },
     },
     {
       accessorKey: "last_seen",
@@ -387,15 +464,25 @@ export default function AgentsPage() {
         </CollapsibleContent>
       </Collapsible>
 
+      <AgentHealthSummary
+        counts={health.counts}
+        anomalyOnly={anomalyOnly}
+        onAnomalyOnlyChange={(v) => {
+          setAnomalyOnly(v);
+          setRowSelection({});
+        }}
+      />
+
       <DataTable
         columns={columns}
-        data={agents}
+        data={tableData}
         loading={isLoading}
-        total={total}
+        defaultColumnVisibility={defaultColumnVisibility}
+        total={anomalyOnly ? tableData.length : total}
         page={page}
         pageSize={pageSize}
         pageCount={pageCount}
-        onPaginationChange={handlePaginationChange}
+        onPaginationChange={anomalyOnly ? undefined : handlePaginationChange}
         renderExpandedRow={(row) => <AgentExpandedRow agent={row.original} />}
         rowSelection={rowSelection}
         onRowSelectionChange={setRowSelection}
@@ -411,7 +498,7 @@ export default function AgentsPage() {
                 loading: fullSyncMutation.isPending,
                 onClick: () => {
                   const selectedIds = Object.keys(rowSelection)
-                    .map((idx) => agents[Number(idx)]?.agent_id)
+                    .map((idx) => tableData[Number(idx)]?.agent_id)
                     .filter(Boolean);
                   handleFullSync(selectedIds);
                 },
@@ -585,12 +672,12 @@ export default function AgentsPage() {
                       variant="outline"
                       size="icon"
                       className="shrink-0"
-                      onClick={() => {
-                        navigator.clipboard.writeText(
-                          `./ai-gateway agent --master ${window.location.origin} --enrollment-token ${enrollToken}`
-                        );
-                        toast.success(tc("copied"));
-                      }}
+                      onClick={() =>
+                        copyTextWithFeedback(
+                          `./ai-gateway agent --master ${window.location.origin} --enrollment-token ${enrollToken}`,
+                          { success: tc("copied"), error: tc("copyFailed") }
+                        )
+                      }
                     >
                       <Copy className="size-4" />
                     </Button>

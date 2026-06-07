@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -54,9 +55,29 @@ type stubAgentCache struct {
 	// privChannels: model → private channels，供 BYOK pool 测试使用。
 	privChannels map[string][]*protocol.SyncedPrivateChannel
 	settings     settings.AgentSettings
+	// modelConfigs / users 供 quotaFilter 测试注入可控定价与余额。
+	modelConfigs map[string]*models.ModelConfig
+	users        map[uint]*protocol.SyncedUser
+	// getUserCalls 记录 GetUser 被调用次数，供 quotaFilter 测试断言"未定价/全免费不读余额"。
+	getUserCalls int
 }
 
 func (c *stubAgentCache) Settings() settings.AgentSettings { return c.settings }
+
+func (c *stubAgentCache) GetModelConfig(name string) *models.ModelConfig {
+	if c.modelConfigs == nil {
+		return nil
+	}
+	return c.modelConfigs[name]
+}
+
+func (c *stubAgentCache) GetUser(_ context.Context, id uint) *protocol.SyncedUser {
+	c.getUserCalls++
+	if c.users == nil {
+		return nil
+	}
+	return c.users[id]
+}
 
 func (c *stubAgentCache) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
 	if c.rs == nil {

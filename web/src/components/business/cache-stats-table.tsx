@@ -11,9 +11,7 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { formatPercent } from "@/lib/utils/format";
-import { CACHE_ENTITY_NAMES } from "@/lib/types";
 import type {
-  CacheEntityName,
   CacheEntityStats,
   ClusterEntityStats,
 } from "@/lib/types";
@@ -112,34 +110,43 @@ export function CacheStatsTable({ data, mode }: CacheStatsTableProps) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {CACHE_ENTITY_NAMES.map((name) => {
-            const row = toRow(data?.[name], mode);
-            const isFullSync = row.capacity === 0;
+          {Object.keys(data ?? {}).sort().map((name) => {
+            const raw = data?.[name];
+            const row = toRow(raw, mode);
+            const isIndex = (raw as { kind?: string } | undefined)?.kind === "index";
+            const extra = (raw as { extra?: Record<string, number> } | undefined)?.extra;
+            const dash = <span className="text-muted-foreground">—</span>;
             return (
               <TableRow key={name}>
-                <TableCell className="font-mono">{name as CacheEntityName}</TableCell>
+                <TableCell className="font-mono">
+                  {name}
+                  {isIndex && (
+                    <span className="ml-1 rounded bg-muted px-1 text-[10px] text-muted-foreground">index</span>
+                  )}
+                </TableCell>
                 <TableCell className={cn("text-right tabular-nums", hitRateClass(row.hit_rate))}>
-                  {row.hit_rate === null ? "—" : formatPercent(row.hit_rate)}
+                  {isIndex ? dash : row.hit_rate === null ? "—" : formatPercent(row.hit_rate)}
                 </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {isFullSync ? <span className="text-muted-foreground">—</span> : row.negative_hits}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {isFullSync ? <span className="text-muted-foreground">—</span> : row.evictions}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {isFullSync ? <span className="text-muted-foreground">—</span> : row.load_errors}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {isFullSync ? <span className="text-muted-foreground">—</span> : row.invalidations}
-                </TableCell>
+                <TableCell className="text-right tabular-nums">{isIndex ? dash : row.negative_hits}</TableCell>
+                <TableCell className="text-right tabular-nums">{isIndex ? dash : row.evictions}</TableCell>
+                <TableCell className="text-right tabular-nums">{isIndex ? dash : row.load_errors}</TableCell>
+                <TableCell className="text-right tabular-nums">{isIndex ? dash : row.invalidations}</TableCell>
                 <TableCell className="text-right tabular-nums">
                   {row.size}
-                  {" / "}
-                  {row.capacity > 0 ? row.capacity : <span className="text-muted-foreground">—</span>}
+                  {isIndex ? "" : <>{" / "}{row.capacity > 0 ? row.capacity : dash}</>}
                 </TableCell>
                 <TableCell>
-                  <UtilCell util={row.util} />
+                  {isIndex ? (
+                    <div className="flex flex-wrap gap-1">
+                      {extra && Object.entries(extra).map(([k, v]) => (
+                        <span key={k} className="rounded bg-muted px-1.5 py-0.5 text-[10px] tabular-nums">
+                          {k} {v}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <UtilCell util={row.util} />
+                  )}
                 </TableCell>
               </TableRow>
             );

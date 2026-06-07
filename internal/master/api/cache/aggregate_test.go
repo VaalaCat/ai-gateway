@@ -105,16 +105,15 @@ func TestAggregate_FullSyncEntityHitRateNull(t *testing.T) {
 	}
 }
 
-func TestAggregate_NoSnapshotsReturnsAllEntitiesZero(t *testing.T) {
+func TestAggregate_NoSnapshotsReturnsEmptyMap(t *testing.T) {
+	// 无在线 agent 时返回空 map（不再预填 EntityNames 零值）。
 	got := Aggregate(nil)
-	for _, name := range EntityNames {
-		e, ok := got[name]
-		if !ok {
-			t.Fatalf("entity %s missing", name)
-		}
-		if e.Hits != 0 || e.Misses != 0 || e.Size != 0 {
-			t.Fatalf("entity %s should be zero, got %+v", name, e)
-		}
+	if len(got) != 0 {
+		t.Fatalf("expected empty map for nil snapshots, got %v keys", len(got))
+	}
+	got2 := Aggregate([]AgentSnapshot{})
+	if len(got2) != 0 {
+		t.Fatalf("expected empty map for empty snapshots, got %v keys", len(got2))
 	}
 }
 
@@ -132,6 +131,40 @@ func TestAggregate_NewFieldsAndPrivateChannel(t *testing.T) {
 	}
 	if pc.LoadErrors != 2 || pc.Invalidations != 5 {
 		t.Fatalf("new fields not aggregated: %+v", pc)
+	}
+}
+
+// 新缓存 key（不在旧 EntityNames）必须零改代码自动流通到聚合输出。
+func TestAggregate_UnionOfKeys(t *testing.T) {
+	snaps := []AgentSnapshot{
+		{AgentID: "a1", Online: true, CacheStats: map[string]protocol.CacheEntityStats{
+			"limiter_index": {Kind: "index", Size: 5, Extra: map[string]int64{"bindings": 9}},
+			"user":          {Kind: "lru", Hits: 10, Misses: 0, Size: 3, Capacity: 100},
+		}},
+		{AgentID: "a2", Online: true, CacheStats: map[string]protocol.CacheEntityStats{
+			"limiter_index": {Kind: "index", Size: 5, Extra: map[string]int64{"bindings": 1}},
+		}},
+		{AgentID: "off", Online: false, CacheStats: map[string]protocol.CacheEntityStats{
+			"ignored": {Size: 999},
+		}},
+	}
+	out := Aggregate(snaps)
+
+	li, ok := out["limiter_index"]
+	if !ok {
+		t.Fatal("limiter_index missing from aggregate")
+	}
+	if li.Kind != "index" || li.Size != 10 || li.Extra["bindings"] != 10 {
+		t.Fatalf("limiter_index agg=%+v", li)
+	}
+	if li.HitRate != nil || li.Util != nil {
+		t.Fatal("index kind must not compute hit_rate/util")
+	}
+	if _, ok := out["ignored"]; ok {
+		t.Fatal("offline agent keys must be skipped")
+	}
+	if out["user"].HitRate == nil {
+		t.Fatal("lru kind should compute hit_rate")
 	}
 }
 

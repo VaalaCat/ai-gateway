@@ -2,48 +2,27 @@
 import type { ChannelForm } from "./types";
 
 export type SectionId =
-  | "basic"
-  | "endpoints-protocol"
-  | "models"
-  | "protocol-behavior"
-  | "request-rewrite"
-  | "route-roles";
+  | "meta"
+  | "routing"
+  | "processing"
+  | "connection"
+  | "resilience"
+  | "response";
 
-/**
- * Fields each section owns. When every field of a section is in
- * adapter.hiddenFields, the section's Tab is suppressed entirely.
- */
 export const SECTION_FIELDS: Record<SectionId, ReadonlyArray<keyof ChannelForm>> = {
-  basic: [
-    "name",
-    "type",
-    "key",
-    "base_url",
-    "weight",
-    "priority",
-    "status",
-    "tag",
-    "remark",
-    "use_legacy_adaptor",
+  meta: ["name", "key", "base_url", "tag", "remark", "use_legacy_adaptor"],
+  routing: [
+    "status", "weight", "priority", "models", "test_model",
+    "supported_api_types", "limit", "auto_ban",
   ],
-  "endpoints-protocol": [
-    "endpoints",
-    "supported_api_types",
-    "passthrough_enabled",
-    "api_version",
-    "organization",
+  processing: [
+    "model_mapping", "system_prompt", "role_mapping", "param_override",
+    "header_override", "endpoints", "passthrough_enabled",
+    "system_prompt_in_input", "other_settings",
   ],
-  models: ["models", "model_mapping", "test_model"],
-  "protocol-behavior": [
-    "system_prompt",
-    "system_prompt_in_input",
-    "setting",
-    "other_settings",
-    "auto_ban",
-    "status_code_mapping",
-  ],
-  "request-rewrite": ["param_override", "header_override", "proxy_url"],
-  "route-roles": ["role_mapping"],
+  connection: ["organization", "api_version", "proxy_url", "disable_keepalive"],
+  resilience: ["resilience"],
+  response: ["status_code_mapping", "free", "price_ratio"],
 };
 
 export function isSectionAllHidden(

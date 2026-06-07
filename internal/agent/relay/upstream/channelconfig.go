@@ -46,18 +46,10 @@ func BuildChannelConfig(ch *models.Channel, model string, outboundProto codec.Pr
 			if v, ok := other["builtin_tool_fallback"].(string); ok {
 				cfg.BuiltinToolFallback = v
 			}
-			// 新增：model_thinking_passthrough → cfg.SendBackThinking
-			if rawTP, ok := other["model_thinking_passthrough"].([]any); ok {
-				rules := parseModelThinkingPassthrough(rawTP, ch.ID)
-				for _, r := range rules {
-					if r.pattern.MatchString(cfg.Model) {
-						cfg.SendBackThinking = r.sendBackThinking
-						break
-					}
-				}
-			}
 		}
 	}
+
+	cfg.SendBackThinking = NewThinkingRules(ch).SendBack(cfg.Model)
 
 	return cfg
 }

@@ -7,14 +7,29 @@ import (
 )
 
 type TokenTemplate struct {
-	ID                uint                       `gorm:"primarykey" json:"id"`
-	Name              string                     `gorm:"size:64;not null" json:"name"`
-	Models            string                     `gorm:"type:text" json:"models"`
-	ExpiryDays        int                        `gorm:"not null;default:-1" json:"expiry_days"`
-	Status            int                        `gorm:"not null;default:1" json:"status"`
-	AllowedChannelIDs datatypes.JSONSlice[uint]  `gorm:"type:text" json:"allowed_channel_ids"`
-	CreatedAt         int64                      `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt         int64                      `gorm:"autoUpdateTime" json:"updated_at"`
+	ID                uint                      `gorm:"primarykey" json:"id"`
+	Name              string                    `gorm:"size:64;not null" json:"name"`
+	Models            string                    `gorm:"type:text" json:"models"`
+	ExpiryDays        int                       `gorm:"not null;default:-1" json:"expiry_days"`
+	Status            int                       `gorm:"not null;default:1" json:"status"`
+	AllowedChannelIDs datatypes.JSONSlice[uint] `gorm:"type:text" json:"allowed_channel_ids"`
+	AllowedGroupIDs   datatypes.JSONSlice[uint] `gorm:"type:text" json:"allowed_group_ids"`
+	CreatedAt         int64                     `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt         int64                     `gorm:"autoUpdateTime" json:"updated_at"`
+}
+
+// AllowsGroup 报告该模版是否对指定用户组开放。
+// 空白名单语义：未配置任何组 = 对所有组开放（向后兼容）。
+func (t *TokenTemplate) AllowsGroup(groupID uint) bool {
+	if len(t.AllowedGroupIDs) == 0 {
+		return true
+	}
+	for _, id := range t.AllowedGroupIDs {
+		if id == groupID {
+			return true
+		}
+	}
+	return false
 }
 
 func TokenFieldsEqual(tplModelsJSON string, tplChannelIDs []uint, tok *Token) bool {

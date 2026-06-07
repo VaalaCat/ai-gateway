@@ -1,0 +1,21 @@
+data: {"type":"response.created","response":{"id":"resp_01","object":"response","created_at":1700000000,"status":"in_progress","model":"gpt-4o","output":[],"usage":null},"sequence_number":0}
+
+data: {"type":"response.in_progress","response":{"id":"resp_01","object":"response","created_at":1700000000,"status":"in_progress","output":[]},"sequence_number":1}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_01","type":"message","role":"assistant","status":"in_progress","content":[]},"sequence_number":2}
+
+data: {"type":"response.content_part.added","item_id":"msg_01","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"sequence_number":3}
+
+data: {"type":"response.output_text.delta","item_id":"msg_01","output_index":0,"content_index":0,"delta":"Hello","sequence_number":4}
+
+data: {"type":"response.output_text.delta","item_id":"msg_01","output_index":0,"content_index":0,"delta":" world","sequence_number":5}
+
+data: {"type":"response.output_text.done","item_id":"msg_01","output_index":0,"content_index":0,"text":"Hello world","sequence_number":6}
+
+data: {"type":"response.content_part.done","item_id":"msg_01","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Hello world","annotations":[]},"sequence_number":7}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_01","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello world","annotations":[]}]},"sequence_number":8}
+
+data: {"type":"response.completed","response":{"id":"resp_01","object":"response","created_at":1700000000,"status":"completed","model":"gpt-4o","output":[{"id":"msg_01","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello world","annotations":[]}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}},"sequence_number":9}
+
+data: [DONE]

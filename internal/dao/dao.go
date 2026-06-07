@@ -46,6 +46,8 @@ type AdminQuery interface {
 	EnrollmentToken() AdminEnrollmentTokenQuery
 	Stats() AdminStatsQuery
 	AgentRoute() AdminAgentRouteQuery
+	RequestLimiter() AdminRequestLimiterQuery
+	LimiterBinding() AdminLimiterBindingQuery
 	TokenTemplate() AdminTokenTemplateQuery
 	UserGroup() AdminUserGroupQuery
 	OAuthProvider() AdminOAuthProviderQuery
@@ -68,6 +70,8 @@ type AdminMutation interface {
 	Setting() AdminSettingMutation
 	EnrollmentToken() AdminEnrollmentTokenMutation
 	AgentRoute() AdminAgentRouteMutation
+	RequestLimiter() AdminRequestLimiterMutation
+	LimiterBinding() AdminLimiterBindingMutation
 	TokenTemplate() AdminTokenTemplateMutation
 	UserGroup() AdminUserGroupMutation
 	OAuthProvider() AdminOAuthProviderMutation
@@ -117,6 +121,12 @@ func (q *compositeAdminQuery) EnrollmentToken() AdminEnrollmentTokenQuery {
 func (q *compositeAdminQuery) Stats() AdminStatsQuery { return &adminStatsQuery{ctx: q.ctx} }
 func (q *compositeAdminQuery) AgentRoute() AdminAgentRouteQuery {
 	return &adminAgentRouteQuery{ctx: q.ctx}
+}
+func (q *compositeAdminQuery) RequestLimiter() AdminRequestLimiterQuery {
+	return &adminRequestLimiterQuery{ctx: q.ctx}
+}
+func (q *compositeAdminQuery) LimiterBinding() AdminLimiterBindingQuery {
+	return &adminLimiterBindingQuery{ctx: q.ctx}
 }
 func (q *compositeAdminQuery) TokenTemplate() AdminTokenTemplateQuery {
 	return &adminTokenTemplateQuery{ctx: q.ctx}
@@ -171,6 +181,12 @@ func (m *compositeAdminMutation) EnrollmentToken() AdminEnrollmentTokenMutation 
 }
 func (m *compositeAdminMutation) AgentRoute() AdminAgentRouteMutation {
 	return &adminAgentRouteMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) RequestLimiter() AdminRequestLimiterMutation {
+	return &adminRequestLimiterMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) LimiterBinding() AdminLimiterBindingMutation {
+	return &adminLimiterBindingMutation{ctx: m.ctx}
 }
 func (m *compositeAdminMutation) TokenTemplate() AdminTokenTemplateMutation {
 	return &adminTokenTemplateMutation{ctx: m.ctx}

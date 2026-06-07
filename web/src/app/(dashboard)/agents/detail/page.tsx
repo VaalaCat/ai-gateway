@@ -27,12 +27,16 @@ import { DateCell } from "@/components/business/date-cell";
 import { CopyableText } from "@/components/business/copyable-text";
 import { CacheStatsTable } from "@/components/business/cache-stats-table";
 
+import { cn } from "@/lib/utils";
 import { useAgentDetail, useConnectivityReport, useCheckConnectivity, useFullSyncAgents, useAgentInflight, useAgentGoroutines, useInterruptInflight } from "@/lib/api/agents";
 import type { GoroutineDump } from "@/lib/api/agents";
 import { InflightTable } from "@/components/business/inflight-table";
+import { InflightBlockDetail } from "@/components/observability/inflight-block-detail";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { formatDuration, formatUptime } from "@/lib/utils/format";
-import type { AgentAddress } from "@/lib/types";
+import type { AgentAddress, GlobalInflightRow } from "@/lib/types";
+import { useAgentHealth } from "@/lib/hooks/use-agent-health";
+import { SaturationBar } from "@/components/business/health-status-dot";
 
 function parseAddresses(raw: string): AgentAddress[] {
   if (!raw) return [];
@@ -80,7 +84,7 @@ function GoroutineDumpDialog({
   );
 }
 
-function InflightSection({ agentId }: { agentId: number }) {
+function InflightSection({ agentId, agentName }: { agentId: number; agentName: string }) {
   const t = useTranslations("agents");
   const tc = useTranslations("common");
   const { data: rows = [], isFetching, refetch } = useAgentInflight(agentId);
@@ -88,6 +92,7 @@ function InflightSection({ agentId }: { agentId: number }) {
   const interrupt = useInterruptInflight();
   const [dumpOpen, setDumpOpen] = useState(false);
   const [dumpData, setDumpData] = useState<GoroutineDump | null>(null);
+  const [selected, setSelected] = useState<GlobalInflightRow | null>(null);
 
   const handleGoroutineDump = async () => {
     try {
@@ -130,6 +135,9 @@ function InflightSection({ agentId }: { agentId: number }) {
         <InflightTable
           rows={rows}
           emptyText={t("inflightEmpty")}
+          onSelectRow={(row) =>
+            setSelected({ ...row, agent_id: agentId, agent_name: agentName } as GlobalInflightRow)
+          }
           onInterrupt={(row) =>
             interrupt.mutate(
               { agent_id: agentId, id: row.id },
@@ -141,6 +149,7 @@ function InflightSection({ agentId }: { agentId: number }) {
           }
         />
       </div>
+      <InflightBlockDetail row={selected} onClose={() => setSelected(null)} />
       <GoroutineDumpDialog open={dumpOpen} onOpenChange={setDumpOpen} data={dumpData} />
     </div>
   );
@@ -160,6 +169,9 @@ function AgentDetailContent() {
   const id = Number(searchParams.get("id"));
   const t = useTranslations("agents");
   const tc = useTranslations("common");
+  const ht = useTranslations("observability.health");
+  const health = useAgentHealth();
+  const h = health.byId.get(id);
 
   const { data: agent, isLoading, refetch } = useAgentDetail(id);
   const { data: connectivity } = useConnectivityReport(id);
@@ -275,6 +287,35 @@ function AgentDetailContent() {
         )}
       </div>
 
+      {/* Live metrics */}
+      {h && (
+        <div className="rounded-md border">
+          <div className="px-4 py-3 border-b">
+            <h2 className="text-sm font-medium">{ht("title")}</h2>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-8 gap-y-3 p-4">
+            <Stat label={ht("field.inflight")}>{h.inflight}</Stat>
+            <Stat label={ht("field.qps")}>{h.qps.toFixed(2)}</Stat>
+            <Stat label={ht("field.errorRate")}>
+              <span
+                className={cn(
+                  h.errorRate * 100 >= health.thresholds.errRedPct
+                    ? "text-red-600 dark:text-red-400"
+                    : h.errorRate * 100 >= health.thresholds.errYellowPct
+                      ? "text-amber-600 dark:text-amber-400"
+                      : "",
+                )}
+              >
+                {(h.errorRate * 100).toFixed(1)}%
+              </span>
+            </Stat>
+            <Stat label={ht("field.saturation")}>
+              <SaturationBar pct={h.saturationPct} hasWaiters={h.hasWaiters} />
+            </Stat>
+          </div>
+        </div>
+      )}
+
       {/* Cache — matching bordered panel */}
       {rt?.cache_stats && (
         <div className="rounded-md border">
@@ -288,7 +329,7 @@ function AgentDetailContent() {
       )}
 
       {/* In-Flight Requests */}
-      <InflightSection agentId={id} />
+      <InflightSection agentId={id} agentName={agent.name} />
 
       {/* Connectivity — matching bordered panel */}
       <div className="rounded-md border">

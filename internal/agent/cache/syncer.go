@@ -73,6 +73,12 @@ func (s *Syncer) FullSync(ctx context.Context) error {
 	if err := s.fullSyncEntity(ctx, "agent_route"); err != nil {
 		s.Logger.Error("full sync agent_route failed", zap.Error(err))
 	}
+	if err := s.fullSyncEntity(ctx, "request_limiter"); err != nil {
+		s.Logger.Error("full sync request_limiter failed", zap.Error(err))
+	}
+	if err := s.fullSyncEntity(ctx, "limiter_binding"); err != nil {
+		s.Logger.Error("full sync limiter_binding failed", zap.Error(err))
+	}
 	if err := s.fullSyncEntity(ctx, "model_routing"); err != nil {
 		s.Logger.Error("full sync model_routing failed", zap.Error(err))
 	}
@@ -138,6 +144,14 @@ func (s *Syncer) fullSyncEntity(ctx context.Context, entity string) error {
 			var items []*models.AgentRoute
 			json.Unmarshal(resp.Items, &items)
 			s.Store.RouteIndex.Load(items)
+		case "request_limiter":
+			var items []models.RequestLimiter
+			json.Unmarshal(resp.Items, &items)
+			s.Store.LimiterIndex.LoadLimiters(items)
+		case "limiter_binding":
+			var items []models.LimiterBinding
+			json.Unmarshal(resp.Items, &items)
+			s.Store.LimiterIndex.LoadBindings(items)
 		case "model_routing":
 			var items []models.ModelRouting
 			json.Unmarshal(resp.Items, &items)
@@ -168,6 +182,8 @@ func (s *Syncer) SubscribeEvents() {
 		events.SyncSettingAllPattern,
 		events.SyncAgentAllPattern,
 		events.SyncAgentRouteAllPattern,
+		events.SyncRequestLimiterAllPattern,
+		events.SyncLimiterBindingAllPattern,
 		events.SyncUserGroupAllPattern,
 		events.SyncUserAllPattern,
 		events.SyncModelRoutingAllPattern,

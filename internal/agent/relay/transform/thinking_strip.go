@@ -18,17 +18,5 @@ func (ThinkingStripTransformer) Transform(req *codec.Request, cfg *codec.Channel
 	if cfg.SendBackThinking {
 		return
 	}
-	for i := range req.Messages {
-		m := &req.Messages[i]
-		if m.Role != codec.RoleAssistant {
-			continue
-		}
-		filtered := m.Content[:0]
-		for _, b := range m.Content {
-			if b.Type != codec.ContentTypeThinking {
-				filtered = append(filtered, b)
-			}
-		}
-		m.Content = filtered
-	}
+	ApplyThinkingStrip(req.Messages)
 }

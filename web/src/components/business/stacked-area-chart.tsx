@@ -1,13 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import { ChartCard } from "@/components/business/chart-card";
 import {
@@ -22,28 +16,29 @@ import type { StackedBucket } from "@/lib/types/observability";
 
 export type { StackedBucket };
 
-interface StackedAreaChartProps {
-  buckets: StackedBucket[];
-  seriesOrder: string[];
-  title: string;
-  loading?: boolean;
-  empty?: boolean;
-  className?: string;
-  /** Y 轴 tick + legend 用紧凑值 */
-  axisFormatter?: (v: number) => string;
-  /** tooltip 内值用精确值。默认 = axisFormatter */
-  tooltipFormatter?: (v: number) => string;
-  /** ChartCard 副标题, 通常显示单位如 "Cost (USD)" */
-  unitLabel?: string;
-}
-
-const CHART_COLORS = [
+/** 堆叠/分项系列共用调色板 */
+export const CHART_COLORS = [
   "var(--chart-1)",
   "var(--chart-2)",
   "var(--chart-3)",
   "var(--chart-4)",
   "var(--chart-5)",
 ];
+
+interface StackedAreaBodyProps {
+  buckets: StackedBucket[];
+  seriesOrder: string[];
+  axisFormatter?: (v: number) => string;
+  tooltipFormatter?: (v: number) => string;
+}
+
+interface StackedAreaChartProps extends StackedAreaBodyProps {
+  title: string;
+  loading?: boolean;
+  empty?: boolean;
+  className?: string;
+  unitLabel?: string;
+}
 
 function useToggleSet<K extends string>() {
   const [hidden, setHidden] = useState<Set<K>>(new Set());
@@ -59,32 +54,23 @@ function useToggleSet<K extends string>() {
   return { isHidden, toggle };
 }
 
-export function StackedAreaChart({
+/** 仅渲染堆叠面积图体(不含 ChartCard),供需要自定义 header/action 的容器复用。 */
+export function StackedAreaBody({
   buckets,
   seriesOrder,
-  title,
-  loading,
-  empty,
-  className,
   axisFormatter,
   tooltipFormatter,
-  unitLabel,
-}: StackedAreaChartProps) {
+}: StackedAreaBodyProps) {
   const series = useToggleSet<string>();
 
   const config = useMemo<ChartConfig>(() => {
     const cfg: ChartConfig = {};
     seriesOrder.forEach((key, i) => {
-      cfg[key] = {
-        label: key,
-        color: CHART_COLORS[i % CHART_COLORS.length],
-      };
+      cfg[key] = { label: key, color: CHART_COLORS[i % CHART_COLORS.length] };
     });
     return cfg;
   }, [seriesOrder]);
 
-  // 补 0: 后端某 bucket 缺某 model series 时, recharts 会把该点视为 NaN/undefined
-  // 导致连线断开。这里对每个 bucket × 每个 series 都填 0 占位, 保证图连续。
   const data = useMemo(
     () =>
       buckets.map((b) => {
@@ -97,27 +83,16 @@ export function StackedAreaChart({
     [buckets, seriesOrder],
   );
 
-  const isEmpty = empty ?? buckets.length === 0;
   const tipFmt = tooltipFormatter ?? axisFormatter;
   const allHidden = seriesOrder.length > 0 && seriesOrder.every((k) => series.isHidden(k));
 
   return (
-    <ChartCard
-      title={title}
-      sub={unitLabel}
-      loading={loading}
-      empty={isEmpty}
-      className={className}
-    >
+    <>
       <ChartContainer config={config} className="h-[260px] w-full">
         <AreaChart data={data} accessibilityLayer>
           <CartesianGrid vertical={false} />
           <XAxis dataKey="label" tickLine={false} axisLine={false} />
-          <YAxis
-            tickLine={false}
-            axisLine={false}
-            tickFormatter={axisFormatter}
-          />
+          <YAxis tickLine={false} axisLine={false} tickFormatter={axisFormatter} />
           <ChartTooltip
             content={
               <ChartTooltipContent
@@ -189,10 +164,32 @@ export function StackedAreaChart({
         </AreaChart>
       </ChartContainer>
       {allHidden && (
-        <p className="mt-2 text-center text-xs text-muted-foreground">
-          all series hidden
-        </p>
+        <p className="mt-2 text-center text-xs text-muted-foreground">all series hidden</p>
       )}
+    </>
+  );
+}
+
+export function StackedAreaChart({
+  buckets,
+  seriesOrder,
+  title,
+  loading,
+  empty,
+  className,
+  axisFormatter,
+  tooltipFormatter,
+  unitLabel,
+}: StackedAreaChartProps) {
+  const isEmpty = empty ?? buckets.length === 0;
+  return (
+    <ChartCard title={title} sub={unitLabel} loading={loading} empty={isEmpty} className={className}>
+      <StackedAreaBody
+        buckets={buckets}
+        seriesOrder={seriesOrder}
+        axisFormatter={axisFormatter}
+        tooltipFormatter={tooltipFormatter}
+      />
     </ChartCard>
   );
 }

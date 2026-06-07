@@ -132,8 +132,17 @@ func TestStore_GetVisiblePrivateChannels_LoaderErrorWarns(t *testing.T) {
 	s.visiblePrivateChannels = lru
 
 	_ = s.GetVisiblePrivateChannelsForUser(42, "gpt-4o")
-	if got := logs.FilterMessage("load visible private channels failed").Len(); got != 1 {
-		t.Fatalf("expected 1 loader-error warn, got %d", got)
+	// 行为变更:降级日志已统一为 "relay entity resolve degraded"(见 resolve_log.go),
+	// 未分类错误归类 reason="unknown"。
+	warns := logs.FilterMessage("relay entity resolve degraded").All()
+	if len(warns) != 1 {
+		t.Fatalf("expected 1 degrade warn, got %d", len(warns))
+	}
+	if warns[0].ContextMap()["entity"] != "private_channel_visible" {
+		t.Errorf("entity want 'private_channel_visible', got %q", warns[0].ContextMap()["entity"])
+	}
+	if warns[0].ContextMap()["reason"] != "unknown" {
+		t.Errorf("reason want 'unknown', got %q", warns[0].ContextMap()["reason"])
 	}
 }
 

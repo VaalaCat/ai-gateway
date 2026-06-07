@@ -38,15 +38,20 @@ type TokenDailyResponse struct {
 // start/end 为 unix 秒, end 缺省 now, start 缺省 end-86400;
 // gran 缺省 "day"; stack 缺省 "model" (Phase 1 仅支持 model, 其它值静默回退为 model)。
 type InsightsRequest struct {
-	Start int64  `form:"start"`
-	End   int64  `form:"end"`
-	Gran  string `form:"gran"`
-	Stack string `form:"stack"`
+	Start  int64  `form:"start"`
+	End    int64  `form:"end"`
+	Gran   string `form:"gran"`
+	Stack  string `form:"stack"`
+	Model  string `form:"model"`
+	UserID uint   `form:"user_id"`
 }
 
 // InsightsResponse 是 /v1/billing/insights 返回。
-// CostTrendStacked 是 (time-bucket × model) 的堆叠成本; CacheSaving 是缓存节省概览。
+// Trend 是 cost/requests/tokens 的统一时间序列(tokens 含 cache, 且带 4 个 token 分量),
+// 供前端 MetricTrendChart 切指标 + 按 token 类型拆;CostTrendStacked 是成本按 model 堆叠;
+// CacheSaving 是缓存节省概览。
 type InsightsResponse struct {
+	Trend            []dao.TimeBucket     `json:"trend"`
 	CostTrendStacked dao.CostTrendStacked `json:"cost_trend_stacked"`
 	CacheSaving      dao.CacheSaving      `json:"cache_saving"`
 }

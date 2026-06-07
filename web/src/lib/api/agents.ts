@@ -1,27 +1,17 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
-import type { Agent, AgentDetail, OnlineAgentInfo, ConnectivityReport, PaginatedResponse, PaginatedParams } from "@/lib/types";
+import type {
+  Agent,
+  AgentDetail,
+  OnlineAgentInfo,
+  ConnectivityReport,
+  PaginatedResponse,
+  PaginatedParams,
+  InflightSnapshot,
+  AllInflightResponse,
+} from "@/lib/types";
 
-export interface InflightSnapshot {
-  id: number;
-  req_id: string;
-  channel_id: number;
-  channel_name: string;
-  model: string;
-  is_stream: boolean;
-  stage: string;
-  elapsed_ms: number;
-}
-
-export interface GlobalInflightRow extends InflightSnapshot {
-  agent_id: number;
-  agent_name: string;
-}
-
-export interface AllInflightResponse {
-  requests: GlobalInflightRow[];
-  failed_agents: { agent_id: number; agent_name: string; error: string }[];
-}
+export type { InflightSnapshot, GlobalInflightRow, AllInflightResponse } from "@/lib/types";
 
 export function useAllAgentsInflight() {
   return useQuery({

@@ -42,3 +42,17 @@ func TestObsRange_Validate_Boundary(t *testing.T) {
 	}
 	require.NoError(t, r.Validate(), "正好 7 天应通过 hour 上限")
 }
+
+func TestObsFilter_EffectiveUserID(t *testing.T) {
+	// 非 admin:永远锁自己,忽略 f.UserID(越权防护)
+	got := ObsFilter{UserID: 999}.EffectiveUserID(Scope{IsAdmin: false, UserID: 7})
+	require.Equal(t, uint(7), got)
+
+	// admin 选了某用户:用 f.UserID
+	got = ObsFilter{UserID: 42}.EffectiveUserID(Scope{IsAdmin: true})
+	require.Equal(t, uint(42), got)
+
+	// admin 没选用户:0 = 全局
+	got = ObsFilter{}.EffectiveUserID(Scope{IsAdmin: true})
+	require.Equal(t, uint(0), got)
+}

@@ -12,8 +12,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { ChevronDown } from "lucide-react";
 
 const ROLES = ["user", "assistant", "system", "tool", "developer"] as const;
 type Role = (typeof ROLES)[number];
@@ -75,17 +73,7 @@ export function RoleMappingEditor({ value, onChange }: RoleMappingEditorProps) {
   const modelMappings = config.models || [];
 
   return (
-    <Collapsible>
-      <CollapsibleTrigger asChild>
-        <button
-          type="button"
-          className="flex w-full items-center justify-between rounded-md border px-4 py-2 text-sm font-medium hover:bg-accent"
-        >
-          {t("roleMapping")}
-          <ChevronDown className="size-4" />
-        </button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-4 pt-4">
+    <div className="space-y-4">
         <div className="space-y-2">
           <Label className="text-sm font-medium">{t("roleMappingDefault")}</Label>
           <div className="space-y-2">
@@ -100,7 +88,7 @@ export function RoleMappingEditor({ value, onChange }: RoleMappingEditorProps) {
                     updateDefaultMapping(newMapping);
                   }}
                 >
-                  <SelectTrigger className="w-32">
+                  <SelectTrigger className="flex-1 sm:w-32">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -118,7 +106,7 @@ export function RoleMappingEditor({ value, onChange }: RoleMappingEditorProps) {
                     updateDefaultMapping({ ...defaultMapping, [from]: newTo as Role });
                   }}
                 >
-                  <SelectTrigger className="w-32">
+                  <SelectTrigger className="flex-1 sm:w-32">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -199,7 +187,7 @@ export function RoleMappingEditor({ value, onChange }: RoleMappingEditorProps) {
                         updateModelMappings(newMappings);
                       }}
                     >
-                      <SelectTrigger className="w-32">
+                      <SelectTrigger className="flex-1 sm:w-32">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -222,7 +210,7 @@ export function RoleMappingEditor({ value, onChange }: RoleMappingEditorProps) {
                         updateModelMappings(newMappings);
                       }}
                     >
-                      <SelectTrigger className="w-32">
+                      <SelectTrigger className="flex-1 sm:w-32">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -285,7 +273,6 @@ export function RoleMappingEditor({ value, onChange }: RoleMappingEditorProps) {
             {t("roleMappingAddModel")}
           </Button>
         </div>
-      </CollapsibleContent>
-    </Collapsible>
+    </div>
   );
 }

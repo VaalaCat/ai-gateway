@@ -17,13 +17,17 @@ export interface ObsRangeParams {
   gran: ObsGranularity;
 }
 
-/** 单指标时间序列桶，含展示用 label */
+/** 单指标时间序列桶,含展示用 label。tokens 含 cache(= 4 个分量之和)。 */
 export interface TimeBucket {
   ts: number;
   label: string;
   cost: number;
   requests: number;
   tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
 }
 
 /** 多系列堆叠桶，含展示用 label */

@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ExpandedModelsView } from "@/components/business/expanded-models-view";
 import { useAvailableModels, AvailableModelsError } from "@/lib/api/available-models";
 import { groupModelsByProvider } from "@/lib/constants";
+import { copyToClipboard } from "@/lib/utils/clipboard";
 
 interface TokenAvailableModelsProps {
   tokenKey: string;
@@ -30,24 +31,16 @@ export function TokenAvailableModels({ tokenKey }: TokenAvailableModelsProps) {
   };
 
   const handleChipClick = async (name: string) => {
-    if (typeof navigator === "undefined" || !navigator.clipboard) return;
-    try {
-      await navigator.clipboard.writeText(name);
-      toast.success(t("copied", { name }));
-    } catch {
-      // silent fail OK for single chip
-    }
+    const ok = await copyToClipboard(name);
+    if (ok) toast.success(t("copied", { name }));
+    else toast.error(t("copyFailed"));
   };
 
   const handleCopyAll = async () => {
     if (!filtered || filtered.length === 0) return;
-    if (typeof navigator === "undefined" || !navigator.clipboard) return;
-    try {
-      await navigator.clipboard.writeText(filtered.join(", "));
-      toast.success(t("copiedAll", { count: filtered.length }));
-    } catch {
-      toast.error(t("errorGeneric"));
-    }
+    const ok = await copyToClipboard(filtered.join(", "));
+    if (ok) toast.success(t("copiedAll", { count: filtered.length }));
+    else toast.error(t("copyFailed"));
   };
 
   const filtered = useMemo(() => {

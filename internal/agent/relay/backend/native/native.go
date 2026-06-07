@@ -1,7 +1,6 @@
 package native
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,11 +8,10 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/scripthook"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/dataflow"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/transform" // register IR transformers via init()
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -28,9 +26,10 @@ type Backend struct {
 	Agent app.AgentApplication
 }
 
-// Relay 把原来 (*Handler).relayNative 的整段流程内化到 backend 里。
-// 步骤：协商 outbound → decode 入站 → 应用 model mapping + transformer →
-// encode 上行 → 应用 override → 上行 HTTP → 监控 events → encode 回客户端。
+// Relay 处理单次上行 attempt。流程：协商 outbound 协议 → decode 入站 →
+// seed/freeze Pass → 通过 dataflow.BuildChannelDataFlow 构建步骤链并 flow.Run
+// （含 model mapping、transformer、script、encode 等各 Step）→ dispatch 上行 HTTP
+// → 监控 events → encode 回客户端。
 //
 // 任一阶段失败会通过 Recorder.WithFail 标记 + 返回 state.AttemptResult.Err。
 // 不做 token 调和（FinalizeTokenCounts 在 Dispatcher 层统一处理），不做 forwarding 决策
@@ -58,29 +57,42 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	}
 	defer cancel()
 
-	if rctx.Inflight != nil {
-		rctx.Inflight.SetChannel(ch.Name)
-	}
-
 	outboundProto, inboundCodec, outboundCodec, err := resolveNativeCodecs(ch, inboundProto, modelName)
 	if err != nil {
 		return state.AttemptResult{Err: err}
 	}
 
-	upstreamReq, outboundBody, upstreamModel, cfg, err := buildNativeUpstreamRequest(
-		c.Request, inboundCodec, outboundCodec, ch, modelName, outboundProto, rec, logger,
-	)
+	// decode 留在链外:它的产出正是种入 Pass 的初值。
+	irReq, err := inboundCodec.DecodeRequest(c.Request)
 	if err != nil {
+		return state.AttemptResult{Err: fmt.Errorf("decode inbound request: %w", err)}
+	}
+	// 进入本 channel 处理的模型名是 planner 解析出的 RealModel(对齐旧
+	// cfg.InboundModel 与 ApplyModelMapping 入参);body 里的 model 在此被丢弃。
+	// 先 seed 再冻结 Original,保证 Original.Model == RealModel。
+	irReq.Model = modelName
+
+	pass := &dataflow.Pass{
+		Original: dataflow.CloneRequest(irReq),
+		Working:  irReq,
+		Rec:      rec,
+	}
+	flow := dataflow.BuildChannelDataFlow(ch, outboundProto, outboundCodec, dataflow.StepDeps{
+		Agent:  b.Agent,
+		GinCtx: c,
+		RCtx:   rctx,
+		Logger: logger,
+	})
+	if err := flow.Run(pass); err != nil {
 		return state.AttemptResult{Err: err}
 	}
-
-	outboundBody = applyNativeOverrides(upstreamReq, outboundBody, cfg, logger)
-
-	newBody, rejected, rejRes := scripthook.RunUpstreamScripts(b.Agent, c, rctx, ch, outboundProto, modelName, upstreamReq, outboundBody)
-	if rejected {
-		return rejRes
+	if pass.Aborted {
+		return pass.AbortResult
 	}
-	outboundBody = newBody
+
+	upstreamReq := pass.HTTPReq
+	outboundBody := pass.Body
+	upstreamModel := pass.Working.Model
 
 	rec.WithOutbound(upstreamReq, outboundBody, ch)
 	rec.WithStage(trace.StageUpstreamDispatch)
@@ -238,71 +250,6 @@ func (b *Backend) dispatchUpstream(ctx context.Context, req *http.Request, ch *m
 		return nil, fmt.Errorf("upstream request failed: %w", err)
 	}
 	return resp, nil
-}
-
-// buildNativeUpstreamRequest 把 inbound HTTP 请求经过 codec pipeline 转成上行 HTTP 请求：
-// decode 入站 → state.ApplyModelMapping → buildChannelConfig → ApplyIRTransformers →
-// encode outbound → 读 body 保存（保留 Body 供后续 Do 使用）。
-// 任一阶段失败返回 wrapped error；调用方包成 state.AttemptResult{Err}。
-// rec 用于 stage 切换 + WithFail；logger 用于 emitDroppedToolsLog。
-func buildNativeUpstreamRequest(
-	origReq *http.Request,
-	inboundCodec codec.InboundCodec,
-	outboundCodec codec.OutboundCodec,
-	ch *models.Channel,
-	modelName string,
-	outboundProto codec.Protocol,
-	rec *trace.Recorder,
-	logger *zap.Logger,
-) (*http.Request, []byte, string, *codec.ChannelConfig, error) {
-	// Decode the inbound request into the IR
-	irReq, err := inboundCodec.DecodeRequest(origReq)
-	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("decode inbound request: %w", err)
-	}
-
-	// Apply model mapping
-	upstreamModel := state.ApplyModelMapping(ch, modelName)
-	irReq.Model = upstreamModel
-
-	// Build channel config first; transformers read from cfg.
-	cfg := upstream.BuildChannelConfig(ch, upstreamModel, outboundProto)
-	cfg.InboundModel = modelName
-
-	// Apply IR transformers (system_prompt_injector, role_mapping,
-	// thinking_passthrough/strip 等). 注册顺序详见
-	// internal/agent/relay/transform/transform.go。
-	codec.ApplyIRTransformers(outboundProto, irReq, cfg)
-
-	rec.WithStage(trace.StageOutboundEncode)
-
-	upstreamReq, err := outboundCodec.EncodeRequest(irReq, cfg)
-	if err != nil {
-		rec.WithFail(trace.StageOutboundEncode, err)
-		return nil, nil, "", nil, fmt.Errorf("encode outbound request: %w", err)
-	}
-	upstream.EmitDroppedToolsLog(logger, irReq, ch.ID, irReq.InboundProtocol, outboundProto, cfg.BuiltinToolFallback)
-
-	// Read and save outbound request body for trace capture
-	var outboundBody []byte
-	if upstreamReq.Body != nil {
-		outboundBody, _ = io.ReadAll(upstreamReq.Body)
-		upstreamReq.Body = io.NopCloser(bytes.NewReader(outboundBody))
-	}
-	return upstreamReq, outboundBody, upstreamModel, cfg, nil
-}
-
-// applyNativeOverrides 把 channel 的 ParamOverride / HeaderOverride 应用到上行请求上。
-// 失败时打 warn 并 graceful degrade（行为对齐原 inline 写法），返回最终 body。
-func applyNativeOverrides(upstreamReq *http.Request, outboundBody []byte, cfg *codec.ChannelConfig, logger *zap.Logger) []byte {
-	if newBody, err := upstream.ApplyOverrides(upstreamReq, outboundBody, cfg.ParamOverride, cfg.HeaderOverride); err != nil {
-		if logger != nil {
-			logger.Warn("apply overrides failed", zap.Error(err))
-		}
-	} else {
-		outboundBody = newBody
-	}
-	return outboundBody
 }
 
 // resolveNativeCodecs 根据 channel + inbound 协议 + model 解析出最终的 outbound 协议

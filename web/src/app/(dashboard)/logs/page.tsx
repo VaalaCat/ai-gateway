@@ -27,6 +27,7 @@ import { StreamBadge } from "@/components/business/status-badge";
 import { ModelName } from "@/components/business/model-name";
 import { TraceDetail } from "@/components/business/trace-detail";
 import { FallbackChain } from "@/components/business/fallback-chain";
+import { RateLimitSection } from "@/components/business/rate-limit-section";
 import { EntityLabel } from "@/components/business/entity-label";
 import { KpiGrid } from "@/components/business/kpi-grid";
 import { StageDistributionBar } from "@/components/business/stage-distribution-bar";
@@ -482,6 +483,14 @@ function LogsPageContent() {
               )}
             </span>
           </div>
+        )}
+        {log.rate_limit_decision != null && log.rate_limit_decision !== "" && (
+          <RateLimitSection
+            decision={log.rate_limit_decision}
+            waitMs={log.rate_limit_wait_ms}
+            reason={log.rate_limit_reason}
+            hits={log.rate_limit_hits}
+          />
         )}
         {(log.fallback_chain?.length ?? 0) > 1 && (
           <FallbackChain chain={log.fallback_chain!} requestId={log.request_id} />

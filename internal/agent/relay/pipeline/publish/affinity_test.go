@@ -34,7 +34,8 @@ func TestFillExecution_AffinityHit(t *testing.T) {
 	used := state.Attempt{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5, ByAffinity: true}
 	rctx := affRctx(used, state.AttemptResult{CacheReadTokens: 100}, true)
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
+	p.recordAffinity(rctx, &e)
 	if e.AffinityStatus != "hit" {
 		t.Fatalf("AffinityStatus = %q, want hit", e.AffinityStatus)
 	}
@@ -52,7 +53,8 @@ func TestFillExecution_AffinityFallback(t *testing.T) {
 	used := state.Attempt{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5, ByAffinity: false}
 	rctx := affRctx(used, state.AttemptResult{}, true)
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
+	p.recordAffinity(rctx, &e)
 	if e.AffinityStatus != "fallback" {
 		t.Fatalf("AffinityStatus = %q, want fallback", e.AffinityStatus)
 	}
@@ -67,7 +69,8 @@ func TestFillExecution_AffinityNone(t *testing.T) {
 	used := state.Attempt{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5}
 	rctx := affRctx(used, state.AttemptResult{}, false)
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
+	p.recordAffinity(rctx, &e)
 	if e.AffinityStatus != "none" {
 		t.Fatalf("AffinityStatus = %q, want none", e.AffinityStatus)
 	}
@@ -79,7 +82,8 @@ func TestFillExecution_AffinityDisabledEmpty(t *testing.T) {
 	used := state.Attempt{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5, ByAffinity: true}
 	rctx := affRctx(used, state.AttemptResult{CacheReadTokens: 100}, true)
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
+	p.recordAffinity(rctx, &e)
 	if e.AffinityStatus != "" || e.AffinityRecorded {
 		t.Fatalf("disabled should leave status empty / no record, got %q / %v", e.AffinityStatus, e.AffinityRecorded)
 	}
@@ -92,7 +96,8 @@ func TestFillExecution_AffinityHitOnFailure(t *testing.T) {
 	rctx := affRctx(used, state.AttemptResult{}, true)
 	rctx.State.Execution.Err = errors.New("upstream failed") // make fillExecution treat it as failure
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
+	p.recordAffinity(rctx, &e)
 	if e.AffinityStatus != affinity.StatusHit {
 		t.Fatalf("status on failure = %q, want hit", e.AffinityStatus)
 	}

@@ -96,6 +96,13 @@ type UsageLogEntry struct {
 	// AttemptTraces 是逐候选 mask 过的 header/body trace，index 对应 FallbackChain 的 Seq-1。
 	// AttemptIndex assigned by settler from slice order until Task 5 adds the field.
 	AttemptTraces []models.UsageLogTrace `json:"attempt_traces,omitempty"`
+
+	// 限流决策（请求级 limiter）：Decision/WaitMs/Reason 标量 + Hits 命中明细。
+	// 无命中时全为零值/空，omitempty 不上报。
+	RateLimitDecision string                `json:"rate_limit_decision,omitempty"`
+	RateLimitWaitMs   int                   `json:"rate_limit_wait_ms,omitempty"`
+	RateLimitReason   string                `json:"rate_limit_reason,omitempty"`
+	RateLimitHits     []models.RateLimitHit `json:"rate_limit_hits,omitempty"`
 }
 
 type HeartbeatParams struct {
@@ -119,14 +126,29 @@ type HeartbeatParams struct {
 // CacheEntityStats 是单个实体缓存的运行统计。
 // LRU 模式实体上报全字段；Full 模式实体仅 Size 有意义、其他字段为 0。
 type CacheEntityStats struct {
-	Hits          int64 `json:"hits"`
-	Misses        int64 `json:"misses"`
-	Evictions     int64 `json:"evictions"`
-	NegativeHits  int64 `json:"negative_hits"`
-	LoadErrors    int64 `json:"load_errors"`
-	Invalidations int64 `json:"invalidations"`
-	Size          int   `json:"size"`
-	Capacity      int   `json:"capacity"`
+	Kind          string           `json:"kind,omitempty"` // "lru" | "index"；旧 agent 上报空串，前端按 lru 兜底
+	Hits          int64            `json:"hits"`
+	Misses        int64            `json:"misses"`
+	Evictions     int64            `json:"evictions"`
+	NegativeHits  int64            `json:"negative_hits"`
+	LoadErrors    int64            `json:"load_errors"`
+	Invalidations int64            `json:"invalidations"`
+	Size          int              `json:"size"`
+	Capacity      int              `json:"capacity"`
+	Extra         map[string]int64 `json:"extra,omitempty"` // 索引细分，如 {"limiters":12,"bindings":30}
+}
+
+// LimiterBucketStat 是一个 (限流器,桶) 的实时仪表读数。agent 采样 + join 规则元数据后上报。
+type LimiterBucketStat struct {
+	LimiterID   uint   `json:"limiter_id"`
+	Name        string `json:"name"`
+	Bucket      string `json:"bucket"`
+	Metric      string `json:"metric"`        // concurrency | rate
+	KeyBy       string `json:"key_by"`
+	Occupied    int64  `json:"occupied"`      // 并发:当前占用; 速率:当前窗口已用
+	Capacity    int64  `json:"capacity"`
+	Waiters     int64  `json:"waiters"`
+	WindowEndMs int64  `json:"window_end_ms"` // 速率桶本窗口复位时刻(unix ms);并发为 0
 }
 
 // FetchEntityRequest 是 sync.fetchEntity 的入参。

@@ -1,11 +1,11 @@
 "use client";
 
 import { useState, KeyboardEvent } from "react";
-import { X, Copy } from "lucide-react";
+import { X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { toast } from "sonner";
 import { useTranslations } from "next-intl";
+import { copyTextWithFeedback } from "@/lib/utils/clipboard";
 
 interface TagInputProps {
   value: string[];
@@ -49,8 +49,7 @@ export function TagInput({ value, onChange, placeholder }: TagInputProps) {
   };
 
   const copyTag = (tag: string) => {
-    navigator.clipboard.writeText(tag);
-    toast.success(tc("copied"));
+    copyTextWithFeedback(tag, { success: tc("copied"), error: tc("copyFailed") });
   };
 
   return (

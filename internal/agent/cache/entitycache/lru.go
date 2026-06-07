@@ -28,6 +28,11 @@ type Config[K comparable, V any] struct {
 	// OnEvict 在 LRU 因容量淘汰一条**正常**条目时被调用（负缓存条目不触发）。
 	// 用于派生反向索引同步清理（如 tokenStore.byID）。可为 nil。
 	OnEvict func(key K, value V)
+
+	// Refresh 提供缓存韧性参数(动态读取,支持运行时改值)。
+	// 非 nil 且 Loader 非 nil 时启用 stale-while-revalidate + detached 冷 miss。
+	// nil 时退化为原行为(冷 miss 沿用调用方 ctx,不做后台刷新)。
+	Refresh func() RefreshConfig
 }
 
 // entry 是 LRU 内部存储单元，区分正常值和负缓存条目。
@@ -35,6 +40,7 @@ type entry[V any] struct {
 	value    V
 	missing  bool  // true 表示负缓存条目
 	expireAt int64 // 仅在 missing=true 时有效（unix nano）
+	loadedAt int64 // unix nano:最近一次成功写入(load/Set/Apply)时间
 }
 
 // LRUCache 基于 hashicorp/golang-lru，带 Loader、负缓存、metrics。
@@ -53,6 +59,9 @@ type LRUCache[K comparable, V any] struct {
 	invalidations atomic.Int64
 
 	sf singleflight.Group
+
+	refresher  *Refresher[K, V]
+	refreshCfg func() RefreshConfig
 }
 
 // NewLRUCache 构造 LRUCache。Capacity <= 0 返回错误（fail-fast）。
@@ -78,6 +87,12 @@ func NewLRUCache[K comparable, V any](cfg Config[K, V]) (*LRUCache[K, V], error)
 		return nil, err
 	}
 	c.cache = cache
+	if cfg.Refresh != nil {
+		c.refreshCfg = cfg.Refresh
+		if cfg.Loader != nil {
+			c.refresher = NewRefresher[K, V](cfg.Loader, cfg.Refresh)
+		}
+	}
 	return c, nil
 }
 
@@ -108,6 +123,7 @@ func (c *LRUCache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 			}
 		} else {
 			c.hits.Add(1)
+			c.maybeRefresh(key, e.loadedAt)
 			return e.value, true, nil
 		}
 	}
@@ -124,7 +140,9 @@ func (c *LRUCache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 func (c *LRUCache[K, V]) loadAndStore(ctx context.Context, key K) (V, bool, error) {
 	sfKey := fmt.Sprintf("%v", key)
 	res, err, _ := c.sf.Do(sfKey, func() (any, error) {
-		return c.loader.Load(ctx, key)
+		lctx, cancel := c.loadContext(ctx)
+		defer cancel()
+		return c.loader.Load(lctx, key)
 	})
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -137,10 +155,56 @@ func (c *LRUCache[K, V]) loadAndStore(ctx context.Context, key K) (V, bool, erro
 		return zero, false, err
 	}
 	v, _ := res.(V)
-	if c.cache.Add(key, entry[V]{value: v}) {
+	c.store(key, v)
+	return v, true, nil
+}
+
+// maybeRefresh 当条目超过 RefreshAfter 且已配 refresher 时,触发一次后台刷新(serve-stale)。
+func (c *LRUCache[K, V]) maybeRefresh(key K, loadedAt int64) {
+	if c.refresher == nil || c.refreshCfg == nil {
+		return
+	}
+	after := c.refreshCfg().RefreshAfter
+	if after <= 0 {
+		return
+	}
+	if c.now().UnixNano()-loadedAt > int64(after) {
+		c.refresher.TriggerRefresh(key, c.onRefresh(key))
+	}
+}
+
+// onRefresh 把 Refresher 的三态结果落到缓存:OK 写回(apply-if-present)、
+// Gone 逐出(revocation)、Unavailable 保留旧值(绝不逐出)。
+func (c *LRUCache[K, V]) onRefresh(key K) func(RefreshOutcome, V) {
+	return func(o RefreshOutcome, v V) {
+		switch o {
+		case RefreshOK:
+			c.Apply(ActionSet, key, v) // 仅更新仍在的条目,不复活已删的
+		case RefreshGone:
+			c.Delete(key)
+		case RefreshUnavailable:
+			// 保留旧值
+		}
+	}
+}
+
+// loadContext 决定冷 miss 加载的 ctx:
+// 未配 Refresh → 旧行为(沿用调用方 ctx);配了 → detached + 有界(根治 leader-cancel 连坐)。
+func (c *LRUCache[K, V]) loadContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.refreshCfg == nil {
+		return context.WithCancel(ctx)
+	}
+	if d := c.refreshCfg().LoadTimeout; d > 0 {
+		return context.WithTimeout(context.Background(), d)
+	}
+	return context.WithCancel(context.Background())
+}
+
+// store 写入正向条目并盖 loadedAt 时间戳;LRU 淘汰时计数。
+func (c *LRUCache[K, V]) store(key K, value V) {
+	if c.cache.Add(key, entry[V]{value: value, loadedAt: c.now().UnixNano()}) {
 		c.evictions.Add(1)
 	}
-	return v, true, nil
 }
 
 // storeNegative 在启用负缓存时写入"key 不存在"的占位条目。
@@ -157,13 +221,15 @@ func (c *LRUCache[K, V]) storeNegative(key K) {
 }
 
 // Apply：apply-if-present。LRU 仅当 key 存在时写入或删除。
+//
+// 已知非原子窗口:ActionSet 的 Contains→store(Add) 之间若有并发 Delete,
+// 这次 re-add 会复活已删条目(resurrection)。这是被接受的——写入幂等,SWR
+// 刷新本就罕见,且 hashicorp/lru 不提供原子的 update-if-present。不加锁。
 func (c *LRUCache[K, V]) Apply(action Action, key K, value V) {
 	switch action {
 	case ActionSet:
 		if c.cache.Contains(key) {
-			if c.cache.Add(key, entry[V]{value: value}) {
-				c.evictions.Add(1)
-			}
+			c.store(key, value)
 		}
 	case ActionDelete:
 		c.invalidations.Add(1)
@@ -173,9 +239,7 @@ func (c *LRUCache[K, V]) Apply(action Action, key K, value V) {
 
 // Set 直接写入（覆盖负缓存）。
 func (c *LRUCache[K, V]) Set(key K, value V) {
-	if c.cache.Add(key, entry[V]{value: value}) {
-		c.evictions.Add(1)
-	}
+	c.store(key, value)
 }
 
 // Delete 删除。

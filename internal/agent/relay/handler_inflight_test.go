@@ -24,7 +24,7 @@ func TestRelay_TracksAndReleasesInflight(t *testing.T) {
 	// 把 registry 作为第四参传入
 	h, _, bus := setupTestHandler(nil)
 	// 重建一个携带 registry 的 handler
-	h = NewHandler(bus, h.Agent, TestDispatcherFactory(h.Agent), reg)
+	h = NewHandler(bus, h.Agent, TestDispatcherFactory(h.Agent), reg, nil)
 
 	// 构造一个 POST /v1/chat/completions、body=`{bad json` 的 gin.Context
 	gin.SetMode(gin.TestMode)
@@ -85,7 +85,7 @@ func TestRelay_InflightTrackedDuringExecution(t *testing.T) {
 	h, _, bus := setupTestHandler([]*models.Channel{
 		{ChannelCore: models.ChannelCore{ID: 99, Type: consts.ChannelTypeOpenAI, BaseURL: upstreamSrv.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
-	h = NewHandler(bus, h.Agent, TestDispatcherFactory(h.Agent), reg)
+	h = NewHandler(bus, h.Agent, TestDispatcherFactory(h.Agent), reg, nil)
 
 	done := make(chan struct{})
 	go func() {
@@ -132,7 +132,7 @@ func TestRelay_InterruptAbortsInflight(t *testing.T) {
 	h, _, bus := setupTestHandler([]*models.Channel{
 		{ChannelCore: models.ChannelCore{ID: 99, Type: consts.ChannelTypeOpenAI, BaseURL: upstreamSrv.URL, Status: 1, Weight: 1}, Key: "k", Models: "gpt-4o"},
 	})
-	h = NewHandler(bus, h.Agent, TestDispatcherFactory(h.Agent), reg)
+	h = NewHandler(bus, h.Agent, TestDispatcherFactory(h.Agent), reg, nil)
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()

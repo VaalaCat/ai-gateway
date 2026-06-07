@@ -18,6 +18,7 @@ import (
 	agentrelay "github.com/VaalaCat/ai-gateway/internal/agent/relay"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/limiter"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/agent/reporter"
 	"github.com/VaalaCat/ai-gateway/internal/agent/rpc"
@@ -51,6 +52,7 @@ type Server struct {
 	httpSrv  *http.Server
 
 	Inflight     *inflight.Registry
+	LimiterStore *limiter.MemStore
 	stopWatchdog func()
 
 	clientMu sync.RWMutex
@@ -433,6 +435,13 @@ func (s *Server) connectLoop(ctx context.Context) {
 		client.OnNotification(consts.RPCAgentInterrupt, func(ctx context.Context, params json.RawMessage) (any, error) {
 			return rpc.HandleInterrupt(s.Inflight, params)
 		})
+		client.OnNotification(consts.RPCAgentLimiterUsage, func(ctx context.Context, params json.RawMessage) (any, error) {
+			var idx *cache.LimiterIndex
+			if s.Store != nil {
+				idx = s.Store.LimiterIndex
+			}
+			return rpc.HandleLimiterUsage(s.LimiterStore, idx)
+		})
 		client.OnNotification(consts.RPCChannelFetchModels, func(ctx context.Context, params json.RawMessage) (any, error) {
 			return rpc.HandleFetchModels(ctx, params)
 		})
@@ -526,7 +535,8 @@ func (s *Server) buildRelayHandler(rf *agentproxy.RouteForwarder, relayTimeout t
 	agentApp := agentappkg.NewDefaultAgentApplication(s.Store, rf, s.Logger, runtimeCfg, pool)
 
 	dispatcher := backend.NewDispatcher(agentApp)
-	return agentrelay.NewHandler(s.Bus, agentApp, dispatcher, s.Inflight)
+	s.LimiterStore = limiter.NewMemStore()
+	return agentrelay.NewHandler(s.Bus, agentApp, dispatcher, s.Inflight, s.LimiterStore)
 }
 
 // lazyWSClient 是 app.WSClient 的延迟代理。
@@ -540,7 +550,9 @@ type lazyWSClient struct {
 func (l *lazyWSClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c := l.getClient()
 	if c == nil {
-		return nil, fmt.Errorf("ws client not connected")
+		// 预连接窗口语义上等同于"master 不可达",返回 ws.ErrConnClosed 使其能被
+		// classifyResolveErr 归类为 master_unreachable,而非 unknown。
+		return nil, ws.ErrConnClosed
 	}
 	return c.Call(ctx, method, params)
 }

@@ -58,6 +58,18 @@ func (b *WSBridge) Start() {
 		return nil, nil
 	})
 
+	b.Client.OnNotification(consts.RPCSyncUserQuota, func(ctx context.Context, params json.RawMessage) (any, error) {
+		var users []protocol.SyncedUser
+		if err := json.Unmarshal(params, &users); err != nil {
+			b.Logger.Error("invalid sync.userQuota", zap.Error(err))
+			return nil, nil
+		}
+		for _, u := range users {
+			b.Store.SetUserQuota(u.ID, u.Quota)
+		}
+		return nil, nil
+	})
+
 	b.Client.OnNotification(consts.RPCSyncForceFullSync, func(ctx context.Context, params json.RawMessage) (any, error) {
 		if b.Syncer == nil {
 			return nil, fmt.Errorf("syncer not initialized")

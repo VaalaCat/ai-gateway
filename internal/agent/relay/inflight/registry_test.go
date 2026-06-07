@@ -6,18 +6,21 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
 func TestRegistry_TrackSnapshotDone(t *testing.T) {
 	r := NewRegistry(nil, time.Hour)
-	e := r.Track(Meta{ReqID: "r1", ChannelID: 7, ChannelName: "openai", Model: "gpt-4o", IsStream: true, StartTime: time.Now()})
+	e := r.Track(Meta{ReqID: "r1", StartTime: time.Now()})
+	e.Update(protocol.UsageLogEntry{ChannelID: 7, ModelName: "gpt-4o", IsStream: true})
 	e.SetStage("upstream_dispatch")
 
 	snaps := r.Snapshot()
 	if len(snaps) != 1 {
 		t.Fatalf("want 1 in-flight, got %d", len(snaps))
 	}
-	if snaps[0].ReqID != "r1" || snaps[0].ChannelName != "openai" || snaps[0].Stage != "upstream_dispatch" {
+	if snaps[0].ReqID != "r1" || snaps[0].View.ChannelID != 7 || snaps[0].Stage != "upstream_dispatch" {
 		t.Fatalf("snapshot mismatch: %+v", snaps[0])
 	}
 	if snaps[0].ElapsedMs < 0 {
@@ -43,5 +46,32 @@ func TestRegistry_WatchdogWarnsStuck(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if logs.FilterMessageSnippet("in-flight relay request stuck").Len() == 0 {
 		t.Fatalf("expected watchdog WARN for stuck request")
+	}
+}
+
+func TestEntry_UpdateAndQueuedSnapshot(t *testing.T) {
+	r := NewRegistry(nil, 0)
+	e := r.Track(Meta{ReqID: "r1", StartTime: time.Now().Add(-time.Second)})
+
+	e.Update(protocol.UsageLogEntry{UserID: 7, ModelName: "gpt-4o", ChannelID: 42, InboundProtocol: "openai"})
+	e.SetStage("ratelimit_wait")
+	e.MarkQueued("free-tier(concurrency/per_user) over capacity 1")
+	time.Sleep(2 * time.Millisecond) // ensure at least 1ms elapses so QueuedMs > 0
+
+	snaps := r.Snapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("want 1 snap, got %d", len(snaps))
+	}
+	s := snaps[0]
+	if s.View.UserID != 7 || s.View.ModelName != "gpt-4o" || s.View.ChannelID != 42 {
+		t.Fatalf("view not carried: %+v", s.View)
+	}
+	if s.Stage != "ratelimit_wait" || s.QueuedMs <= 0 || s.QueuedReason == "" {
+		t.Fatalf("queue marker wrong: stage=%s queuedMs=%d reason=%q", s.Stage, s.QueuedMs, s.QueuedReason)
+	}
+
+	e.Unqueue()
+	if r.Snapshot()[0].QueuedMs != 0 {
+		t.Fatal("Unqueue should zero QueuedMs")
 	}
 }

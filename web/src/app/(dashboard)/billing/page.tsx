@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { ColumnDef } from "@tanstack/react-table";
 import { toast } from "sonner";
 
@@ -15,7 +16,7 @@ import { DateCell } from "@/components/business/date-cell";
 import { ObservabilityHeader } from "@/components/business/observability-header";
 import { RebuildButton } from "@/components/business/rebuild-button";
 import { RebuildDialog } from "@/components/business/rebuild-dialog";
-import { StackedAreaChart } from "@/components/business/stacked-area-chart";
+import { MetricTrendChart } from "@/components/business/metric-trend-chart";
 import { KpiGrid } from "@/components/business/kpi-grid";
 import { DataGlyph } from "@/components/business/data-glyph";
 import { normalize0to100 } from "@/lib/utils/normalize";
@@ -31,7 +32,7 @@ import { useAuth } from "@/lib/auth";
 import { useObsRange } from "@/lib/hooks/use-obs-range";
 import { tsToDateStr } from "@/lib/utils/date-range";
 import { PAGE_SIZES } from "@/lib/constants";
-import { formatMoneyCompact, formatMoneyExact, formatSuccessRate, formatTokensCompact } from "@/lib/utils/format";
+import { formatMoneyCompact, formatSuccessRate, formatTokensCompact } from "@/lib/utils/format";
 import { MoneyCell } from "@/components/business/money-cell";
 import { EntityLabel } from "@/components/business/entity-label";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
@@ -63,10 +64,11 @@ export default function BillingPage() {
 function BillingPageContent() {
   const t = useTranslations("billing");
   const tc = useTranslations("common");
+  const tcf = useTranslations("charts");
   const { isAdmin, loading } = useAuth();
 
   const [tab, setTab] = useState("token");
-  const [userId, setUserId] = useState("");
+  // channelId 仅作用于「按渠道」表(channel tab),不进 URL、不参与页级 user/model 筛选。
   const [channelId, setChannelId] = useState("");
   const [rebuildOpen, setRebuildOpen] = useState(false);
 
@@ -76,6 +78,20 @@ function BillingPageContent() {
   const [channelPageSize, setChannelPageSize] = useState<number>(
     PAGE_SIZES.DEFAULT
   );
+
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const userId = searchParams.get("user_id") ?? "";
+  const model = searchParams.get("model") ?? "";
+  const setParam = (key: string, value: string) => {
+    const sp = new URLSearchParams(searchParams.toString());
+    if (value) sp.set(key, value);
+    else sp.delete(key);
+    router.replace(`${pathname}?${sp.toString()}`, { scroll: false });
+  };
+  const setUserFilter = (v: string) => { setParam("user_id", v); setTokenPage(1); };
+  const setModel = (v: string) => setParam("model", v);
 
   // 统一时间窗 + gran (day/hour) 控制所有数据源 (KPI / trend / token-list / channel-list).
   // useObsRange 默认 24h, 24h 配 gran=day 会出"1 个点", 这里仅在 URL 没显式 start 时
@@ -94,14 +110,21 @@ function BillingPageContent() {
   const startDateStr = tsToDateStr(range.start);
   const endDateStr = tsToDateStr(range.end);
 
-  const insights = useBillingInsights(range, {
-    enabled: !loading,
-    refetchKey: refreshKey,
-  });
+  const insights = useBillingInsights(
+    {
+      ...range,
+      ...(model ? { model } : {}),
+      ...(userId ? { user_id: Number(userId) } : {}),
+    },
+    { enabled: !loading, refetchKey: refreshKey },
+  );
 
   const tokenUserId = userId ? Number(userId) : undefined;
   const channelFilterId = channelId ? Number(channelId) : undefined;
 
+  // 注意:model 筛选「只作用于趋势图」(useBillingInsights)。
+  // 顶部 KPI 卡与下方 token/channel 表来自日账汇总表(token_daily_billings / channel_daily_billings),
+  // 这些表没有 model_name 列,无法按模型拆;故它们只跟随 user 筛选,不接收 model。这是设计如此,勿"修复"。
   const overview = useBillingOverview(
     {
       start_date: startDateStr,
@@ -339,6 +362,17 @@ function BillingPageContent() {
         onRefresh={refresh}
         refreshing={insights.isFetching || overview.isFetching}
         showGranularity
+        extraFilters={
+          isAdmin ? (
+            <EntityPicker
+              entity="user"
+              value={userId}
+              onChange={setUserFilter}
+              placeholder={tcf("filter.user")}
+              className="w-44"
+            />
+          ) : undefined
+        }
       />
       {isAdmin && (
         <div className="flex justify-end">
@@ -375,9 +409,9 @@ function BillingPageContent() {
                 threshold: noData ? undefined : { warn: 5, critical: 10 },
               },
               {
-                key: "activeTokens",
-                label: t("activeTokens"),
-                value: overviewValue?.active_tokens ?? 0,
+                key: "totalTokens",
+                label: t("totalTokens"),
+                value: formatTokensCompact(overviewValue?.total_tokens ?? 0),
               },
               {
                 key: "cacheHit",
@@ -395,29 +429,25 @@ function BillingPageContent() {
         );
       })()}
 
-      <StackedAreaChart
-        buckets={insights.data?.cost_trend_stacked.buckets ?? []}
-        seriesOrder={insights.data?.cost_trend_stacked.series_order ?? []}
-        title={t("costTrend")}
+      <MetricTrendChart
+        buckets={insights.data?.trend ?? []}
+        costStacked={insights.data?.cost_trend_stacked}
+        defaultMetric="tokens"
+        title={t("usageTrend")}
         loading={insights.isLoading}
-        axisFormatter={formatMoneyCompact}
-        tooltipFormatter={formatMoneyExact}
-        unitLabel="Cost (USD)"
+        headerExtra={
+          <EntityPicker
+            entity="model"
+            value={model}
+            onChange={setModel}
+            placeholder={tcf("filter.model")}
+            className="w-40"
+          />
+        }
       />
 
-      <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
-        {isAdmin && tab === "token" && (
-          <div className="space-y-1">
-            <Label>{t("user")}</Label>
-            <EntityPicker
-              entity="user"
-              value={userId}
-              onChange={(v) => { setUserId(v); setTokenPage(1); }}
-              placeholder={t("user")}
-            />
-          </div>
-        )}
-        {isAdmin && tab === "channel" && (
+      {isAdmin && tab === "channel" && (
+        <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
           <div className="space-y-1">
             <Label>{t("channelId")}</Label>
             <EntityPicker
@@ -427,8 +457,8 @@ function BillingPageContent() {
               placeholder={t("channelId")}
             />
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {isAdmin ? (
         <Tabs value={tab} onValueChange={setTab}>

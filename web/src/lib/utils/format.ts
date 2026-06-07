@@ -139,6 +139,11 @@ export function formatPrice(price: number): string {
   return `$${price.toFixed(2)} / 1M`;
 }
 
+// 只输出金额数值($X.XX);单位($ / 1M)由调用方放表头,避免每格重复刷屏。
+export function formatPriceValue(price: number): string {
+  return `$${price.toFixed(2)}`;
+}
+
 /** 计费倍率 → 简洁字符串(最多 4 位小数,去尾零)。×倍率 展示用,避免 float 噪声如 0.30000000000004。 */
 export function formatFactor(n: number): string {
   if (!Number.isFinite(n)) return "—";

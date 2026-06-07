@@ -24,6 +24,57 @@ func newPlannerTestRctx(channels []*models.Channel, ui *app.UserInfo, model stri
 	return newTestRelayContext(cache, model, ui, 0)
 }
 
+// newQuotaPlannerRctx 构造带 quota-gate 关切字段的 Planner 测试 rctx：
+//   - 单个 shared channel（free 控制是否免费）映射到 model
+//   - model 注册一份已定价 ModelConfig（让 quotaFilter 进入余额判定）
+//   - UserInfo.UserID=7 + cache.users[7] 注入指定 Quota
+//   - settings 注入 RetryMax / MinQuotaReserve / service_fee 计费
+//   - withRequest 让 fctx.Rctx.Request.Context() 不 nil-panic
+func newQuotaPlannerRctx(free bool, quota, reserve int64, model string, retryMax int) *state.RelayContext {
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled, Weight: 1}, Free: free}
+	cache := &stubAgentCache{
+		channels: []*models.Channel{ch},
+		settings: settings.AgentSettings{
+			RetryMaxChannels: retryMax,
+			MinQuotaReserve:  reserve,
+			BYOKBillingMode:  consts.BYOKBillingModeServiceFee,
+		},
+		modelConfigs: map[string]*models.ModelConfig{model: {InputPrice: 0.001}},
+		users:        map[uint]*protocol.SyncedUser{7: {ID: 7, Quota: quota}},
+	}
+	return withRequest(newTestRelayContext(cache, model, &app.UserInfo{UserID: 7}, 0))
+}
+
+// TestSolve_InsufficientQuota: 单 realModel、唯一候选是付费 admin channel、模型已定价、
+// 用户 Quota=0 reserve=0 → quotaFilter 把候选收空 → Solve 返回 state.ErrInsufficientQuota。
+func TestSolve_InsufficientQuota(t *testing.T) {
+	rctx := newQuotaPlannerRctx(false /*paid*/, 0 /*quota*/, 0 /*reserve*/, "m", 5)
+
+	err := NewSolver(nil).Solve(rctx)
+	if err != state.ErrInsufficientQuota {
+		t.Fatalf("err = %v, want state.ErrInsufficientQuota", err)
+	}
+	if len(rctx.State.Plan.Attempts) != 0 {
+		t.Errorf("Attempts len = %d, want 0 (付费候选被余额闸门拦)", len(rctx.State.Plan.Attempts))
+	}
+}
+
+// TestSolve_FreeChannelPassesAtZeroBalance: 同上但唯一候选是 Free channel →
+// quotaFilter 放行 → Solve 返回 nil + 1 个 Attempt（免费渠道不受余额闸门约束）。
+func TestSolve_FreeChannelPassesAtZeroBalance(t *testing.T) {
+	rctx := newQuotaPlannerRctx(true /*free*/, 0 /*quota*/, 0 /*reserve*/, "m", 5)
+
+	if err := NewSolver(nil).Solve(rctx); err != nil {
+		t.Fatalf("Solve() err = %v, want nil (free channel 应放行)", err)
+	}
+	if len(rctx.State.Plan.Attempts) != 1 {
+		t.Fatalf("Attempts len = %d, want 1", len(rctx.State.Plan.Attempts))
+	}
+	if !rctx.State.Plan.Attempts[0].Channel.Free {
+		t.Errorf("保留的候选应为 free channel，got Free=%v", rctx.State.Plan.Attempts[0].Channel.Free)
+	}
+}
+
 // TestPlanner_Success: 链长 1 个 model + 2 个 enabled channel → Attempts 长度 2。
 func TestPlanner_Success(t *testing.T) {
 	chs := []*models.Channel{

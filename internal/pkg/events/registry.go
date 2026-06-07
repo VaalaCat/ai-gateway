@@ -29,6 +29,7 @@ func NewRegistry() TopicRegistry {
 	userType := reflect.TypeOf(models.User{})
 	usageReportType := reflect.TypeOf(protocol.UsageReport{})
 	usageEntryType := reflect.TypeOf(protocol.UsageLogEntry{})
+	userQuotaSyncType := reflect.TypeOf(protocol.UserQuotaSync{})
 	syncPushType := reflect.TypeOf(protocol.SyncPushParams{})
 	emptyType := reflect.TypeOf(struct{}{})
 
@@ -53,6 +54,7 @@ func NewRegistry() TopicRegistry {
 			UsageCompletedTopic.Value(): usageEntryType,
 
 			UserQuotaDepletedTopic.Value(): userType,
+			UserQuotaSyncTopic.Value():     userQuotaSyncType,
 
 			SyncFullSyncRequestedTopic.Value(): emptyType,
 		},

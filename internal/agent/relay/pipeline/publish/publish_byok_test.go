@@ -9,7 +9,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
-// newByokRctx 构造一个 fillExecution 测试用的最小 RelayContext。
+// newByokRctx 构造一个 projectExecution 测试用的最小 RelayContext。
 func newByokRctx(attempt state.Attempt) *state.RelayContext {
 	rctx := newPublishTestRctx()
 	rctx.State.Recorder = trace.NewRecorder(false, 0)
@@ -31,9 +31,8 @@ func TestFillExecution_AdminSource(t *testing.T) {
 	}
 	rctx := newByokRctx(attempt)
 
-	p := &Publisher{}
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
 
 	if e.ChannelID != 17 {
 		t.Errorf("admin: ChannelID = %d, want 17", e.ChannelID)
@@ -58,9 +57,8 @@ func TestFillExecution_PrivateSource(t *testing.T) {
 	}
 	rctx := newByokRctx(attempt)
 
-	p := &Publisher{}
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
 
 	if e.PrivateChannelID != 99 {
 		t.Errorf("private: PrivateChannelID = %d, want 99", e.PrivateChannelID)
@@ -85,9 +83,8 @@ func TestFillExecution_FallbackAdminWhenSourceEmpty(t *testing.T) {
 	}
 	rctx := newByokRctx(attempt)
 
-	p := &Publisher{}
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
 
 	if e.ChannelID != 5 {
 		t.Errorf("fallback: ChannelID = %d, want 5", e.ChannelID)
@@ -115,9 +112,8 @@ func TestFillExecution_AdminSource_SnapshotsPriceRatio(t *testing.T) {
 	}
 	rctx := newByokRctx(attempt)
 
-	p := &Publisher{}
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
 
 	if e.PriceRatio != 0.5 {
 		t.Errorf("admin: PriceRatio = %v, want 0.5", e.PriceRatio)
@@ -135,9 +131,8 @@ func TestFillExecution_PrivateSource_NoPriceRatio(t *testing.T) {
 	}
 	rctx := newByokRctx(attempt)
 
-	p := &Publisher{}
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
 
 	if e.PriceRatio != 0 {
 		t.Errorf("private: PriceRatio = %v, want 0 (unset)", e.PriceRatio)
@@ -158,9 +153,8 @@ func TestFillExecution_AdminSource_SnapshotsFree(t *testing.T) {
 	}
 	rctx := newByokRctx(attempt)
 
-	p := &Publisher{}
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
 
 	if !e.Free {
 		t.Errorf("admin free channel: e.Free = false, want true")
@@ -178,9 +172,8 @@ func TestFillExecution_PrivateSource_FreeStaysFalse(t *testing.T) {
 	}
 	rctx := newByokRctx(attempt)
 
-	p := &Publisher{}
 	var e protocol.UsageLogEntry
-	p.fillExecution(&e, rctx)
+	projectExecution(&e, rctx)
 
 	if e.Free {
 		t.Errorf("private row: e.Free = true, want false (not snapshotted)")

@@ -42,7 +42,7 @@ func setupTestHandler(channels []*models.Channel) (*Handler, *cache.Store, app.E
 		Relay: config.RelayConfig{Timeout: 30},
 	}
 	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, cfg, pool)
-	handler := NewHandler(bus, agentApp, TestDispatcherFactory(agentApp), nil)
+	handler := NewHandler(bus, agentApp, TestDispatcherFactory(agentApp), nil, nil)
 	return handler, store, bus
 }
 

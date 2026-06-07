@@ -3,12 +3,14 @@ package billing
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
@@ -124,6 +126,112 @@ func TestSettleUsage(t *testing.T) {
 	if logCount != 1 {
 		t.Errorf("duplicate should be ignored, got %d logs", logCount)
 	}
+}
+
+// TestSettle_PublishesUserQuotaSync 验证结算后把受影响 user 的最新 Quota 定向回送
+// 给来源 agent。覆盖三类场景：success(有 owner → 发回送)、boundary(全 owner-less →
+// 不发)、failure(user 不存在 → 跳过该 id)。
+func TestSettle_PublishesUserQuotaSync(t *testing.T) {
+	t.Run("success_publishes_for_seeded_user", func(t *testing.T) {
+		db, appProv := setupTestDB(t)
+		bus := eventbus.NewMemoryBus()
+		logger := zap.NewNop()
+
+		db.Create(&models.User{ID: 9, Username: "u9", Password: "x", Role: 1, Status: 1, Quota: 10000, GroupID: 2})
+		db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+		got := make(chan protocol.UserQuotaSync, 1)
+		_, err := events.SubscribeUserQuotaSync(bus, func(_ context.Context, m protocol.UserQuotaSync) error {
+			got <- m
+			return nil
+		})
+		require.NoError(t, err)
+
+		settler := NewSettler(appProv, bus, logger)
+		settler.Settle(context.Background(), "agentX", []protocol.UsageLogEntry{
+			{
+				RequestID:        "req-sync-1",
+				UserID:           9,
+				TokenID:          1,
+				ChannelID:        1,
+				ModelName:        "m",
+				PromptTokens:     100,
+				CompletionTokens: 50,
+				Status:           1,
+				Timestamp:        time.Now().Unix(),
+			},
+		})
+
+		select {
+		case m := <-got:
+			require.Equal(t, "agentX", m.AgentID)
+			require.Len(t, m.Users, 1)
+			require.Equal(t, uint(9), m.Users[0].ID)
+			require.Equal(t, uint(2), m.Users[0].GroupID)
+			// Quota 应为结算扣减后的余额(< 初始 10000)
+			require.Less(t, m.Users[0].Quota, int64(10000))
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting user.quota_synced")
+		}
+	})
+
+	t.Run("boundary_no_owner_publishes_nothing", func(t *testing.T) {
+		db, appProv := setupTestDB(t)
+		bus := eventbus.NewMemoryBus()
+		logger := zap.NewNop()
+
+		db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+		var count atomic.Int64
+		_, err := events.SubscribeUserQuotaSync(bus, func(_ context.Context, _ protocol.UserQuotaSync) error {
+			count.Add(1)
+			return nil
+		})
+		require.NoError(t, err)
+
+		settler := NewSettler(appProv, bus, logger)
+		settler.Settle(context.Background(), "agentX", []protocol.UsageLogEntry{
+			{
+				RequestID: "req-sync-anon",
+				UserID:    0,
+				TokenName: "anon",
+				ModelName: "m",
+				Status:    1,
+				Timestamp: time.Now().Unix(),
+			},
+		})
+
+		time.Sleep(100 * time.Millisecond)
+		require.Equal(t, int64(0), count.Load(), "owner-less batch must not publish UserQuotaSync")
+	})
+
+	t.Run("failure_missing_user_skipped", func(t *testing.T) {
+		_, appProv := setupTestDB(t)
+		bus := eventbus.NewMemoryBus()
+		logger := zap.NewNop()
+
+		var count atomic.Int64
+		_, err := events.SubscribeUserQuotaSync(bus, func(_ context.Context, _ protocol.UserQuotaSync) error {
+			count.Add(1)
+			return nil
+		})
+		require.NoError(t, err)
+
+		settler := NewSettler(appProv, bus, logger)
+		// user 777 不存在 → GetByID 报错 → 跳过 → users 为空 → 不发
+		settler.Settle(context.Background(), "agentX", []protocol.UsageLogEntry{
+			{
+				RequestID: "req-sync-missing",
+				UserID:    777,
+				ModelName: "m",
+				Status:    1,
+				Timestamp: time.Now().Unix(),
+			},
+		})
+
+		time.Sleep(100 * time.Millisecond)
+		require.Equal(t, int64(0), count.Load(), "missing user must be skipped → no publish")
+	})
 }
 
 func TestQuotaDepletion(t *testing.T) {

@@ -29,6 +29,8 @@ interface EntityMultiPickerProps {
   placeholder?: string;
   disabled?: boolean;
   className?: string;
+  /** 从下拉可选项中排除的 value（如已绑定项）。默认不排除，向后兼容。 */
+  excludeIds?: string[];
 }
 
 export function EntityMultiPicker({
@@ -38,6 +40,7 @@ export function EntityMultiPicker({
   placeholder,
   disabled,
   className,
+  excludeIds,
 }: EntityMultiPickerProps) {
   const t = useTranslations("entityPicker");
   const adapter = ENTITY_ADAPTERS[entity] as unknown as EntityAdapter<unknown>;
@@ -45,6 +48,9 @@ export function EntityMultiPicker({
   const [open, setOpen] = useState(false);
   const { search, setSearch, items, isLoading, getValue, renderItem } =
     useEntityOptions(adapter, { scope: "self", pageSize: PAGE_SIZE });
+
+  const excludeSet = new Set(excludeIds ?? []);
+  const visibleItems = items.filter((it) => !excludeSet.has(getValue(it)));
 
   const selectedSet = new Set(value);
   const toggle = (v: string) =>
@@ -81,10 +87,10 @@ export function EntityMultiPicker({
                 <div className="px-3 py-6 text-center text-sm text-muted-foreground">
                   {t("loading")}
                 </div>
-              ) : items.length === 0 ? (
+              ) : visibleItems.length === 0 ? (
                 <CommandEmpty>{t("noResults")}</CommandEmpty>
               ) : (
-                items.map((item) => {
+                visibleItems.map((item) => {
                   const v = getValue(item);
                   return (
                     <CommandItem key={v} value={v} onSelect={() => toggle(v)}>
@@ -112,7 +118,7 @@ export function EntityMultiPicker({
               className="cursor-pointer"
               onClick={() => !disabled && toggle(v)}
             >
-              <EntityLabel entity={entity} id={v} showId={false} className="truncate" />
+              <EntityLabel entity={entity} id={v} showId={false} hover={false} className="truncate" />
               <X className="ml-1 size-3" />
             </Badge>
           ))}

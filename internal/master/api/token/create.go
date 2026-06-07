@@ -47,6 +47,13 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		if tpl.Status != consts.StatusEnabled {
 			return api.Created[models.Token]{}, api.BadRequestError("template is disabled", nil)
 		}
+		groupID, gErr := api.ResolveGroupID(q, scope.UserID)
+		if gErr != nil {
+			return api.Created[models.Token]{}, api.InternalError("load user failed", gErr)
+		}
+		if !tpl.AllowsGroup(groupID) {
+			return api.Created[models.Token]{}, api.ForbiddenError("template not available for your group")
+		}
 
 		token.UserID = scope.UserID
 		token.TemplateID = req.TemplateID

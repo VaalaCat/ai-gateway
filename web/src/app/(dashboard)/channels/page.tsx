@@ -24,6 +24,7 @@ import {
 
 import { StatusBadge } from "@/components/business/status-badge";
 import { ChannelLimitBadge } from "@/components/business/channel-limit-badge";
+import { ChannelBillingBadge } from "@/components/business/channel-billing-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 
 import { ExpandedModelsView } from "@/components/business/expanded-models-view";
@@ -377,6 +378,11 @@ export default function ChannelsPage() {
       cell: ({ row }) => row.original.tag ? (
         <Badge variant="outline">{row.original.tag}</Badge>
       ) : null,
+    },
+    {
+      id: "billing",
+      header: t("billing"),
+      cell: ({ row }) => <ChannelBillingBadge channel={row.original} />,
     },
     {
       id: "lb",

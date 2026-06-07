@@ -62,6 +62,12 @@ func primaryProtocol(endpoints, supportedAPITypes string) Protocol {
 	return ProtocolOpenAIChat
 }
 
+// PrimaryOutboundProtocol 返回 channel 的主出站协议(给静态 dataflow describe 复用)。
+// 入参直接收 channel 的 endpoints / supportedAPITypes 字符串,避免 codec 依赖 models。
+func PrimaryOutboundProtocol(endpoints, supportedAPITypes string) Protocol {
+	return primaryProtocol(endpoints, supportedAPITypes)
+}
+
 // ResolveTestEndpoint resolves the upstream path used to connectivity-test a
 // channel, driven by the codec Protocol model (endpoints / supportedAPITypes) —
 // never the deprecated numeric channel type.

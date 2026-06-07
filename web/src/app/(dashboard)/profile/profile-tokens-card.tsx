@@ -70,7 +70,7 @@ export function ProfileTokensCard({ userId }: ProfileTokensCardProps) {
                 <TableRow key={tk.id}>
                   <TableCell className="font-medium">{tk.name}</TableCell>
                   <TableCell>
-                    <CopyableText text={tk.key} display={tk.key.slice(0, 8) + "…"} />
+                    <CopyableText text={tk.key} display={tk.key.slice(0, 8) + "…"} revealable />
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={tk.status} />

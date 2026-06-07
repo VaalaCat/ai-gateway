@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
-	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -56,27 +55,6 @@ func ApplyOverrides(req *http.Request, body []byte, paramOverride, headerOverrid
 	}
 
 	return body, retErr
-}
-
-func ApplyHeaderFilter(header http.Header) {
-	for key := range header {
-		lowerKey := strings.ToLower(key)
-		switch lowerKey {
-		case "forwarded",
-			"x-forwarded-for",
-			"x-forwarded-host",
-			"x-forwarded-port",
-			"x-forwarded-proto",
-			"x-forwarded-server",
-			"x-real-ip",
-			"cdn-loop":
-			header.Del(key)
-		default:
-			if strings.HasPrefix(lowerKey, "cf-") {
-				header.Del(key)
-			}
-		}
-	}
 }
 
 // parseProtocolOverride converts the raw map[string]any decoded from

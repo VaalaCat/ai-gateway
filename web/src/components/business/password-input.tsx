@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
+import { copyToClipboard } from "@/lib/utils/clipboard";
 import { Eye, EyeOff, Copy, Check, X } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -54,11 +55,11 @@ function GeneratedReveal({ password, onDismiss }: GeneratedRevealProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(password);
+    const ok = await copyToClipboard(password);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
+    } else {
       toast.error(t("passwordCopyFailed"));
     }
   };

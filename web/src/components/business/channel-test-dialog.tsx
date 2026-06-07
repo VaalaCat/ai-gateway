@@ -40,9 +40,8 @@ import { ModelName } from "@/components/business/model-name";
 import { API_TYPES } from "@/lib/constants";
 import { useDebounce } from "@/hooks/use-debounce";
 import type { ChannelTestResponse } from "@/lib/types";
-import type { OnlineAgentInfo } from "@/lib/types";
-import { useOnlineAgents } from "@/lib/api/agents";
 import { useAgentRoutes } from "@/lib/api/agent-routes";
+import { OnlineAgentSelect } from "@/components/business/online-agent-select";
 
 type TestStatus = "pending" | "testing" | "success" | "failed";
 
@@ -120,7 +119,6 @@ export function ChannelTestDialog({
   const abortRef = useRef<AbortController | null>(null);
 
   const [agentId, setAgentId] = useState<string>("");
-  const { data: onlineAgents } = useOnlineAgents({ enabled: agentSourceType !== null });
 
   // Auto-resolve default agent from channel's routing rules
   // agentSourceType === "channel" 时加载 agent routes；null 时跳过查询（BYOK 用户
@@ -331,19 +329,7 @@ export function ChannelTestDialog({
           {agentSourceType !== null && (
             <div className="flex items-center gap-2">
               <Label>{t("agentSelector")}</Label>
-              <Select value={agentId || "local"} onValueChange={(v) => setAgentId(v === "local" ? "" : v)}>
-                <SelectTrigger className="w-[200px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="local">{t("localTest")}</SelectItem>
-                  {onlineAgents?.map((a: OnlineAgentInfo) => (
-                    <SelectItem key={a.agent_id} value={a.agent_id}>
-                      {a.name} ({a.agent_id.slice(0, 8)}...)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <OnlineAgentSelect value={agentId} onChange={setAgentId} />
             </div>
           )}
         </div>

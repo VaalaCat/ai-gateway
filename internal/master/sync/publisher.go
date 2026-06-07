@@ -14,10 +14,11 @@ import (
 
 var _ app.Publisher = (*Publisher)(nil)
 
-// broadcaster 是 Publisher 对 sync hub 的最小依赖：向所有已连接 agent 推送通知。
-// 收窄成接口便于测试注入 fake 捕获广播；生产实现是 *Hub（hub.go:567 Broadcast）。
+// broadcaster 是 Publisher 对 sync hub 的最小依赖：向所有已连接 agent 推送通知，
+// 或向单个 agent 定向推送。收窄成接口便于测试注入 fake 捕获广播；生产实现是 *Hub。
 type broadcaster interface {
 	Broadcast(method string, params any)
+	NotifyAgent(agentID, method string, params any)
 }
 
 type Publisher struct {
@@ -54,6 +55,13 @@ func (p *Publisher) Start() {
 	subscribeTopic(p, events.EntityAgentRoute, events.ActionUpdate, events.AgentRouteUpdateTopic)
 	subscribeTopic(p, events.EntityAgentRoute, events.ActionDelete, events.AgentRouteDeleteTopic)
 
+	subscribeTopic(p, events.EntityRequestLimiter, events.ActionCreate, events.RequestLimiterCreateTopic)
+	subscribeTopic(p, events.EntityRequestLimiter, events.ActionUpdate, events.RequestLimiterUpdateTopic)
+	subscribeTopic(p, events.EntityRequestLimiter, events.ActionDelete, events.RequestLimiterDeleteTopic)
+	subscribeTopic(p, events.EntityLimiterBinding, events.ActionCreate, events.LimiterBindingCreateTopic)
+	subscribeTopic(p, events.EntityLimiterBinding, events.ActionUpdate, events.LimiterBindingUpdateTopic)
+	subscribeTopic(p, events.EntityLimiterBinding, events.ActionDelete, events.LimiterBindingDeleteTopic)
+
 	subscribeTopic(p, events.EntityModelRouting, events.ActionCreate, events.ModelRoutingCreateTopic)
 	subscribeTopic(p, events.EntityModelRouting, events.ActionUpdate, events.ModelRoutingUpdateTopic)
 	subscribeTopic(p, events.EntityModelRouting, events.ActionDelete, events.ModelRoutingDeleteTopic)
@@ -70,6 +78,15 @@ func (p *Publisher) Start() {
 	subscribeTopic(p, events.EntityScript, events.ActionCreate, events.ScriptCreateTopic)
 	subscribeTopic(p, events.EntityScript, events.ActionUpdate, events.ScriptUpdateTopic)
 	subscribeTopic(p, events.EntityScript, events.ActionDelete, events.ScriptDeleteTopic)
+
+	// 结算后的余额回送：master 把受影响 user 的最新 Quota 定向推回来源 agent，
+	// 不走 Broadcast(全量广播)，只 NotifyAgent 单点投递。
+	if _, err := events.SubscribeUserQuotaSync(p.bus, func(_ context.Context, m protocol.UserQuotaSync) error {
+		p.hub.NotifyAgent(m.AgentID, consts.RPCSyncUserQuota, m.Users)
+		return nil
+	}); err != nil {
+		p.logger.Error("subscribe user.quota_synced failed", zap.Error(err))
+	}
 }
 
 func subscribeTopic[T any](p *Publisher, entity, action string, topic events.Topic[T]) {

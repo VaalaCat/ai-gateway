@@ -10,6 +10,7 @@ import {
   ChevronRight,
   FileCode2,
   FileKey,
+  Gauge,
   Key,
   KeyRound,
   LayoutDashboard,
@@ -159,6 +160,7 @@ export function AppSidebar() {
             { label: t("agentRoutes"), icon: Route, href: "/agent-routes" },
             { label: t("modelRoutings"), icon: Network, href: "/model-routings" },
             { label: t("scripts"), icon: FileCode2, href: "/scripts" },
+            { label: t("rateLimiters"), icon: Gauge, href: "/rate-limiters" },
           ],
         },
         {

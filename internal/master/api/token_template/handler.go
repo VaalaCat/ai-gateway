@@ -7,6 +7,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
@@ -51,6 +52,21 @@ func (h *Handler) ListEnabled(c *app.Context, req ListRequest) (api.PaginatedRes
 	if err != nil {
 		return api.PaginatedResponse[models.TokenTemplate]{}, api.InternalError("list token templates failed", err)
 	}
+	scope := middleware.GetScope(c.Context)
+	if scope != nil && !scope.IsAdmin {
+		groupID, gErr := api.ResolveGroupID(q, scope.UserID)
+		if gErr != nil {
+			return api.PaginatedResponse[models.TokenTemplate]{}, api.InternalError("load user failed", gErr)
+		}
+		filtered := make([]models.TokenTemplate, 0, len(templates))
+		for _, tpl := range templates {
+			if tpl.AllowsGroup(groupID) {
+				filtered = append(filtered, tpl)
+			}
+		}
+		templates = filtered
+		total = int64(len(filtered))
+	}
 	return api.PaginatedResponse[models.TokenTemplate]{Data: templates, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
@@ -72,6 +88,12 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		}
 	}
 
+	if req.AllowedGroupIDs != nil {
+		if err := validateAllowedGroupIDs(*req.AllowedGroupIDs); err != nil {
+			return api.Created[models.TokenTemplate]{}, api.BadRequestError(err.Error(), err)
+		}
+	}
+
 	tpl := models.TokenTemplate{
 		Name:       req.Name,
 		Models:     req.Models,
@@ -80,6 +102,9 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 	}
 	if req.AllowedChannelIDs != nil {
 		tpl.AllowedChannelIDs = datatypes.JSONSlice[uint](*req.AllowedChannelIDs)
+	}
+	if req.AllowedGroupIDs != nil {
+		tpl.AllowedGroupIDs = datatypes.JSONSlice[uint](*req.AllowedGroupIDs)
 	}
 	if tpl.ExpiryDays == 0 {
 		tpl.ExpiryDays = -1
@@ -145,6 +170,17 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.TokenTemplat
 		updates["allowed_channel_ids"] = datatypes.JSONSlice[uint](ids)
 	}
 
+	if raw, ok := updates["allowed_group_ids"]; ok {
+		ids, err := normalizeAllowedGroupIDs(raw)
+		if err != nil {
+			return models.TokenTemplate{}, api.BadRequestError(err.Error(), err)
+		}
+		if err := validateAllowedGroupIDs(ids); err != nil {
+			return models.TokenTemplate{}, api.BadRequestError(err.Error(), err)
+		}
+		updates["allowed_group_ids"] = datatypes.JSONSlice[uint](ids)
+	}
+
 	if err := m.TokenTemplate().Update(uint(id), updates); err != nil {
 		return models.TokenTemplate{}, api.InternalError("update token template failed", err)
 	}
@@ -180,4 +216,12 @@ func validateAllowedChannelIDs(ids []uint) error {
 
 func normalizeAllowedChannelIDs(v any) ([]uint, error) {
 	return api.NormalizeAllowedChannelIDs(v)
+}
+
+func validateAllowedGroupIDs(ids []uint) error {
+	return api.ValidateAllowedGroupIDs(ids)
+}
+
+func normalizeAllowedGroupIDs(v any) ([]uint, error) {
+	return api.NormalizeAllowedGroupIDs(v)
 }

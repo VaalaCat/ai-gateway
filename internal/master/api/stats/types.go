@@ -37,9 +37,11 @@ type TrendResponse struct {
 // DashboardRequest 是 /v1/stats/dashboard 的入参。
 // start/end 为 unix 秒；end 缺省取 now、start 缺省取 end-86400；gran 缺省 "day"。
 type DashboardRequest struct {
-	Start int64  `form:"start"`
-	End   int64  `form:"end"`
-	Gran  string `form:"gran"`
+	Start  int64  `form:"start"`
+	End    int64  `form:"end"`
+	Gran   string `form:"gran"`
+	Model  string `form:"model"`
+	UserID uint   `form:"user_id"`
 }
 
 // DashboardResponse 是 /v1/stats/dashboard 的统一返回。

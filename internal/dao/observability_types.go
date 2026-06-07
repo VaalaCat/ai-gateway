@@ -63,11 +63,31 @@ type Scope struct {
 	UserID  uint
 }
 
-// TimeBucket 是 trend 输出的统一桶。
+// ObsFilter 是观测查询的可选筛选维度,零值表示不筛。
+// ModelName="" 表示所有模型;UserID=0 表示不按用户筛(仅 admin 生效)。
+type ObsFilter struct {
+	ModelName string
+	UserID    uint
+}
+
+// EffectiveUserID 返回查询实际应锁定的 user_id。
+// 非 admin 永远锁自己(忽略 f.UserID,防越权);admin 选了某用户则用之,否则 0(全局)。
+func (f ObsFilter) EffectiveUserID(scope Scope) uint {
+	if !scope.IsAdmin {
+		return scope.UserID
+	}
+	return f.UserID
+}
+
+// TimeBucket 是 trend 输出的统一桶。Tokens 含 cache(= 4 个分量之和)。
 type TimeBucket struct {
 	Ts       int64  `json:"ts"`
 	Label    string `json:"label"`
 	Cost     int64  `json:"cost"`
 	Requests int64  `json:"requests"`
 	Tokens   int64  `json:"tokens"`
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
 }

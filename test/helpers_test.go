@@ -112,7 +112,7 @@ func setupFullEnv(t *testing.T, agentID string, retryMax int) *testEnv {
 		Relay: config.RelayConfig{Timeout: 30},
 	}
 	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, relayCfg, pool)
-	relayHandler := agentrelay.NewHandler(agentBus, agentApp, backend.NewDispatcher(agentApp), nil)
+	relayHandler := agentrelay.NewHandler(agentBus, agentApp, backend.NewDispatcher(agentApp), nil, nil)
 
 	agentRouter := gin.New()
 	v1 := agentRouter.Group("/v1")

@@ -42,7 +42,7 @@ import { StatusBadge, RoleBadge } from "@/components/business/status-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { ProfileFormDialog } from "@/components/business/profile-form-dialog";
 import { DateCell } from "@/components/business/date-cell";
-import { GroupSelect } from "@/components/business/group-select";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 
 import { useUsers, useCreateUser, useDeleteUser, useUpdateQuota } from "@/lib/api/users";
 import { formatErrorToast } from "@/lib/api/error-toast";
@@ -355,9 +355,12 @@ function UsersPageContent() {
             </div>
             <div className="space-y-2">
               <Label>{t("group")}</Label>
-              <GroupSelect
-                value={createForm.group_id}
-                onChange={(id) => setCreateForm({ ...createForm, group_id: id })}
+              <EntityPicker
+                entity="user-group"
+                value={createForm.group_id != null ? String(createForm.group_id) : ""}
+                onChange={(v) =>
+                  setCreateForm({ ...createForm, group_id: v ? Number(v) : undefined })
+                }
               />
             </div>
           </div>

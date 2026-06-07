@@ -7,18 +7,20 @@ import (
 
 // Entity 常量。
 const (
-	EntityToken      = "token"
-	EntityChannel    = "channel"
-	EntityModel      = "model"
-	EntityModelV1    = "model_config" // legacy full-sync entity name
-	EntitySetting    = "setting"
-	EntityAgent      = "agent"
-	EntityAgentRoute    = "agent_route"
-	EntityModelRouting  = "model_routing"
-	EntityUserRoutings  = "user_routings"
-	EntitySync          = "sync"
-	EntityUserGroup  = "user_group"
-	EntityUser       = "user"
+	EntityToken          = "token"
+	EntityChannel        = "channel"
+	EntityModel          = "model"
+	EntityModelV1        = "model_config" // legacy full-sync entity name
+	EntitySetting        = "setting"
+	EntityAgent          = "agent"
+	EntityAgentRoute     = "agent_route"
+	EntityRequestLimiter = "request_limiter"
+	EntityLimiterBinding = "limiter_binding"
+	EntityModelRouting   = "model_routing"
+	EntityUserRoutings   = "user_routings"
+	EntitySync           = "sync"
+	EntityUserGroup      = "user_group"
+	EntityUser           = "user"
 
 	EntityPrivateChannel      = "private_channel"
 	EntityPrivateChannelShare = "private_channel_share"
@@ -58,10 +60,18 @@ const (
 	topicUsageCompleted = "usage.completed"
 
 	topicUserQuotaDepleted = "user.quota_depleted"
+	topicUserQuotaSync     = "user.quota_synced"
 
 	topicAgentRouteCreate = "agent_route.create"
 	topicAgentRouteUpdate = "agent_route.update"
 	topicAgentRouteDelete = "agent_route.delete"
+
+	topicRequestLimiterCreate = "request_limiter.create"
+	topicRequestLimiterUpdate = "request_limiter.update"
+	topicRequestLimiterDelete = "request_limiter.delete"
+	topicLimiterBindingCreate = "limiter_binding.create"
+	topicLimiterBindingUpdate = "limiter_binding.update"
+	topicLimiterBindingDelete = "limiter_binding.delete"
 
 	topicModelRoutingCreate = "model_routing.create"
 	topicModelRoutingUpdate = "model_routing.update"
@@ -96,6 +106,9 @@ const (
 	patternSyncAgentAll       = "sync.agent.*"
 	patternAgentRouteAll      = "agent_route.*"
 	patternSyncAgentRouteAll  = "sync.agent_route.*"
+
+	patternSyncRequestLimiterAll = "sync.request_limiter.*"
+	patternSyncLimiterBindingAll = "sync.limiter_binding.*"
 
 	patternModelRoutingAll     = "model_routing.*"
 	patternSyncModelRoutingAll = "sync.model_routing.*"
@@ -140,6 +153,7 @@ var (
 	UsageCompletedTopic = newTopic[protocol.UsageLogEntry](topicUsageCompleted)
 
 	UserQuotaDepletedTopic = newTopic[models.User](topicUserQuotaDepleted)
+	UserQuotaSyncTopic     = newTopic[protocol.UserQuotaSync](topicUserQuotaSync)
 
 	SettingUpdateTopic = newTopic[models.Setting](topicSettingUpdate)
 
@@ -166,6 +180,15 @@ var (
 	AgentRouteDeleteTopic    = newTopic[models.AgentRoute](topicAgentRouteDelete)
 	AgentRouteAllPattern     = newPattern[models.AgentRoute](patternAgentRouteAll)
 	SyncAgentRouteAllPattern = newPattern[protocol.SyncPushParams](patternSyncAgentRouteAll)
+
+	RequestLimiterCreateTopic    = newTopic[models.RequestLimiter](topicRequestLimiterCreate)
+	RequestLimiterUpdateTopic    = newTopic[models.RequestLimiter](topicRequestLimiterUpdate)
+	RequestLimiterDeleteTopic    = newTopic[models.RequestLimiter](topicRequestLimiterDelete)
+	LimiterBindingCreateTopic    = newTopic[models.LimiterBinding](topicLimiterBindingCreate)
+	LimiterBindingUpdateTopic    = newTopic[models.LimiterBinding](topicLimiterBindingUpdate)
+	LimiterBindingDeleteTopic    = newTopic[models.LimiterBinding](topicLimiterBindingDelete)
+	SyncRequestLimiterAllPattern = newPattern[protocol.SyncPushParams](patternSyncRequestLimiterAll)
+	SyncLimiterBindingAllPattern = newPattern[protocol.SyncPushParams](patternSyncLimiterBindingAll)
 
 	ModelRoutingCreateTopic    = newTopic[models.ModelRouting](topicModelRoutingCreate)
 	ModelRoutingUpdateTopic    = newTopic[models.ModelRouting](topicModelRoutingUpdate)

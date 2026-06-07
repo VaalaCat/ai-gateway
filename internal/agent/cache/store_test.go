@@ -404,6 +404,16 @@ func TestHandleSyncEvent_UserApplyIfPresent_DropsAbsent(t *testing.T) {
 	}
 }
 
+func TestStore_SetUserQuota(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetUser(&protocol.SyncedUser{ID: 5, GroupID: 1, Quota: 100})
+	s.SetUserQuota(5, 30)
+	if u := s.GetUser(context.Background(), 5); u == nil || u.Quota != 30 {
+		t.Fatalf("Quota after SetUserQuota = %v, want 30", u)
+	}
+	s.SetUserQuota(999, 1) // not cached: must be a silent no-op, no panic
+}
+
 func TestStore_HasRealModel(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 	s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-5.5,gpt-4o"})

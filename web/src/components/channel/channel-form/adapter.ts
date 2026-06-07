@@ -29,6 +29,12 @@ export interface ChannelFormAdapter<Entity> {
   /** Form fields that must not render. */
   hiddenFields?: ReadonlySet<keyof ChannelForm>;
 
+  /**
+   * 上游请求脚本配置页路径。为空时 processing 的 upstream_script 节点不渲染
+   * (如 BYOK 无脚本权限)。
+   */
+  scriptsHref?: string;
+
   /** Hint shown below the Key input. Returns undefined to render nothing. */
   keyFieldHelpText?: (entity: Entity | null) => string | undefined;
 
@@ -75,7 +81,7 @@ export interface ChannelFormAdapter<Entity> {
 
   useTypes: () => { data: ChannelTypeMeta[] | undefined };
 
-  /** When defined, ModelsSection shows a multi-select from this catalog. */
+  /** When defined, RoutingSection shows the model multi-select from this catalog. */
   useModelsCatalog?: () => { data: string[] | undefined };
 
   /** When undefined, the Test button is hidden in edit mode. */

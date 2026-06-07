@@ -23,20 +23,7 @@ func (ThinkingPassthroughTransformer) Transform(req *codec.Request, cfg *codec.C
 	if !cfg.SendBackThinking {
 		return
 	}
-	for i := range req.Messages {
-		m := &req.Messages[i]
-		if m.Role != codec.RoleAssistant {
-			continue
-		}
-		if len(m.ToolCalls) == 0 {
-			continue // 纯文本 assistant 不补占位
-		}
-		if hasThinkingBlock(m.Content) {
-			continue // 幂等：已有 thinking 不重复加
-		}
-		placeholder := codec.ContentBlock{Type: codec.ContentTypeThinking, Text: ""}
-		m.Content = append([]codec.ContentBlock{placeholder}, m.Content...)
-	}
+	ApplyThinkingPassthrough(req.Messages)
 }
 
 func hasThinkingBlock(blocks []codec.ContentBlock) bool {

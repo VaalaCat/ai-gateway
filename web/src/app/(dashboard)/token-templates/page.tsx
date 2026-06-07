@@ -12,16 +12,6 @@ import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { TagInput } from "@/components/ui/tag-input";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,12 +19,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+import { EntityChipList } from "@/components/business/entity-chip-list";
 import { StatusBadge } from "@/components/business/status-badge";
-import { StatusSelect } from "@/components/business/status-select";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
-import { EntityMultiPicker } from "@/components/business/entity-picker/entity-multi-picker";
 import { TokenTemplateSyncDialog } from "@/components/business/token-template-sync-dialog";
+import { TokenTemplateFormDialog, type TokenTemplateFormValues } from "@/components/business/token-template-form-dialog";
 import { formatErrorToast } from "@/lib/api/error-toast";
 
 import {
@@ -43,8 +33,9 @@ import {
   useUpdateTokenTemplate,
   useDeleteTokenTemplate,
 } from "@/lib/api/token-templates";
+import { useResponsiveColumnVisibility } from "@/hooks/use-responsive-column-visibility";
 import { PAGE_SIZES } from "@/lib/constants";
-import { parseModels, serializeModels } from "@/lib/parse-models";
+import { parseModels } from "@/lib/parse-models";
 import type { TokenTemplate } from "@/lib/types";
 
 export default function TokenTemplatesPage() {
@@ -65,6 +56,12 @@ export default function TokenTemplatesPage() {
       placeholder: t("filterByStatus"),
     },
   } satisfies FilterSpec), [t, tc]);
+
+  const visConfig = useMemo(
+    () => ({ storageKey: "token-templates", hiddenOnMobile: ["allowed_groups", "models", "created_at"] as const }),
+    [],
+  );
+  const [colVis, setColVis] = useResponsiveColumnVisibility(visConfig);
 
   const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
 
@@ -102,36 +99,34 @@ export default function TokenTemplatesPage() {
   const [deleteItem, setDeleteItem] = useState<TokenTemplate | null>(null);
   const [syncItem, setSyncItem] = useState<TokenTemplate | null>(null);
 
-  const [createForm, setCreateForm] = useState({ name: "", models: "", expiry_days: "-1", status: "1", allowed_channel_ids: [] as number[] });
-  const [editForm, setEditForm] = useState({ name: "", models: "", expiry_days: "-1", status: "1", allowed_channel_ids: [] as number[] });
-
-  const handleCreate = async () => {
+  const handleCreate = async (values: TokenTemplateFormValues) => {
     try {
       await createMutation.mutateAsync({
-        name: createForm.name,
-        models: createForm.models,
-        expiry_days: Number(createForm.expiry_days),
-        status: Number(createForm.status),
-        allowed_channel_ids: createForm.allowed_channel_ids.length > 0 ? createForm.allowed_channel_ids : undefined,
+        name: values.name,
+        models: values.models,
+        expiry_days: Number(values.expiry_days),
+        status: Number(values.status),
+        allowed_channel_ids: values.allowed_channel_ids.length > 0 ? values.allowed_channel_ids : undefined,
+        allowed_group_ids: values.allowed_group_ids.length > 0 ? values.allowed_group_ids : undefined,
       });
       toast.success(tc("success"));
       setCreateOpen(false);
-      setCreateForm({ name: "", models: "", expiry_days: "-1", status: "1", allowed_channel_ids: [] });
     } catch (e) {
       toast.error(formatErrorToast(e, tc("error")));
     }
   };
 
-  const handleEdit = async () => {
+  const handleEdit = async (values: TokenTemplateFormValues) => {
     if (!editItem) return;
     try {
       await updateMutation.mutateAsync({
         id: editItem.id,
-        name: editForm.name,
-        models: editForm.models,
-        expiry_days: Number(editForm.expiry_days),
-        status: Number(editForm.status),
-        allowed_channel_ids: editForm.allowed_channel_ids,
+        name: values.name,
+        models: values.models,
+        expiry_days: Number(values.expiry_days),
+        status: Number(values.status),
+        allowed_channel_ids: values.allowed_channel_ids,
+        allowed_group_ids: values.allowed_group_ids,
       });
       toast.success(tc("success"));
       setEditItem(null);
@@ -149,17 +144,6 @@ export default function TokenTemplatesPage() {
     } catch (e) {
       toast.error(formatErrorToast(e, tc("error")));
     }
-  };
-
-  const openEdit = (tpl: TokenTemplate) => {
-    setEditForm({
-      name: tpl.name,
-      models: tpl.models ?? "",
-      expiry_days: String(tpl.expiry_days),
-      status: String(tpl.status),
-      allowed_channel_ids: tpl.allowed_channel_ids ?? [],
-    });
-    setEditItem(tpl);
   };
 
   const columns: ColumnDef<TokenTemplate>[] = [
@@ -190,6 +174,17 @@ export default function TokenTemplatesPage() {
         row.original.expiry_days === -1 ? t("noExpiry") : `${row.original.expiry_days}`,
     },
     {
+      id: "allowed_groups",
+      header: t("allowedGroups"),
+      cell: ({ row }) => (
+        <EntityChipList
+          entity="user-group"
+          ids={row.original.allowed_group_ids ?? []}
+          emptyLabel={t("allGroups")}
+        />
+      ),
+    },
+    {
       accessorKey: "status",
       header: ({ column }) => <DataTableColumnHeader column={column} title={t("status")} />,
       cell: ({ row }) => <StatusBadge status={row.original.status} />,
@@ -210,7 +205,7 @@ export default function TokenTemplatesPage() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => openEdit(row.original)}>
+            <DropdownMenuItem onClick={() => setEditItem(row.original)}>
               {tc("edit")}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => setSyncItem(row.original)}>
@@ -245,16 +240,15 @@ export default function TokenTemplatesPage() {
         pageSize={pageSize}
         pageCount={pageCount}
         onPaginationChange={handlePaginationChange}
+        columnVisibilityState={colVis}
+        onColumnVisibilityChange={setColVis}
         toolbar={
           <FilterableToolbar
             spec={filterSpec}
             value={filterValues}
             onChange={setFilterValues}
             primaryAction={
-              <Button size="sm" onClick={() => {
-                setCreateForm({ name: "", models: "", expiry_days: "-1", status: "1", allowed_channel_ids: [] });
-                setCreateOpen(true);
-              }}>
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="mr-2 size-4" />
                 {t("create")}
               </Button>
@@ -263,107 +257,19 @@ export default function TokenTemplatesPage() {
         }
       />
 
-      {/* Create Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("create")}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>{t("name")}</Label>
-              <Input
-                value={createForm.name}
-                onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("models")}</Label>
-              <TagInput
-                value={parseModels(createForm.models)}
-                onChange={(tags) => setCreateForm({ ...createForm, models: serializeModels(tags) })}
-                placeholder={t("modelsPlaceholder")}
-              />
-              <p className="text-xs text-muted-foreground">{t("modelsHint")}</p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("allowedChannels")}</Label>
-              <EntityMultiPicker
-                entity="channel"
-                value={createForm.allowed_channel_ids.map(String)}
-                onChange={(vals) => setCreateForm({ ...createForm, allowed_channel_ids: vals.map(Number) })}
-                placeholder={t("allowedChannelsPlaceholder")}
-              />
-              <p className="text-xs text-muted-foreground">{t("allowedChannelsEmptyHint")}</p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("expiryDays")}</Label>
-              <Input
-                type="number"
-                value={createForm.expiry_days}
-                onChange={(e) => setCreateForm({ ...createForm, expiry_days: e.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">{t("expiryDaysHint")}</p>
-            </div>
-            <StatusSelect value={createForm.status} onChange={(v) => setCreateForm({ ...createForm, status: v })} />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>{tc("cancel")}</Button>
-            <Button onClick={handleCreate} disabled={createMutation.isPending}>{tc("save")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Edit Dialog */}
-      <Dialog open={!!editItem} onOpenChange={(open) => { if (!open) setEditItem(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("edit")}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>{t("name")}</Label>
-              <Input
-                value={editForm.name}
-                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>{t("models")}</Label>
-              <TagInput
-                value={parseModels(editForm.models)}
-                onChange={(tags) => setEditForm({ ...editForm, models: serializeModels(tags) })}
-                placeholder={t("modelsPlaceholder")}
-              />
-              <p className="text-xs text-muted-foreground">{t("modelsHint")}</p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("allowedChannels")}</Label>
-              <EntityMultiPicker
-                entity="channel"
-                value={editForm.allowed_channel_ids.map(String)}
-                onChange={(vals) => setEditForm({ ...editForm, allowed_channel_ids: vals.map(Number) })}
-                placeholder={t("allowedChannelsPlaceholder")}
-              />
-              <p className="text-xs text-muted-foreground">{t("allowedChannelsEmptyHint")}</p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t("expiryDays")}</Label>
-              <Input
-                type="number"
-                value={editForm.expiry_days}
-                onChange={(e) => setEditForm({ ...editForm, expiry_days: e.target.value })}
-              />
-              <p className="text-xs text-muted-foreground">{t("expiryDaysHint")}</p>
-            </div>
-            <StatusSelect value={editForm.status} onChange={(v) => setEditForm({ ...editForm, status: v })} />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditItem(null)}>{tc("cancel")}</Button>
-            <Button onClick={handleEdit} disabled={updateMutation.isPending}>{tc("save")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <TokenTemplateFormDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onSubmit={handleCreate}
+        pending={createMutation.isPending}
+      />
+      <TokenTemplateFormDialog
+        open={!!editItem}
+        onOpenChange={(o) => { if (!o) setEditItem(null); }}
+        template={editItem}
+        onSubmit={handleEdit}
+        pending={updateMutation.isPending}
+      />
 
       <DeleteConfirm
         open={!!deleteItem}

@@ -56,15 +56,27 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 	s := toDaoScope(scope)
 	q := dao.NewAdminQuery(dao.NewContext(c.App))
 
-	stacked, err := q.Stats().CostTrendStackedByModel(r, s, insightsTopModels)
+	filter := dao.ObsFilter{ModelName: req.Model, UserID: req.UserID}
+	if !s.IsAdmin {
+		filter.UserID = 0
+	}
+	// 缓存命中卡不跟模型(spec §4):只吃 user。
+	cacheFilter := dao.ObsFilter{UserID: filter.UserID}
+
+	stacked, err := q.Stats().CostTrendStackedByModel(r, s, insightsTopModels, filter)
 	if err != nil {
 		return InsightsResponse{}, api.InternalError("billing insights cost trend", err)
 	}
-	saving, err := q.Stats().CacheSaving(r, s)
+	saving, err := q.Stats().CacheSaving(r, s, cacheFilter)
 	if err != nil {
 		return InsightsResponse{}, api.InternalError("billing insights cache saving", err)
 	}
+	trend, err := q.Stats().HourlyTrend(r, s, filter)
+	if err != nil {
+		return InsightsResponse{}, api.InternalError("billing insights trend", err)
+	}
 	return InsightsResponse{
+		Trend:            trend,
 		CostTrendStacked: stacked,
 		CacheSaving:      saving,
 	}, nil

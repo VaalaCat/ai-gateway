@@ -34,6 +34,8 @@ func StatusFromState(rctx *RelayContext) (int, string) {
 		return http.StatusNotFound, fmt.Sprintf("no channel available for model %s", rctx.Input.Model)
 	case errors.Is(err, ErrNoRoutableModel):
 		return http.StatusNotFound, "no available real model after routing: " + rctx.Input.Model
+	case errors.Is(err, ErrInsufficientQuota):
+		return http.StatusPaymentRequired, fmt.Sprintf("insufficient quota for model %s", rctx.Input.Model)
 	case errors.Is(err, ErrModelNotAllowed):
 		return http.StatusNotFound, fmt.Sprintf("model not allowed: %s", rctx.Input.Model)
 	case errors.Is(err, ErrNoChannelAvailable):
@@ -48,6 +50,8 @@ func StatusFromState(rctx *RelayContext) (int, string) {
 		// 老主循环 routing 兜底分支：routing 整链耗尽 + lastErr==nil → 502 + "no available channels"。
 		// err.Error() 本身就是 consts.ErrNoChannelAvailable。
 		return http.StatusBadGateway, err.Error()
+	case errors.Is(err, ErrRateLimited):
+		return http.StatusTooManyRequests, "rate limited"
 	}
 
 	// 其它（含 Executor 阶段冒上来的 upstream/codec 错误）→ 502。

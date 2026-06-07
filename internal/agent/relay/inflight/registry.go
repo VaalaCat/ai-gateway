@@ -8,55 +8,61 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
-// Meta 是 Track 时已知的初值;Model/IsStream/ChannelName 也可 Track 后用 setter 补/改。
+// Meta 是 Track 时已知的初值。
 type Meta struct {
-	ReqID       string
-	ChannelID   uint
-	ChannelName string
-	Model       string
-	IsStream    bool
-	StartTime   time.Time
-	// Cancel 取消该请求(打断用)。由 Relay 传入从请求 context 派生的 cancel;可为 nil。
-	Cancel context.CancelFunc
+	ReqID     string
+	StartTime time.Time
+	Cancel    context.CancelFunc
 }
 
-// Snapshot 是某一时刻一条在途请求的只读视图(给 RPC / 看门狗用)。
+// Snapshot 是某一时刻一条在途请求的只读视图。View 即"进行中的 usage_log"（与落库同构）。
 type Snapshot struct {
-	ID          int64  `json:"id"` // registry 内部自增 key,打断按此定位(避免 ReqID 缺失/重复)
-	ReqID       string `json:"req_id"`
-	ChannelID   uint   `json:"channel_id"`
-	ChannelName string `json:"channel_name"`
-	Model       string `json:"model"`
-	IsStream    bool   `json:"is_stream"`
-	Stage       string `json:"stage"`
-	ElapsedMs   int64  `json:"elapsed_ms"`
+	ID           int64                  `json:"id"`
+	ReqID        string                 `json:"req_id"`
+	View         protocol.UsageLogEntry `json:"view"`
+	Stage        string                 `json:"stage"`
+	ElapsedMs    int64                  `json:"elapsed_ms"`
+	QueuedMs     int64                  `json:"queued_ms"`
+	QueuedReason string                 `json:"queued_reason"`
 }
 
 // Entry 是一条在途请求的可变句柄。可变字段统一用 mu 保护(snapshot 频率低,mutex 足够清晰)。
 type Entry struct {
 	reqID     string
-	channelID uint
 	startTime time.Time
 	reg       *Registry
 	id        int64
 	cancel    context.CancelFunc
 
-	mu          sync.RWMutex
-	stage       string
-	model       string
-	isStream    bool
-	channelName string
+	mu           sync.RWMutex
+	stage        string
+	view         protocol.UsageLogEntry
+	queuedAt     time.Time
+	queuedReason string
 }
 
 // SetStage 更新当前阶段名(与 trace.Stage 字符串一致)。nil 接收者安全。
 func (e *Entry) SetStage(s string) { e.set(func() { e.stage = s }) }
 
-// SetModel / SetStream / SetChannel 用于 ctxBuild / dispatch 后补全信息。
-func (e *Entry) SetModel(m string)      { e.set(func() { e.model = m }) }
-func (e *Entry) SetStream(b bool)       { e.set(func() { e.isStream = b }) }
-func (e *Entry) SetChannel(name string) { e.set(func() { e.channelName = name }) }
+// Update 用阶段边界投影整份刷新（替代一堆 setter）。nil 接收者安全。
+func (e *Entry) Update(view protocol.UsageLogEntry) { e.set(func() { e.view = view }) }
+
+// MarkQueued 标记"正卡在限流队列"。reason=卡在哪条规则。重复调不重置起点。
+func (e *Entry) MarkQueued(reason string) {
+	e.set(func() {
+		if e.queuedAt.IsZero() {
+			e.queuedAt = time.Now()
+		}
+		e.queuedReason = reason
+	})
+}
+
+// Unqueue 退出排队（排到名额 / 被拒 / 断连）。
+func (e *Entry) Unqueue() { e.set(func() { e.queuedAt = time.Time{}; e.queuedReason = "" }) }
 
 func (e *Entry) set(fn func()) {
 	if e == nil {
@@ -78,15 +84,18 @@ func (e *Entry) Done() {
 func (e *Entry) snapshot(now time.Time) Snapshot {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+	var queuedMs int64
+	if !e.queuedAt.IsZero() {
+		queuedMs = now.Sub(e.queuedAt).Milliseconds()
+	}
 	return Snapshot{
-		ID:          e.id,
-		ReqID:       e.reqID,
-		ChannelID:   e.channelID,
-		ChannelName: e.channelName,
-		Model:       e.model,
-		IsStream:    e.isStream,
-		Stage:       e.stage,
-		ElapsedMs:   now.Sub(e.startTime).Milliseconds(),
+		ID:           e.id,
+		ReqID:        e.reqID,
+		View:         e.view,
+		Stage:        e.stage,
+		ElapsedMs:    now.Sub(e.startTime).Milliseconds(),
+		QueuedMs:     queuedMs,
+		QueuedReason: e.queuedReason,
 	}
 }
 
@@ -112,16 +121,11 @@ func (r *Registry) Track(meta Meta) *Entry {
 		meta.StartTime = time.Now()
 	}
 	e := &Entry{
-		reqID:       meta.ReqID,
-		channelID:   meta.ChannelID,
-		startTime:   meta.StartTime,
-		reg:         r,
-		id:          r.nextID.Add(1),
-		cancel:      meta.Cancel,
-		stage:       "",
-		model:       meta.Model,
-		isStream:    meta.IsStream,
-		channelName: meta.ChannelName,
+		reqID:     meta.ReqID,
+		startTime: meta.StartTime,
+		reg:       r,
+		id:        r.nextID.Add(1),
+		cancel:    meta.Cancel,
 	}
 	r.entries.Store(e.id, e)
 	return e
@@ -176,11 +180,10 @@ func (r *Registry) StartWatchdog(interval time.Duration) (stop func()) {
 					if time.Duration(s.ElapsedMs)*time.Millisecond >= r.warnAge {
 						r.logger.Warn("in-flight relay request stuck",
 							zap.String("req_id", s.ReqID),
-							zap.Uint("channel_id", s.ChannelID),
-							zap.String("channel", s.ChannelName),
-							zap.String("model", s.Model),
+							zap.Uint("channel_id", s.View.ChannelID),
+							zap.String("model", s.View.ModelName),
 							zap.String("stage", s.Stage),
-							zap.Bool("stream", s.IsStream),
+							zap.Bool("stream", s.View.IsStream),
 							zap.Int64("elapsed_ms", s.ElapsedMs))
 					}
 					return true

@@ -27,7 +27,7 @@ func TestNewHandler_WiresStageFields(t *testing.T) {
 	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, cfg, pool)
 	bus := eventbus.NewMemoryBus()
 
-	h := NewHandler(bus, agentApp, TestDispatcherFactory(agentApp), nil)
+	h := NewHandler(bus, agentApp, TestDispatcherFactory(agentApp), nil, nil)
 
 	if h == nil {
 		t.Fatal("NewHandler returned nil")
@@ -67,7 +67,7 @@ func TestNewHandler_NilArgsDoesNotPanic(t *testing.T) {
 			t.Errorf("NewHandler(nil, nil, nil) panicked: %v", r)
 		}
 	}()
-	h := NewHandler(nil, nil, nil, nil)
+	h := NewHandler(nil, nil, nil, nil, nil)
 	if h == nil {
 		t.Fatal("NewHandler(nil, nil, nil) returned nil; should still construct")
 	}

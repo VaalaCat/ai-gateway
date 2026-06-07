@@ -1,5 +1,6 @@
 "use client";
 
+import { type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
@@ -32,6 +33,7 @@ interface ObservabilityHeaderProps {
   onRefresh: () => void;
   refreshing?: boolean;
   showGranularity?: boolean;
+  extraFilters?: ReactNode;
 }
 
 export function ObservabilityHeader({
@@ -42,6 +44,7 @@ export function ObservabilityHeader({
   onRefresh,
   refreshing = false,
   showGranularity = true,
+  extraFilters,
 }: ObservabilityHeaderProps) {
   const tRange = useTranslations("monitoring.range");
   const startStr = tsToDateStr(range.start);
@@ -70,37 +73,42 @@ export function ObservabilityHeader({
   };
 
   return (
-    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-bold">{title}</h1>
-        {subtitle && <p className="text-muted-foreground">{subtitle}</p>}
+    <div className="space-y-3">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold">{title}</h1>
+          {subtitle && <p className="text-muted-foreground">{subtitle}</p>}
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {showGranularity && (
+            <Tabs value={range.gran} onValueChange={handleGranChange}>
+              <TabsList>
+                <TabsTrigger value="day">{tRange("day")}</TabsTrigger>
+                <TabsTrigger value="hour">{tRange("hour")}</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          )}
+          <DateRangeInputs
+            compact
+            startDate={startStr}
+            endDate={endStr}
+            onStartDateChange={handleStartChange}
+            onEndDateChange={handleEndChange}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onRefresh}
+            disabled={refreshing}
+            aria-label="Refresh"
+          >
+            <RefreshCw className={refreshing ? "animate-spin" : ""} />
+          </Button>
+        </div>
       </div>
-      <div className="flex flex-wrap items-center gap-3">
-        {showGranularity && (
-          <Tabs value={range.gran} onValueChange={handleGranChange}>
-            <TabsList>
-              <TabsTrigger value="day">{tRange("day")}</TabsTrigger>
-              <TabsTrigger value="hour">{tRange("hour")}</TabsTrigger>
-            </TabsList>
-          </Tabs>
-        )}
-        <DateRangeInputs
-          compact
-          startDate={startStr}
-          endDate={endStr}
-          onStartDateChange={handleStartChange}
-          onEndDateChange={handleEndChange}
-        />
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onRefresh}
-          disabled={refreshing}
-          aria-label="Refresh"
-        >
-          <RefreshCw className={refreshing ? "animate-spin" : ""} />
-        </Button>
-      </div>
+      {extraFilters && (
+        <div className="flex flex-wrap items-center gap-3">{extraFilters}</div>
+      )}
     </div>
   );
 }

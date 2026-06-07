@@ -214,8 +214,8 @@ func TestBackend_SuccessfulRelay_ReturnsZeroErr(t *testing.T) {
 	}
 }
 
-// TestBackend_ApplyModelMappingBeforeEncode 验证 buildNativeUpstreamRequest
-// 在 codec encode 前先 ApplyModelMapping：ch.ModelMapping={"gpt-4":"gpt-4o"}
+// TestBackend_ApplyModelMappingBeforeEncode 验证端到端经 Relay 流程，model mapping
+// 在上行 encode 前被应用：ch.ModelMapping={"gpt-4":"gpt-4o"}
 // → 上游 body 里的 model 字段应该是 "gpt-4o"，AttemptResult.UpstreamModel 同款。
 func TestBackend_ApplyModelMappingBeforeEncode(t *testing.T) {
 	var gotModel string

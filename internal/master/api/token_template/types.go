@@ -16,6 +16,7 @@ type CreateRequest struct {
 	ExpiryDays        int     `json:"expiry_days"`
 	Status            int     `json:"status"`
 	AllowedChannelIDs *[]uint `json:"allowed_channel_ids"`
+	AllowedGroupIDs   *[]uint `json:"allowed_group_ids"`
 }
 
 type UpdateRequest struct {

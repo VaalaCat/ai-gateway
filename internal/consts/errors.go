@@ -15,4 +15,5 @@ const (
 	ErrInvalidRequestBody = "invalid request body"
 	ErrModelRequired      = "model is required"
 	ErrNoChannelAvailable = "no available channels"
+	ErrInsufficientQuota  = "insufficient quota"
 )

@@ -116,6 +116,7 @@ type BillingOverview struct {
 	RequestCount int64   `json:"request_count"`
 	SuccessRate  float64 `json:"success_rate"`
 	ActiveTokens int64   `json:"active_tokens"`
+	TotalTokens  int64   `json:"total_tokens"` // 含 cache: prompt+completion+cache_read+cache_write
 }
 
 type BillingRebuildFilter struct {
@@ -432,6 +433,7 @@ func (q *adminBillingQuery) GetBillingOverview(filter TokenBillingListFilter) (*
 		RequestCount int64
 		SuccessCount int64
 		ActiveTokens int64
+		TotalTokens  int64
 	}
 
 	var row overviewRow
@@ -439,7 +441,8 @@ func (q *adminBillingQuery) GetBillingOverview(filter TokenBillingListFilter) (*
 		"COALESCE(SUM(total_cost), 0) as total_cost, " +
 			"COALESCE(SUM(request_count), 0) as request_count, " +
 			"COALESCE(SUM(success_count), 0) as success_count, " +
-			"COUNT(DISTINCT token_id) as active_tokens",
+			"COUNT(DISTINCT token_id) as active_tokens, " +
+			"COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) as total_tokens",
 	).Scan(&row).Error; err != nil {
 		return nil, err
 	}
@@ -448,6 +451,7 @@ func (q *adminBillingQuery) GetBillingOverview(filter TokenBillingListFilter) (*
 		TotalCost:    row.TotalCost,
 		RequestCount: row.RequestCount,
 		ActiveTokens: row.ActiveTokens,
+		TotalTokens:  row.TotalTokens,
 	}
 	if row.RequestCount > 0 {
 		overview.SuccessRate = float64(row.SuccessCount) / float64(row.RequestCount)

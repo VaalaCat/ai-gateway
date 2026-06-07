@@ -3,7 +3,6 @@ package cache
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"slices"
 	"sort"
 	"strings"
@@ -43,6 +42,8 @@ type Store struct {
 
 	RouteIndex *RouteIndex
 
+	LimiterIndex *LimiterIndex
+
 	version atomic.Int64
 	mu      sync.Mutex // protects index rebuild
 
@@ -72,6 +73,7 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		agents:       entitycache.NewFullCache[string, *models.Agent](),
 		userGroups:   entitycache.NewFullCache[uint, *models.UserGroup](),
 		RouteIndex:   NewRouteIndex(),
+		LimiterIndex: NewLimiterIndex(),
 	}
 	{
 		snap := settings.AgentSettings{}
@@ -80,6 +82,18 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		}
 		s.settings.Store(&snap)
 	}
+	refreshCfg := func() entitycache.RefreshConfig {
+		set := s.Settings()
+		return entitycache.RefreshConfig{
+			LoadTimeout:        time.Duration(set.CacheLoadTimeoutMs) * time.Millisecond,
+			RefreshAfter:       time.Duration(set.CacheRefreshAfterMs) * time.Millisecond,
+			RefreshTimeout:     time.Duration(set.CacheRefreshTimeoutMs) * time.Millisecond,
+			RefreshMaxRetries:  set.CacheRefreshMaxRetries,
+			RefreshBackoffBase: time.Duration(set.CacheRefreshBackoffBaseMs) * time.Millisecond,
+			RefreshBackoffMax:  time.Duration(set.CacheRefreshBackoffMaxMs) * time.Millisecond,
+		}
+	}
+
 	s.logger = zap.NewNop()
 	s.scripts = newScriptStore(s.logger)
 
@@ -94,12 +108,12 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		userCap = 20000
 	}
 
-	users, err := newUserLRU(client, userCap, negTTL)
+	users, err := newUserLRU(client, userCap, negTTL, refreshCfg)
 	if err != nil {
 		panic(err)
 	}
 	s.users = users
-	s.tokenStore = newTokenStoreLRU(client, s.users, tokenCap, negTTL)
+	s.tokenStore = newTokenStoreLRU(client, s.users, tokenCap, negTTL, refreshCfg)
 
 	s.globalRoutings = entitycache.NewFullCache[string, *protocol.SyncedRouting]()
 
@@ -115,6 +129,7 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		Capacity:    routingCap,
 		Loader:      routingLoader,
 		NegativeTTL: negTTL,
+		Refresh:     refreshCfg,
 	})
 	if err != nil {
 		panic(err)
@@ -134,6 +149,7 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 			Capacity:    pchanCap,
 			Loader:      pchanLoader,
 			NegativeTTL: negTTL,
+			Refresh:     refreshCfg,
 		})
 	if err != nil {
 		panic(err)
@@ -155,7 +171,7 @@ func (s *Store) SetLogger(l *zap.Logger) {
 	}
 }
 
-func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration) (entitycache.EntityCache[uint, *protocol.SyncedUser], error) {
+func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration, refreshCfg func() entitycache.RefreshConfig) (entitycache.EntityCache[uint, *protocol.SyncedUser], error) {
 	var loader entitycache.Loader[uint, *protocol.SyncedUser]
 	if client != nil {
 		loader = &loaders.UserLoader{Client: client}
@@ -164,10 +180,11 @@ func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration) (entity
 		Capacity:    capacity,
 		Loader:      loader,
 		NegativeTTL: negTTL,
+		Refresh:     refreshCfg,
 	})
 }
 
-func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *protocol.SyncedUser], capacity int, negTTL time.Duration) *tokenStore {
+func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *protocol.SyncedUser], capacity int, negTTL time.Duration, refreshCfg func() entitycache.RefreshConfig) *tokenStore {
 	ts := &tokenStore{}
 	var loader entitycache.Loader[string, *models.Token]
 	if client != nil {
@@ -177,6 +194,7 @@ func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *
 		Capacity:    capacity,
 		Loader:      loader,
 		NegativeTTL: negTTL,
+		Refresh:     refreshCfg,
 		OnEvict: func(_ string, tok *models.Token) {
 			if tok != nil {
 				ts.byID.Delete(tok.ID)
@@ -193,7 +211,10 @@ func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *
 // === Token API ===
 
 func (s *Store) GetToken(ctx context.Context, key string) *models.Token {
-	t, _, _ := s.tokenStore.Get(ctx, key)
+	t, _, err := s.tokenStore.Get(ctx, key)
+	if reason := classifyResolveErr(err); reason != "" && reason != "not_found" {
+		s.logger.Warn("token auth resolve failed", zap.String("reason", reason))
+	}
 	return t
 }
 
@@ -206,7 +227,10 @@ func (s *Store) DeleteToken(key string) {
 }
 
 func (s *Store) GetTokenByID(ctx context.Context, id uint) *models.Token {
-	t, _, _ := s.tokenStore.GetByID(ctx, id)
+	t, _, err := s.tokenStore.GetByID(ctx, id)
+	if reason := classifyResolveErr(err); reason != "" && reason != "not_found" {
+		s.logger.Warn("token auth resolve failed", zap.String("reason", reason))
+	}
 	return t
 }
 
@@ -226,6 +250,18 @@ func (s *Store) GetUser(ctx context.Context, id uint) *protocol.SyncedUser {
 func (s *Store) SetUser(u *protocol.SyncedUser) { s.users.Set(u.ID, u) }
 func (s *Store) DeleteUser(id uint)              { s.users.Delete(id) }
 func (s *Store) UserCount() int                  { return s.users.Len() }
+
+// SetUserQuota 更新已缓存 user 的 Quota 字段;用于配额扣减后的原地刷新。
+// 若 user 不在缓存中则静默忽略（不触发 loader 拉取）。
+func (s *Store) SetUserQuota(id uint, quota int64) {
+	u, ok := s.users.Peek(id)
+	if !ok || u == nil {
+		return
+	}
+	nu := *u
+	nu.Quota = quota
+	s.users.Set(id, &nu)
+}
 
 // === Channel ===
 
@@ -421,6 +457,17 @@ func (s *Store) RebuildModelIndex() {
 	}
 }
 
+// === Limiter Index (派生) ===
+
+// EffectiveRequestLimiters / EffectiveAttemptLimiters 委托给 LimiterIndex，
+// 供 relay 侧 Gate 通过 app.AgentCache 接口读取（src: "admin"|"private"）。
+func (s *Store) EffectiveRequestLimiters(userID, groupID uint) []*models.RequestLimiter {
+	return s.LimiterIndex.EffectiveRequestLimiters(userID, groupID)
+}
+func (s *Store) EffectiveAttemptLimiters(userID, groupID uint, src string, channelID uint) []*models.RequestLimiter {
+	return s.LimiterIndex.EffectiveAttemptLimiters(userID, groupID, src, channelID)
+}
+
 // === Agent helpers ===
 
 // UpdateAgentAutoAddresses updates in-memory auto-detected addresses for an
@@ -567,6 +614,24 @@ func (s *Store) HandleSyncEvent(entity, action string, data []byte) {
 				s.RouteIndex.Delete(route.ID)
 			} else {
 				s.RouteIndex.Put(&route)
+			}
+		}
+	case events.EntityRequestLimiter:
+		var l models.RequestLimiter
+		if err := json.Unmarshal(data, &l); err == nil {
+			if action == events.ActionDelete {
+				s.LimiterIndex.DeleteLimiter(l.ID)
+			} else {
+				s.LimiterIndex.PutLimiter(&l)
+			}
+		}
+	case events.EntityLimiterBinding:
+		var b models.LimiterBinding
+		if err := json.Unmarshal(data, &b); err == nil {
+			if action == events.ActionDelete {
+				s.LimiterIndex.DeleteBinding(b.ID)
+			} else {
+				s.LimiterIndex.PutBinding(&b)
 			}
 		}
 	case events.EntityUserGroup:
@@ -721,7 +786,10 @@ func (s *Store) DeleteGlobalRouting(name string) {
 // GetGlobalRouting 返回 enabled 的全局 routing；disabled 或 not found 都返回 nil。
 // disabled 等同于运行时"临时移除"——校验层另有一份不过滤 enabled 的查询。
 func (s *Store) GetGlobalRouting(name string) *protocol.SyncedRouting {
-	v, _, _ := s.globalRoutings.Get(context.Background(), name)
+	v, _, err := s.globalRoutings.Get(context.Background(), name)
+	if reason := classifyResolveErr(err); reason != "" {
+		s.logResolveDegrade("global_routing", reason, zap.String("name", name))
+	}
 	if v != nil && v.Enabled {
 		return v
 	}
@@ -748,7 +816,10 @@ func (s *Store) ListUserRoutingNames(userID uint) []string {
 	if userID == 0 {
 		return nil
 	}
-	m, ok, _ := s.userRoutings.Get(context.Background(), userID)
+	m, ok, err := s.userRoutings.Get(context.Background(), userID)
+	if reason := classifyResolveErr(err); reason != "" {
+		s.logResolveDegrade("user_routing", reason, zap.Uint("user_id", userID))
+	}
 	if !ok || m == nil {
 		return nil
 	}
@@ -777,7 +848,11 @@ func (s *Store) InvalidateUserRoutings(userID uint) {
 // ResolveRouting 按 spec §1.4 优先级解析：用户 routing > 全局 routing > nil（让上层当真实 model 处理）。
 func (s *Store) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
 	if userID > 0 {
-		if m, ok, _ := s.userRoutings.Get(context.Background(), userID); ok && m != nil {
+		m, ok, err := s.userRoutings.Get(context.Background(), userID)
+		if reason := classifyResolveErr(err); reason != "" {
+			s.logResolveDegrade("user_routing", reason, zap.Uint("user_id", userID))
+		}
+		if ok && m != nil {
 			if r, has := m.Routings[name]; has && r.Enabled {
 				return r
 			}
@@ -791,12 +866,12 @@ func (s *Store) ResolveRouting(name string, userID uint) *protocol.SyncedRouting
 // GetVisiblePrivateChannelsForUser 返回某 user 可见的、enabled 的、对应 model 的
 // private channels（未投影成 *models.Channel——投影在 upstream/private_channel_adapter
 // 内进行，避免 Store 与 channel 表示层耦合）。
-// getVisiblePrivateSet 取某 user 的可见私有通道集；loader 真错误（非 ErrNotFound）记 warn。
+// getVisiblePrivateSet 取某 user 的可见私有通道集;解析降级走统一 logResolveDegrade
+// (master_unreachable 等记 Warn,not_found 记 Debug)。
 func (s *Store) getVisiblePrivateSet(userID uint) *protocol.VisiblePrivateChannelSet {
 	set, _, err := s.visiblePrivateChannels.Get(context.Background(), userID)
-	if err != nil && !errors.Is(err, entitycache.ErrNotFound) {
-		s.logger.Warn("load visible private channels failed",
-			zap.Uint("user_id", userID), zap.Error(err))
+	if reason := classifyResolveErr(err); reason != "" {
+		s.logResolveDegrade("private_channel_visible", reason, zap.Uint("user_id", userID))
 	}
 	return set
 }
@@ -915,12 +990,15 @@ func (s *Store) emitChannelChange(old, new *models.Channel) {
 	}
 }
 
-// CacheSnapshot 收集每实体的 Stats 用于 heartbeat 上报。
-// LRU 模式实体含完整字段；Full 模式实体仅 Size 有意义、其他字段为 0。
+// CacheSnapshot 收集每实体/索引的 Stats 用于 heartbeat 上报。
+// 单一 provider 列表：实体缓存（LRU/Full）+ 实现 NamedCacheStat 的索引。
+// 新增缓存请加进 namedStats() 或让其实现 NamedCacheStat；
+// TestCacheSnapshot_Complete 反射兜底拦截遗漏。
 func (s *Store) CacheSnapshot() map[string]protocol.CacheEntityStats {
 	snap := map[string]protocol.CacheEntityStats{}
-	put := func(name string, stats entitycache.Stats) {
+	putLRU := func(name string, stats entitycache.Stats) {
 		snap[name] = protocol.CacheEntityStats{
+			Kind:          "lru",
 			Hits:          stats.Hits,
 			Misses:        stats.Misses,
 			Evictions:     stats.Evictions,
@@ -931,14 +1009,29 @@ func (s *Store) CacheSnapshot() map[string]protocol.CacheEntityStats {
 			Capacity:      stats.Capacity,
 		}
 	}
-	put("token", s.tokenStore.PrimaryStats())
-	put("user", s.users.Stats())
-	put("channel", s.channels.Stats())
-	put("model_config", s.modelConfigs.Stats())
-	put("agent", s.agents.Stats())
-	put("user_group", s.userGroups.Stats())
-	put("model_routing", s.globalRoutings.Stats())
-	put("user_routings", s.userRoutings.Stats())
-	put("private_channels_visible", s.visiblePrivateChannels.Stats())
+	putLRU("token", s.tokenStore.PrimaryStats())
+	putLRU("user", s.users.Stats())
+	putLRU("channel", s.channels.Stats())
+	putLRU("model_config", s.modelConfigs.Stats())
+	putLRU("agent", s.agents.Stats())
+	putLRU("user_group", s.userGroups.Stats())
+	putLRU("model_routing", s.globalRoutings.Stats())
+	putLRU("user_routings", s.userRoutings.Stats())
+	putLRU("private_channels_visible", s.visiblePrivateChannels.Stats())
+	for _, ncs := range s.namedStats() {
+		snap[ncs.CacheName()] = ncs.CacheStat()
+	}
 	return snap
+}
+
+// namedStats 返回所有自描述索引。新增索引在此登记一行（或靠 TestCacheSnapshot_Complete 拦截）。
+func (s *Store) namedStats() []NamedCacheStat {
+	out := []NamedCacheStat{}
+	if s.RouteIndex != nil {
+		out = append(out, s.RouteIndex)
+	}
+	if s.LimiterIndex != nil {
+		out = append(out, s.LimiterIndex)
+	}
+	return out
 }

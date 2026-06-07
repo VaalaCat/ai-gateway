@@ -65,6 +65,7 @@ function buildPayload(form: ChannelForm): Partial<Channel> {
 
 export const adminChannelAdapter: ChannelFormAdapter<Channel> = {
   listPath: "/channels",
+  scriptsHref: "/scripts",
   mapEntityToForm: mapChannelToForm,
   mapEntityToCopyForm: (c) => ({
     ...mapChannelToForm(c),

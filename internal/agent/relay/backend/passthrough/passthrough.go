@@ -66,10 +66,6 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	}
 	defer cancel()
 
-	if rctx.Inflight != nil {
-		rctx.Inflight.SetChannel(ch.Name)
-	}
-
 	rec.WithStage(trace.StageUpstreamDispatch).WithPassthrough()
 
 	upstreamModel := state.ApplyModelMapping(ch, modelName)
@@ -266,8 +262,8 @@ func applyPassthroughOverrides(upstreamReq *http.Request, newBody []byte, ch *mo
 }
 
 // buildPassthroughRequest 根据原始 *http.Request + channel 配置 + 新 body 构造上行 HTTP 请求。
-// 处理：endpoint 解析 / URL 拼接 / header 拷贝 + 过滤 / Authorization 覆盖 / Organization /
-// 移除 hop-by-hop 与 Accept-Encoding。
+// 处理：endpoint 解析 / URL 拼接 / 经 upstream.ForwardClientHeaders 诚实透传客户端 header
+// (剥离受管头) / Authorization 覆盖 / Organization。
 func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundProto codec.Protocol, newBody []byte) (*http.Request, error) {
 	// Build upstream URL: prefer Endpoints config path, fallback to original request path
 	endpointPath := codec.ResolveEndpointPath(ch.Endpoints, inboundProto)
@@ -284,26 +280,17 @@ func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundP
 		return nil, fmt.Errorf("create passthrough request: %w", err)
 	}
 
-	// Copy original headers, then override auth
-	for k, vals := range origReq.Header {
-		for _, v := range vals {
-			upstreamReq.Header.Add(k, v)
-		}
-	}
-	upstream.ApplyHeaderFilter(upstreamReq.Header)
+	// 诚实透传客户端 header:默认转发,只剥离受管头(hop-by-hop / Accept-Encoding /
+	// 全协议凭证 / Host 等,见 upstream.ForwardClientHeaders)。删 Accept-Encoding 是为
+	// 让 Go Transport 注入 gzip 并透明解压,usage 抽取依赖明文 body。
+	// passthrough 恒同协议(pipeline/plan/mode.go 选取前提),故 crossProtocol=false。
+	upstream.ForwardClientHeaders(upstreamReq.Header, origReq.Header, false)
 	upstreamReq.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+ch.Key)
 	upstreamReq.Header.Set(consts.HeaderContentType, consts.ContentTypeJSON)
-	upstreamReq.ContentLength = int64(len(newBody))
 	if ch.Organization != "" {
 		upstreamReq.Header.Set(consts.HeaderOpenAIOrg, ch.Organization)
 	}
-	// Remove hop-by-hop headers
-	upstreamReq.Header.Del(consts.HeaderConnection)
-	upstreamReq.Header.Del(consts.HeaderHost)
-	// Remove Accept-Encoding so Go's Transport handles decompression transparently.
-	// Without this, the upstream may return gzip/br-compressed bodies that we cannot
-	// parse for usage extraction.
-	upstreamReq.Header.Del("Accept-Encoding")
+	upstreamReq.ContentLength = int64(len(newBody))
 	return upstreamReq, nil
 }
 

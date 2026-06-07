@@ -78,11 +78,11 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 // 子查询 (cache_saving) 失败不阻断主流程,会退化为零值环。
 // DashboardKpis 失败才返回 error (主要数据源)。
 func computeKpiRings(q dao.AdminQuery, r dao.ObsRange, s dao.Scope, agents []dao.AgentMetric) (KpiRings, error) {
-	kpis, err := q.Stats().DashboardKpis(r, s)
+	kpis, err := q.Stats().DashboardKpis(r, s, dao.ObsFilter{})
 	if err != nil {
 		return KpiRings{}, err
 	}
-	cache, _ := q.Stats().CacheSaving(r, s)
+	cache, _ := q.Stats().CacheSaving(r, s, dao.ObsFilter{})
 
 	return KpiRings{
 		Success: successRing(kpis),

@@ -43,6 +43,7 @@ import {
 } from "@/lib/api/models";
 import { PAGE_SIZES } from "@/lib/constants";
 import { formatPrice } from "@/lib/utils/format";
+import { copyTextWithFeedback } from "@/lib/utils/clipboard";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import type { ModelConfig } from "@/lib/types";
 
@@ -54,12 +55,16 @@ function PriceDisplay({ price }: { price: number }) {
 }
 
 function ModelNameCell({ name }: { name: string }) {
+  const tc = useTranslations("common");
   return (
     <div className="flex items-center gap-1 group max-w-[220px]">
       <span className="font-mono text-xs truncate" title={name}>{name}</span>
       <button
         className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity shrink-0"
-        onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(name); toast.success("Copied"); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          copyTextWithFeedback(name, { success: tc("copied"), error: tc("copyFailed") });
+        }}
       >
         <Copy className="size-3" />
       </button>

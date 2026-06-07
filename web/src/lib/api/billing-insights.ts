@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./client";
 import type { ObsRangeParams } from "./dashboard";
-import type { StackedBucket } from "@/lib/types/observability";
+import type { StackedBucket, TimeBucket } from "@/lib/types/observability";
 
 export type { StackedBucket };
 
@@ -15,6 +15,7 @@ export interface CacheSaving {
 }
 
 export interface BillingInsightsResponse {
+  trend: TimeBucket[];
   cost_trend_stacked: {
     buckets: StackedBucket[];
     series_order: string[];
@@ -25,7 +26,7 @@ export interface BillingInsightsResponse {
 export type BillingStackBy = "model" | "user" | "channel";
 
 export function useBillingInsights(
-  params: ObsRangeParams & { stack?: BillingStackBy },
+  params: ObsRangeParams & { stack?: BillingStackBy; model?: string; user_id?: number },
   options?: { enabled?: boolean; refetchKey?: number },
 ) {
   return useQuery({
@@ -37,6 +38,8 @@ export function useBillingInsights(
         gran: params.gran,
       });
       if (params.stack) qs.set("stack", params.stack);
+      if (params.model) qs.set("model", params.model);
+      if (params.user_id) qs.set("user_id", String(params.user_id));
       return api.get<BillingInsightsResponse>(
         `/billing/insights?${qs.toString()}`,
       );

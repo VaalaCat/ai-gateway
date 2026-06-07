@@ -2,6 +2,7 @@ package cache
 
 import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
 )
 
@@ -132,6 +133,15 @@ func (ri *RouteIndex) rebuildIndex() {
 		sortRoutesByPriority(routes)
 		ri.byChannel.Store(id, routes)
 	}
+}
+
+// CacheName / CacheStat 实现 NamedCacheStat：索引类只报条目数（无 LRU 命中语义）。
+func (ri *RouteIndex) CacheName() string { return "route_index" }
+
+func (ri *RouteIndex) CacheStat() protocol.CacheEntityStats {
+	n := 0
+	ri.routes.Range(func(uint, *models.AgentRoute) bool { n++; return true })
+	return protocol.CacheEntityStats{Kind: "index", Size: n}
 }
 
 func sortRoutesByPriority(routes []*models.AgentRoute) {

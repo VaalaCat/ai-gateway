@@ -195,7 +195,7 @@ func TestEndToEndFlow(t *testing.T) {
 		Relay: config.RelayConfig{Timeout: 30},
 	}
 	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, relayCfg, pool)
-	relayHandler := agentrelay.NewHandler(agentBus, agentApp, backend.NewDispatcher(agentApp), nil)
+	relayHandler := agentrelay.NewHandler(agentBus, agentApp, backend.NewDispatcher(agentApp), nil, nil)
 
 	// Create agent's HTTP router
 	agentRouter := gin.New()

@@ -44,7 +44,7 @@ func marshalSyncedUser(q dao.AdminQuery, userID uint) json.RawMessage {
 	if gid == 0 {
 		gid = 1
 	}
-	b, err := json.Marshal(protocol.SyncedUser{ID: user.ID, GroupID: gid})
+	b, err := json.Marshal(protocol.SyncedUser{ID: user.ID, GroupID: gid, Quota: user.Quota})
 	if err != nil {
 		return nil
 	}

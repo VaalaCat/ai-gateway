@@ -36,6 +36,7 @@ export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
               <CopyableText
                 text={token.key}
                 display={token.key.slice(0, 12) + "..."}
+                revealable
               />
             </span>
           </Field>
@@ -67,7 +68,11 @@ export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
           )}
           {channelIds.length > 0 && (
             <Field label={t("fieldChannels")}>
-              <span className="font-mono">{channelIds.map((id) => `#${id}`).join(", ")}</span>
+              <span className="flex flex-wrap gap-x-2 gap-y-1">
+                {channelIds.map((id) => (
+                  <EntityLabel key={id} entity="channel" id={id} className="font-mono text-sm" />
+                ))}
+              </span>
             </Field>
           )}
           <Field label={t("fieldFilterRule")}>

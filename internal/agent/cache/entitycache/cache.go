@@ -12,6 +12,7 @@ package entitycache
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Action 描述一次数据变更事件的语义。
@@ -27,6 +28,29 @@ const (
 // ErrNotFound 表示 Loader 已确认 key 在源端不存在。
 // LRUCache 据此触发负缓存。
 var ErrNotFound = errors.New("entity not found")
+
+// RefreshOutcome 是一次后台刷新的三态结果。
+type RefreshOutcome int
+
+const (
+	// RefreshOK 成功拿到新值。
+	RefreshOK RefreshOutcome = iota
+	// RefreshGone 源端明确返回 ErrNotFound(可达且已删/吊销)→ 应逐出。
+	RefreshGone
+	// RefreshUnavailable 连接/超时错误(源端不可达)→ 应保留旧值。
+	RefreshUnavailable
+)
+
+// RefreshConfig 是缓存韧性参数快照,由调用方通过 Config.Refresh 动态提供
+// (通常映射自管理后台 Settings,支持运行时改值即时生效)。
+type RefreshConfig struct {
+	LoadTimeout        time.Duration // 冷 miss 阻塞加载超时(detached)
+	RefreshAfter       time.Duration // 条目多旧触发后台刷新;<=0 禁用 soft-TTL
+	RefreshTimeout     time.Duration // 单次后台刷新尝试超时
+	RefreshMaxRetries  int           // 单次触发内 failsafe 重试次数
+	RefreshBackoffBase time.Duration
+	RefreshBackoffMax  time.Duration
+}
 
 // Stats 是缓存的运行计数。LRUCache 按调用累加；FullCache 仅维护 Size。
 type Stats struct {

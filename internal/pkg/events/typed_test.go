@@ -45,6 +45,40 @@ func TestPublishSubscribeUsageReported(t *testing.T) {
 	}
 }
 
+func TestPublishSubscribeUserQuotaSync(t *testing.T) {
+	bus := eventbus.NewMemoryBus()
+	defer bus.Close()
+
+	got := make(chan protocol.UserQuotaSync, 1)
+	_, err := SubscribeUserQuotaSync(bus, func(ctx context.Context, m protocol.UserQuotaSync) error {
+		got <- m
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("subscribe user.quota_synced: %v", err)
+	}
+
+	want := protocol.UserQuotaSync{
+		AgentID: "a1",
+		Users:   []protocol.SyncedUser{{ID: 3, Quota: 50}},
+	}
+	if err := PublishUserQuotaSync(context.Background(), bus, want); err != nil {
+		t.Fatalf("publish user.quota_synced: %v", err)
+	}
+
+	select {
+	case gotSync := <-got:
+		if gotSync.AgentID != want.AgentID {
+			t.Fatalf("agent_id=%s want %s", gotSync.AgentID, want.AgentID)
+		}
+		if len(gotSync.Users) != 1 || gotSync.Users[0].ID != 3 || gotSync.Users[0].Quota != 50 {
+			t.Fatalf("unexpected users payload: %+v", gotSync.Users)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting user.quota_synced")
+	}
+}
+
 func TestPublishWithGenericTopic(t *testing.T) {
 	bus := eventbus.NewMemoryBus()
 	defer bus.Close()

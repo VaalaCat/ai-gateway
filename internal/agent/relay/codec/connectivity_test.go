@@ -53,6 +53,15 @@ func TestResolveTestEndpoint(t *testing.T) {
 	}
 }
 
+func TestPrimaryOutboundProtocol(t *testing.T) {
+	if p := PrimaryOutboundProtocol("", ""); p != ProtocolOpenAIChat {
+		t.Fatalf("empty channel = %q, want openai_chat default", p)
+	}
+	if p := PrimaryOutboundProtocol(`{"messages":"/v1/messages"}`, ""); p != ProtocolClaude {
+		t.Fatalf("messages-only = %q, want claude", p)
+	}
+}
+
 func TestBuildConnectivityTestRequest(t *testing.T) {
 	path, body, err := BuildConnectivityTestRequest("", "", "anthropic", "claude-3", false)
 	if err != nil || path != "/v1/messages" {

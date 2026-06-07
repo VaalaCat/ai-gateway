@@ -10,6 +10,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -48,7 +49,7 @@ func TestGetAllInflight_MergesAndIsolatesFailures(t *testing.T) {
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a", "uid-b"} },
 		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			if agentID == "uid-a" {
-				return json.Marshal([]inflight.Snapshot{{ID: 7, ReqID: "r1", Model: "gpt-4o", Stage: "upstream", ElapsedMs: 1200}})
+				return json.Marshal([]inflight.Snapshot{{ID: 7, ReqID: "r1", View: protocol.UsageLogEntry{ModelName: "gpt-4o"}, Stage: "upstream", ElapsedMs: 1200}})
 			}
 			return nil, assertErr("node down")
 		},
@@ -62,7 +63,7 @@ func TestGetAllInflight_MergesAndIsolatesFailures(t *testing.T) {
 		t.Fatalf("requests len = %d, want 1", len(resp.Requests))
 	}
 	row := resp.Requests[0]
-	if row.ID != 7 || row.AgentName != "edge-a" || row.Model != "gpt-4o" {
+	if row.ID != 7 || row.AgentName != "edge-a" || row.View.ModelName != "gpt-4o" {
 		t.Fatalf("row = %+v, want id=7 agent=edge-a model=gpt-4o", row)
 	}
 	if len(resp.FailedAgents) != 1 || resp.FailedAgents[0].AgentName != "edge-b" {
