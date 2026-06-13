@@ -11,6 +11,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"gorm.io/datatypes"
 )
 
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Channel, error) {
@@ -50,6 +51,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Channel, err
 		if err := rc.Validate(); err != nil {
 			return models.Channel{}, api.BadRequestError(err.Error(), err)
 		}
+		updates["resilience"] = datatypes.NewJSONType(rc)
 	}
 
 	if v, ok := updates["price_ratio"]; ok && v != nil {

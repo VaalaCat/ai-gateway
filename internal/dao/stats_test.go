@@ -18,7 +18,7 @@ func seedHourlyBucket(t *testing.T, db *gorm.DB, date string, hour int, reqs, to
 		OwnerType:    "admin",
 		RequestCount: reqs, SuccessCount: reqs,
 		PromptTokens: tokens / 2, CompletionTokens: tokens / 2,
-		TotalCost:    reqs * 10,
+		TotalCost: reqs * 10,
 	}).Error)
 }
 
@@ -107,7 +107,7 @@ func seedHourlyBucketModel(t *testing.T, db *gorm.DB, date string, hour int, mod
 		OwnerType:    "admin",
 		RequestCount: reqs, SuccessCount: reqs,
 		PromptTokens: tokens / 2, CompletionTokens: tokens / 2,
-		TotalCost:    reqs * 10,
+		TotalCost: reqs * 10,
 	}).Error)
 }
 
@@ -1565,6 +1565,55 @@ func TestDashboardKpis_ModelFilter_SuccessAndActiveUsers(t *testing.T) {
 	require.Equal(t, int64(1), got.SuccessRate.Value, "uhb 里只算 gpt-4o 的 success_count")
 	require.NotNil(t, got.Users)
 	require.Equal(t, int64(1), got.Users.Active, "usage_logs 里用 gpt-4o 的 distinct user = 仅 user 7")
+}
+
+func seedUsageLogTotals(t *testing.T, db *gorm.DB, reqID string, userID uint, status, duration int, ts int64) {
+	t.Helper()
+	require.NoError(t, db.Select("*").Create(&models.UsageLog{
+		UserID: userID, ChannelID: 5, ModelName: "gpt-4o", AgentID: "cn-1",
+		Status: status, Duration: duration,
+		RequestID: reqID, CreatedAt: ts,
+	}).Error)
+}
+
+func TestLogsTotals_AggregatesCountsP95SlowestAndSparks(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+	start := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC).Unix()
+	r := ObsRange{Start: start, End: start + 3*3600, Gran: GranHour}
+
+	seedUsageLogTotals(t, db, "logs-total-u1-100", 1, 1, 100, start+10)
+	seedUsageLogTotals(t, db, "logs-total-u1-200", 1, 1, 200, start+20)
+	seedUsageLogTotals(t, db, "logs-total-u1-failed", 1, 0, 999, start+3600+10)
+	seedUsageLogTotals(t, db, "logs-total-u1-300", 1, 1, 300, start+2*3600+10)
+	seedUsageLogTotals(t, db, "logs-total-u2-400", 2, 1, 400, start+2*3600+20)
+	seedUsageLogTotals(t, db, "logs-total-u1-old", 1, 1, 10000, start-10)
+
+	adminGot, err := q.Stats().LogsTotals(r, Scope{IsAdmin: true})
+	require.NoError(t, err)
+	require.Equal(t, int64(5), adminGot.Total)
+	require.Equal(t, int64(1), adminGot.Failed)
+	require.Equal(t, int64(400), adminGot.P95Ms)
+	require.Equal(t, int64(400), adminGot.SlowestMs)
+	require.GreaterOrEqual(t, len(adminGot.SparkTotal), 3)
+	require.GreaterOrEqual(t, len(adminGot.SparkFailed), 3)
+	require.GreaterOrEqual(t, len(adminGot.SparkP95), 3)
+	require.Equal(t, []int64{2, 1, 2}, adminGot.SparkTotal[:3])
+	require.Equal(t, []int64{0, 1, 0}, adminGot.SparkFailed[:3])
+	require.Equal(t, []int64{200, 0, 400}, adminGot.SparkP95[:3])
+
+	userGot, err := q.Stats().LogsTotals(r, Scope{IsAdmin: false, UserID: 1})
+	require.NoError(t, err)
+	require.Equal(t, int64(4), userGot.Total)
+	require.Equal(t, int64(1), userGot.Failed)
+	require.Equal(t, int64(300), userGot.P95Ms)
+	require.Equal(t, int64(300), userGot.SlowestMs)
+	require.GreaterOrEqual(t, len(userGot.SparkTotal), 3)
+	require.GreaterOrEqual(t, len(userGot.SparkFailed), 3)
+	require.GreaterOrEqual(t, len(userGot.SparkP95), 3)
+	require.Equal(t, []int64{2, 1, 1}, userGot.SparkTotal[:3])
+	require.Equal(t, []int64{0, 1, 0}, userGot.SparkFailed[:3])
+	require.Equal(t, []int64{200, 0, 300}, userGot.SparkP95[:3])
 }
 
 // ---- Task 4.2: RecentAgentHealth ----

@@ -106,3 +106,29 @@ func TestUpdateSettings_AgentOnlyIntKey_BadValueRejected(t *testing.T) {
 		t.Errorf("UpdateSettings(retry_max_channels=notanumber): want BadRequest, got %v", err)
 	}
 }
+
+func TestUpdateSettings_BreakerEnabled_AcceptsZeroAndOne(t *testing.T) {
+	for _, v := range []string{"0", "1"} {
+		t.Run(v, func(t *testing.T) {
+			c := newSettingsContext(t)
+			h := Handler{}
+			_, err := h.UpdateSettings(c, UpdateSettingsRequest{
+				Settings: map[string]string{"breaker_enabled": v},
+			})
+			if err != nil {
+				t.Errorf("UpdateSettings(breaker_enabled=%s): want success, got %v", v, err)
+			}
+		})
+	}
+}
+
+func TestUpdateSettings_BreakerEnabled_BadValueRejected(t *testing.T) {
+	c := newSettingsContext(t)
+	h := Handler{}
+	_, err := h.UpdateSettings(c, UpdateSettingsRequest{
+		Settings: map[string]string{"breaker_enabled": "2"},
+	})
+	if !isBadRequest(err) {
+		t.Fatal("UpdateSettings(breaker_enabled=2): want BadRequest")
+	}
+}

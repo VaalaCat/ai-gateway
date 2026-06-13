@@ -33,6 +33,9 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
+	if err := ensureUsageLogQueryIndexes(db); err != nil {
+		return err
+	}
 	if err := backfillPasswordSet(db); err != nil {
 		return err
 	}
@@ -43,6 +46,47 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 	return dropLegacyTraceRequestIDUniqueIndex(db)
+}
+
+func ensureUsageLogQueryIndexes(db *gorm.DB) error {
+	indexes := []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "idx_usage_logs_created_id",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_created_id ON usage_logs(created_at DESC, id DESC)`,
+		},
+		{
+			name: "idx_usage_logs_user_created_id",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_user_created_id ON usage_logs(user_id, created_at DESC, id DESC)`,
+		},
+		{
+			name: "idx_usage_logs_status_created_duration",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_status_created_duration ON usage_logs(status, created_at, duration)`,
+		},
+		{
+			name: "idx_usage_logs_agent_status_created",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_agent_status_created ON usage_logs(agent_id, status, created_at DESC)`,
+		},
+		{
+			name: "idx_usage_logs_pchan_created_model",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_pchan_created_model ON usage_logs(private_channel_id, created_at, model_name)`,
+		},
+		{
+			name: "idx_usage_logs_model_created_id",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_model_created_id ON usage_logs(model_name, created_at DESC, id DESC)`,
+		},
+	}
+	for _, idx := range indexes {
+		if db.Migrator().HasIndex(&UsageLog{}, idx.name) {
+			continue
+		}
+		if err := db.Exec(idx.sql).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // backfillPasswordSet 把已经设过密码的存量用户标记为 PasswordSet=true。

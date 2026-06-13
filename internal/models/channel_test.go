@@ -19,6 +19,8 @@ func TestChannel_ResilienceJSONColumn(t *testing.T) {
 func intp(v int) *int { return &v }
 
 func TestChannelResilience_Validate(t *testing.T) {
+	breakerOn := true
+	breakerOff := false
 	cases := []struct {
 		name    string
 		in      ChannelResilience
@@ -26,6 +28,8 @@ func TestChannelResilience_Validate(t *testing.T) {
 	}{
 		{"all nil = no override", ChannelResilience{}, false},
 		{"valid values", ChannelResilience{MaxRetries: intp(3), BackoffBaseMs: intp(200), BreakerThreshold: intp(5), BreakerCooldownMs: intp(30000)}, false},
+		{"valid breaker_enabled=true", ChannelResilience{BreakerEnabled: &breakerOn}, false},
+		{"valid breaker_enabled=false", ChannelResilience{BreakerEnabled: &breakerOff}, false},
 		{"boundary ok: max_retries=10", ChannelResilience{MaxRetries: intp(10)}, false},
 		{"boundary ok: breaker_threshold=1", ChannelResilience{BreakerThreshold: intp(1)}, false},
 		{"reject negative max_retries (would be infinite retries)", ChannelResilience{MaxRetries: intp(-1)}, true},

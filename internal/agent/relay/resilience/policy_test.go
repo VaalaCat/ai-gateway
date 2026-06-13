@@ -9,6 +9,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
+	"gorm.io/datatypes"
 )
 
 func chAttempt(id uint) state.Attempt {
@@ -17,8 +18,10 @@ func chAttempt(id uint) state.Attempt {
 	return state.Attempt{Channel: c, SourceID: id}
 }
 
-func okRes() state.AttemptResult  { return state.AttemptResult{} }
-func errRes() state.AttemptResult { return state.AttemptResult{Err: &common.UpstreamError{Status: 503}} }
+func okRes() state.AttemptResult { return state.AttemptResult{} }
+func errRes() state.AttemptResult {
+	return state.AttemptResult{Err: &common.UpstreamError{Status: 503}}
+}
 
 // stubSettings 满足 SettingsReader,供测试注入全局韧性默认。
 type stubSettings struct{ s settings.AgentSettings }
@@ -27,12 +30,17 @@ func (s stubSettings) Settings() settings.AgentSettings { return s.s }
 
 // settingsFromCfg 把 Config 转成等值的 AgentSettings 快照(测试用)。
 func settingsFromCfg(c Config) stubSettings {
+	breakerEnabled := 0
+	if c.BreakerEnabled {
+		breakerEnabled = 1
+	}
 	return stubSettings{settings.AgentSettings{
 		MaxRetriesPerChannel: c.MaxRetries,
 		RetryBackoffBaseMs:   c.BackoffBaseMs,
 		RetryBackoffMaxMs:    c.BackoffMaxMs,
 		BreakerThreshold:     c.BreakerThreshold,
 		BreakerCooldownMs:    c.BreakerCooldownMs,
+		BreakerEnabled:       breakerEnabled,
 	}}
 }
 
@@ -62,7 +70,7 @@ func TestRunner_RetryThenSuccess(t *testing.T) {
 
 func TestRunner_ExhaustsRetries(t *testing.T) {
 	// BreakerThreshold=10 确保 3 次失败不会让熔断器提前 open 截断重试。
-	cfg := Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 10, BreakerCooldownMs: 50}
+	cfg := Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 10, BreakerCooldownMs: 50, BreakerEnabled: true}
 	r := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry()} // MaxRetries=2 → 共 3 次
 	n := 0
 	res := r.Run(nil, chAttempt(3), func() state.AttemptResult { n++; return errRes() })
@@ -82,6 +90,89 @@ func TestRunner_BreakerOpenSkipsDispatch(t *testing.T) {
 	}
 	if !errors.Is(res.Err, ErrBreakerOpen) {
 		t.Fatalf("want ErrBreakerOpen, got %v", res.Err)
+	}
+}
+
+func TestRunner_GlobalBreakerDisabled_DoesNotSkipDispatch(t *testing.T) {
+	cfg := Config{MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 1, BreakerCooldownMs: 50, BreakerEnabled: false}
+	reg := NewRegistry()
+	r := &Runner{Settings: settingsFromCfg(cfg), Breakers: reg}
+
+	for i := 0; i < 3; i++ {
+		n := 0
+		res := r.Run(nil, chAttempt(10), func() state.AttemptResult {
+			n++
+			return errRes()
+		})
+		if n != 1 {
+			t.Fatalf("disabled breaker should dispatch on run %d, got n=%d", i+1, n)
+		}
+		if errors.Is(res.Err, ErrBreakerOpen) {
+			t.Fatalf("disabled breaker must not return ErrBreakerOpen, got %v", res.Err)
+		}
+	}
+	if reg.Len() != 0 {
+		t.Fatalf("disabled breaker should not create registry entries, got %d", reg.Len())
+	}
+}
+
+func TestRunner_ChannelOverrideDisablesBreaker(t *testing.T) {
+	cfg := Config{MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 1, BreakerCooldownMs: 50, BreakerEnabled: true}
+	reg := NewRegistry()
+	r := &Runner{Settings: settingsFromCfg(cfg), Breakers: reg}
+	off := false
+	attempt := chAttempt(11)
+	attempt.Channel.Resilience = datatypes.NewJSONType(models.ChannelResilience{BreakerEnabled: &off})
+
+	for i := 0; i < 2; i++ {
+		n := 0
+		res := r.Run(nil, attempt, func() state.AttemptResult {
+			n++
+			return errRes()
+		})
+		if n != 1 {
+			t.Fatalf("channel disabled breaker should dispatch on run %d, got n=%d", i+1, n)
+		}
+		if errors.Is(res.Err, ErrBreakerOpen) {
+			t.Fatalf("channel disabled breaker must not return ErrBreakerOpen, got %v", res.Err)
+		}
+	}
+	if reg.Len() != 0 {
+		t.Fatalf("channel disabled breaker should not create registry entries, got %d", reg.Len())
+	}
+}
+
+func TestRunner_ChannelOverrideEnablesBreaker(t *testing.T) {
+	cfg := Config{MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 1, BreakerCooldownMs: 50, BreakerEnabled: false}
+	r := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry()}
+	on := true
+	attempt := chAttempt(12)
+	attempt.Channel.Resilience = datatypes.NewJSONType(models.ChannelResilience{BreakerEnabled: &on})
+
+	r.Run(nil, attempt, func() state.AttemptResult { return errRes() })
+	n := 0
+	res := r.Run(nil, attempt, func() state.AttemptResult {
+		n++
+		return errRes()
+	})
+	if n != 0 {
+		t.Fatalf("channel enabled breaker should skip open channel, got n=%d", n)
+	}
+	if !errors.Is(res.Err, ErrBreakerOpen) {
+		t.Fatalf("want ErrBreakerOpen, got %v", res.Err)
+	}
+}
+
+func TestRunner_BreakerDisabledStillRetries(t *testing.T) {
+	cfg := Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 1, BreakerCooldownMs: 50, BreakerEnabled: false}
+	r := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry()}
+	n := 0
+	res := r.Run(nil, chAttempt(13), func() state.AttemptResult {
+		n++
+		return errRes()
+	})
+	if n != 3 || res.Err == nil {
+		t.Fatalf("disabled breaker must preserve retries, got n=%d err=%v", n, res.Err)
 	}
 }
 

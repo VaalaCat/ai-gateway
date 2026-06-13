@@ -1,6 +1,7 @@
 package models
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,10 +17,20 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := AutoMigrate(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
+}
+
+type indexColumn struct {
+	name string
+	desc bool
 }
 
 func TestAutoMigrate(t *testing.T) {
@@ -69,6 +80,128 @@ func TestAutoMigrate_AddsCreatedAtIndexesForUsageTables(t *testing.T) {
 
 	assertHasCreatedAtIndex("usage_logs")
 	assertHasCreatedAtIndex("usage_log_traces")
+}
+
+func TestAutoMigrate_AddsUsageLogQueryIndexes(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	want := map[string][]indexColumn{
+		"idx_usage_logs_created_id": {
+			{name: "created_at", desc: true},
+			{name: "id", desc: true},
+		},
+		"idx_usage_logs_user_created_id": {
+			{name: "user_id"},
+			{name: "created_at", desc: true},
+			{name: "id", desc: true},
+		},
+		"idx_usage_logs_status_created_duration": {
+			{name: "status"},
+			{name: "created_at"},
+			{name: "duration"},
+		},
+		"idx_usage_logs_agent_status_created": {
+			{name: "agent_id"},
+			{name: "status"},
+			{name: "created_at", desc: true},
+		},
+		"idx_usage_logs_pchan_created_model": {
+			{name: "private_channel_id"},
+			{name: "created_at"},
+			{name: "model_name"},
+		},
+		"idx_usage_logs_model_created_id": {
+			{name: "model_name"},
+			{name: "created_at", desc: true},
+			{name: "id", desc: true},
+		},
+	}
+	for name, wantColumns := range want {
+		name, wantColumns := name, wantColumns
+		t.Run(name, func(t *testing.T) {
+			if !db.Migrator().HasIndex(&UsageLog{}, name) {
+				t.Fatalf("expected usage_logs to have index %s", name)
+			}
+
+			if !usageLogHasIndex(t, sqlDB, name) {
+				t.Fatalf("PRAGMA index_list did not include %s", name)
+			}
+
+			gotColumns := usageLogIndexColumns(t, sqlDB, name)
+			if !reflect.DeepEqual(gotColumns, wantColumns) {
+				t.Fatalf("index %s columns = %+v, want %+v", name, gotColumns, wantColumns)
+			}
+		})
+	}
+
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("second AutoMigrate should be idempotent: %v", err)
+	}
+}
+
+func usageLogHasIndex(t *testing.T, sqlDB interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}, name string) bool {
+	t.Helper()
+
+	rows, err := sqlDB.Query("PRAGMA index_list('usage_logs')")
+	if err != nil {
+		t.Fatalf("query index_list: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var seq int
+		var gotName string
+		var unique int
+		var origin string
+		var partial int
+		if err := rows.Scan(&seq, &gotName, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index_list: %v", err)
+		}
+		if gotName == name {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index_list: %v", err)
+	}
+	return false
+}
+
+func usageLogIndexColumns(t *testing.T, sqlDB interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}, name string) []indexColumn {
+	t.Helper()
+
+	rows, err := sqlDB.Query("PRAGMA index_xinfo('" + name + "')")
+	if err != nil {
+		t.Fatalf("query index_xinfo for %s: %v", name, err)
+	}
+	defer rows.Close()
+
+	var columns []indexColumn
+	for rows.Next() {
+		var seqno int
+		var cid int
+		var colName sql.NullString
+		var desc int
+		var coll string
+		var key int
+		if err := rows.Scan(&seqno, &cid, &colName, &desc, &coll, &key); err != nil {
+			t.Fatalf("scan index_xinfo for %s: %v", name, err)
+		}
+		if key == 0 || !colName.Valid {
+			continue
+		}
+		columns = append(columns, indexColumn{name: colName.String, desc: desc == 1})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index_xinfo for %s: %v", name, err)
+	}
+	return columns
 }
 
 func TestAutoMigrate_BillingTables(t *testing.T) {

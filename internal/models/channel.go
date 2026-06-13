@@ -12,11 +12,12 @@ import (
 // 定义在 models 包以避免 resilience→state→models 的循环 import;
 // resilience 包以类型别名复用它。
 type ChannelResilience struct {
-	MaxRetries        *int `json:"max_retries,omitempty"`
-	BackoffBaseMs     *int `json:"backoff_base_ms,omitempty"`
-	BackoffMaxMs      *int `json:"backoff_max_ms,omitempty"`
-	BreakerThreshold  *int `json:"breaker_threshold,omitempty"`
-	BreakerCooldownMs *int `json:"breaker_cooldown_ms,omitempty"`
+	MaxRetries        *int  `json:"max_retries,omitempty"`
+	BackoffBaseMs     *int  `json:"backoff_base_ms,omitempty"`
+	BackoffMaxMs      *int  `json:"backoff_max_ms,omitempty"`
+	BreakerThreshold  *int  `json:"breaker_threshold,omitempty"`
+	BreakerCooldownMs *int  `json:"breaker_cooldown_ms,omitempty"`
+	BreakerEnabled    *bool `json:"breaker_enabled,omitempty"`
 }
 
 // Validate 校验每 channel 覆盖值的边界,与全局 Settings 的 min/max 一致。

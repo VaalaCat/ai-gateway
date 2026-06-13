@@ -67,7 +67,7 @@ func (q *usageLogQuery) List(opts ListOptions, filter UsageLogListFilter) ([]mod
 		return nil, 0, err
 	}
 	var logs []models.UsageLog
-	err := db.Order("id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
+	err := db.Order("created_at DESC, id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
 	return logs, total, err
 }
 
@@ -124,7 +124,7 @@ func (q *adminUsageLogQuery) List(opts ListOptions, filter UsageLogListFilter) (
 		return nil, 0, err
 	}
 	var logs []models.UsageLog
-	err := db.Order("id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
+	err := db.Order("created_at DESC, id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
 	return logs, total, err
 }
 

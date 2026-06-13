@@ -66,7 +66,7 @@ func TestKeys_DeclarationOrder(t *testing.T) {
 	require.Equal(t, []string{
 		"trace_max_body_size", "fallback_sleep_ms", "affinity_enabled", "affinity_ttl_sec",
 		"max_retries_per_channel", "retry_backoff_base_ms", "retry_backoff_max_ms",
-		"breaker_threshold", "breaker_cooldown_ms", "retry_max_channels",
+		"breaker_threshold", "breaker_cooldown_ms", "breaker_enabled", "retry_max_channels",
 		"byok_billing_mode", "min_quota_reserve",
 		"rate_limiter_enabled", "sse_keepalive_ms", "queue_time_ms",
 		"health_error_rate_yellow_pct", "health_error_rate_red_pct",
@@ -118,6 +118,18 @@ func TestRetryMaxChannelsDefault(t *testing.T) {
 	if got := Defaults()["retry_max_channels"]; got != "5" {
 		t.Errorf("retry_max_channels default = %q, want 5", got)
 	}
+}
+
+func TestBreakerEnabledSetting(t *testing.T) {
+	defs := Defaults()
+	require.Equal(t, "1", defs["breaker_enabled"])
+
+	var s AgentSettings
+	require.NoError(t, Apply(&s, "breaker_enabled", "0"))
+	require.Equal(t, 0, s.BreakerEnabled)
+	require.NoError(t, Apply(&s, "breaker_enabled", "1"))
+	require.Equal(t, 1, s.BreakerEnabled)
+	require.Error(t, Validate("breaker_enabled", "2"), "breaker_enabled=2 should be rejected")
 }
 
 func TestAffinityDefaults(t *testing.T) {

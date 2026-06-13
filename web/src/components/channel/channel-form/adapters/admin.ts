@@ -10,13 +10,16 @@ import type { ChannelFormAdapter } from "../adapter";
 import { mapChannelToForm, sanitizeOtherSettingsForSubmit, parseResilience, parseLimit } from "../utils";
 import type { ChannelForm } from "../types";
 
-function buildPayload(form: ChannelForm): Partial<Channel> {
+function buildPayload(
+  form: ChannelForm,
+  opts: { includeEmptyResilience?: boolean } = {},
+): Partial<Channel> {
   const otherSettings = sanitizeOtherSettingsForSubmit(
     form.other_settings,
     form.endpoints,
   );
   const resilienceRaw = parseResilience(form.resilience);
-  const resilience = Object.keys(resilienceRaw).length > 0 ? resilienceRaw : undefined;
+  const hasResilience = Object.keys(resilienceRaw).length > 0;
   const limitRaw = parseLimit(form.limit);
   const cleanRules = (limitRaw.rules ?? []).filter((r) => r.threshold > 0);
   const hasCutoff = typeof limitRaw.disable_at === "number" && limitRaw.disable_at > 0;
@@ -58,7 +61,7 @@ function buildPayload(form: ChannelForm): Partial<Channel> {
     disable_keepalive: form.disable_keepalive,
     price_ratio: Number(form.price_ratio),
     free: form.free,
-    ...(resilience !== undefined && { resilience }),
+    ...((hasResilience || opts.includeEmptyResilience) && { resilience: resilienceRaw }),
     limit,
   } as Partial<Channel>;
 }
@@ -73,8 +76,10 @@ export const adminChannelAdapter: ChannelFormAdapter<Channel> = {
     key: c.key ?? "",
   }),
   buildCreatePayload: (form) => buildPayload(form),
-  buildUpdatePayload: (form) => ({
-    fields: buildPayload(form) as Record<string, unknown>,
+  buildUpdatePayload: (form, initial) => ({
+    fields: buildPayload(form, {
+      includeEmptyResilience: form.resilience !== initial.resilience,
+    }) as Record<string, unknown>,
   }),
   useEntity: (id) => {
     const q = useChannel(id);

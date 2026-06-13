@@ -68,6 +68,7 @@ export interface Channel {
     backoff_max_ms?: number;
     breaker_threshold?: number;
     breaker_cooldown_ms?: number;
+    breaker_enabled?: boolean;
   };
   limit?: {
     disable_at?: number;

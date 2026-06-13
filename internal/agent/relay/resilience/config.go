@@ -6,11 +6,12 @@ import "github.com/VaalaCat/ai-gateway/internal/models"
 
 // Config 是某 channel 最终生效的韧性参数(全局默认 ⊕ 每 channel 覆盖后的结果)。
 type Config struct {
-	MaxRetries        int // 单 channel 内最大重试次数(不含首发)
-	BackoffBaseMs     int // 指数退避初始间隔
-	BackoffMaxMs      int // 指数退避上限
-	BreakerThreshold  int // 连续失败多少次后 open
-	BreakerCooldownMs int // open 后多久转 half-open
+	MaxRetries        int  // 单 channel 内最大重试次数(不含首发)
+	BackoffBaseMs     int  // 指数退避初始间隔
+	BackoffMaxMs      int  // 指数退避上限
+	BreakerThreshold  int  // 连续失败多少次后 open
+	BreakerCooldownMs int  // open 后多久转 half-open
+	BreakerEnabled    bool // false = retry/fallback only; no circuit breaker state
 }
 
 // ChannelResilience 复用 models 定义,避免循环 import。
@@ -42,6 +43,9 @@ func Resolve(global Config, o *ChannelResilience) Config {
 	}
 	if o.BreakerCooldownMs != nil {
 		out.BreakerCooldownMs = *o.BreakerCooldownMs
+	}
+	if o.BreakerEnabled != nil {
+		out.BreakerEnabled = *o.BreakerEnabled
 	}
 	return out
 }

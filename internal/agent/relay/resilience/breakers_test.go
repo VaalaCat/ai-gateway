@@ -8,7 +8,7 @@ import (
 )
 
 func testCfg() Config {
-	return Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 2, BreakerCooldownMs: 50}
+	return Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 2, BreakerCooldownMs: 50, BreakerEnabled: true}
 }
 
 func adminKey(id uint) BreakerKey { return BreakerKey{Source: state.SourceAdmin, ID: id} }

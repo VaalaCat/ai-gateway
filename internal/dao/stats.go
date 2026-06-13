@@ -1576,13 +1576,13 @@ func (q *adminStatsQuery) CacheSaving(r ObsRange, scope Scope, f ObsFilter) (Cac
 // Spark* 长度恒为 24, 槽位对应 r.End 前的最后 24 小时;
 // SparkP95 用 MAX(duration) 作 p95 的近似 (per-bucket 真实 p95 要 24 个独立查询, 用 MAX 折中)。
 type LogsTotals struct {
-	Total      int64   `json:"total"`
-	Failed     int64   `json:"failed"`
-	P95Ms      int64   `json:"p95_ms"`
-	SlowestMs  int64   `json:"slowest_ms"`
-	SparkTotal []int64 `json:"spark_total"`
+	Total       int64   `json:"total"`
+	Failed      int64   `json:"failed"`
+	P95Ms       int64   `json:"p95_ms"`
+	SlowestMs   int64   `json:"slowest_ms"`
+	SparkTotal  []int64 `json:"spark_total"`
 	SparkFailed []int64 `json:"spark_failed"`
-	SparkP95   []int64 `json:"spark_p95"`
+	SparkP95    []int64 `json:"spark_p95"`
 }
 
 // LogsTotals 聚合 usage_logs 在 r 窗口内的请求总数 / 失败数 / duration p95 / 最慢请求 / 24-slot spark。
@@ -1607,37 +1607,34 @@ func (q *adminStatsQuery) LogsTotals(r ObsRange, scope Scope) (LogsTotals, error
 		return q
 	}
 
-	var total int64
-	if err := base().Count(&total).Error; err != nil {
-		return LogsTotals{}, err
+	type logsTotalsAgg struct {
+		Total   int64 `gorm:"column:total"`
+		Failed  int64 `gorm:"column:failed"`
+		Success int64 `gorm:"column:success"`
+		Slowest int64 `gorm:"column:slowest"`
 	}
-	var failed int64
-	if err := base().Where("status = 0").Count(&failed).Error; err != nil {
+	var agg logsTotalsAgg
+	if err := base().
+		Select(`COUNT(*) AS total,
+			COALESCE(SUM(CASE WHEN status = 0 THEN 1 ELSE 0 END), 0) AS failed,
+			COALESCE(SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END), 0) AS success,
+			COALESCE(MAX(CASE WHEN status = 1 THEN duration ELSE NULL END), 0) AS slowest`).
+		Scan(&agg).Error; err != nil {
 		return LogsTotals{}, err
 	}
 
 	// p95 over status=1 rows (success) using OFFSET approximation.
-	successCnt := int64(0)
-	if err := base().Where("status = 1").Count(&successCnt).Error; err != nil {
-		return LogsTotals{}, err
-	}
 	var p95 int64
-	var slowest int64
-	if successCnt > 0 {
-		offset := successCnt * 95 / 100
-		if offset >= successCnt {
-			offset = successCnt - 1
+	if agg.Success > 0 {
+		offset := agg.Success * 95 / 100
+		if offset >= agg.Success {
+			offset = agg.Success - 1
 		}
 		if err := base().Where("status = 1").
 			Select("duration").
 			Order("duration ASC").
 			Offset(int(offset)).Limit(1).
 			Scan(&p95).Error; err != nil {
-			return LogsTotals{}, err
-		}
-		if err := base().Where("status = 1").
-			Select("COALESCE(MAX(duration), 0)").
-			Scan(&slowest).Error; err != nil {
 			return LogsTotals{}, err
 		}
 	}
@@ -1660,7 +1657,7 @@ func (q *adminStatsQuery) LogsTotals(r ObsRange, scope Scope) (LogsTotals, error
 		return LogsTotals{}, err
 	}
 	return LogsTotals{
-		Total: total, Failed: failed, P95Ms: p95, SlowestMs: slowest,
+		Total: agg.Total, Failed: agg.Failed, P95Ms: p95, SlowestMs: agg.Slowest,
 		SparkTotal: sparkTotal, SparkFailed: sparkFailed, SparkP95: sparkP95,
 	}, nil
 }

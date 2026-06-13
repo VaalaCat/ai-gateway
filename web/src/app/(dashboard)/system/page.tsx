@@ -138,6 +138,7 @@ export default function SystemMaintenancePage() {
   const [retryBackoffMaxInput, setRetryBackoffMaxInput] = useState<string | null>(null);
   const [breakerThresholdInput, setBreakerThresholdInput] = useState<string | null>(null);
   const [breakerCooldownInput, setBreakerCooldownInput] = useState<string | null>(null);
+  const [breakerEnabledInput, setBreakerEnabledInput] = useState<boolean | null>(null);
   const [minQuotaReserveInput, setMinQuotaReserveInput] = useState<string | null>(null);
   const [rateLimiterEnabledInput, setRateLimiterEnabledInput] = useState<boolean | null>(null);
   const [sseKeepaliveInput, setSseKeepaliveInput] = useState<string | null>(null);
@@ -240,6 +241,10 @@ export default function SystemMaintenancePage() {
   const displayBreakerCooldown = breakerCooldownInput ?? String(currentBreakerCooldown);
   const breakerCooldownHasChanges = displayBreakerCooldown !== String(currentBreakerCooldown);
 
+  const currentBreakerEnabled = settings?.settings?.breaker_enabled !== "0";
+  const displayBreakerEnabled = breakerEnabledInput ?? currentBreakerEnabled;
+  const breakerEnabledHasChanges = displayBreakerEnabled !== currentBreakerEnabled;
+
   const currentMinQuotaReserve = settings?.settings?.min_quota_reserve
     ? Number(settings.settings.min_quota_reserve)
     : 0;
@@ -299,6 +304,7 @@ export default function SystemMaintenancePage() {
     retryBackoffMaxHasChanges ||
     breakerThresholdHasChanges ||
     breakerCooldownHasChanges ||
+    breakerEnabledHasChanges ||
     minQuotaReserveHasChanges ||
     rateLimiterEnabledHasChanges ||
     sseKeepaliveHasChanges ||
@@ -395,6 +401,9 @@ export default function SystemMaintenancePage() {
       }
       updates.breaker_cooldown_ms = String(n);
     }
+    if (breakerEnabledHasChanges) {
+      updates.breaker_enabled = displayBreakerEnabled ? "1" : "0";
+    }
     if (minQuotaReserveHasChanges) {
       updates.min_quota_reserve = String(Number(minQuotaReserveInput) || 0);
     }
@@ -450,6 +459,7 @@ export default function SystemMaintenancePage() {
           setRetryBackoffMaxInput(null);
           setBreakerThresholdInput(null);
           setBreakerCooldownInput(null);
+          setBreakerEnabledInput(null);
           setMinQuotaReserveInput(null);
           setRateLimiterEnabledInput(null);
           setSseKeepaliveInput(null);
@@ -614,6 +624,14 @@ export default function SystemMaintenancePage() {
                 max={60000}
                 onChange={setRetryBackoffMaxInput}
               />
+              <div className="sm:col-span-2">
+                <SwitchRow
+                  label={t("breakerEnabled")}
+                  desc={t("breakerEnabledDesc")}
+                  checked={displayBreakerEnabled}
+                  onChange={setBreakerEnabledInput}
+                />
+              </div>
               <NumField
                 label={t("breakerThreshold")}
                 desc={t("breakerThresholdDesc")}

@@ -40,6 +40,7 @@ func (r *Runner) globalDefaults() Config {
 		BackoffMaxMs:      s.RetryBackoffMaxMs,
 		BreakerThreshold:  s.BreakerThreshold,
 		BreakerCooldownMs: s.BreakerCooldownMs,
+		BreakerEnabled:    s.BreakerEnabled != 0,
 	}
 }
 
@@ -63,7 +64,6 @@ func (r *Runner) Run(_ *state.RelayContext, a state.Attempt, dispatch func() sta
 			channelID = a.Channel.ID
 		}
 	}
-	cb := r.Breakers.Get(BreakerKey{Source: a.Source, ID: channelID}, cfg)
 
 	retry := retrypolicy.NewBuilder[state.AttemptResult]().
 		WithMaxRetries(cfg.MaxRetries).
@@ -86,6 +86,16 @@ func (r *Runner) Run(_ *state.RelayContext, a state.Attempt, dispatch func() sta
 		ReturnLastFailure().
 		Build()
 
+	if !cfg.BreakerEnabled {
+		res, _ := failsafe.With[state.AttemptResult](retry).
+			Get(func() (state.AttemptResult, error) {
+				out := dispatch()
+				return out, out.Err
+			})
+		return res
+	}
+
+	cb := r.Breakers.Get(BreakerKey{Source: a.Source, ID: channelID}, cfg)
 	res, err := failsafe.With[state.AttemptResult](retry, cb).
 		Get(func() (state.AttemptResult, error) {
 			out := dispatch()

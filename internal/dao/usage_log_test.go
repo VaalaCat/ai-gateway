@@ -2,6 +2,7 @@ package dao
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -192,6 +193,39 @@ func TestUsageLog_AdminList_FilterByPrivateChannelID(t *testing.T) {
 	}
 }
 
+func TestUsageLog_AdminList_OrdersByCreatedAtThenIDDesc(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx).UsageLog()
+
+	rows := []models.UsageLog{
+		{UserID: 1, RequestID: "old", CreatedAt: 1000},
+		{UserID: 1, RequestID: "new-first", CreatedAt: 3000},
+		{UserID: 1, RequestID: "middle", CreatedAt: 2000},
+		{UserID: 1, RequestID: "new-second", CreatedAt: 3000},
+	}
+	for i := range rows {
+		if err := db.Select("*").Create(&rows[i]).Error; err != nil {
+			t.Fatalf("seed %s: %v", rows[i].RequestID, err)
+		}
+	}
+
+	logs, total, err := q.List(ListOptions{Page: 1, PageSize: 10}, UsageLogListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 4 {
+		t.Fatalf("total = %d, want 4", total)
+	}
+	if len(logs) != 4 {
+		t.Fatalf("len(logs) = %d, want 4", len(logs))
+	}
+	got := []string{logs[0].RequestID, logs[1].RequestID, logs[2].RequestID, logs[3].RequestID}
+	want := []string{"new-second", "new-first", "middle", "old"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
 func TestUsageLogDAO_UserScoped(t *testing.T) {
 	uctx, db := setupUserContext(t, 42)
 	q := NewQuery(uctx).UsageLog()
@@ -233,6 +267,40 @@ func TestUsageLogDAO_UserScoped(t *testing.T) {
 			t.Fatalf("expected ErrRecordNotFound for other user's log, got %v", err)
 		}
 	})
+}
+
+func TestUsageLog_UserList_OrdersByCreatedAtThenIDDesc(t *testing.T) {
+	uctx, db := setupUserContext(t, 42)
+	q := NewQuery(uctx).UsageLog()
+
+	rows := []models.UsageLog{
+		{UserID: 42, RequestID: "u-old", CreatedAt: 1000},
+		{UserID: 42, RequestID: "u-new-first", CreatedAt: 3000},
+		{UserID: 99, RequestID: "other-new", CreatedAt: 4000},
+		{UserID: 42, RequestID: "u-middle", CreatedAt: 2000},
+		{UserID: 42, RequestID: "u-new-second", CreatedAt: 3000},
+	}
+	for i := range rows {
+		if err := db.Select("*").Create(&rows[i]).Error; err != nil {
+			t.Fatalf("seed %s: %v", rows[i].RequestID, err)
+		}
+	}
+
+	logs, total, err := q.List(ListOptions{Page: 1, PageSize: 10}, UsageLogListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 4 {
+		t.Fatalf("total = %d, want 4", total)
+	}
+	if len(logs) != 4 {
+		t.Fatalf("len(logs) = %d, want 4", len(logs))
+	}
+	got := []string{logs[0].RequestID, logs[1].RequestID, logs[2].RequestID, logs[3].RequestID}
+	want := []string{"u-new-second", "u-new-first", "u-middle", "u-old"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
 }
 
 // ---- Task 2.8: PercentileTTFT ----
