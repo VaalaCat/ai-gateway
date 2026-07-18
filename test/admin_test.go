@@ -16,7 +16,7 @@ import (
 func TestAdmin_StatsEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
-	masterCfg := newTestMasterRuntimeConfig(":0")
+	masterCfg := newTestMasterRuntimeConfig(t, ":0")
 	srv, err := master.New(masterCfg, logger)
 	if err != nil {
 		t.Fatalf("new master: %v", err)
@@ -55,7 +55,7 @@ func TestAdmin_StatsEndpoint(t *testing.T) {
 func TestAdmin_LogsEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
-	masterCfg := newTestMasterRuntimeConfig(":0")
+	masterCfg := newTestMasterRuntimeConfig(t, ":0")
 	srv, err := master.New(masterCfg, logger)
 	if err != nil {
 		t.Fatalf("new master: %v", err)
@@ -83,7 +83,7 @@ func TestAdmin_LogsEndpoint(t *testing.T) {
 func TestAdmin_UserProfile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
-	masterCfg := newTestMasterRuntimeConfig(":0")
+	masterCfg := newTestMasterRuntimeConfig(t, ":0")
 	srv, err := master.New(masterCfg, logger)
 	if err != nil {
 		t.Fatalf("new master: %v", err)

@@ -1,7 +1,6 @@
 package model_routing
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -9,6 +8,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"go.uber.org/zap"
 )
 
 // Handler 是 model-routings 的 admin 路由处理器。
@@ -30,17 +30,22 @@ func validateErrorToAPI(ve *dao.ValidateError) error {
 }
 
 // publishEvent 发送 ModelRouting 事件到 EventBus。
-func (h *Handler) publishEvent(action string, r *models.ModelRouting) {
+func (h *Handler) publishEvent(c *app.Context, action string, r *models.ModelRouting) {
 	if h.Bus == nil {
 		return
 	}
-	ctx := context.Background()
+	var err error
 	switch action {
 	case events.ActionCreate:
-		_ = events.Publish(ctx, h.Bus, events.ModelRoutingCreateTopic, *r)
+		err = events.Publish(c.RequestContext(), h.Bus, events.ModelRoutingCreateTopic, *r)
 	case events.ActionUpdate:
-		_ = events.Publish(ctx, h.Bus, events.ModelRoutingUpdateTopic, *r)
+		err = events.Publish(c.RequestContext(), h.Bus, events.ModelRoutingUpdateTopic, *r)
 	case events.ActionDelete:
-		_ = events.Publish(ctx, h.Bus, events.ModelRoutingDeleteTopic, *r)
+		err = events.Publish(c.RequestContext(), h.Bus, events.ModelRoutingDeleteTopic, *r)
+	}
+	if err != nil && c.Logger != nil {
+		// behavior change: the mutation is committed even if cache invalidation is delayed.
+		c.Logger.Warn("publish model_routing mutation failed after commit",
+			zap.String("action", action), zap.Uint("routing_id", r.ID), zap.Error(err))
 	}
 }

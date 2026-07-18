@@ -1,6 +1,8 @@
 package dataflow
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
@@ -14,7 +16,7 @@ type Step interface {
 	Key() string
 	// Apply 在 Pass 上加工。返回 error 表示该工序失败(对齐现状:多数工序遇非法配置
 	// noop 并打 warn 返回 nil;只有 encode / script 这类会真正失败)。
-	Apply(p *Pass) error
+	Apply(ctx context.Context, p *Pass) error
 	// Describe 自我描述,纯供前端画图使用,不参与运行逻辑。
 	Describe() StepInfo
 }
@@ -29,9 +31,11 @@ type StepInfo struct {
 }
 
 // StepDeps 是装配 Step 时需要的运行期依赖(脚本引擎、日志等)。
-// 只有 StepUpstreamScript 要求 Agent / GinCtx / RCtx 非 nil;其余 Step 不读它们。
+// StepUpstreamScript 要求 Agent / GinCtx / RCtx 非 nil;StepInlineImages 在 Apply 时
+// 也要求 Agent 非 nil(经 Agent.GetCache().Settings() 读抓取参数);其余 Step 不读它们。
+// 注:仅 Describe() 的装配路径(master dataflow.go)可传 Agent==nil——它不跑 Apply。
 type StepDeps struct {
-	Agent  app.AgentApplication // StepUpstreamScript 用
+	Agent  app.AgentApplication // StepUpstreamScript / StepInlineImages 用
 	GinCtx *gin.Context         // StepUpstreamScript 用(写回 reject 响应)
 	RCtx   *state.RelayContext  // StepUpstreamScript 用(取 UserInfo / Header)
 	Logger *zap.Logger          // StepEncode / StepParamOverride 用;可能为 nil

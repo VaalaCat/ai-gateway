@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
@@ -25,7 +26,7 @@ func TestStepThinkingPassthrough_AddsWhenSendBack(t *testing.T) {
 		{Role: codec.RoleAssistant, ToolCalls: []codec.ToolCall{{}},
 			Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "x"}}},
 	}}}
-	if err := s.Apply(p); err != nil {
+	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Working.Messages[0].Content[0].Type != codec.ContentTypeThinking {
@@ -41,7 +42,7 @@ func TestStepThinkingStrip_StripsWhenSendBackFalse(t *testing.T) {
 			{Type: codec.ContentTypeText, Text: "answer"},
 		}},
 	}}}
-	if err := s.Apply(p); err != nil {
+	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	for _, b := range p.Working.Messages[0].Content {

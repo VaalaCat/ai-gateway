@@ -271,7 +271,7 @@ function ByResource({ buckets }: { buckets: LimiterBucketRow[] }) {
 export function LimiterDashboard() {
   const t = useTranslations("observability");
   const { data } = useLimiterUsage();
-  const buckets = data?.buckets ?? [];
+  const buckets = useMemo(() => data?.buckets ?? [], [data?.buckets]);
 
   const totals = useMemo(() => {
     let occupied = 0;

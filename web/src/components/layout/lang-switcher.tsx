@@ -11,11 +11,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+function persistLocale(locale: Locale) {
+  document.cookie = `locale=${locale}; path=/; max-age=${60 * 60 * 24 * 365}`;
+}
+
 export function LangSwitcher() {
   const t = useTranslations("language");
 
   const switchLocale = (locale: Locale) => {
-    document.cookie = `locale=${locale}; path=/; max-age=${60 * 60 * 24 * 365}`;
+    persistLocale(locale);
     window.dispatchEvent(
       new CustomEvent("locale-change", { detail: locale })
     );

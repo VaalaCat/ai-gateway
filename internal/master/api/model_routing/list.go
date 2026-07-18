@@ -10,7 +10,7 @@ import (
 func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[models.ModelRouting], error) {
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	// 未传 user_id 且未传 scope：返回 global 全部 + 当前 admin 自己的 user-scope

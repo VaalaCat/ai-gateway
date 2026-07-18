@@ -30,7 +30,7 @@ func (h *Handler) FetchModels(c *app.Context, req FetchModelsRequest) (FetchMode
 
 	// Resolve proxy: channel-level > DB setting > config file
 	dbProxy := ""
-	if setting, found, err := dao.NewAdminQuery(dao.NewContext(c.App)).Setting().Lookup("proxy_url"); err == nil && found {
+	if setting, found, err := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Setting().Lookup("proxy_url"); err == nil && found {
 		dbProxy = setting.Value
 	}
 	resolved := httputil.ResolveProxyURL(req.ProxyURL, dbProxy, c.Settings.Master.ProxyURL)

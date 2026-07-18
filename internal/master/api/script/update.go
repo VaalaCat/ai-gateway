@@ -18,7 +18,7 @@ import (
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.AdminScript, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

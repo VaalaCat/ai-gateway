@@ -20,16 +20,16 @@ func (h *Handler) Register(c *app.Context, req RegisterRequest) (RegisterRespons
 	if err != nil {
 		return RegisterResponse{}, api.UnauthorizedError("ticket_invalid")
 	}
-	if !h.readAutoCreateSetting() {
+	if !h.readAutoCreateSetting(c.RequestContext()) {
 		return RegisterResponse{}, api.ForbiddenError("auto_create_disabled")
 	}
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	if _, found, err := q.OAuthIdentity().GetByProviderSubject(claims.ProviderID, claims.Subject); err != nil {
 		return RegisterResponse{}, api.InternalError("lookup identity failed", err)
 	} else if found {
 		return RegisterResponse{}, api.ConflictError("already_bound", nil)
 	}
-	userID, err := h.createUserFromClaims(claims)
+	userID, err := h.createUserFromClaims(c.RequestContext(), claims)
 	if err != nil {
 		return RegisterResponse{}, api.InternalError("create user failed", err)
 	}

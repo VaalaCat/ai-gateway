@@ -29,7 +29,7 @@ func setupScriptTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
-	ctx := &app.Context{Context: ginCtx, App: application, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1, Role: 2}}
+	ctx := &app.Context{Context: ginCtx, App: application, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1, Role: 2}, OwnerContext: t.Context()}
 	return &Handler{}, ctx, db
 }
 

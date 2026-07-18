@@ -41,14 +41,15 @@ func newLogTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 }
 
 // makeCtx 构造 *app.Context 并把 RequestScope 写入 gin context。
-func makeCtx(application app.Application, userID uint, isAdmin bool) *app.Context {
+func makeCtx(t *testing.T, application app.Application, userID uint, isAdmin bool) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	ginCtx.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
 	return &app.Context{
-		Context:  ginCtx,
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: userID, GroupID: 1},
+		Context:      ginCtx,
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: userID, GroupID: 1},
+		OwnerContext: t.Context(),
 	}
 }
 
@@ -76,7 +77,7 @@ func TestList_NormalUser_OwnsPrivateChannel_ReturnsRows(t *testing.T) {
 	seedPC(t, db, 42, 1)
 	seedLog(t, db, models.UsageLog{UserID: 1, OwnerType: "private", PrivateChannelID: 42, ModelName: "claude", Status: 1, RequestID: "a"})
 
-	ctx := makeCtx(application, 1, false)
+	ctx := makeCtx(t, application, 1, false)
 	resp, err := h.List(ctx, ListRequest{PrivateChannelID: "42"})
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -98,7 +99,7 @@ func TestList_Admin_AnyPrivateChannel_NoOwnershipCheck(t *testing.T) {
 	seedLog(t, db, models.UsageLog{UserID: 2, OwnerType: "private", PrivateChannelID: 42, ModelName: "claude", Status: 1, RequestID: "b"})
 
 	// admin (UserID=1) querying pc owned by user 2
-	ctx := makeCtx(application, 1, true)
+	ctx := makeCtx(t, application, 1, true)
 	resp, err := h.List(ctx, ListRequest{PrivateChannelID: "42"})
 	if err != nil {
 		t.Fatalf("admin should succeed without ownership: %v", err)
@@ -112,7 +113,7 @@ func TestList_NormalUser_NotOwned_403(t *testing.T) {
 	h, db, application := newLogTestCtx(t)
 	seedPC(t, db, 42, 2) // owner is user 2
 
-	ctx := makeCtx(application, 1, false)
+	ctx := makeCtx(t, application, 1, false)
 	_, err := h.List(ctx, ListRequest{PrivateChannelID: "42"})
 	if err == nil {
 		t.Fatalf("expected 403, got nil")
@@ -125,7 +126,7 @@ func TestList_NormalUser_NotOwned_403(t *testing.T) {
 
 func TestList_NormalUser_NotExistChannel_Also_403(t *testing.T) {
 	h, _, application := newLogTestCtx(t)
-	ctx := makeCtx(application, 1, false)
+	ctx := makeCtx(t, application, 1, false)
 	_, err := h.List(ctx, ListRequest{PrivateChannelID: "99999"})
 	if err == nil {
 		t.Fatalf("expected 403, got nil")
@@ -138,7 +139,7 @@ func TestList_NormalUser_NotExistChannel_Also_403(t *testing.T) {
 
 func TestList_InvalidPrivateChannelID_400(t *testing.T) {
 	h, _, application := newLogTestCtx(t)
-	ctx := makeCtx(application, 1, false)
+	ctx := makeCtx(t, application, 1, false)
 	_, err := h.List(ctx, ListRequest{PrivateChannelID: "abc"})
 	if err == nil {
 		t.Fatalf("expected 400, got nil")
@@ -155,7 +156,7 @@ func TestList_WithTimeWindow_FiltersByCreatedAt(t *testing.T) {
 	seedLog(t, db, models.UsageLog{UserID: 1, ModelName: "m", Status: 1, RequestID: "b", CreatedAt: 2000})
 	seedLog(t, db, models.UsageLog{UserID: 1, ModelName: "m", Status: 1, RequestID: "c", CreatedAt: 3000})
 
-	ctx := makeCtx(application, 1, true)
+	ctx := makeCtx(t, application, 1, true)
 	resp, err := h.List(ctx, ListRequest{
 		TimeWindowQuery: listfilter.TimeWindowQuery{Start: 1500, End: 3000},
 	})
@@ -169,7 +170,7 @@ func TestList_WithTimeWindow_FiltersByCreatedAt(t *testing.T) {
 
 func TestList_RangeOutOfBounds_Returns400(t *testing.T) {
 	h, _, application := newLogTestCtx(t)
-	ctx := makeCtx(application, 1, true)
+	ctx := makeCtx(t, application, 1, true)
 	// start=0, end far in future → > MaxLogsListDays (365)
 	_, err := h.List(ctx, ListRequest{
 		TimeWindowQuery: listfilter.TimeWindowQuery{Start: 0, End: 366 * 86400},
@@ -191,12 +192,47 @@ func TestList_NoTimeWindow_ReturnsAll(t *testing.T) {
 	seedLog(t, db, models.UsageLog{UserID: 1, ModelName: "m", Status: 1, RequestID: "a", CreatedAt: 1000})
 	seedLog(t, db, models.UsageLog{UserID: 1, ModelName: "m", Status: 1, RequestID: "b", CreatedAt: 2000})
 
-	ctx := makeCtx(application, 1, true)
+	ctx := makeCtx(t, application, 1, true)
 	resp, err := h.List(ctx, ListRequest{}) // no TimeWindowQuery
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	if resp.Total != 2 {
 		t.Fatalf("total = %d, want 2 (no time filter)", resp.Total)
+	}
+}
+
+func TestListFilterByRequestID(t *testing.T) {
+	h, db, application := newLogTestCtx(t)
+	seedLog(t, db, models.UsageLog{UserID: 1, ModelName: "m", Status: 1, RequestID: "r1"})
+	seedLog(t, db, models.UsageLog{UserID: 1, ModelName: "m", Status: 1, RequestID: "r2"})
+	seedLog(t, db, models.UsageLog{UserID: 1, ModelName: "m", Status: 1, RequestID: "r3"})
+
+	ctx := makeCtx(t, application, 1, true)
+	resp, err := h.List(ctx, ListRequest{RequestID: "r2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 1 || resp.Data[0].RequestID != "r2" {
+		t.Fatalf("total=%d, want exactly r2", resp.Total)
+	}
+
+	// 精确匹配:前缀不命中
+	resp, err = h.List(ctx, ListRequest{RequestID: "r"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 0 {
+		t.Fatal("prefix must not match (exact match only)")
+	}
+
+	// 普通用户 scope 叠加:查别人(user 1)的 request_id 不可见(ScopedUserID 仍生效)
+	otherUserCtx := makeCtx(t, application, 2, false)
+	respUser, err := h.List(otherUserCtx, ListRequest{RequestID: "r2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respUser.Total != 0 {
+		t.Fatal("request_id filter must not widen scoped visibility")
 	}
 }

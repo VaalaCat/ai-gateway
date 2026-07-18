@@ -2,13 +2,16 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/sourcegraph/conc"
 	"go.uber.org/zap"
 	"gorm.io/datatypes"
 )
@@ -83,46 +86,116 @@ func reconcile(status int, state models.ChannelLimitState, shouldDisable bool, r
 
 // LimitEvaluator 周期评估所有配了限额的 admin channel,翻 Status + 写 LimitState。
 type LimitEvaluator struct {
-	App      dao.AppProvider
-	Bus      app.EventBus
-	Logger   *zap.Logger
-	interval time.Duration
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	App           dao.AppProvider
+	Bus           app.EventBus
+	Logger        *zap.Logger
+	interval      time.Duration
+	stopCh        chan struct{}
+	lifecycleMu   sync.Mutex
+	started       bool
+	closing       bool
+	closeOnce     sync.Once
+	workerCancel  context.CancelCauseFunc
+	workers       conc.WaitGroup
+	done          chan struct{}
+	tick          func(context.Context, time.Time) error
+	activeWorkers atomic.Int64
+	activeTimers  atomic.Int64
+	inflight      atomic.Int64
 }
 
 func NewLimitEvaluator(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, interval time.Duration) *LimitEvaluator {
-	return &LimitEvaluator{App: application, Bus: bus, Logger: logger, interval: interval, stopCh: make(chan struct{})}
+	e := &LimitEvaluator{App: application, Bus: bus, Logger: logger, interval: interval, stopCh: make(chan struct{}), done: make(chan struct{})}
+	e.tick = e.TickContext
+	return e
 }
 
 // Start 起后台 ticker;每 tick 跑一轮 Tick(now)。
 func (e *LimitEvaluator) Start() {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	if e.started || e.closing {
+		return
+	}
+	e.started = true
 	if e.interval <= 0 {
 		e.interval = 30 * time.Second
 	}
-	go func() {
+	workerCtx, cancel := context.WithCancelCause(context.Background())
+	e.workerCancel = cancel
+	e.activeWorkers.Add(1)
+	e.activeTimers.Add(1)
+	e.workers.Go(func() {
+		defer e.activeWorkers.Add(-1)
+		defer e.activeTimers.Add(-1)
 		ticker := time.NewTicker(e.interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				if err := e.Tick(time.Now().UTC()); err != nil && e.Logger != nil {
+				if workerCtx.Err() != nil {
+					return
+				}
+				e.inflight.Add(1)
+				err := e.tick(workerCtx, time.Now().UTC())
+				e.inflight.Add(-1)
+				if workerCtx.Err() != nil {
+					return
+				}
+				if err != nil && e.Logger != nil {
 					e.Logger.Error("channel_limit_tick_failed", zap.Error(err))
 				}
 			case <-e.stopCh:
 				return
+			case <-workerCtx.Done():
+				return
 			}
 		}
-	}()
+	})
 }
 
-func (e *LimitEvaluator) Stop() { e.stopOnce.Do(func() { close(e.stopCh) }) }
+func (e *LimitEvaluator) Close(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("limit evaluator: nil close context")
+	}
+	e.closeOnce.Do(func() {
+		e.lifecycleMu.Lock()
+		e.closing = true
+		if e.workerCancel != nil {
+			e.workerCancel(context.Cause(ctx))
+		}
+		close(e.stopCh)
+		e.lifecycleMu.Unlock()
+		go func() {
+			e.workers.Wait()
+			close(e.done)
+		}()
+	})
+	select {
+	case <-e.done:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (e *LimitEvaluator) Stop(ctx context.Context) error { return e.Close(ctx) }
+
+func (e *LimitEvaluator) Done() <-chan struct{} { return e.done }
+
+func (e *LimitEvaluator) ResourceCounts() app.ResourceCounts {
+	return app.ResourceCounts{LifecycleWorkers: e.activeWorkers.Load(), Timers: e.activeTimers.Load(), Inflight: e.inflight.Load()}
+}
 
 // Tick 跑一轮评估。now 应为 UTC。
 func (e *LimitEvaluator) Tick(now time.Time) error {
-	ctx := dao.NewContext(e.App)
-	q := dao.NewAdminQuery(ctx).Channel()
-	m := dao.NewAdminMutation(ctx).Channel()
+	return e.TickContext(context.Background(), now)
+}
+
+func (e *LimitEvaluator) TickContext(ctx context.Context, now time.Time) error {
+	daoCtx := dao.NewContextWithContext(e.App, ctx)
+	q := dao.NewAdminQuery(daoCtx).Channel()
+	m := dao.NewAdminMutation(daoCtx).Channel()
 
 	channels, err := q.ListAll()
 	if err != nil {
@@ -168,7 +241,7 @@ func (e *LimitEvaluator) Tick(now time.Time) error {
 		if e.Bus != nil {
 			updated, err := q.GetByID(ch.ID)
 			if err == nil {
-				_ = events.PublishChannelUpdate(context.Background(), e.Bus, *updated)
+				_ = events.PublishChannelUpdate(ctx, e.Bus, *updated)
 			}
 		}
 	}

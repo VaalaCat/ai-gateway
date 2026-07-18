@@ -3,14 +3,21 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	gosync "sync"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/glebarez/sqlite"
+	"github.com/sourcegraph/conc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 func newTrackerForTest(t *testing.T) *HeartbeatTracker {
@@ -42,6 +49,67 @@ func TestHeartbeatTracker_TouchAndGet(t *testing.T) {
 	ts, ok = tr.Get("agent-b")
 	require.True(t, ok)
 	require.Equal(t, int64(0), ts)
+}
+
+func TestHeartbeatTracker_TouchIsMonotonicAndSkipsUnchangedDirty(t *testing.T) {
+	tr := newTrackerForTest(t)
+	fake := &fakeAgentMutator{}
+	tr.SetLastSeenPersistFn(fake.record)
+
+	tr.Touch("agent-a", 100)
+	require.NoError(t, tr.Flush())
+	require.Equal(t, 1, fake.callCount())
+
+	tr.Touch("agent-a", 100)
+	tr.Touch("agent-a", 99)
+	require.NoError(t, tr.Flush())
+	require.Equal(t, 1, fake.callCount(), "equal and older samples must not mark the tracker dirty")
+	lastSeen, ok := tr.Get("agent-a")
+	require.True(t, ok)
+	require.Equal(t, int64(100), lastSeen)
+
+	tr.Touch("agent-a", 101)
+	require.NoError(t, tr.Flush())
+	require.Equal(t, 2, fake.callCount())
+	require.Equal(t, int64(101), fake.snapshotCalls()[1]["agent-a"])
+
+	concurrent := newTrackerForTest(t)
+	var wg gosync.WaitGroup
+	for _, value := range []int64{300, 50, 900, 450, 899, 1_000, 700} {
+		value := value
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			concurrent.Touch("agent-a", value)
+		}()
+	}
+	wg.Wait()
+	lastSeen, ok = concurrent.Get("agent-a")
+	require.True(t, ok)
+	require.Equal(t, int64(1_000), lastSeen)
+}
+
+func TestHeartbeatTracker_FlushDoesNotMoveDatabaseLastSeenBackward(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	require.NoError(t, db.AutoMigrate(&models.Agent{}))
+	require.NoError(t, db.Create(&models.Agent{AgentID: "agent-a", LastSeen: 900}).Error)
+	application := app.NewApplication()
+	application.SetDB(db)
+
+	tr := NewHeartbeatTracker(application, zap.NewNop(), 0)
+	tr.SetLastSeenPersistFn(func(updates map[string]int64) error {
+		return dao.NewAdminMutation(dao.NewContext(application)).Agent().BatchUpdateLastSeen(updates)
+	})
+	tr.Touch("agent-a", 200)
+	require.NoError(t, tr.Flush())
+
+	var stored models.Agent
+	require.NoError(t, db.Where("agent_id = ?", "agent-a").First(&stored).Error)
+	require.Equal(t, int64(900), stored.LastSeen)
 }
 
 func TestHeartbeatTracker_GetMany(t *testing.T) {
@@ -146,7 +214,7 @@ func TestHeartbeatTracker_TickerFlushesPeriodically(t *testing.T) {
 
 	// success: Stop force flush 最后一批
 	tr.Touch("b", 200)
-	tr.Stop()
+	_ = tr.Stop(context.Background())
 	found := false
 	for _, c := range fake.snapshotCalls() {
 		if _, ok := c["b"]; ok {
@@ -169,7 +237,7 @@ func TestHeartbeatTracker_StopConcurrentSafe(t *testing.T) {
 	for i := 0; i < callers; i++ {
 		go func() {
 			defer wg.Done()
-			tr.Stop()
+			_ = tr.Stop(context.Background())
 		}()
 	}
 	wg.Wait()
@@ -194,7 +262,7 @@ func TestHeartbeatTracker_NoTickerWhenFlushEveryZero(t *testing.T) {
 	tr.Touch("a", 100)
 	time.Sleep(40 * time.Millisecond)
 	require.Zero(t, fake.callCount(), "flushEvery=0 不应触发自动 flush")
-	tr.Stop()
+	_ = tr.Stop(context.Background())
 }
 
 func TestHeartbeatTracker_ConfigChanged(t *testing.T) {
@@ -208,40 +276,135 @@ func TestHeartbeatTracker_ConfigChanged(t *testing.T) {
 	}
 
 	// success: 冷启动第一次永远算变化
-	require.True(t, tr.ConfigChanged("a", params))
+	require.True(t, tr.ConfigChanged("a", 1, params))
 
 	// success: 同 params 第二次返回 false
-	require.False(t, tr.ConfigChanged("a", params))
+	require.False(t, tr.ConfigChanged("a", 1, params))
 
 	// success: 改 HTTPAddresses → 变化
 	p2 := params
 	p2.HTTPAddresses = json.RawMessage(`["http://b:2"]`)
-	require.True(t, tr.ConfigChanged("a", p2))
+	require.True(t, tr.ConfigChanged("a", 1, p2))
 
 	// success: 改 Tags → 变化
 	p3 := p2
 	p3.Tags = "y"
-	require.True(t, tr.ConfigChanged("a", p3))
+	require.True(t, tr.ConfigChanged("a", 1, p3))
 
 	// success: 改 ProxyURL → 变化
 	p4 := p3
 	p4.ProxyURL = "http://proxy:9999"
-	require.True(t, tr.ConfigChanged("a", p4))
+	require.True(t, tr.ConfigChanged("a", 1, p4))
 
 	// success: 改 ListenPort → 变化
 	p5 := p4
 	p5.ListenPort = 9001
-	require.True(t, tr.ConfigChanged("a", p5))
+	require.True(t, tr.ConfigChanged("a", 1, p5))
 
 	// boundary: 同 agent 的 cfgFp 已更新，再发一次相同 p5 → false
-	require.False(t, tr.ConfigChanged("a", p5))
+	require.False(t, tr.ConfigChanged("a", 1, p5))
 
 	// boundary: Uptime / CachedTokens 等非指纹字段变化不算 ConfigChanged
 	p6 := p5
 	p6.Uptime = 999999
 	p6.CachedTokens = 42
-	require.False(t, tr.ConfigChanged("a", p6))
+	require.False(t, tr.ConfigChanged("a", 1, p6))
 
 	// boundary: 不同 agent_id 各自独立
-	require.True(t, tr.ConfigChanged("b", params), "agent b 冷启动")
+	require.True(t, tr.ConfigChanged("b", 1, params), "agent b 冷启动")
+}
+
+func TestHeartbeatTrackerCloseDeadlineCancelsFinalFlushAndRejectsRestart(t *testing.T) {
+	tr := NewHeartbeatTracker(nil, zap.NewNop(), time.Hour)
+	flushEntered := make(chan struct{})
+	tr.SetLastSeenPersistContextFn(func(ctx context.Context, _ map[string]int64) error {
+		close(flushEntered)
+		<-ctx.Done()
+		return context.Cause(ctx)
+	})
+	tr.Touch("agent-a", 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := tr.Close(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close = %v, want deadline exceeded", err)
+	}
+	<-flushEntered
+	select {
+	case <-tr.Done():
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Heartbeat Done did not close after deadline")
+	}
+	if got := tr.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("resources after Close = %+v", got)
+	}
+	tr.Start(context.Background())
+	if got := tr.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("Start after Close created resources: %+v", got)
+	}
+}
+
+func TestHeartbeatTrackerConcurrentStartCloseUsesOneLifecycleGate(t *testing.T) {
+	started := NewHeartbeatTracker(nil, zap.NewNop(), time.Hour)
+	if got := started.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("resources before Start = %+v", got)
+	}
+	started.Start(context.Background())
+	if got := started.ResourceCounts(); got.LifecycleWorkers != 1 || got.Timers != 1 {
+		t.Fatalf("resources after Start = %+v, want one worker and timer", got)
+	}
+	if err := started.Close(context.Background()); err != nil {
+		t.Fatalf("Close started tracker: %v", err)
+	}
+
+	tracker := NewHeartbeatTracker(nil, zap.NewNop(), time.Hour)
+	start := make(chan struct{})
+	errs := make(chan error, 32)
+	var callers conc.WaitGroup
+	for i := 0; i < 64; i++ {
+		if i%2 == 0 {
+			callers.Go(func() {
+				<-start
+				tracker.Start(context.Background())
+			})
+			continue
+		}
+		callers.Go(func() {
+			<-start
+			errs <- tracker.Close(context.Background())
+		})
+	}
+	close(start)
+	callers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Close: %v", err)
+		}
+	}
+	select {
+	case <-tracker.Done():
+	default:
+		t.Fatal("Done remained open after concurrent Start/Close")
+	}
+	if got := tracker.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("resources after concurrent Start/Close = %+v", got)
+	}
+	tracker.Start(context.Background())
+	if got := tracker.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("Start after Close created resources: %+v", got)
+	}
+}
+
+func TestHeartbeatTracker_ConfigChangedGenerationOrdering(t *testing.T) {
+	tr := newTrackerForTest(t)
+	initial := protocol.HeartbeatParams{Tags: "initial", ListenPort: 9000}
+	changed := protocol.HeartbeatParams{Tags: "changed", ListenPort: 9001}
+
+	require.True(t, tr.ConfigChanged("agent-a", 1, initial))
+	require.True(t, tr.ConfigChanged("agent-a", 2, initial), "a new generation must merge even when params are unchanged")
+	require.False(t, tr.ConfigChanged("agent-a", 1, changed), "an old generation must not merge or overwrite fingerprint state")
+	require.False(t, tr.ConfigChanged("agent-a", 2, initial), "old generation must not pollute the replacement fingerprint")
+	require.True(t, tr.ConfigChanged("agent-a", 2, changed))
+	require.False(t, tr.ConfigChanged("agent-a", 1, initial), "old generation remains ignored after current config changes")
 }

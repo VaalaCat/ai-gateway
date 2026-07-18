@@ -17,7 +17,7 @@ type AvailableModelsResponse struct {
 }
 
 func (h *Handler) PortalAvailableModels(c *app.Context, _ api.EmptyRequest) (AvailableModelsResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	cfgs, err := q.ModelConfig().ListAll()
 	if err != nil {

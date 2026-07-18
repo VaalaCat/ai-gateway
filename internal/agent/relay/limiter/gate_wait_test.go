@@ -1,13 +1,44 @@
 package limiter
 
 import (
+	"context"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGateWaitHonorsRequestCancellation(t *testing.T) {
+	res := stubResolver{req: []*models.RequestLimiter{
+		{ID: 1, Metric: "concurrency", Capacity: 1, KeyBy: "shared", Action: "wait", QueueSize: 5, QueueTimeMs: 5000, Enabled: true},
+	}}
+	g := NewGate(res, NewMemStore())
+	held, err := g.AcquireRequest(rctxWithUser(1, 0))
+	require.NoError(t, err)
+	defer held.Release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &gin.Context{Request: (&http.Request{}).WithContext(ctx)}
+	rctx := rctxWithUser(1, 0)
+	rctx.Context = c
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.AcquireRequest(rctx)
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("limiter wait ignored request cancellation")
+	}
+}
 
 func TestGate_Wait_BlockThenAcquire(t *testing.T) {
 	res := stubResolver{req: []*models.RequestLimiter{

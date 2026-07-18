@@ -3,13 +3,13 @@ package plan
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/models"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
@@ -20,20 +20,26 @@ import (
 // stubRoutingStore 让 chain 测试不依赖真实 *cache.Store。
 type stubRoutingStore struct {
 	user       map[string]*protocol.SyncedRouting // by name
+	token      map[string]*protocol.SyncedRouting
 	global     map[string]*protocol.SyncedRouting
 	realModels map[string]bool // name → 是否真实模型
 }
 
-func (s *stubRoutingStore) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
-	if userID > 0 && s.user != nil {
+func (s *stubRoutingStore) ResolveRouting(ctx context.Context, name string, owner protocol.RoutingOwner) *protocol.SyncedRouting {
+	if owner.TokenID > 0 && s.token != nil {
+		if r, ok := s.token[name]; ok {
+			return r
+		}
+	}
+	if owner.UserID > 0 && s.user != nil {
 		if r, ok := s.user[name]; ok {
 			return r
 		}
 	}
-	return s.GetGlobalRouting(name)
+	return s.GetGlobalRouting(ctx, name)
 }
 
-func (s *stubRoutingStore) GetGlobalRouting(name string) *protocol.SyncedRouting {
+func (s *stubRoutingStore) GetGlobalRouting(_ context.Context, name string) *protocol.SyncedRouting {
 	if s.global == nil {
 		return nil
 	}
@@ -60,6 +66,7 @@ type stubAgentCache struct {
 	users        map[uint]*protocol.SyncedUser
 	// getUserCalls 记录 GetUser 被调用次数，供 quotaFilter 测试断言"未定价/全免费不读余额"。
 	getUserCalls int
+	getUser      func(context.Context, uint) *protocol.SyncedUser
 }
 
 func (c *stubAgentCache) Settings() settings.AgentSettings { return c.settings }
@@ -71,26 +78,29 @@ func (c *stubAgentCache) GetModelConfig(name string) *models.ModelConfig {
 	return c.modelConfigs[name]
 }
 
-func (c *stubAgentCache) GetUser(_ context.Context, id uint) *protocol.SyncedUser {
+func (c *stubAgentCache) GetUser(ctx context.Context, id uint) *protocol.SyncedUser {
 	c.getUserCalls++
+	if c.getUser != nil {
+		return c.getUser(ctx, id)
+	}
 	if c.users == nil {
 		return nil
 	}
 	return c.users[id]
 }
 
-func (c *stubAgentCache) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
+func (c *stubAgentCache) ResolveRouting(ctx context.Context, name string, owner protocol.RoutingOwner) *protocol.SyncedRouting {
 	if c.rs == nil {
 		return nil
 	}
-	return c.rs.ResolveRouting(name, userID)
+	return c.rs.ResolveRouting(ctx, name, owner)
 }
 
-func (c *stubAgentCache) GetGlobalRouting(name string) *protocol.SyncedRouting {
+func (c *stubAgentCache) GetGlobalRouting(ctx context.Context, name string) *protocol.SyncedRouting {
 	if c.rs == nil {
 		return nil
 	}
-	return c.rs.GetGlobalRouting(name)
+	return c.rs.GetGlobalRouting(ctx, name)
 }
 
 func (c *stubAgentCache) GetChannelsForModel(model string) []*models.Channel {
@@ -119,8 +129,8 @@ type stubAgentApp struct {
 	logger *zap.Logger
 }
 
-func (s *stubAgentApp) GetCache() app.AgentCache              { return s.cache }
-func (s *stubAgentApp) GetRouteForwarder() app.RouteForwarder { return nil }
+func (s *stubAgentApp) GetCache() app.AgentCache    { return s.cache }
+func (s *stubAgentApp) GetBodyStore() app.BodyStore { return nil }
 func (s *stubAgentApp) GetLogger() *zap.Logger {
 	if s.logger != nil {
 		return s.logger
@@ -136,20 +146,21 @@ type stubTransportPool struct{}
 
 func (stubTransportPool) Get(*models.Channel) *http.Transport { return nil }
 func (stubTransportPool) Invalidate(uint, string)             {}
+func (stubTransportPool) CloseIdleConnections()               {}
 
 // 编译期断言：embedded interface 写法不会破坏接口实现。
 var (
 	_ app.AgentCache       = (*stubAgentCache)(nil)
 	_ app.AgentApplication = (*stubAgentApp)(nil)
 	_ RoutingStore         = (*stubRoutingStore)(nil)
-	_ app.RouteForwarder   = (*agentproxy.RouteForwarder)(nil) // 仅引入 agentproxy 让 go.sum 链路完整
 	_ app.TransportPool    = stubTransportPool{}
 )
 
 // newTestRelayContext 构造一个最小可用的 state.RelayContext，喂给 chain / pool 测试。
 func newTestRelayContext(cache app.AgentCache, userModel string, ui *app.UserInfo, forcedID uint) *state.RelayContext {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	return &state.RelayContext{
-		Context: &gin.Context{},
+		Context: &gin.Context{Request: request},
 		Agent:   &stubAgentApp{cache: cache},
 		Input: state.RelayInput{
 			Model:           userModel,
@@ -158,4 +169,8 @@ func newTestRelayContext(cache app.AgentCache, userModel string, ui *app.UserInf
 		},
 		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
 	}
+}
+
+func resolveToRealModel(store RoutingStore, ref string, userID uint, walk *ResolveCtx) string {
+	return ResolveToRealModel(context.Background(), store, ref, protocol.RoutingOwner{UserID: userID}, walk)
 }

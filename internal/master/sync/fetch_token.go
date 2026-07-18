@@ -28,14 +28,25 @@ func (tokenFetchHandler) Fetch(_ context.Context, q dao.AdminQuery, key string) 
 	if err != nil {
 		return nil, nil, false, err
 	}
-	side := marshalSyncedUser(q, token.UserID)
+	routings, err := q.ModelRouting().ListByToken(token.ID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	side, err := json.Marshal(protocol.TokenFetchSide{
+		SchemaVersion: protocol.TokenFetchSideSchemaV1,
+		User:          syncedUser(q, token.UserID),
+		TokenRoutings: routingMap(routings),
+	})
+	if err != nil {
+		return nil, nil, false, err
+	}
 	return data, side, true, nil
 }
 
 // marshalSyncedUser 查 user 并打包成 SyncedUser JSON。
 // user 缺失或查询失败时返回 nil（Side 为空，agent 自行处理）。
 // GroupID 为 0 时归一化为 1（default group），与 hub.handleFullSync 一致。
-func marshalSyncedUser(q dao.AdminQuery, userID uint) json.RawMessage {
+func syncedUser(q dao.AdminQuery, userID uint) *protocol.SyncedUser {
 	user, err := q.User().GetByID(userID)
 	if err != nil {
 		return nil
@@ -44,7 +55,15 @@ func marshalSyncedUser(q dao.AdminQuery, userID uint) json.RawMessage {
 	if gid == 0 {
 		gid = 1
 	}
-	b, err := json.Marshal(protocol.SyncedUser{ID: user.ID, GroupID: gid, Quota: user.Quota})
+	return &protocol.SyncedUser{ID: user.ID, GroupID: gid, Quota: user.Quota}
+}
+
+func marshalSyncedUser(q dao.AdminQuery, userID uint) json.RawMessage {
+	user := syncedUser(q, userID)
+	if user == nil {
+		return nil
+	}
+	b, err := json.Marshal(user)
 	if err != nil {
 		return nil
 	}

@@ -15,7 +15,7 @@ func (h *Handler) AdminGet(c *app.Context, req api.IDPathRequest) (DetailRespons
 	if err != nil {
 		return DetailResponse{}, api.NotFoundError("private channel not found")
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	pc, err := q.PrivateChannel().GetByID(uint(id))
 	if err != nil || pc == nil {

@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
@@ -11,7 +12,7 @@ func TestStepInjectSystemPrompt_PrependsWhenNoSystem(t *testing.T) {
 	p := &Pass{Working: &codec.Request{Messages: []codec.Message{
 		{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "hi"}}},
 	}}}
-	if err := s.Apply(p); err != nil {
+	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Working.Messages[0].Role != codec.RoleSystem {
@@ -24,7 +25,7 @@ func TestStepInjectSystemPrompt_NoopWhenEmpty(t *testing.T) {
 	p := &Pass{Working: &codec.Request{Messages: []codec.Message{
 		{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "hi"}}},
 	}}}
-	_ = s.Apply(p)
+	_ = s.Apply(context.Background(), p)
 	if len(p.Working.Messages) != 1 || p.Working.Messages[0].Role != codec.RoleUser {
 		t.Fatalf("messages mutated: %+v", p.Working.Messages)
 	}

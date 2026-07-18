@@ -15,7 +15,7 @@ import (
 // offline agent 也会列在 agents[] 里（带最近 last_seen），但
 // 不计入 cluster 聚合。
 func (h *Handler) Stats(c *app.Context, _ api.EmptyRequest) (StatsResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	// 一次性拉所有 agent；admin 部署规模不会超过这个上限。

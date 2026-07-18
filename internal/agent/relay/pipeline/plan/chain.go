@@ -1,6 +1,9 @@
 package plan
 
-import "github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+import (
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+)
 
 // ModelChainBuilder 把入参 model 一次性预求值成完整的 realModel 链。
 // "失败→MarkMemberExhausted→再 Resolve"的迭代由 Build 内部完成，
@@ -60,13 +63,18 @@ func buildChainFromStore(rs RoutingStore, rctx *state.RelayContext) ModelChain {
 		return ModelChain{}
 	}
 
-	userID := uint(0)
-	if ui := rctx.Input.UserInfo; ui != nil {
-		userID = ui.UserID
+	if rctx.Request == nil {
+		return ModelChain{}
 	}
+	owner := protocol.RoutingOwner{}
+	if ui := rctx.Input.UserInfo; ui != nil {
+		owner.UserID = ui.UserID
+		owner.TokenID = ui.TokenID
+	}
+	requestCtx := rctx.Request.Context()
 
 	ctx := NewResolveCtx()
-	first := ResolveToRealModel(rs, rctx.Input.Model, userID, ctx)
+	first := ResolveToRealModel(requestCtx, rs, rctx.Input.Model, owner, ctx)
 	// 首次 Resolve 完成后立刻拍照 trace——这是 Plan.Trace 的最终值。
 	// 后续 Mark+Resolve 仍累积 ctx.trace，但不传出（否则
 	// UsageLog.Other.routing_trace 被几何级数放大，违反 main parity）。
@@ -81,7 +89,7 @@ func buildChainFromStore(rs RoutingStore, rctx *state.RelayContext) ModelChain {
 	for {
 		last := models[len(models)-1]
 		ctx.MarkMemberExhausted(last)
-		next := ResolveToRealModel(rs, rctx.Input.Model, userID, ctx)
+		next := ResolveToRealModel(requestCtx, rs, rctx.Input.Model, owner, ctx)
 		// next == "" 表示 routing 链耗尽；next == last 是退化情况（非 routing 路径）
 		if next == "" || next == last {
 			break

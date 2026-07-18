@@ -20,6 +20,43 @@ type CreateRequest struct {
 	Remark  string        `json:"remark"`
 }
 
+type TokenRoutingListRequest struct {
+	api.PaginationQuery
+	TokenID string `uri:"id" binding:"required"`
+	Q       string `form:"q"`
+}
+
+type TokenRoutingCreateRequest struct {
+	TokenID     string        `uri:"id" binding:"required" json:"-"`
+	Name        string        `json:"name" binding:"required"`
+	Members     []MemberInput `json:"members" binding:"required"`
+	Enabled     bool          `json:"enabled"`
+	Remark      string        `json:"remark"`
+	BodyScope   *string       `json:"scope"`
+	BodyUserID  *uint         `json:"user_id"`
+	BodyTokenID *uint         `json:"token_id"`
+}
+
+type TokenRoutingPathRequest struct {
+	TokenID string `uri:"id" binding:"required"`
+	ID      string `uri:"routing_id" binding:"required"`
+}
+
+type TokenRoutingUpdateRequest struct {
+	TokenRoutingPathRequest
+	Fields map[string]any `json:"-"`
+}
+
+func (r *TokenRoutingUpdateRequest) SetBodyMap(fs map[string]any) { r.Fields = fs }
+
+type TokenRoutingPreviewRequest struct {
+	TokenID string `uri:"id" binding:"required" json:"-"`
+	PreviewRequest
+	BodyScope   *string `json:"scope"`
+	BodyUserID  *uint   `json:"user_id"`
+	BodyTokenID *uint   `json:"token_id"`
+}
+
 type MemberInput struct {
 	Ref      string `json:"ref"`
 	Priority int    `json:"priority"`

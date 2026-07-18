@@ -13,11 +13,15 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	// SendQueueSize / WriteDeadline 可在 master 启动时用 settings 覆盖(spec §5.2)。
+	SendQueueSize = 1024
+	WriteDeadline = 10 * time.Second
+)
+
 const (
-	sendQueueSize = 256
-	writeDeadline = 10 * time.Second
-	pingInterval  = 30 * time.Second
-	pongTimeout   = 240 * time.Second // 4 分钟内任意一次 Pong 算活
+	pingInterval = 30 * time.Second
+	pongTimeout  = 240 * time.Second // 4 分钟内任意一次 Pong 算活
 )
 
 var (
@@ -44,13 +48,14 @@ type Conn struct {
 	sendDone  chan struct{}
 	closed    chan struct{}
 	once      sync.Once
+	closeErr  error
 }
 
 func NewConn(ws *websocket.Conn, logger *zap.Logger) *Conn {
 	c := &Conn{
 		WS:        ws,
 		Logger:    logger,
-		sendQueue: make(chan []byte, sendQueueSize),
+		sendQueue: make(chan []byte, SendQueueSize),
 		sendDone:  make(chan struct{}),
 		closed:    make(chan struct{}),
 	}
@@ -77,7 +82,7 @@ func (c *Conn) writeLoop() {
 			if !ok {
 				return
 			}
-			c.WS.SetWriteDeadline(time.Now().Add(writeDeadline))
+			c.WS.SetWriteDeadline(time.Now().Add(WriteDeadline))
 			if err := c.WS.WriteMessage(websocket.TextMessage, msg); err != nil {
 				if c.Logger != nil {
 					c.Logger.Warn("ws write failed, closing conn", zap.Error(err))
@@ -86,8 +91,8 @@ func (c *Conn) writeLoop() {
 				return
 			}
 		case <-ticker.C:
-			c.WS.SetWriteDeadline(time.Now().Add(writeDeadline))
-			if err := c.WS.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeDeadline)); err != nil {
+			c.WS.SetWriteDeadline(time.Now().Add(WriteDeadline))
+			if err := c.WS.WriteControl(websocket.PingMessage, nil, time.Now().Add(WriteDeadline)); err != nil {
 				if c.Logger != nil {
 					c.Logger.Warn("ws ping failed, closing conn", zap.Error(err))
 				}
@@ -100,12 +105,29 @@ func (c *Conn) writeLoop() {
 	}
 }
 
+// SendNotification 发送单向通知——可丢消息。队列满时丢弃本条并告警,不关连接:
+// 通知都有兜底(full-sync/心跳周期重发),丢一条的代价远小于整条连接重连风暴。
 func (c *Conn) SendNotification(method string, params any) error {
 	msg, err := jsonrpc.NewNotification(method, params)
 	if err != nil {
 		return err
 	}
-	return c.WriteJSON(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.sendQueue <- data:
+		return nil
+	case <-c.closed:
+		return errClosedConn
+	default:
+		if c.Logger != nil {
+			c.Logger.Warn("ws send queue full, dropping notification",
+				zap.String("method", method), zap.Int("queue_cap", cap(c.sendQueue)))
+		}
+		return errSendQueueFull
+	}
 }
 
 func (c *Conn) SendResponse(resp *jsonrpc.Response) error {
@@ -131,9 +153,8 @@ func (c *Conn) ReadMessage() (*jsonrpc.Request, *jsonrpc.Response, error) {
 	return nil, nil, nil
 }
 
-// WriteJSON marshal v 后非阻塞 enqueue 到 sendQueue。
-// 队列满 = 本 conn 已经病了 → 主动 Close 触发对端重连（agent 重连会触发 full sync）。
-// 一般调用方（如 Broadcast fan-out）忽略错误。
+// WriteJSON 是关键路径(RPC 请求/响应):队列满时背压等待至多 WriteDeadline,
+// 仍写不进才判连接真死并 Close。behavior change: 旧逻辑队列满立即 Close(spec §5.2)。
 func (c *Conn) WriteJSON(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -145,8 +166,18 @@ func (c *Conn) WriteJSON(v any) error {
 	case <-c.closed:
 		return errClosedConn
 	default:
+	}
+
+	timer := time.NewTimer(WriteDeadline)
+	defer timer.Stop()
+	select {
+	case c.sendQueue <- data:
+		return nil
+	case <-c.closed:
+		return errClosedConn
+	case <-timer.C:
 		if c.Logger != nil {
-			c.Logger.Warn("ws send queue full, closing conn",
+			c.Logger.Warn("ws send queue full beyond deadline, closing conn",
 				zap.Int("queue_cap", cap(c.sendQueue)))
 		}
 		c.Close()
@@ -159,10 +190,10 @@ func (c *Conn) WriteJSON(v any) error {
 func (c *Conn) Close() error {
 	c.once.Do(func() {
 		close(c.closed)
+		c.closeErr = c.WS.Close()
+		<-c.sendDone
 	})
-	err := c.WS.Close()
-	<-c.sendDone
-	return err
+	return c.closeErr
 }
 
 func (c *Conn) Done() <-chan struct{} {

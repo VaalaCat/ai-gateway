@@ -18,7 +18,7 @@ import (
 
 // requireInviteEnabled 是所有 invite 端点的总开关 gate。
 func requireInviteEnabled(c *app.Context) error {
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	if !q.Setting().LookupBool(consts.SettingKeyInviteEnabled, false) {
 		return api.ForbiddenError("invite feature disabled")
 	}
@@ -74,7 +74,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 	}
 	uid := c.UserInfo.UserID
 	scope := middleware.GetScope(c.Context)
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

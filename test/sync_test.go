@@ -75,7 +75,7 @@ func TestSync_IncrementalSync(t *testing.T) {
 func TestSync_EnrollmentFlow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
-	masterCfg := newTestMasterRuntimeConfig(":0")
+	masterCfg := newTestMasterRuntimeConfig(t, ":0")
 	srv, err := master.New(masterCfg, logger)
 	if err != nil {
 		t.Fatalf("new master: %v", err)

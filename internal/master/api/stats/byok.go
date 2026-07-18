@@ -28,7 +28,7 @@ func (h *Handler) BYOKOverview(c *app.Context, _ api.EmptyRequest) (BYOKOverview
 		return BYOKOverviewResponse{}, api.UnauthorizedError("not authenticated")
 	}
 
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	rows, err := q.Billing().ListPrivateChannelDailyByOwner(scope.UserID, dao.ChannelBillingListFilter{})
 	if err != nil {
 		return BYOKOverviewResponse{}, api.InternalError("stats query failed", err)

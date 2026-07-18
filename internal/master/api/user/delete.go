@@ -14,7 +14,7 @@ func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusRespo
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 	uid := uint(id)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	if _, err := q.User().GetByID(uid); err != nil {
 		return api.StatusResponse{}, api.NotFoundError(consts.ErrNotFound)
@@ -25,7 +25,7 @@ func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusRespo
 	// hold encrypted key material that must not survive the user row
 	// (GDPR / SOC2 right-to-erasure), and any share row whose target is this
 	// user becomes orphan grant data.
-	err := dao.RunInTx[dao.Context](dao.NewContext(c.App), func(ctx dao.Context) error {
+	err := dao.RunInTx[dao.Context](dao.NewContextWithContext(c.App, c.RequestContext()), func(ctx dao.Context) error {
 		m := dao.NewAdminMutation(ctx)
 		if err := m.OAuthIdentity().DeleteByUserID(uid); err != nil {
 			return err

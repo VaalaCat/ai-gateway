@@ -23,7 +23,7 @@ class ApiClient {
     return localStorage.getItem(STORAGE_KEYS.TOKEN);
   }
 
-  async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  private async requestResponse(path: string, options: RequestInit = {}): Promise<Response> {
     const token = this.getToken();
     const headers: Record<string, string> = {
       [HTTP_HEADERS.CONTENT_TYPE]: "application/json",
@@ -50,13 +50,19 @@ class ApiClient {
         document.cookie = `${STORAGE_KEYS.TOKEN}=; path=/; max-age=0`;
         window.location.href = "/login";
       }
-      throw new ApiError(401, body.error || "Unauthorized", body);
+      throw new ApiError(401, body.message || body.error || "Unauthorized", body);
     }
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw new ApiError(res.status, body.error || res.statusText, body);
+      throw new ApiError(res.status, body.message || body.error || res.statusText, body);
     }
+
+    return res;
+  }
+
+  async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const res = await this.requestResponse(path, options);
 
     return res.json();
   }
@@ -70,6 +76,20 @@ class ApiClient {
       method: "POST",
       body: JSON.stringify(body),
     });
+  }
+
+  postRawJSON<T>(path: string, body: string): Promise<T> {
+    return this.request<T>(path, { method: "POST", body });
+  }
+
+  async download(path: string, body: unknown): Promise<{ blob: Blob; filename: string | null }> {
+    const res = await this.requestResponse(path, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? null;
+    return { blob: await res.blob(), filename };
   }
 
   put<T>(path: string, body: unknown): Promise<T> {

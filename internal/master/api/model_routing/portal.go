@@ -42,7 +42,7 @@ func (h *Handler) PortalGet(c *app.Context, req api.IDPathRequest) (GetResponse,
 	if err != nil {
 		return GetResponse{}, api.NotFoundError("model routing not found")
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	r, err := q.ModelRouting().GetByID(uint(id))
 	if err != nil || r == nil || r.Scope != models.RoutingScopeUser || r.UserID != c.UserInfo.UserID {
@@ -63,7 +63,7 @@ func (h *Handler) PortalUpdate(c *app.Context, req UpdateRequest) (models.ModelR
 	if err != nil {
 		return models.ModelRouting{}, api.NotFoundError("model routing not found")
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	existing, err := q.ModelRouting().GetByID(uint(id))
 	if err != nil || existing == nil || existing.Scope != models.RoutingScopeUser || existing.UserID != c.UserInfo.UserID {
@@ -85,7 +85,7 @@ func (h *Handler) PortalDelete(c *app.Context, req api.IDPathRequest) (api.Statu
 	if err != nil {
 		return api.StatusResponse{}, api.NotFoundError("model routing not found")
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	r, err := q.ModelRouting().GetByID(uint(id))
 	if err != nil || r == nil || r.Scope != models.RoutingScopeUser || r.UserID != c.UserInfo.UserID {
@@ -102,7 +102,7 @@ func (h *Handler) PortalGlobalRoutingNames(c *app.Context, _ struct{}) (RoutingN
 	if c.UserInfo == nil {
 		return RoutingNamesResp{}, api.UnauthorizedError("not authenticated")
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	routings, err := q.ModelRouting().ListAllGlobal()
 	if err != nil {

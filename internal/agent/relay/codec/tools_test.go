@@ -15,6 +15,7 @@ func TestNormalizeBuiltinToolFallback(t *testing.T) {
 		{"drop", BuiltinToolFallbackDrop},
 		{"error", BuiltinToolFallbackError},
 		{"passthrough", BuiltinToolFallbackPassthrough},
+		{"function", BuiltinToolFallbackPolicy("function")},
 		{"bogus", BuiltinToolFallbackDrop},
 		{"DROP", BuiltinToolFallbackDrop}, // 大小写敏感，非精确匹配回落到默认
 	}
@@ -158,6 +159,49 @@ func TestResolveTool(t *testing.T) {
 			target:   ProtocolOpenAIChat,
 			policy:   BuiltinToolFallbackPassthrough,
 			wantEmit: rawCfg,
+		},
+		{
+			name: "function_fallback_converts_named_custom_tool",
+			tool: Tool{
+				Type:        "custom",
+				Name:        "apply_patch",
+				Description: "Edit files",
+				RawConfig: map[string]any{
+					"type":   "custom",
+					"format": map[string]any{"type": "grammar"},
+				},
+			},
+			source:   ProtocolOpenAIResponses,
+			target:   ProtocolOpenAIResponses,
+			policy:   BuiltinToolFallbackPolicy("function"),
+			wantEmit: map[string]any{"kind": "function", "name": "apply_patch", "description": "Edit files"},
+		},
+		{
+			name:   "function_fallback_drops_unnamed_server_tool",
+			tool:   Tool{Type: "web_search", RawConfig: rawCfg},
+			source: ProtocolOpenAIResponses,
+			target: ProtocolOpenAIResponses,
+			policy: BuiltinToolFallbackPolicy("function"),
+			wantDropped: &DroppedTool{
+				Type:   "web_search",
+				Reason: DroppedToolReasonFunctionFallbackUnsupported,
+			},
+		},
+		{
+			name: "function_fallback_does_not_convert_custom_tool_to_chat",
+			tool: Tool{
+				Type:      "custom",
+				Name:      "apply_patch",
+				RawConfig: map[string]any{"type": "custom", "name": "apply_patch"},
+			},
+			source: ProtocolOpenAIResponses,
+			target: ProtocolOpenAIChat,
+			policy: BuiltinToolFallbackFunction,
+			wantDropped: &DroppedTool{
+				Type:   "custom",
+				Name:   "apply_patch",
+				Reason: DroppedToolReasonFunctionFallbackUnsupported,
+			},
 		},
 		// 未知 policy 字符串归一到 drop
 		{

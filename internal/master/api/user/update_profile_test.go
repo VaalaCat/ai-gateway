@@ -2,15 +2,20 @@ package user_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 func seedUserAndToken(t *testing.T, srv *master.Server, username, email string) (*models.User, string) {
@@ -160,5 +165,65 @@ func TestUpdateProfile_NoAuth_401(t *testing.T) {
 
 	if w.Code != 401 {
 		t.Fatalf("expected 401, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateProfileMutationObservesRequestCancellation(t *testing.T) {
+	srv := setupMasterForUserAdmin(t)
+	_, tok := seedUserAndToken(t, srv, "cancel_profile", "cancel_profile@x.com")
+	updateEntered := make(chan struct{}, 1)
+	updateCanceled := make(chan error, 1)
+	releaseUpdate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpdate) }) }
+	t.Cleanup(release)
+	if err := srv.DB.Callback().Update().Before("gorm:update").Register("test:block_profile_update", func(tx *gorm.DB) {
+		if tx.Statement.Table != "users" {
+			return
+		}
+		select {
+		case updateEntered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-tx.Statement.Context.Done():
+			cause := context.Cause(tx.Statement.Context)
+			updateCanceled <- cause
+			_ = tx.AddError(cause)
+		case <-releaseUpdate:
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cause := errors.New("profile request canceled")
+	requestCtx, cancel := context.WithCancelCause(context.Background())
+	req := httptest.NewRequest("PUT", "/api/profile", bytes.NewReader([]byte(`{"display_name":"Canceled"}`)))
+	req = req.WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+tok)
+	w := httptest.NewRecorder()
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		srv.Router.ServeHTTP(w, req)
+	}()
+	<-updateEntered
+	cancel(cause)
+
+	select {
+	case got := <-updateCanceled:
+		if !errors.Is(got, cause) {
+			t.Fatalf("mutation cancellation cause = %v, want %v", got, cause)
+		}
+	case <-time.After(100 * time.Millisecond):
+		release()
+		<-requestDone
+		t.Fatal("profile mutation did not observe request cancellation")
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("profile handler remained blocked after mutation cancellation")
 	}
 }

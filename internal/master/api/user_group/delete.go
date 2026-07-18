@@ -22,7 +22,7 @@ func (h *Handler) Delete(c *app.Context, req DeleteRequest) (api.StatusResponse,
 		return api.StatusResponse{}, api.BadRequestError("cannot delete default user group", nil)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

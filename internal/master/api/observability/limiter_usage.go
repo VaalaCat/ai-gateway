@@ -48,7 +48,7 @@ func (h *Handler) GetLimiterUsage(c *app.Context, _ api.EmptyRequest) (LimiterUs
 	if len(ids) == 0 {
 		return resp, nil
 	}
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	agents, err := q.Agent().ListByAgentIDs(ids)
 	if err != nil {
 		return resp, api.InternalError("list agents failed", err)

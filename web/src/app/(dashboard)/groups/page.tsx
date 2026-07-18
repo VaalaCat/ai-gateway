@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -74,7 +74,11 @@ export default function UserGroupsPage() {
     },
   } satisfies FilterSpec), [t, tc]);
 
-  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
+  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
+    setPage(1);
+    setFilterValuesRaw(next);
+  };
 
   const { data, isLoading } = useUserGroups({
     page,
@@ -86,8 +90,6 @@ export default function UserGroupsPage() {
   const groups = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
-
-  useEffect(() => { setPage(1); }, [filterValues]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {

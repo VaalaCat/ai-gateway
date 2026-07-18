@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Loader2, MoreHorizontal, Search } from "lucide-react";
@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -18,6 +19,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -40,6 +42,8 @@ interface FilterableToolbarProps {
   context?: Partial<FilterContext>;
   primaryAction?: ReactNode;
   secondaryActions?: ToolbarAction[];
+  /** 渲染在右侧 actions 区(secondary 按钮之前)的自定义控件,如自动刷新 Select。 */
+  secondaryContent?: ReactNode;
 }
 
 export function FilterableToolbar({
@@ -49,6 +53,7 @@ export function FilterableToolbar({
   context,
   primaryAction,
   secondaryActions,
+  secondaryContent,
 }: FilterableToolbarProps) {
   const tc = useTranslations("common");
   const { isAdmin } = useAuth();
@@ -56,7 +61,7 @@ export function FilterableToolbar({
 
   const secondary = secondaryActions ?? [];
   const shouldCollapse = secondary.length >= SECONDARY_COLLAPSE_THRESHOLD;
-  const hasActions = primaryAction !== undefined || secondary.length > 0;
+  const hasActions = primaryAction !== undefined || secondary.length > 0 || secondaryContent !== undefined;
 
   return (
     <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-start md:justify-between md:gap-4">
@@ -77,23 +82,19 @@ export function FilterableToolbar({
 
       {hasActions && (
         <div className="flex flex-wrap items-center gap-2 md:shrink-0">
-          {shouldCollapse ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="text-body">
-                  <MoreHorizontal className="size-4" />
-                  <span className="ml-1 hidden sm:inline">{tc("more")}</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {secondary.map((a, i) => (
-                  <ToolbarActionMenuItem key={i} action={a} />
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            secondary.map((a, i) => <ToolbarActionButton key={i} action={a} />)
+          {secondaryContent}
+          {secondary.length > 0 && (
+            <div className="sm:hidden">
+              <ToolbarActionsMenu actions={secondary} label={tc("more")} />
+            </div>
           )}
+          <div className="hidden sm:contents">
+            {shouldCollapse ? (
+              <ToolbarActionsMenu actions={secondary} label={tc("more")} />
+            ) : (
+              secondary.map((a, i) => <ToolbarActionButton key={i} action={a} />)
+            )}
+          </div>
           {primaryAction}
         </div>
       )}
@@ -137,14 +138,16 @@ function FilterControl({ fieldKey, def, value, onChange }: FilterControlProps) {
           <SelectValue placeholder={def.placeholder} />
         </SelectTrigger>
         <SelectContent>
-          {includeAll && (
-            <SelectItem value="__all__">{def.placeholder ?? "全部"}</SelectItem>
-          )}
-          {def.options.map((opt) => (
-            <SelectItem key={opt.value} value={opt.value}>
-              {opt.label}
-            </SelectItem>
-          ))}
+          <SelectGroup>
+            {includeAll && (
+              <SelectItem value="__all__">{def.placeholder ?? "全部"}</SelectItem>
+            )}
+            {def.options.map((opt) => (
+              <SelectItem key={opt.value} value={opt.value}>
+                {opt.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
         </SelectContent>
       </Select>
     );
@@ -199,27 +202,26 @@ function DebouncedTextFilter({
   placeholder,
   debounceMs,
 }: DebouncedTextProps) {
-  const [local, setLocal] = useState(value);
-  const debounced = useDebounce(local, debounceMs);
+  const [draft, setDraft] = useState(() => ({ baseline: value, value }));
+  const currentDraft = useMemo(
+    () => draft.baseline === value ? draft : { baseline: value, value },
+    [draft, value],
+  );
+  const debounced = useDebounce(currentDraft, debounceMs);
 
   useEffect(() => {
-    setLocal(value);
-  }, [value]);
-
-  useEffect(() => {
-    if (debounced !== value) {
-      onChange(debounced);
+    if (debounced.baseline === value && debounced.value !== value) {
+      onChange(debounced.value);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debounced]);
+  }, [debounced, onChange, value]);
 
   return (
     <div className="relative w-full sm:max-w-sm">
       <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
       <Input
         placeholder={placeholder}
-        value={local}
-        onChange={(e) => setLocal(e.target.value)}
+        value={currentDraft.value}
+        onChange={(e) => setDraft({ baseline: value, value: e.target.value })}
         className="pl-8"
       />
     </div>
@@ -232,8 +234,8 @@ function ToolbarActionButton({ action }: { action: ToolbarAction }) {
   const isDisabled = disabled || loading;
   const inner = (
     <>
-      {loading ? <Loader2 className="size-4 animate-spin" /> : icon}
-      <span className="ml-2">{label}</span>
+      {loading ? <Loader2 data-icon="inline-start" className="animate-spin" /> : icon}
+      <span>{label}</span>
     </>
   );
   if (href) {
@@ -267,10 +269,8 @@ function ToolbarActionMenuItem({ action }: { action: ToolbarAction }) {
   const isDisabled = disabled || loading;
   const inner = (
     <>
-      {loading ? <Loader2 className="size-4 animate-spin" /> : icon}
-      <span
-        className={cn("ml-2", variant === "destructive" && "text-destructive")}
-      >
+      {loading ? <Loader2 className="animate-spin" /> : icon}
+      <span className={cn(variant === "destructive" && "text-destructive")}>
         {label}
       </span>
     </>
@@ -290,5 +290,26 @@ function ToolbarActionMenuItem({ action }: { action: ToolbarAction }) {
     >
       {inner}
     </DropdownMenuItem>
+  );
+}
+
+function ToolbarActionsMenu({ actions, label }: { actions: ToolbarAction[]; label: string }) {
+  if (actions.length === 0) return null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="text-body">
+          <MoreHorizontal data-icon="inline-start" />
+          <span>{label}</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuGroup>
+          {actions.map((action, index) => (
+            <ToolbarActionMenuItem key={index} action={action} />
+          ))}
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

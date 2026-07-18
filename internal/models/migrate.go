@@ -1,6 +1,10 @@
 package models
 
-import "gorm.io/gorm"
+import (
+	"fmt"
+
+	"gorm.io/gorm"
+)
 
 func AutoMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(
@@ -26,14 +30,19 @@ func AutoMigrate(db *gorm.DB) error {
 		&PrivateChannel{},
 		&PrivateChannelShare{},
 		&UsageHourlyBucket{},
+		&UsageDurationHistogram{},
 		&AdminScript{},
 		&InviteCode{},
 		&InviteRedemption{},
+		&MasterSigningKey{},
 	); err != nil {
 		return err
 	}
 
 	if err := ensureUsageLogQueryIndexes(db); err != nil {
+		return err
+	}
+	if err := ensureModelRoutingOwnerIndex(db); err != nil {
 		return err
 	}
 	if err := backfillPasswordSet(db); err != nil {
@@ -46,6 +55,27 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 	return dropLegacyTraceRequestIDUniqueIndex(db)
+}
+
+func ensureModelRoutingOwnerIndex(db *gorm.DB) error {
+	const (
+		currentIndex = "uidx_routing_owner_name"
+		legacyIndex  = "uidx_routing_scope_user_name"
+	)
+	if !db.Migrator().HasIndex(&ModelRouting{}, currentIndex) {
+		if err := db.Migrator().CreateIndex(&ModelRouting{}, currentIndex); err != nil {
+			return fmt.Errorf("create model routing owner index: %w", err)
+		}
+	}
+	if db.Migrator().HasIndex(&ModelRouting{}, legacyIndex) {
+		if err := db.Migrator().DropIndex(&ModelRouting{}, legacyIndex); err != nil {
+			return fmt.Errorf("drop legacy model routing owner index: %w", err)
+		}
+	}
+	if !db.Migrator().HasIndex(&ModelRouting{}, currentIndex) {
+		return fmt.Errorf("model routing owner index %q is missing", currentIndex)
+	}
+	return nil
 }
 
 func ensureUsageLogQueryIndexes(db *gorm.DB) error {
@@ -77,6 +107,14 @@ func ensureUsageLogQueryIndexes(db *gorm.DB) error {
 			name: "idx_usage_logs_model_created_id",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_model_created_id ON usage_logs(model_name, created_at DESC, id DESC)`,
 		},
+		{
+			name: "idx_usage_logs_window_stats",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_window_stats ON usage_logs(created_at, status, duration)`,
+		},
+		{
+			name: "idx_usage_logs_user_window_stats",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_usage_logs_user_window_stats ON usage_logs(user_id, created_at, status, duration)`,
+		},
 	}
 	for _, idx := range indexes {
 		if db.Migrator().HasIndex(&UsageLog{}, idx.name) {
@@ -90,7 +128,7 @@ func ensureUsageLogQueryIndexes(db *gorm.DB) error {
 }
 
 // backfillPasswordSet 把已经设过密码的存量用户标记为 PasswordSet=true。
-// 仅对 password_set=0 且 password!='' 的行生效，可重复执行。
+// 仅对 password_set=0 且 password!=” 的行生效，可重复执行。
 func backfillPasswordSet(db *gorm.DB) error {
 	return db.Exec(`UPDATE users SET password_set = 1 WHERE password_set = 0 AND password != ''`).Error
 }

@@ -8,7 +8,7 @@ export const routingMemberSchema = z.object({
 
 export const routingFormSchema = z.object({
   name: z.string().min(1).max(128).regex(/^[^,]+$/, "name_contains_comma"),
-  scope: z.enum(["global", "user"]),
+  scope: z.enum(["global", "user", "token"]),
   user_id: z.number().int().min(0),
   members: z.array(routingMemberSchema).min(1).max(32),
   enabled: z.boolean(),

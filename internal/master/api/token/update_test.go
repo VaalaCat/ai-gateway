@@ -36,9 +36,10 @@ func setupTokenUpdateTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	ginCtx, _ := gin.CreateTestContext(w)
 
 	ctx := &app.Context{
-		Context:  ginCtx,
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: 1, GroupID: 1, Role: 2},
+		Context:      ginCtx,
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: 1, GroupID: 1, Role: 2},
+		OwnerContext: t.Context(),
 	}
 
 	return &Handler{}, ctx, db
@@ -151,6 +152,61 @@ func TestUpdate_IllegalZeroChannelID_Reject(t *testing.T) {
 
 func setScope(ctx *app.Context, isAdmin bool, userID uint) {
 	ctx.Context.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
+}
+
+func TestUpdate_UserModelWhitelistCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		setting    string
+		models     any
+		wantStatus int
+		wantCode   string
+		wantModels string
+	}{
+		{name: "disabled", setting: "false", models: `["gpt-4o"]`, wantStatus: 403, wantCode: "model_whitelist_edit_forbidden"},
+		{name: "expand", setting: "true", models: `["gpt-4o","claude-.*"]`, wantModels: `["gpt-4o","claude-.*"]`},
+		{name: "clear empty array", setting: "true", models: `[]`, wantModels: `[]`},
+		{name: "clear empty string", setting: "true", models: "", wantModels: ""},
+		{name: "invalid type", setting: "true", models: []any{"gpt-4o"}, wantStatus: 400},
+		{name: "invalid pattern", setting: "true", models: `["["]`, wantStatus: 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ctx, db := setupTokenUpdateTest(t)
+			tok := seedToken(t, db, nil)
+			setScope(ctx, false, tok.UserID)
+			if tc.setting != "" {
+				if err := db.Create(&models.Setting{Key: consts.SettingKeyTokenModelWhitelistSelfService, Value: tc.setting}).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+			req.SetBodyMap(map[string]any{"models": tc.models})
+			_, err := h.Update(ctx, req)
+			if tc.wantStatus != 0 {
+				if err == nil {
+					t.Fatalf("expected status %d", tc.wantStatus)
+				}
+				apiErr, ok := err.(*api.APIError)
+				if !ok || apiErr.Status != tc.wantStatus {
+					t.Fatalf("error = %#v, want status %d", err, tc.wantStatus)
+				}
+				if apiErr.Code != tc.wantCode {
+					t.Fatalf("code = %q, want %q", apiErr.Code, tc.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var reloaded models.Token
+			if err := db.First(&reloaded, tok.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.Models != tc.wantModels {
+				t.Fatalf("models = %q, want %q", reloaded.Models, tc.wantModels)
+			}
+		})
+	}
 }
 
 func seedUserQuota(t *testing.T, db *gorm.DB, id uint, quota int64) {

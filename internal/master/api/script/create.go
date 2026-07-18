@@ -28,7 +28,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		Priority: req.Priority,
 		Scope:    datatypes.NewJSONType(req.Scope),
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	if err := dao.NewAdminMutation(daoCtx).AdminScript().Create(&s); err != nil {
 		return api.Created[models.AdminScript]{}, api.ConflictError(err.Error(), err)
 	}

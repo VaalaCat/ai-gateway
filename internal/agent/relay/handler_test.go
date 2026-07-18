@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	agentappkg "github.com/VaalaCat/ai-gateway/internal/agent/app"
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	relayupstream "github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -23,6 +25,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -41,10 +44,55 @@ func setupTestHandler(channels []*models.Channel) (*Handler, *cache.Store, app.E
 	cfg := &config.AgentRuntimeConfig{
 		Relay: config.RelayConfig{Timeout: 30},
 	}
-	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, cfg, pool)
+	agentApp := agentappkg.NewDefaultAgentApplication(store, relayTestBodyStore{}, logger, cfg, pool)
 	handler := NewHandler(bus, agentApp, TestDispatcherFactory(agentApp), nil, nil, nil)
 	return handler, store, bus
 }
+
+func TestNewRelayContextRecordsRouteSourceBeforePipeline(t *testing.T) {
+	handler, _, _ := setupTestHandler(nil)
+	handler.executor.SourceAgentID = "source-a"
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(""))
+
+	rctx := handler.newRelayContext(c)
+	defer CloseContext(rctx)
+
+	require.Equal(t, "source-a", rctx.State.Execution.RouteSourceAgentID)
+	require.Empty(t, rctx.State.Execution.ExecutionAgentID)
+}
+
+type relayTestBodyStore struct{}
+
+func (relayTestBodyStore) Capture(_ context.Context, src io.Reader, _ app.BodyLimits) (app.ReplayBody, error) {
+	body, err := io.ReadAll(src)
+	if err != nil {
+		return nil, relayTestBodyError("body_store_failed")
+	}
+	return &relayTestReplayBody{data: body}, nil
+}
+
+type relayTestReplayBody struct {
+	data []byte
+}
+
+func (b *relayTestReplayBody) Size() int64 { return int64(len(b.data)) }
+func (b *relayTestReplayBody) Open() (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader(string(b.data))), nil
+}
+func (b *relayTestReplayBody) Bytes(limit int64) ([]byte, error) {
+	if int64(len(b.data)) > limit {
+		return nil, io.ErrShortBuffer
+	}
+	return append([]byte(nil), b.data...), nil
+}
+func (*relayTestReplayBody) Close() error { return nil }
+
+type relayTestBodyError string
+
+func (e relayTestBodyError) Error() string         { return string(e) }
+func (e relayTestBodyError) BodyErrorCode() string { return string(e) }
 
 func setupRouter(handler *Handler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -924,6 +972,62 @@ func TestStatusFromState_NilErr_Returns500(t *testing.T) {
 	}
 }
 
+func TestWriteResponseRouteFailureUsesStablePublicContract(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rctx := &state.RelayContext{
+		Context: c,
+		Input:   state.RelayInput{RequestID: "req-17"},
+		State: &state.RelayState{
+			Err: state.NewRouteFailureError(consts.RouteErrorDirectTLS,
+				errors.New("Authorization: Bearer secret ticket=t-1 https://example.com/p?token=x\nstack")),
+			FailPhase: state.PhaseExecute,
+		},
+	}
+
+	(&Handler{}).writeResponse(rctx)
+
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	require.JSONEq(t, `{"code":"direct_tls","stage":"tls","request_id":"req-17","message":"route request failed"}`, w.Body.String())
+	for _, secret := range []string{"Authorization", "Bearer", "secret", "ticket", "token=x", "stack"} {
+		require.NotContains(t, w.Body.String(), secret)
+	}
+}
+
+type publicBodyError struct{ code string }
+
+func (e publicBodyError) Error() string         { return "secret body failure at /tmp/private" }
+func (e publicBodyError) BodyErrorCode() string { return e.code }
+
+func TestWriteResponseBodyFailuresPreserveStatusWithPublicContract(t *testing.T) {
+	for _, test := range []struct {
+		code   string
+		status int
+	}{
+		{code: consts.RouteErrorBodyTooLarge, status: http.StatusRequestEntityTooLarge},
+		{code: consts.RouteErrorBodyStoreFailed, status: http.StatusInternalServerError},
+	} {
+		t.Run(test.code, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			rctx := &state.RelayContext{
+				Context: c, Input: state.RelayInput{RequestID: "req-body"},
+				State: &state.RelayState{Err: publicBodyError{code: test.code}, FailPhase: state.PhaseCtxBuild},
+			}
+
+			(&Handler{}).writeResponse(rctx)
+
+			require.Equal(t, test.status, w.Code)
+			require.JSONEq(t, fmt.Sprintf(`{"code":%q,"stage":"body","request_id":"req-body","message":"route request failed"}`, test.code), w.Body.String())
+			require.NotContains(t, w.Body.String(), "secret")
+			require.NotContains(t, w.Body.String(), "/tmp/private")
+		})
+	}
+}
+
 // TestWriteResponse_WrittenSkipsJSON 覆盖 Outcome.Written=true 短路：
 // backend 已写过部分流式 body 时，writeResponse 不能再调 c.JSON 否则会双写（破坏 SSE 协议）。
 func TestWriteResponse_WrittenSkipsJSON(t *testing.T) {
@@ -950,28 +1054,6 @@ func TestWriteResponse_WrittenSkipsJSON(t *testing.T) {
 	h.writeResponse(rctx)
 	if got := w.Body.Len() - preLen; got != 0 {
 		t.Errorf("writeResponse appended %d bytes; expected 0 (Written=true must skip JSON)", got)
-	}
-}
-
-// TestWriteResponse_ForwardedSkips 覆盖 forwarder 接管短路：State.Forwarded=true 直接返。
-// 即使 Err 已经设置也不能再 c.JSON 覆盖被 forwarder 写过的响应。
-func TestWriteResponse_ForwardedSkips(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request, _ = http.NewRequest("POST", "/v1/test", nil)
-
-	h := &Handler{}
-	rctx := &state.RelayContext{
-		Context: c,
-		State: &state.RelayState{
-			Forwarded: true,
-			Err:       errors.New("would otherwise 502"),
-		},
-	}
-	h.writeResponse(rctx)
-	if w.Body.Len() != 0 {
-		t.Errorf("Forwarded=true must skip; wrote %d bytes", w.Body.Len())
 	}
 }
 

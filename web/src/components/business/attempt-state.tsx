@@ -34,6 +34,26 @@ export function breakerAccentClass(state: string): string {
   return "border-l-green-500";
 }
 
+// —— 投递队列健康度视觉词汇(旁路投递看板共用)——
+export const QUEUE_STALL_WINDOW_MS = 5 * 60_000;
+export const QUEUE_OLDEST_RED_MS = 10 * 60_000;
+export type QueueHealth = "idle" | "backlog" | "stalled";
+export function queueHealth(
+  row: { store_len: number; retry_len: number; last_success_at: number; oldest_ts: number },
+  nowMs: number,
+): QueueHealth {
+  if (row.store_len + row.retry_len === 0) return "idle";
+  const noRecentSuccess =
+    !row.last_success_at || nowMs - row.last_success_at * 1000 > QUEUE_STALL_WINDOW_MS;
+  const tooOld = row.oldest_ts > 0 && nowMs - row.oldest_ts * 1000 > QUEUE_OLDEST_RED_MS;
+  return noRecentSuccess || tooOld ? "stalled" : "backlog";
+}
+export function queueAccentClass(h: QueueHealth): string {
+  if (h === "stalled") return "border-l-red-500";
+  if (h === "backlog") return "border-l-amber-400";
+  return "border-l-emerald-300/60";
+}
+
 // FallbackChainInline 横向带名链路:每段=渠道名+结果图标,着色;进行中段脉冲。
 export function FallbackChainInline({
   chain,

@@ -72,7 +72,7 @@ func (h *Handler) Sync(c *app.Context, req SyncRequest) (SyncResponse, error) {
 		return SyncResponse{}, api.BadRequestError(ferr.Error(), ferr)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -122,7 +122,7 @@ func (h *Handler) SyncPreview(c *app.Context, req SyncRequest) (PreviewResponse,
 		return PreviewResponse{}, api.BadRequestError(ferr.Error(), ferr)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	tpl, err := q.TokenTemplate().GetByID(uint(id))

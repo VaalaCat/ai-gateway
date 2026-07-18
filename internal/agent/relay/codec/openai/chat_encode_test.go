@@ -725,3 +725,129 @@ func TestChatEncode_NoThinkingNoReasoningContentField(t *testing.T) {
 		t.Fatalf("reasoning_content field should be absent when no thinking block; got %v", asst["reasoning_content"])
 	}
 }
+
+// TestChatEncodeRequest_DropsEmptyTextBlock 复现 SGLang 400:assistant 历史消息含
+// 「空块 + 真块」,出站不得产生非法的 {"type":"text"} 块;过滤后只剩真块 → 字符串简写。
+func TestChatEncodeRequest_DropsEmptyTextBlock(t *testing.T) {
+	req := &codec.Request{
+		Model: "qwen",
+		Messages: []codec.Message{
+			{
+				Role: codec.RoleAssistant,
+				Content: []codec.ContentBlock{
+					{Type: codec.ContentTypeText, Text: ""},
+					{Type: codec.ContentTypeText, Text: "Hello! I see you're working on..."},
+				},
+			},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "https://x", APIKey: "k", Model: "qwen"}
+
+	httpReq, err := (&ChatCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+
+	// 非法空块的确切 marshal 形态(Go 无空格):{"type":"text"} 不得出现。
+	// 真块若走数组会是 {"type":"text","text":"..."},不含子串 {"type":"text"}。
+	if strings.Contains(string(bodyBytes), `{"type":"text"}`) {
+		t.Errorf("body contains illegal empty text block: %s", bodyBytes)
+	}
+	if !strings.Contains(string(bodyBytes), "Hello! I see you're working on...") {
+		t.Errorf("real text missing from body: %s", bodyBytes)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	msg := raw["messages"].([]any)[0].(map[string]any)
+	if msg["content"] != "Hello! I see you're working on..." {
+		t.Errorf("content = %#v, want string shorthand of the real text", msg["content"])
+	}
+}
+
+// TestChatEncodeRequest_AllEmptyTextBecomesEmptyString:整条消息只有空文本块 → 合法 content:""。
+func TestChatEncodeRequest_AllEmptyTextBecomesEmptyString(t *testing.T) {
+	req := &codec.Request{
+		Model: "qwen",
+		Messages: []codec.Message{
+			{Role: codec.RoleAssistant, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: ""},
+				{Type: codec.ContentTypeText, Text: ""},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "https://x", APIKey: "k", Model: "qwen"}
+	httpReq, err := (&ChatCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	msg := raw["messages"].([]any)[0].(map[string]any)
+	if msg["content"] != "" {
+		t.Errorf("content = %#v, want empty string", msg["content"])
+	}
+}
+
+// TestChatEncodeRequest_TwoRealTextBlocksUnchanged:两个真文本块无回归,仍是数组两块。
+func TestChatEncodeRequest_TwoRealTextBlocksUnchanged(t *testing.T) {
+	req := &codec.Request{
+		Model: "qwen",
+		Messages: []codec.Message{
+			{Role: codec.RoleUser, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: "first"},
+				{Type: codec.ContentTypeText, Text: "second"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "https://x", APIKey: "k", Model: "qwen"}
+	httpReq, err := (&ChatCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	content := raw["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want 2", len(content))
+	}
+}
+
+// TestChatEncodeRequest_EmptyTextWithImageKeepsImageOnly(boundary):空块 + 图片 → 只剩图片。
+func TestChatEncodeRequest_EmptyTextWithImageKeepsImageOnly(t *testing.T) {
+	req := &codec.Request{
+		Model: "gpt-4o",
+		Messages: []codec.Message{
+			{Role: codec.RoleUser, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: ""},
+				{Type: codec.ContentTypeImage, MediaB64: "abc", MimeType: "image/png"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "https://x", APIKey: "k", Model: "gpt-4o"}
+	httpReq, err := (&ChatCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	content := raw["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content len = %d, want 1 (image only)", len(content))
+	}
+	if content[0].(map[string]any)["type"] != "image_url" {
+		t.Errorf("remaining block type = %v, want image_url", content[0].(map[string]any)["type"])
+	}
+}

@@ -2,9 +2,94 @@ package protocol
 
 import (
 	"encoding/json"
+	"slices"
+	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 )
+
+const (
+	FullSyncMaxPageSize             = 500
+	AgentFullSyncSnapshotContractV1 = "agent_full_sync_v1"
+	AgentCapabilitiesMaxCount       = 32
+	AgentCapabilityMaxLength        = 64
+	AgentAuthSigningKeysMaxCount    = 8
+	AgentAuthKeyIDMaxLength         = 128
+	AgentAuthAlgorithmEdDSA         = "EdDSA"
+	AgentCapabilityTunnelV1         = "agent_tunnel_v1"
+	AgentCapabilityForwardV1        = "agent_forward_ticket_v1"
+	AgentCapabilityDirectIngressV1  = "agent_direct_ingress_v1"
+	AgentCapabilityRelayHTTPPingV1  = "agent_relay_http_ping_v1"
+	AgentCapabilityTokenRoutingV1   = "agent_token_routing_v1"
+)
+
+type AuthBootstrapResponse struct {
+	MasterInstanceID string                `json:"master_instance_id"`
+	Capabilities     []string              `json:"capabilities"`
+	SigningKeys      []agentauth.PublicKey `json:"signing_keys"`
+}
+
+type RelayTicketRequest struct {
+	DesiredGeneration uint64 `json:"desired_generation"`
+}
+
+type OperationRequest struct {
+	AgentID                   string `json:"agent_id"`
+	Operation                 string `json:"operation"`
+	TargetAgentID             string `json:"target_agent_id,omitempty"`
+	RequestID                 string `json:"request_id,omitempty"`
+	ExpectedEpoch             string `json:"expected_epoch"`
+	ExpectedControlGeneration uint64 `json:"expected_control_generation,omitempty"`
+	ExpectedRelayGeneration   uint64 `json:"expected_relay_generation,omitempty"`
+}
+
+type OperationAck struct {
+	OperationID string `json:"operation_id"`
+	State       string `json:"state"`
+	SnapshotSeq uint64 `json:"snapshot_seq"`
+}
+
+type TicketResponse struct {
+	Token     string `json:"token"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+type AgentCapabilitiesUpdate struct {
+	AgentID      string   `json:"agent_id"`
+	Capabilities []string `json:"capabilities"`
+}
+
+func NormalizeAgentCapabilities(capabilities []string) []string {
+	if len(capabilities) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, min(len(capabilities), AgentCapabilitiesMaxCount))
+	for _, capability := range capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability == "" || len(capability) > AgentCapabilityMaxLength {
+			continue
+		}
+		index, found := slices.BinarySearch(normalized, capability)
+		if found || len(normalized) == AgentCapabilitiesMaxCount && index == len(normalized) {
+			continue
+		}
+		if len(normalized) < AgentCapabilitiesMaxCount {
+			normalized = append(normalized, "")
+			copy(normalized[index+1:], normalized[index:])
+		} else {
+			copy(normalized[index+1:], normalized[index:len(normalized)-1])
+		}
+		normalized[index] = capability
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	for i := range normalized {
+		normalized[i] = strings.Clone(normalized[i])
+	}
+	return normalized
+}
 
 type SyncPushParams struct {
 	Entity  string `json:"entity"`
@@ -14,17 +99,25 @@ type SyncPushParams struct {
 }
 
 type FullSyncRequest struct {
-	Entity   string `json:"entity"`
-	Page     int    `json:"page"`
-	PageSize int    `json:"page_size"`
+	Entity        string `json:"entity"`
+	Page          int    `json:"page,omitempty"`
+	PageSize      int    `json:"page_size"`
+	AfterID       uint   `json:"after_id,omitempty"`
+	SnapshotMaxID uint   `json:"snapshot_max_id,omitempty"`
+	BaseVersion   int64  `json:"base_version,omitempty"`
 }
 
 type FullSyncResponse struct {
-	Items   []byte `json:"items"`
-	Total   int64  `json:"total"`
-	Page    int    `json:"page"`
-	HasMore bool   `json:"has_more"`
-	Version int64  `json:"version"`
+	Items            []byte `json:"items"`
+	Total            int64  `json:"total"`
+	Page             int    `json:"page,omitempty"`
+	HasMore          bool   `json:"has_more"`
+	Version          int64  `json:"version"`
+	Keyset           bool   `json:"keyset,omitempty"`
+	LastID           uint   `json:"last_id,omitempty"`
+	SnapshotMaxID    uint   `json:"snapshot_max_id,omitempty"`
+	BaseVersion      int64  `json:"base_version,omitempty"`
+	SnapshotContract string `json:"snapshot_contract,omitempty"`
 }
 
 type GetVersionResponse struct {
@@ -42,19 +135,23 @@ type UsageReport struct {
 }
 
 type UsageLogEntry struct {
-	RequestID        string `json:"request_id"`
-	UserID           uint   `json:"user_id"`
-	TokenID          uint   `json:"token_id"`
-	ChannelID        uint   `json:"channel_id"`
-	PrivateChannelID uint   `json:"private_channel_id"`
-	OwnerType        string `json:"owner_type"`
-	ModelName        string `json:"model_name"`
-	PromptTokens     int    `json:"prompt_tokens"`
-	CompletionTokens int    `json:"completion_tokens"`
-	IsStream         bool   `json:"is_stream"`
-	Duration         int    `json:"duration"`
-	ClientIP         string `json:"client_ip"`
-	Timestamp        int64  `json:"timestamp"`
+	RequestID          string  `json:"request_id"`
+	UserID             uint    `json:"user_id"`
+	TokenID            uint    `json:"token_id"`
+	ChannelID          uint    `json:"channel_id"`
+	PrivateChannelID   uint    `json:"private_channel_id"`
+	OwnerType          string  `json:"owner_type"`
+	ModelName          string  `json:"model_name"`
+	PromptTokens       int     `json:"prompt_tokens"`
+	CompletionTokens   int     `json:"completion_tokens"`
+	IsStream           bool    `json:"is_stream"`
+	Duration           int     `json:"duration"`
+	ClientIP           string  `json:"client_ip"`
+	Timestamp          int64   `json:"timestamp"`
+	ExecutionAgentID   *string `json:"execution_agent_id,omitempty"`
+	RouteSourceAgentID string  `json:"route_source_agent_id,omitempty"`
+	AgentRouteID       uint    `json:"agent_route_id,omitempty"`
+	AgentRoutePath     string  `json:"agent_route_path,omitempty"`
 
 	// Enhanced logging fields
 	TokenName        string `json:"token_name"`
@@ -106,14 +203,17 @@ type UsageLogEntry struct {
 }
 
 type HeartbeatParams struct {
-	Uptime               int64 `json:"uptime"`
-	CachedTokens         int   `json:"cached_tokens"`
-	CachedChannels       int   `json:"cached_channels"`
-	CachedModels         int   `json:"cached_models"`
-	CachedGlobalRoutings int   `json:"cached_global_routings"`
-	CachedUserRoutings   int   `json:"cached_user_routings"`
-	ActiveConnections    int   `json:"active_connections"`
-	Version              int64 `json:"version"`
+	Uptime               int64         `json:"uptime"`
+	CachedTokens         int           `json:"cached_tokens"`
+	CachedChannels       int           `json:"cached_channels"`
+	CachedModels         int           `json:"cached_models"`
+	CachedGlobalRoutings int           `json:"cached_global_routings"`
+	CachedUserRoutings   int           `json:"cached_user_routings"`
+	ActiveConnections    int           `json:"active_connections"`
+	Version              int64         `json:"version"`
+	PendingUsage         int           `json:"pending_usage,omitempty"`
+	Capabilities         []string      `json:"capabilities,omitempty"`
+	Relay                *RelayRuntime `json:"relay,omitempty"`
 
 	HTTPAddresses json.RawMessage `json:"http_addresses,omitempty"`
 	Tags          string          `json:"tags,omitempty"`
@@ -121,6 +221,42 @@ type HeartbeatParams struct {
 	ListenPort    int             `json:"listen_port,omitempty"`
 
 	CacheStats map[string]CacheEntityStats `json:"cache_stats,omitempty"`
+}
+
+type RelayDesiredRuntime struct {
+	Mode              string `json:"mode"`
+	ConfiguredURI     string `json:"configured_uri"`
+	EffectiveURI      string `json:"effective_uri"`
+	DesiredGeneration uint64 `json:"desired_generation"`
+}
+
+type RelayActiveRuntime struct {
+	URI               string `json:"uri"`
+	ActiveGeneration  uint64 `json:"active_generation"`
+	SessionGeneration uint64 `json:"session_generation"`
+	ConnectedAt       int64  `json:"connected_at"`
+	Streams           int    `json:"streams"`
+	RetryAt           int64  `json:"retry_at"`
+}
+
+type RelayRuntime struct {
+	Support             string              `json:"support"`
+	Config              string              `json:"config"`
+	Availability        string              `json:"availability"`
+	AcceptingNewStreams bool                `json:"accepting_new_streams"`
+	Convergence         string              `json:"convergence"`
+	Desired             RelayDesiredRuntime `json:"desired"`
+	Active              RelayActiveRuntime  `json:"active"`
+	LastError           string              `json:"last_error,omitempty"`
+	RecentErrors        []RelayRecentError  `json:"recent_errors,omitempty"`
+}
+
+type RelayRecentError struct {
+	Code       string `json:"code"`
+	Stage      string `json:"stage"`
+	Message    string `json:"message"`
+	OccurredAt int64  `json:"occurred_at"`
+	Count      uint64 `json:"count"`
 }
 
 // CacheEntityStats 是单个实体缓存的运行统计。
@@ -143,9 +279,9 @@ type LimiterBucketStat struct {
 	LimiterID   uint   `json:"limiter_id"`
 	Name        string `json:"name"`
 	Bucket      string `json:"bucket"`
-	Metric      string `json:"metric"`        // concurrency | rate
+	Metric      string `json:"metric"` // concurrency | rate
 	KeyBy       string `json:"key_by"`
-	Occupied    int64  `json:"occupied"`      // 并发:当前占用; 速率:当前窗口已用
+	Occupied    int64  `json:"occupied"` // 并发:当前占用; 速率:当前窗口已用
 	Capacity    int64  `json:"capacity"`
 	Waiters     int64  `json:"waiters"`
 	WindowEndMs int64  `json:"window_end_ms"` // 速率桶本窗口复位时刻(unix ms);并发为 0

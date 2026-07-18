@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
@@ -26,9 +26,9 @@ import { BYOKCard } from "./byok-card";
 export function OverviewTab({ group, isDefault }: { group: UserGroup; isDefault: boolean }) {
   return (
     <div className="space-y-4">
-      <BasicInfoCard group={group} isDefault={isDefault} />
-      <PermissionsCard group={group} />
-      <BYOKCard group={group} />
+      <BasicInfoCard key={`basic-${group.id}`} group={group} isDefault={isDefault} />
+      <PermissionsCard key={`permissions-${group.id}`} group={group} />
+      <BYOKCard key={`byok-${group.id}`} group={group} />
     </div>
   );
 }
@@ -43,19 +43,6 @@ function BasicInfoCard({ group, isDefault }: { group: UserGroup; isDefault: bool
     description: group.description ?? "",
     status: String(group.status),
   });
-
-  // Reset only when navigating to a different group (not on react-query refetch
-  // of the same group, which would clobber unsaved edits made in the sibling
-  // PermissionsCard).
-  useEffect(() => {
-    setForm({
-      name: group.name,
-      description: group.description ?? "",
-      status: String(group.status),
-    });
-    // Reset on group change only — see comment above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group.id]);
 
   const dirty =
     form.name !== group.name ||
@@ -140,13 +127,6 @@ function PermissionsCard({ group }: { group: UserGroup }) {
 
   const [channels, setChannels] = useState<number[]>(group.allowed_channel_ids ?? []);
   const [models, setModels] = useState<string[]>(parseModels(group.models));
-
-  useEffect(() => {
-    setChannels(group.allowed_channel_ids ?? []);
-    setModels(parseModels(group.models));
-    // Reset on group change only — avoid wiping unsaved edits when sibling card saves.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group.id]);
 
   const channelsDirty =
     JSON.stringify([...channels].sort()) !==

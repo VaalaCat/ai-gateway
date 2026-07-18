@@ -41,7 +41,7 @@ import {
 } from "@/lib/api/model-routings";
 import { ApiError } from "@/lib/api/client";
 import { PAGE_SIZES } from "@/lib/constants";
-import type { ModelRouting } from "@/lib/types";
+import type { ModelRouting, RoutingMember } from "@/lib/types";
 
 export interface ModelRoutingsListPageProps {
   apiMode: "admin" | "user";
@@ -50,10 +50,10 @@ export interface ModelRoutingsListPageProps {
 function MembersCell({ members }: { members: ModelRouting["members"] | string }) {
   const t = useTranslations("modelRoutings");
   // 后端 ModelRouting.members 在 JSON 响应里是字符串（GORM text 列），前端解析为数组
-  const list: ModelRouting["members"] = (() => {
+  const list: RoutingMember[] = (() => {
     if (Array.isArray(members)) return members;
     if (typeof members === "string") {
-      try { return JSON.parse(members) as ModelRouting["members"]; } catch { return []; }
+      try { return JSON.parse(members) as RoutingMember[]; } catch { return []; }
     }
     return [];
   })();

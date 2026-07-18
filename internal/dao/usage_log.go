@@ -55,6 +55,9 @@ func applyUsageLogFilter(db *gorm.DB, filter UsageLogListFilter) *gorm.DB {
 	if filter.PrivateChannelID != nil {
 		db = db.Where("private_channel_id = ?", *filter.PrivateChannelID)
 	}
+	if filter.RequestID != "" {
+		db = db.Where("request_id = ?", filter.RequestID)
+	}
 	return db
 }
 

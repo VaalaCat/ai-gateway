@@ -28,6 +28,7 @@ type oaiRequest struct {
 	Logprobs          *bool          `json:"logprobs,omitempty"`
 	TopLogprobs       *int           `json:"top_logprobs,omitempty"`
 	ServiceTier       string         `json:"service_tier,omitempty"`
+	SafetyIdentifier  string         `json:"safety_identifier,omitempty"`
 	ResponseFormat    any            `json:"response_format,omitempty"`
 	StreamOptions     map[string]any `json:"stream_options,omitempty"`
 	ReasoningEffort   string         `json:"reasoning_effort,omitempty"`

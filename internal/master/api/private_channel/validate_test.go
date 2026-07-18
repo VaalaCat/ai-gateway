@@ -39,8 +39,9 @@ func newValidatorTestCtx(t *testing.T, userID, groupID uint) *app.Context {
 	db.Create(&models.User{ID: userID, GroupID: groupID, Username: "testuser"})
 
 	return &app.Context{
-		App:      &stubApp{db: db},
-		UserInfo: &app.UserInfo{UserID: userID, GroupID: groupID},
+		App:          &stubApp{db: db},
+		UserInfo:     &app.UserInfo{UserID: userID, GroupID: groupID},
+		OwnerContext: t.Context(),
 	}
 }
 

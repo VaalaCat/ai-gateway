@@ -998,8 +998,9 @@ func TestRelayEarly_TraceOff_ReadBodyFail(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
+	// behavior change: replay capture sanitizes read/storage failures as an internal body_store_failed error.
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
 	}
 	entry := waitForUsage(t, got)
 

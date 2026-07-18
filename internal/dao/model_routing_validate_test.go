@@ -9,10 +9,12 @@ import (
 
 type fakeNames struct {
 	models   map[string]bool
+	tokens   map[uint]bool
 	routings map[string]*models.ModelRouting
 }
 
-func (f *fakeNames) HasModel(n string) bool                        { return f.models[n] }
+func (f *fakeNames) HasModel(n string) bool                         { return f.models[n] }
+func (f *fakeNames) HasToken(id uint) bool                          { return f.tokens[id] }
 func (f *fakeNames) GetGlobalRouting(n string) *models.ModelRouting { return f.routings[n] }
 func (f *fakeNames) AllGlobalRoutings() []*models.ModelRouting {
 	out := make([]*models.ModelRouting, 0, len(f.routings))
@@ -29,15 +31,49 @@ func TestValidate_NameRules(t *testing.T) {
 		in       *models.ModelRouting
 		wantCode string
 	}{
-		{"empty name", &models.ModelRouting{Name: "", Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`}, "name_required"},
-		{"name with comma", &models.ModelRouting{Name: "a,b", Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`}, "name_contains_comma"},
-		{"too long", &models.ModelRouting{Name: string(make([]byte, 129)), Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`}, "name_too_long"},
+		{"empty name", &models.ModelRouting{Name: "", Scope: models.RoutingScopeGlobal, Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`}, "name_required"},
+		{"name with comma", &models.ModelRouting{Name: "a,b", Scope: models.RoutingScopeGlobal, Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`}, "name_contains_comma"},
+		{"too long", &models.ModelRouting{Name: string(make([]byte, 129)), Scope: models.RoutingScopeGlobal, Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`}, "name_too_long"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := dao.ValidateRouting(c.in, nv)
 			if err == nil || err.Code() != c.wantCode {
 				t.Errorf("want code %s, got %v", c.wantCode, err)
+			}
+		})
+	}
+}
+
+func TestValidate_ScopeOwnerRules(t *testing.T) {
+	nv := &fakeNames{
+		models: map[string]bool{"gpt-4o": true},
+		tokens: map[uint]bool{7: true},
+	}
+	members := `[{"ref":"gpt-4o","priority":0,"weight":1}]`
+	cases := []struct {
+		name     string
+		routing  models.ModelRouting
+		wantCode string
+	}{
+		{name: "unknown scope", routing: models.ModelRouting{Name: "x", Scope: "team", Members: members}, wantCode: dao.ErrCodeInvalidScope},
+		{name: "global with owner", routing: models.ModelRouting{Name: "x", Scope: models.RoutingScopeGlobal, UserID: 1, Members: members}, wantCode: dao.ErrCodeInvalidScopeOwner},
+		{name: "user without owner", routing: models.ModelRouting{Name: "x", Scope: models.RoutingScopeUser, Members: members}, wantCode: dao.ErrCodeInvalidScopeOwner},
+		{name: "token with user owner", routing: models.ModelRouting{Name: "x", Scope: models.RoutingScopeToken, UserID: 1, TokenID: 7, Members: members}, wantCode: dao.ErrCodeInvalidScopeOwner},
+		{name: "missing token", routing: models.ModelRouting{Name: "x", Scope: models.RoutingScopeToken, TokenID: 8, Members: members}, wantCode: dao.ErrCodeTokenNotFound},
+		{name: "existing token", routing: models.ModelRouting{Name: "x", Scope: models.RoutingScopeToken, TokenID: 7, Members: members}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := dao.ValidateRouting(&tc.routing, nv)
+			if tc.wantCode == "" {
+				if err != nil {
+					t.Fatalf("expected success, got %v", err)
+				}
+				return
+			}
+			if err == nil || err.Code() != tc.wantCode {
+				t.Fatalf("code = %v, want %s", err, tc.wantCode)
 			}
 		})
 	}

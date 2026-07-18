@@ -12,24 +12,28 @@ const (
 	routingMaxMembers = 32
 	routingMaxDepth   = 5
 
-	ErrCodeNameRequired        = "name_required"
-	ErrCodeNameTooLong         = "name_too_long"
-	ErrCodeNameContainsComma   = "name_contains_comma"
-	ErrCodeMembersInvalidJSON  = "members_invalid_json"
-	ErrCodeMembersEmpty        = "members_empty"
-	ErrCodeMembersTooMany      = "members_too_many"
-	ErrCodeRefEmpty            = "ref_empty"
-	ErrCodeInvalidRef          = "invalid_ref"
-	ErrCodeCycleDetected       = "cycle_detected"
-	ErrCodeMaxDepth            = "max_depth"
-	ErrCodeReferencedBy        = "referenced_by"
-	ErrCodeDBError             = "db_error"
-	ErrCodeNotFound            = "not_found"
+	ErrCodeNameRequired       = "name_required"
+	ErrCodeNameTooLong        = "name_too_long"
+	ErrCodeNameContainsComma  = "name_contains_comma"
+	ErrCodeMembersInvalidJSON = "members_invalid_json"
+	ErrCodeMembersEmpty       = "members_empty"
+	ErrCodeMembersTooMany     = "members_too_many"
+	ErrCodeRefEmpty           = "ref_empty"
+	ErrCodeInvalidRef         = "invalid_ref"
+	ErrCodeCycleDetected      = "cycle_detected"
+	ErrCodeMaxDepth           = "max_depth"
+	ErrCodeReferencedBy       = "referenced_by"
+	ErrCodeInvalidScope       = "invalid_scope"
+	ErrCodeInvalidScopeOwner  = "invalid_scope_owner"
+	ErrCodeTokenNotFound      = "token_not_found"
+	ErrCodeDBError            = "db_error"
+	ErrCodeNotFound           = "not_found"
 )
 
 // NameProvider 为校验函数提供名称查询能力，与 DB 解耦。
 type NameProvider interface {
 	HasModel(name string) bool
+	HasToken(tokenID uint) bool
 	GetGlobalRouting(name string) *models.ModelRouting
 	AllGlobalRoutings() []*models.ModelRouting
 }
@@ -52,6 +56,9 @@ func newErr(code, msg string, details map[string]any) *ValidateError {
 
 // ValidateRouting 校验 ModelRouting，包含名称规则、成员规则、引用检查、DFS 环检测和深度上限。
 func ValidateRouting(r *models.ModelRouting, np NameProvider) *ValidateError {
+	if err := validateRoutingOwner(r, np); err != nil {
+		return err
+	}
 	if r.Name == "" {
 		return newErr(ErrCodeNameRequired, "name is required", nil)
 	}
@@ -86,6 +93,29 @@ func ValidateRouting(r *models.ModelRouting, np NameProvider) *ValidateError {
 		if err := dfsCycleAndDepth(r, np, members); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateRoutingOwner(r *models.ModelRouting, np NameProvider) *ValidateError {
+	switch r.Scope {
+	case models.RoutingScopeGlobal:
+		if r.UserID != 0 || r.TokenID != 0 {
+			return newErr(ErrCodeInvalidScopeOwner, "global routing cannot have an owner", nil)
+		}
+	case models.RoutingScopeUser:
+		if r.UserID == 0 || r.TokenID != 0 {
+			return newErr(ErrCodeInvalidScopeOwner, "user routing requires only user_id", nil)
+		}
+	case models.RoutingScopeToken:
+		if r.UserID != 0 || r.TokenID == 0 {
+			return newErr(ErrCodeInvalidScopeOwner, "token routing requires only token_id", nil)
+		}
+		if !np.HasToken(r.TokenID) {
+			return newErr(ErrCodeTokenNotFound, "token does not exist", map[string]any{"token_id": r.TokenID})
+		}
+	default:
+		return newErr(ErrCodeInvalidScope, "unsupported routing scope", map[string]any{"scope": r.Scope})
 	}
 	return nil
 }

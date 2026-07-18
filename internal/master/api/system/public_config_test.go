@@ -25,7 +25,7 @@ func newPublicConfigTestContext(t *testing.T) (*app.Context, *gorm.DB) {
 	ginCtx, _ := gin.CreateTestContext(w)
 	a := app.NewApplication()
 	a.SetDB(db)
-	return &app.Context{Context: ginCtx, App: a}, db
+	return &app.Context{Context: ginCtx, App: a, OwnerContext: t.Context()}, db
 }
 
 func TestPublicConfig_DefaultsFalse(t *testing.T) {

@@ -260,12 +260,14 @@ export default function TokenTemplatesPage() {
       />
 
       <TokenTemplateFormDialog
+        key={`create-${createOpen}`}
         open={createOpen}
         onOpenChange={setCreateOpen}
         onSubmit={handleCreate}
         pending={createMutation.isPending}
       />
       <TokenTemplateFormDialog
+        key={`edit-${editItem?.id ?? "none"}`}
         open={!!editItem}
         onOpenChange={(o) => { if (!o) setEditItem(null); }}
         template={editItem}
@@ -279,10 +281,13 @@ export default function TokenTemplatesPage() {
         onConfirm={handleDelete}
       />
 
-      <TokenTemplateSyncDialog
-        template={syncItem}
-        onOpenChange={(open) => { if (!open) setSyncItem(null); }}
-      />
+      {syncItem && (
+        <TokenTemplateSyncDialog
+          key={syncItem.id}
+          template={syncItem}
+          onOpenChange={(open) => { if (!open) setSyncItem(null); }}
+        />
+      )}
     </div>
   );
 }

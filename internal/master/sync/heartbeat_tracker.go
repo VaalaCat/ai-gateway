@@ -5,11 +5,15 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	gosync "sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/sourcegraph/conc"
 	"go.uber.org/zap"
 )
 
@@ -21,19 +25,34 @@ type HeartbeatTracker struct {
 	mu    gosync.RWMutex
 	seen  map[string]int64
 	dirty map[string]struct{}
-	cfgFp map[string]string
+	cfgFp map[string]configFingerprintState
 
-	flushEvery time.Duration
-	app        dao.AppProvider
-	logger     *zap.Logger
-	stopCh     chan struct{}
-	stopOnce   gosync.Once
-	persistFn  LastSeenPersistFn
+	flushEvery    time.Duration
+	app           dao.AppProvider
+	logger        *zap.Logger
+	stopCh        chan struct{}
+	lifecycleMu   gosync.Mutex
+	started       bool
+	closing       bool
+	closeOnce     gosync.Once
+	workerCancel  context.CancelCauseFunc
+	workers       conc.WaitGroup
+	done          chan struct{}
+	persistFn     LastSeenPersistContextFn
+	activeWorkers atomic.Int64
+	activeTimers  atomic.Int64
+	inflight      atomic.Int64
+}
+
+type configFingerprintState struct {
+	generation  uint64
+	fingerprint string
 }
 
 // LastSeenPersistFn is the function Flush calls to persist updates.
 // Inject the real dao.BatchUpdateLastSeen for production; nil makes Flush a no-op.
 type LastSeenPersistFn func(updates map[string]int64) error
+type LastSeenPersistContextFn func(context.Context, map[string]int64) error
 
 // NewHeartbeatTracker constructs a tracker. app may be nil for pure-memory
 // tests. flushEvery <= 0 disables the background ticker.
@@ -41,11 +60,12 @@ func NewHeartbeatTracker(app dao.AppProvider, logger *zap.Logger, flushEvery tim
 	return &HeartbeatTracker{
 		seen:       make(map[string]int64),
 		dirty:      make(map[string]struct{}),
-		cfgFp:      make(map[string]string),
+		cfgFp:      make(map[string]configFingerprintState),
 		flushEvery: flushEvery,
 		app:        app,
 		logger:     logger,
 		stopCh:     make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -53,6 +73,9 @@ func NewHeartbeatTracker(app dao.AppProvider, logger *zap.Logger, flushEvery tim
 func (t *HeartbeatTracker) Touch(agentID string, ts int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if current, ok := t.seen[agentID]; ok && ts <= current {
+		return
+	}
 	t.seen[agentID] = ts
 	t.dirty[agentID] = struct{}{}
 }
@@ -83,6 +106,16 @@ func (t *HeartbeatTracker) GetMany(ids []string) map[string]int64 {
 
 // SetLastSeenPersistFn installs the persistence function used by Flush.
 func (t *HeartbeatTracker) SetLastSeenPersistFn(fn LastSeenPersistFn) {
+	if fn == nil {
+		t.SetLastSeenPersistContextFn(nil)
+		return
+	}
+	t.SetLastSeenPersistContextFn(func(_ context.Context, updates map[string]int64) error {
+		return fn(updates)
+	})
+}
+
+func (t *HeartbeatTracker) SetLastSeenPersistContextFn(fn LastSeenPersistContextFn) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.persistFn = fn
@@ -94,6 +127,10 @@ func (t *HeartbeatTracker) SetLastSeenPersistFn(fn LastSeenPersistFn) {
 // never heartbeat again, last_seen may stay stale in DB — acceptable, since
 // such agents are stale anyway and the UI reads memory first.
 func (t *HeartbeatTracker) Flush() error {
+	return t.FlushContext(context.Background())
+}
+
+func (t *HeartbeatTracker) FlushContext(ctx context.Context) error {
 	t.mu.Lock()
 	if len(t.dirty) == 0 {
 		t.mu.Unlock()
@@ -110,7 +147,9 @@ func (t *HeartbeatTracker) Flush() error {
 	if fn == nil {
 		return nil
 	}
-	return fn(snapshot)
+	t.inflight.Add(1)
+	defer t.inflight.Add(-1)
+	return fn(ctx, snapshot)
 }
 
 // Start spawns a background goroutine that calls Flush every flushEvery.
@@ -118,42 +157,84 @@ func (t *HeartbeatTracker) Flush() error {
 // flushEvery <= 0 disables the ticker entirely; callers must Flush manually
 // or rely on Stop's force-flush.
 func (t *HeartbeatTracker) Start(ctx context.Context) {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+	if t.started || t.closing || ctx == nil {
+		return
+	}
+	t.started = true
+	workerCtx, cancel := context.WithCancelCause(ctx)
+	t.workerCancel = cancel
 	if t.flushEvery <= 0 {
 		return
 	}
-	go func() {
+	t.activeWorkers.Add(1)
+	t.activeTimers.Add(1)
+	t.workers.Go(func() {
+		defer t.activeWorkers.Add(-1)
+		defer t.activeTimers.Add(-1)
 		ticker := time.NewTicker(t.flushEvery)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				if err := t.Flush(); err != nil && t.logger != nil {
+				if err := t.FlushContext(workerCtx); err != nil && t.logger != nil {
 					t.logger.Warn("heartbeat_flush failed", zap.Error(err))
 				}
-			case <-ctx.Done():
+			case <-workerCtx.Done():
 				return
 			case <-t.stopCh:
 				return
 			}
 		}
-	}()
+	})
 }
 
 // Stop signals the ticker goroutine to exit and runs one final Flush
 // to persist anything still in dirty. Safe to call concurrently and idempotent:
 // stopCh 关闭走 sync.Once，Flush 自身由 mu 保护可重复调用。
-func (t *HeartbeatTracker) Stop() {
-	t.stopOnce.Do(func() {
+func (t *HeartbeatTracker) Close(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("heartbeat tracker: nil close context")
+	}
+	t.closeOnce.Do(func() {
+		t.lifecycleMu.Lock()
+		t.closing = true
+		if t.workerCancel != nil {
+			t.workerCancel(context.Cause(ctx))
+		}
 		close(t.stopCh)
+		t.lifecycleMu.Unlock()
+		go func() {
+			t.workers.Wait()
+			if err := t.FlushContext(ctx); err != nil && t.logger != nil {
+				t.logger.Warn("heartbeat_flush failed on shutdown", zap.Error(err))
+			}
+			close(t.done)
+		}()
 	})
-	if err := t.Flush(); err != nil && t.logger != nil {
-		t.logger.Warn("heartbeat_flush failed on shutdown", zap.Error(err))
+	select {
+	case <-t.done:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
 	}
 }
 
-// configFingerprint 计算 mergeAgentConfig 实际写 DB 时关心的 4 个字段
-// 的 sha1 前 16 字节十六进制。字段集来自 hub.go:472 mergeAgentConfig 实现。
-// 必须保持"指纹变化 ⟺ mergeAgentConfig 会写 DB"。
+func (t *HeartbeatTracker) Stop(ctx context.Context) error { return t.Close(ctx) }
+
+func (t *HeartbeatTracker) Done() <-chan struct{} { return t.done }
+
+func (t *HeartbeatTracker) ResourceCounts() app.ResourceCounts {
+	return app.ResourceCounts{
+		LifecycleWorkers: t.activeWorkers.Load(),
+		Timers:           t.activeTimers.Load(),
+		Inflight:         t.inflight.Load(),
+	}
+}
+
+// configFingerprint hashes the heartbeat configuration fields used to decide
+// whether mergeAgentConfig needs to inspect the persisted agent again.
 func configFingerprint(params protocol.HeartbeatParams) string {
 	payload := struct {
 		Addrs      json.RawMessage `json:"addrs,omitempty"`
@@ -171,16 +252,20 @@ func configFingerprint(params protocol.HeartbeatParams) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// ConfigChanged 返回 params 是否与上次记录的指纹不同，并在变化时更新指纹。
-// 冷启动（首次见到该 agent）永远返回 true。
-// 用于跳过无变化心跳的 mergeAgentConfig SELECT。
-func (t *HeartbeatTracker) ConfigChanged(agentID string, params protocol.HeartbeatParams) bool {
+// ConfigChanged returns whether the current generation must merge params.
+// Newer generations always merge, stale generations are ignored, and repeated
+// fingerprints within the same generation skip mergeAgentConfig's SELECT.
+func (t *HeartbeatTracker) ConfigChanged(agentID string, generation uint64, params protocol.HeartbeatParams) bool {
 	fp := configFingerprint(params)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.cfgFp[agentID] == fp {
+	current, ok := t.cfgFp[agentID]
+	if ok && generation < current.generation {
 		return false
 	}
-	t.cfgFp[agentID] = fp
+	if ok && generation == current.generation && current.fingerprint == fp {
+		return false
+	}
+	t.cfgFp[agentID] = configFingerprintState{generation: generation, fingerprint: fp}
 	return true
 }

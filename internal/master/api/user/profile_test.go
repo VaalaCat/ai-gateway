@@ -28,7 +28,7 @@ func TestChangePassword_SetsPasswordSet(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	c := newUserTestContext(db)
+	c := newUserTestContext(t, db)
 	c.UserInfo = &app.UserInfo{UserID: u.ID, Username: u.Username}
 
 	h := &Handler{}

@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
@@ -16,7 +17,7 @@ type StepForwardClientHeaders struct {
 
 func (s *StepForwardClientHeaders) Key() string { return "forward_client_headers" }
 
-func (s *StepForwardClientHeaders) Apply(p *Pass) error {
+func (s *StepForwardClientHeaders) Apply(_ context.Context, p *Pass) error {
 	if p.HTTPReq == nil || s.inbound == nil {
 		return nil
 	}

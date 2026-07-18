@@ -3,7 +3,7 @@ package relay
 import (
 	"bytes"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -34,10 +34,10 @@ func (h *Handler) scriptEngine() *script.Engine {
 
 // applyRequestScripts 在路由前执行 onRequest 钩子。
 // 返回 true 表示请求已被脚本拒绝并写回响应，调用方应直接返回。
-func (h *Handler) applyRequestScripts(rctx *state.RelayContext) bool {
+func (h *Handler) applyRequestScripts(rctx *state.RelayContext) (bool, error) {
 	eng := h.scriptEngine()
 	if eng == nil {
-		return false
+		return false, nil
 	}
 	res := eng.Run(script.HookInput{
 		Hook:      script.HookRequest,
@@ -51,19 +51,32 @@ func (h *Handler) applyRequestScripts(rctx *state.RelayContext) bool {
 		rctx.Context.AbortWithStatusJSON(res.Status, gin.H{
 			"error": gin.H{"message": res.Message, "type": "script_rejected"},
 		})
-		return true
+		return true, nil
 	}
 	if res.Changed {
-		rctx.Input.Body = res.Body
-		rctx.Context.Request.Body = io.NopCloser(bytes.NewReader(res.Body))
-		rctx.Context.Request.ContentLength = int64(len(res.Body))
-		bodySnap := res.Body
-		rctx.Context.Request.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(bodySnap)), nil
+		if rctx.Resources == nil || h.Agent == nil || h.Agent.GetBodyStore() == nil {
+			return false, errors.New("request body resources unavailable")
 		}
+		body, reader, err := rctx.Resources.CaptureAndReplaceWithReader(
+			rctx.Context.Request.Context(),
+			h.Agent.GetBodyStore(),
+			bytes.NewReader(res.Body),
+			rctx.Input.BodyLimits,
+		)
+		if err != nil {
+			return false, err
+		}
+		previous := rctx.Context.Request.Body
+		rctx.Context.Request.Body = reader
+		rctx.Context.Request.GetBody = body.Open
+		rctx.Context.Request.ContentLength = body.Size()
+		if previous != nil {
+			_ = previous.Close()
+		}
+		rctx.Input.Body = res.Body
 		reparseModelStream(rctx, res.Body)
 	}
-	return false
+	return false, nil
 }
 
 // reparseModelStream 在 onRequest 改写后重新提取 model/stream（脚本可能改了它们）。

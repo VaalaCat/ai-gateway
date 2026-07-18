@@ -10,8 +10,6 @@
 package publish
 
 import (
-	"context"
-
 	"go.uber.org/zap"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
@@ -36,18 +34,16 @@ func NewPublisher(bus app.EventBus, logger *zap.Logger, aff *affinity.Engine) *P
 }
 
 // Publish 把 rctx 累加的状态收成 UsageLogEntry 并发 usage.completed。
-// rctx.State.Forwarded=true 时跳过（请求被转发到另一个 agent，对方记录）。
-//
 // usage_log 的内容完全由 ProjectUsageEntry 投影决定；publish 在投影之后追加唯一的
 // 专属副作用——affinity 记录（recordAffinity），它读 e.CacheRead/WriteTokens
 // 所以必须在投影之后、发布之前执行，顺序与重构前一致。
 func (p *Publisher) Publish(rctx *state.RelayContext) {
-	if rctx == nil || rctx.State == nil || rctx.State.Forwarded {
+	if rctx == nil || rctx.State == nil || rctx.Context == nil || rctx.Request == nil {
 		return
 	}
 	e := ProjectUsageEntry(rctx)
 	p.recordAffinity(rctx, &e)
-	if err := events.PublishUsageCompleted(context.Background(), p.bus, e); err != nil {
+	if err := events.PublishUsageCompleted(rctx.Request.Context(), p.bus, e); err != nil {
 		if p.logger != nil {
 			p.logger.Error("publish usage.completed failed", zap.Error(err))
 		}

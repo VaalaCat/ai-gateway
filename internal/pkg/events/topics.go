@@ -18,6 +18,7 @@ const (
 	EntityLimiterBinding = "limiter_binding"
 	EntityModelRouting   = "model_routing"
 	EntityUserRoutings   = "user_routings"
+	EntityTokenRoutings  = "token_routings"
 	EntitySync           = "sync"
 	EntityUserGroup      = "user_group"
 	EntityUser           = "user"

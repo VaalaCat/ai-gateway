@@ -14,7 +14,7 @@ type OverviewRequest struct {
 func (h *Handler) Overview(c *app.Context, req OverviewRequest) (api.PaginatedResponse[OverviewItem], error) {
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	routes, total, err := q.AgentRoute().List(

@@ -1,6 +1,9 @@
 package agent_route
 
-import "github.com/VaalaCat/ai-gateway/internal/master/api"
+import (
+	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/models"
+)
 
 type Handler struct{}
 
@@ -19,12 +22,34 @@ type CreateRequest struct {
 }
 
 type UpdateRequest struct {
-	ID     string         `uri:"id" binding:"required"`
-	Fields map[string]any `json:"-"`
+	ID         string  `uri:"id" binding:"required"`
+	SourceType *string `json:"source_type"`
+	SourceID   *uint   `json:"source_id"`
+	Model      *string `json:"model"`
+	AgentID    *string `json:"agent_id"`
+	AgentTag   *string `json:"agent_tag"`
 }
 
-func (r *UpdateRequest) SetBodyMap(fields map[string]any) {
-	r.Fields = fields
+func (r UpdateRequest) Merge(old models.AgentRoute) models.AgentRoute {
+	merged := old
+	if r.SourceType != nil {
+		merged.SourceType = *r.SourceType
+	}
+	if r.SourceID != nil {
+		merged.SourceID = *r.SourceID
+	}
+	if r.Model != nil {
+		merged.Model = *r.Model
+	}
+	if r.AgentID != nil {
+		merged.AgentID = *r.AgentID
+	}
+	if r.AgentTag != nil {
+		merged.AgentTag = *r.AgentTag
+	}
+	normalizeAgentRouteSelectors(&merged)
+	merged.Priority = merged.CalcPriority()
+	return merged
 }
 
 type OverviewItem struct {

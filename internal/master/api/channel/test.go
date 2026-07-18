@@ -26,7 +26,7 @@ import (
 func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	channelPtr, err := q.Channel().GetByID(uint(id))
@@ -74,7 +74,7 @@ func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
 	}
 
 	// Local test
-	daoCtx2 := dao.NewContext(c.App)
+	daoCtx2 := dao.NewContextWithContext(c.App, c.RequestContext())
 	token, err := getOrCreateTestToken(daoCtx2, c.GetBus())
 	if err != nil {
 		return TestResponse{}, api.InternalError("failed to get test token", err)

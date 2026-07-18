@@ -39,6 +39,7 @@ func (c *ChatCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig) 
 	raw.Logprobs = req.Logprobs
 	raw.TopLogprobs = req.TopLogprobs
 	raw.ServiceTier = req.ServiceTier
+	raw.SafetyIdentifier = req.SafetyIdentifier
 	raw.ResponseFormat = req.ResponseFormat
 	raw.StreamOptions = req.StreamOptions
 	raw.ReasoningEffort = req.ReasoningEffort
@@ -92,13 +93,20 @@ func (c *ChatCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig) 
 			nonThinkingContent = rest
 		}
 
+		// Drop empty text blocks before encoding: an OpenAI-compatible upstream
+		// (e.g. SGLang) rejects a {"type":"text"} content block with no/empty text
+		// field. Inbound history (both the Claude and OpenAI request decoders) can
+		// carry such blocks into the IR.
+		// 见 docs/superpowers/specs/2026-07-10-openai-chat-empty-text-block-design.md
+		filtered := codec.DropEmptyTextBlocks(nonThinkingContent)
+
 		// Content: use string shorthand if single text block with no RawJSON
-		if len(nonThinkingContent) == 1 && nonThinkingContent[0].Type == codec.ContentTypeText && nonThinkingContent[0].RawJSON == nil {
-			b, _ := json.Marshal(nonThinkingContent[0].Text)
+		if len(filtered) == 1 && filtered[0].Type == codec.ContentTypeText && filtered[0].RawJSON == nil {
+			b, _ := json.Marshal(filtered[0].Text)
 			om.Content = b
-		} else if len(nonThinkingContent) > 0 {
+		} else if len(filtered) > 0 {
 			var blocks []json.RawMessage
-			for _, cb := range nonThinkingContent {
+			for _, cb := range filtered {
 				if cb.RawJSON != nil {
 					blocks = append(blocks, cb.RawJSON)
 				} else {
@@ -124,6 +132,11 @@ func (c *ChatCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig) 
 			}
 			b, _ := json.Marshal(blocks)
 			om.Content = b
+		} else if len(nonThinkingContent) > 0 {
+			// The message carried only empty text blocks; emit a legal empty string
+			// rather than an illegal {"type":"text"} array or an omitted content field
+			// (preserves the previous single-empty-block behavior of content:"").
+			om.Content = json.RawMessage(`""`)
 		}
 
 		// Tool calls

@@ -15,7 +15,7 @@ func (h *Handler) Get(c *app.Context, req api.IDPathRequest) (models.Token, erro
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 	scope := middleware.GetScope(c.Context)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	token, err := q.Token().GetByID(uint(id))

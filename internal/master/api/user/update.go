@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -14,10 +15,25 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+func isQuotaUpdateField(key string) bool {
+	normalized := strings.ReplaceAll(key, "_", "")
+	return strings.EqualFold(normalized, "quota") || strings.EqualFold(normalized, "usedquota")
+}
+
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.User, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
+	updates := req.Fields
+	if updates == nil {
+		updates = map[string]any{}
+	}
+	for key := range updates {
+		if isQuotaUpdateField(key) {
+			return models.User{}, api.BadRequestError("quota fields must be updated through the quota endpoint", nil)
+		}
+	}
+	delete(updates, "id")
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -26,12 +42,6 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.User, error)
 		return models.User{}, api.NotFoundError(consts.ErrNotFound)
 	}
 	oldGroupID := oldUser.GroupID
-
-	updates := req.Fields
-	if updates == nil {
-		updates = map[string]any{}
-	}
-	delete(updates, "id")
 
 	// Validate status if present
 	if v, ok := updates["status"]; ok {

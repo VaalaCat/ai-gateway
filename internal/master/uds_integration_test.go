@@ -2,6 +2,7 @@ package master
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,9 @@ func runMasterOverUnix(t *testing.T, listen string) (*Server, func()) {
 			DBPath:    ":memory:",
 			JWTSecret: strings.Repeat("x", 32),
 		},
+		Agent: config.AgentConfig{
+			CredentialsFile: filepath.Join(t.TempDir(), "embedded-agent.json"),
+		},
 		Runtime: config.RuntimeConfig{RelayTimeout: 30},
 	}
 	srv, err := New(cfg, zap.NewNop())
@@ -33,6 +37,14 @@ func runMasterOverUnix(t *testing.T, listen string) (*Server, func()) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
+		select {
+		case <-srv.Done():
+		case <-ctx.Done():
+			t.Errorf("master Done remained open after UDS shutdown: %v", ctx.Err())
+		}
+		if _, err := os.Stat(filepath.Join("data", "request-bodies")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("master test left package request-body directory: %v", err)
+		}
 	}
 	return srv, cleanup
 }

@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -13,7 +14,7 @@ type fakeStep struct {
 }
 
 func (f *fakeStep) Key() string { return f.key }
-func (f *fakeStep) Apply(p *Pass) error {
+func (f *fakeStep) Apply(_ context.Context, p *Pass) error {
 	if f.onApply != nil {
 		return f.onApply(p)
 	}
@@ -27,7 +28,7 @@ func TestFlow_Run_Order(t *testing.T) {
 		&fakeStep{key: "a", onApply: func(p *Pass) error { order = append(order, "a"); return nil }},
 		&fakeStep{key: "b", onApply: func(p *Pass) error { order = append(order, "b"); return nil }},
 	}}
-	if err := f.Run(&Pass{}); err != nil {
+	if err := f.Run(context.Background(), &Pass{}); err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
 	if len(order) != 2 || order[0] != "a" || order[1] != "b" {
@@ -41,7 +42,7 @@ func TestFlow_Run_StopsOnError(t *testing.T) {
 		&fakeStep{key: "a", onApply: func(p *Pass) error { ran = append(ran, "a"); return errors.New("boom") }},
 		&fakeStep{key: "b", onApply: func(p *Pass) error { ran = append(ran, "b"); return nil }},
 	}}
-	err := f.Run(&Pass{})
+	err := f.Run(context.Background(), &Pass{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -59,7 +60,7 @@ func TestFlow_Run_StopsOnAbort(t *testing.T) {
 		&fakeStep{key: "a", onApply: func(p *Pass) error { ran = append(ran, "a"); p.Aborted = true; return nil }},
 		&fakeStep{key: "b", onApply: func(p *Pass) error { ran = append(ran, "b"); return nil }},
 	}}
-	if err := f.Run(&Pass{}); err != nil {
+	if err := f.Run(context.Background(), &Pass{}); err != nil {
 		t.Fatalf("Run err: %v", err)
 	}
 	if len(ran) != 1 || ran[0] != "a" {

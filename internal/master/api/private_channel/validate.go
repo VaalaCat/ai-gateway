@@ -18,11 +18,13 @@ import (
 // Each validator that cares about a specific field MUST self-check via IsDirty
 // before doing work, so the same registry runs for both Create and Update.
 type ValidatorCtx struct {
-	Query   dao.AdminQuery
-	Req     map[string]any
-	Dirty   map[string]bool
-	OwnerID uint
-	GroupID uint
+	Query           dao.AdminQuery
+	Req             map[string]any
+	Dirty           map[string]bool
+	OwnerID         uint
+	GroupID         uint
+	CreateCount     int
+	SkipCreateQuota bool
 }
 
 // IsDirty reports whether `field` is present in the patch. Create-path callers
@@ -61,13 +63,22 @@ var byokValidators = []validatorFn{
 // Create-path requests are also covered by `binding:"max=N"` tags on
 // CreateRequest, which fail earlier with a structured 400 from gin.
 var fieldLengthLimits = map[string]int{
-	"name":         64,
-	"base_url":     256,
-	"tag":          64,
-	"remark":       255,
-	"organization": 128,
-	"api_version":  32,
-	"test_model":   128,
+	"name":                64,
+	"key":                 4096,
+	"base_url":            256,
+	"supported_api_types": 4096,
+	"endpoints":           4096,
+	"system_prompt":       4096,
+	"role_mapping":        4096,
+	"param_override":      4096,
+	"setting":             4096,
+	"tag":                 64,
+	"remark":              255,
+	"organization":        128,
+	"api_version":         32,
+	"test_model":          128,
+	"status_code_mapping": 4096,
+	"other_settings":      4096,
 }
 
 // RunValidators executes the BYOK validator registry against c, returning the
@@ -103,6 +114,9 @@ func validateUserUnderChannelLimitCtx(c ValidatorCtx) error {
 	if !c.IsCreate() {
 		return nil
 	}
+	if c.SkipCreateQuota {
+		return nil
+	}
 	if c.OwnerID == 0 {
 		return api.UnauthorizedError("not authenticated")
 	}
@@ -124,7 +138,11 @@ func validateUserUnderChannelLimitCtx(c ValidatorCtx) error {
 	if err != nil {
 		return api.InternalError("count private channels", err)
 	}
-	if int(count) >= limit {
+	createCount := c.CreateCount
+	if createCount <= 0 {
+		createCount = 1
+	}
+	if int(count)+createCount > limit {
 		return api.ConflictError(fmt.Sprintf("byok channel quota %d reached", limit), nil)
 	}
 	return nil
@@ -414,13 +432,26 @@ func mappingFromAny(v any) map[string]string {
 // shared validator registry consumes.
 func createRequestToMap(req *CreateRequest) map[string]any {
 	return map[string]any{
-		"name":          req.Name,
-		"base_url":      req.BaseURL,
-		"endpoints":     req.Endpoints,
-		"models":        req.Models,
-		"model_mapping": req.ModelMapping,
-		"weight":        req.Weight,
-		"priority":      req.Priority,
+		"name":                req.Name,
+		"key":                 req.Key,
+		"base_url":            req.BaseURL,
+		"supported_api_types": req.SupportedAPITypes,
+		"endpoints":           req.Endpoints,
+		"organization":        req.Organization,
+		"api_version":         req.ApiVersion,
+		"system_prompt":       req.SystemPrompt,
+		"role_mapping":        req.RoleMapping,
+		"param_override":      req.ParamOverride,
+		"setting":             req.Setting,
+		"tag":                 req.Tag,
+		"remark":              req.Remark,
+		"test_model":          req.TestModel,
+		"status_code_mapping": req.StatusCodeMapping,
+		"other_settings":      req.OtherSettings,
+		"models":              req.Models,
+		"model_mapping":       req.ModelMapping,
+		"weight":              req.Weight,
+		"priority":            req.Priority,
 	}
 }
 

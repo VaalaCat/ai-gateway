@@ -17,6 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig) (*http.Request, error) {
+	toolPolicy := codec.NormalizeBuiltinToolFallback(cfg.BuiltinToolFallback)
 	out := map[string]any{
 		"model":  cfg.Model,
 		"stream": req.Stream,
@@ -47,6 +48,9 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 	if req.ServiceTier != "" {
 		out["service_tier"] = req.ServiceTier
 	}
+	if req.SafetyIdentifier != "" {
+		out["safety_identifier"] = req.SafetyIdentifier
+	}
 	if req.TopLogprobs != nil {
 		out["top_logprobs"] = *req.TopLogprobs
 	}
@@ -57,7 +61,11 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 	for _, m := range req.Messages {
 		// RawJSON messages: emit as-is (unknown input item types)
 		if m.RawJSON != nil {
-			inputItems = append(inputItems, m.RawJSON)
+			raw := m.RawJSON
+			if toolPolicy == codec.BuiltinToolFallbackFunction {
+				raw = encodeFunctionFallbackInputItem(raw)
+			}
+			inputItems = append(inputItems, raw)
 			continue
 		}
 
@@ -107,20 +115,37 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 			"role": string(m.Role),
 		}
 
-		// Content
-		if len(m.Content) == 1 && m.Content[0].Type == codec.ContentTypeText && m.Content[0].RawJSON == nil {
-			item["content"] = m.Content[0].Text
-		} else if len(m.Content) > 0 {
+		// Content — drop empty text blocks first: an OpenAI-compatible upstream
+		// rejects an input_text part with no/empty text field (same defect the Chat
+		// encoder had). Inbound history can carry such blocks into the IR.
+		filtered := codec.DropEmptyTextBlocks(m.Content)
+		if len(filtered) == 1 && filtered[0].Type == codec.ContentTypeText && filtered[0].RawJSON == nil {
+			item["content"] = filtered[0].Text
+		} else if len(filtered) > 0 {
 			var blocks []json.RawMessage
-			for _, cb := range m.Content {
+			for _, cb := range filtered {
 				if cb.RawJSON != nil {
 					blocks = append(blocks, cb.RawJSON)
 				} else if cb.Type == codec.ContentTypeText {
 					b, _ := json.Marshal(respInputContentBlock{Type: "input_text", Text: cb.Text})
 					blocks = append(blocks, b)
+				} else if cb.Type == codec.ContentTypeImage {
+					var imgURL string
+					if cb.MediaB64 != "" && cb.MimeType != "" {
+						imgURL = "data:" + cb.MimeType + ";base64," + cb.MediaB64
+					} else {
+						imgURL = cb.MediaURL
+					}
+					if imgURL != "" {
+						b, _ := json.Marshal(respInputContentBlock{Type: "input_image", ImageURL: imgURL})
+						blocks = append(blocks, b)
+					}
 				}
 			}
 			item["content"] = blocks
+		} else if len(m.Content) > 0 {
+			// message carried only empty text blocks → legal empty string
+			item["content"] = ""
 		}
 
 		b, _ := json.Marshal(item)
@@ -135,13 +160,22 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 
 	// Extended fields
 	if req.ToolChoice != nil {
-		out["tool_choice"] = encodeToolChoiceResponses(req.ToolChoice)
+		toolChoice := req.ToolChoice
+		if toolPolicy == codec.BuiltinToolFallbackFunction && toolChoice.Type == "custom" {
+			functionChoice := *toolChoice
+			functionChoice.Type = "function"
+			toolChoice = &functionChoice
+		}
+		out["tool_choice"] = encodeToolChoiceResponses(toolChoice)
 	}
 	if req.ParallelToolCalls != nil {
 		out["parallel_tool_calls"] = *req.ParallelToolCalls
 	}
 	if req.Store != nil {
 		out["store"] = *req.Store
+	}
+	if len(req.StreamOptions) > 0 {
+		out["stream_options"] = req.StreamOptions
 	}
 
 	// Reconstruct reasoning from ReasoningEffort + Extras["reasoning_summary"]
@@ -188,7 +222,6 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 
 	// Tools
 	if len(req.Tools) > 0 {
-		policy := codec.NormalizeBuiltinToolFallback(cfg.BuiltinToolFallback)
 		emit := codec.TargetEmitFuncs{
 			Function: func(t codec.Tool) any {
 				ft := map[string]any{
@@ -206,9 +239,10 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 			},
 		}
 		var dropped []codec.DroppedTool
+		var functionFallbacks []codec.FunctionFallbackTool
 		var tools []any
 		for _, t := range req.Tools {
-			r, err := codec.ResolveTool(t, req.InboundProtocol, codec.ProtocolOpenAIResponses, policy, emit)
+			r, err := codec.ResolveTool(t, req.InboundProtocol, codec.ProtocolOpenAIResponses, toolPolicy, emit)
 			if err != nil {
 				return nil, err
 			}
@@ -216,9 +250,13 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 				dropped = append(dropped, *r.Dropped)
 				continue
 			}
+			if r.FunctionFallback != nil {
+				functionFallbacks = append(functionFallbacks, *r.FunctionFallback)
+			}
 			tools = append(tools, r.Emit)
 		}
 		codec.RecordDroppedTools(req, dropped)
+		codec.RecordFunctionFallbackTools(req, functionFallbacks)
 		if err := codec.AssertToolsInvariant(tools); err != nil {
 			return nil, err
 		}
@@ -250,6 +288,46 @@ func (c *ResponsesCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelCon
 	}
 
 	return httpReq, nil
+}
+
+func encodeFunctionFallbackInputItem(raw json.RawMessage) json.RawMessage {
+	var item map[string]any
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return raw
+	}
+	typ, _ := item["type"].(string)
+	switch typ {
+	case "custom_tool_call":
+		input, _ := item["input"].(string)
+		arguments, err := json.Marshal(map[string]string{"input": input})
+		if err != nil {
+			return raw
+		}
+		converted := map[string]any{
+			"type":      "function_call",
+			"call_id":   item["call_id"],
+			"name":      item["name"],
+			"arguments": string(arguments),
+		}
+		for _, key := range []string{"id", "status"} {
+			if value, ok := item[key]; ok {
+				converted[key] = value
+			}
+		}
+		if encoded, err := json.Marshal(converted); err == nil {
+			return encoded
+		}
+	case "custom_tool_call_output":
+		converted := map[string]any{
+			"type":    "function_call_output",
+			"call_id": item["call_id"],
+			"output":  item["output"],
+		}
+		if encoded, err := json.Marshal(converted); err == nil {
+			return encoded
+		}
+	}
+	return raw
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +375,16 @@ func (c *ResponsesCodec) encodeNonStream(events <-chan codec.Event, w http.Respo
 					Name:      tc.Name,
 					Arguments: tc.Arguments,
 				})
+			}
+		case codec.EventRawPassthrough:
+			if ev.RawPassthrough == nil || ev.RawPassthrough.EventName != sseconsts.OutputItemDone {
+				continue
+			}
+			var raw struct {
+				Item respOutputItem `json:"item"`
+			}
+			if json.Unmarshal([]byte(ev.RawPassthrough.Data), &raw) == nil && raw.Item.Type == "custom_tool_call" {
+				toolCalls = append(toolCalls, raw.Item)
 			}
 		case codec.EventUsage:
 			if ev.Usage != nil {

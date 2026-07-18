@@ -17,6 +17,31 @@ type UserRoutingsLoader struct {
 	Client app.WSClient
 }
 
+type TokenRoutingsLoader struct {
+	Client app.WSClient
+}
+
+func (l *TokenRoutingsLoader) Load(ctx context.Context, tokenID uint) (*protocol.TokenRoutingMap, error) {
+	if l.Client == nil {
+		return nil, entitycache.ErrNotFound
+	}
+	resp, err := fetchEntity(ctx, l.Client, events.EntityTokenRoutings, strconv.FormatUint(uint64(tokenID), 10))
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Found {
+		return nil, entitycache.ErrNotFound
+	}
+	var routings protocol.TokenRoutingMap
+	if err := json.Unmarshal(resp.Data, &routings); err != nil {
+		return nil, err
+	}
+	if routings.Routings == nil {
+		routings.Routings = map[string]*protocol.SyncedRouting{}
+	}
+	return &routings, nil
+}
+
 // Load 实现 entitycache.Loader[uint, *protocol.UserRoutingMap]。
 func (l *UserRoutingsLoader) Load(ctx context.Context, userID uint) (*protocol.UserRoutingMap, error) {
 	if l.Client == nil {

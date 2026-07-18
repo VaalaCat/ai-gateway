@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -205,6 +206,34 @@ func TestQuotaFilter_GetUserNil_DegradeOpen(t *testing.T) {
 	}
 	if fx.cache.getUserCalls != 1 {
 		t.Errorf("GetUser called %d times, want 1 (priced+paid → must attempt read)", fx.cache.getUserCalls)
+	}
+}
+
+func TestTargetSelectionCacheLoadHonorsRequestCancellation(t *testing.T) {
+	fx := newQuotaFixture("m", quotaPricedMC(), 7, nil, serviceFeeSettings(100))
+	ctx, cancel := context.WithCancel(context.Background())
+	fx.fctx.Rctx.Request = fx.fctx.Rctx.Request.WithContext(ctx)
+	entered := make(chan struct{})
+	fx.cache.getUser = func(ctx context.Context, _ uint) *protocol.SyncedUser {
+		close(entered)
+		<-ctx.Done()
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = quotaFilter{}.Apply(fx.fctx, []ScoredCandidate{adminPaid()})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("target selection did not enter cache load")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("target selection cache load ignored request cancellation")
 	}
 }
 

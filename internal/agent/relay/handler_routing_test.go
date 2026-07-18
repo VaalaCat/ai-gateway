@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -249,7 +250,7 @@ func TestRelay_RoutingExhausted_404(t *testing.T) {
 	}
 }
 
-// TestRelay_AgentRoute_MatchesByRealModel: 验证 RouteIndex.Match 使用真实 model（routing 解析后）而非顶层入参。
+// TestRelay_AgentRoute_MatchesByRealModel: 验证 AgentRoute 查找使用真实 model（routing 解析后）而非顶层入参。
 // 设置：global routing smart=[deepseek]，调用 ResolveToRealModel 校验解析，
 // 断言 routing 层后 realModel=deepseek（不是 smart）。
 func TestRelay_AgentRoute_MatchesByRealModel(t *testing.T) {
@@ -260,11 +261,11 @@ func TestRelay_AgentRoute_MatchesByRealModel(t *testing.T) {
 	})
 
 	ctx := plan.NewResolveCtx()
-	real := plan.ResolveToRealModel(s, "smart", 0, ctx)
+	real := plan.ResolveToRealModel(context.Background(), s, "smart", protocol.RoutingOwner{}, ctx)
 	if real != "deepseek" {
 		t.Fatalf("expect realModel=deepseek, got %q", real)
 	}
-	// 验证：handler.go 改造后 Match 调用用 real（不是 "smart"）
+	// 验证：agent route finder 输入用 real（不是 "smart"）
 	// 完整 handler 集成测试 + build pass 即覆盖正确性
 }
 
@@ -312,10 +313,10 @@ func TestRelay_ErrorMessageBytewiseParity_WithMain(t *testing.T) {
 			channels: []*models.Channel{
 				{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://x", Status: 1, Weight: 1}, Models: "gpt-4o"},
 			},
-			ui:        &app.UserInfo{UserID: 1, TokenID: 1, TokenModels: []string{"deepseek"}}, // gpt-4o 不在白名单
-			wantCode:  http.StatusNotFound,
-			wantBody:  "model not allowed: gpt-4o",
-			wantUsage: "model not allowed: gpt-4o",
+			ui: &app.UserInfo{UserID: 1, TokenID: 1, TokenModels: []string{"deepseek"}}, // gpt-4o 不在白名单
+			// behavior change: auth moved after ctxbuild and before scripts/planner, preserving middleware's 403/no-usage semantics.
+			wantCode: http.StatusForbidden,
+			wantBody: consts.ErrModelNotAllowed,
 		},
 		{
 			name: "invalid_forced_channel_id",
@@ -362,6 +363,12 @@ func TestRelay_ErrorMessageBytewiseParity_WithMain(t *testing.T) {
 
 			time.Sleep(50 * time.Millisecond)
 			snap := logs.Snapshot()
+			if c.wantUsage == "" {
+				if len(snap) != 0 {
+					t.Fatalf("authorization failure published %d usage entries, want 0", len(snap))
+				}
+				return
+			}
 			if len(snap) == 0 {
 				t.Fatal("expected usage log")
 			}
@@ -435,7 +442,7 @@ func TestRelay_RoutingFallback_AllMembersNoChannel_Returns502(t *testing.T) {
 	}
 }
 
-// TestRelay_Whitelist_GroupModelsBlock: GroupModels=[deepseek-v3]，请求 model=gpt-4o → handler 返回 404。
+// TestRelay_Whitelist_GroupModelsBlock: GroupModels=[deepseek-v3]，请求 model=gpt-4o → handler 返回 403。
 // （此测试绕过 auth 中间件，直接把 GroupModels 注入 UserInfo，验证 handler 层的防御性逻辑。）
 func TestRelay_Whitelist_GroupModelsBlock(t *testing.T) {
 	up := upstreamReturning200()
@@ -452,8 +459,9 @@ func TestRelay_Whitelist_GroupModelsBlock(t *testing.T) {
 	}
 	code, body := doRoutingRequestExpectCode(t, handler, ui, "gpt-4o")
 
-	if code != http.StatusNotFound {
-		t.Fatalf("expected 404 (group whitelist block), got %d: %s", code, body)
+	// behavior change: AuthorizeModel now runs after ctxbuild and before request scripts/planner.
+	if code != http.StatusForbidden {
+		t.Fatalf("expected 403 (group whitelist block), got %d: %s", code, body)
 	}
 	if !strings.Contains(body, "model not allowed") {
 		t.Errorf("expected 'model not allowed' in body, got: %s", body)

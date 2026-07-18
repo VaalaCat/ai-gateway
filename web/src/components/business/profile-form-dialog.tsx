@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
@@ -82,14 +82,6 @@ function SelfDialog(props: SelfProps) {
   const [avatarError, setAvatarError] = useState<string>("");
 
   const mutation = useUpdateProfile();
-
-  useEffect(() => {
-    if (props.open) {
-      setValue(props.initial);
-      setEmailError("");
-      setAvatarError("");
-    }
-  }, [props.open, props.initial]);
 
   const diff = diffProfile(value, props.initial);
   const isDirty = Object.keys(diff).length > 0;
@@ -177,13 +169,6 @@ function AdminDialog(props: AdminProps) {
   const [avatarError, setAvatarError] = useState<string>("");
 
   const mutation = useUpdateUser();
-
-  useEffect(() => {
-    if (props.open) {
-      setState(buildAdminInitial(props.user));
-      setAvatarError("");
-    }
-  }, [props.open, props.user]);
 
   const updateFields = (next: ProfileFormValue) => {
     setState({ ...state, fields: next });

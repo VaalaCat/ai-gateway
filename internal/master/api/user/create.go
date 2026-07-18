@@ -14,7 +14,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		return api.Created[models.User]{}, api.InternalError("create user failed", err)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

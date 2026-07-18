@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -21,7 +22,7 @@ func (h *Handler) HandleAuthorize(c *gin.Context) {
 		h.redirectLoginError(c, ErrUntrustedOrigin)
 		return
 	}
-	p, err := h.lookupEnabledProvider(providerName)
+	p, err := h.lookupEnabledProvider(c.Request.Context(), providerName)
 	if err != nil {
 		h.redirectLoginError(c, ErrUnknownProvider)
 		return
@@ -45,8 +46,8 @@ func (h *Handler) HandleAuthorize(c *gin.Context) {
 	c.Redirect(http.StatusFound, buildAuthorizeURL(p, state, matched))
 }
 
-func (h *Handler) lookupEnabledProvider(name string) (*models.OAuthProvider, error) {
-	q := dao.NewAdminQuery(dao.NewContext(h.App)).OAuthProvider()
+func (h *Handler) lookupEnabledProvider(ctx context.Context, name string) (*models.OAuthProvider, error) {
+	q := dao.NewAdminQuery(dao.NewContextWithContext(h.App, ctx)).OAuthProvider()
 	p, err := q.GetByName(name)
 	if err != nil {
 		return nil, err

@@ -3,10 +3,12 @@ package cache
 import (
 	"context"
 	"errors"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache/entitycache"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
 )
 
@@ -34,13 +36,26 @@ func classifyResolveErr(err error) string {
 // logResolveDegrade 用统一 Store.logger 记录一次实体解析降级。
 // not_found 属正常业务(用户没配该实体),降到 Debug 以免噪音;其余用 Warn。
 func (s *Store) logResolveDegrade(entity, reason string, extra ...zap.Field) {
+	s.logResolveDegradeFor(entity, reason, "", extra...)
+}
+
+func (s *Store) logResolveDegradeFor(entity, reason, target string, extra ...zap.Field) {
 	fields := append([]zap.Field{
 		zap.String("entity", entity),
 		zap.String("reason", reason),
 	}, extra...)
-	if reason == "not_found" {
+	if reason == "not_found" || reason == "client_canceled" {
 		s.logger.Debug("relay entity resolve degraded", fields...)
 		return
+	}
+	decision := s.resolveLogSuppressor.Observe(diagnostics.SuppressionKey{
+		Source: "agent_cache", Target: target, PathKind: entity, Stage: "load", ReasonCode: reason,
+	}, time.Now())
+	if !decision.Allow && decision.Summary == nil {
+		return
+	}
+	if decision.Summary != nil {
+		fields = append(fields, zap.Uint64("suppressed_count", decision.Summary.SuppressedCount))
 	}
 	s.logger.Warn("relay entity resolve degraded", fields...)
 }

@@ -2,6 +2,8 @@ package models
 
 import (
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -38,11 +40,67 @@ func TestAutoMigrate(t *testing.T) {
 	sqlDB, _ := db.DB()
 	defer sqlDB.Close()
 
-	tables := []string{"users", "tokens", "channels", "model_configs", "agents", "usage_logs", "o_auth_providers", "o_auth_identities"}
+	tables := []string{"users", "tokens", "channels", "model_configs", "agents", "usage_logs", "o_auth_providers", "o_auth_identities", "master_signing_keys"}
 	for _, table := range tables {
 		if !db.Migrator().HasTable(table) {
 			t.Errorf("table %s not created", table)
 		}
+	}
+}
+
+func TestMasterSigningKeyPrivateKeyJSONIsolation(t *testing.T) {
+	privateMarker := []byte("task8-private-key-marker-never-publish")
+	one := uint8(1)
+	key := MasterSigningKey{
+		KeyID:      strings.Repeat("a", 64),
+		PublicKey:  []byte("public-key-material"),
+		PrivateKey: privateMarker,
+		ActiveSlot: &one,
+		CreatedAt:  123,
+	}
+
+	raw, err := json.Marshal(key)
+	if err != nil {
+		t.Fatalf("marshal master signing key: %v", err)
+	}
+	serialized := string(raw)
+	for _, forbidden := range []string{
+		string(privateMarker),
+		base64.StdEncoding.EncodeToString(privateMarker),
+		"PrivateKey",
+		"private_key",
+		"ActiveSlot",
+		"active_slot",
+	} {
+		if strings.Contains(serialized, forbidden) {
+			t.Fatal("master signing key JSON exposed private signing state")
+		}
+	}
+}
+
+func TestMasterSigningKeyActiveSlotIsUnique(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	one := uint8(1)
+	first := MasterSigningKey{
+		KeyID:      strings.Repeat("a", 64),
+		PublicKey:  []byte("public-a"),
+		PrivateKey: []byte("private-a"),
+		ActiveSlot: &one,
+	}
+	if err := db.Create(&first).Error; err != nil {
+		t.Fatalf("create first active key: %v", err)
+	}
+	second := MasterSigningKey{
+		KeyID:      strings.Repeat("b", 64),
+		PublicKey:  []byte("public-b"),
+		PrivateKey: []byte("private-b"),
+		ActiveSlot: &one,
+	}
+	if err := db.Create(&second).Error; err == nil {
+		t.Fatal("expected unique active_slot index to reject a second active key")
 	}
 }
 
@@ -247,6 +305,46 @@ func TestAutoMigrate_UsageLogChannelSnapshotColumns(t *testing.T) {
 				t.Fatalf("expected usage_logs to have column %s", column)
 			}
 		})
+	}
+}
+
+func TestAutoMigrate_UsageLogAgentRouteScalars(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	for _, column := range []string{"route_source_agent_id", "agent_route_id", "agent_route_path"} {
+		if !db.Migrator().HasColumn(&UsageLog{}, column) {
+			t.Errorf("expected usage_logs to have column %s", column)
+		}
+	}
+	for _, index := range []string{
+		"idx_usage_logs_route_source_agent_id",
+		"idx_usage_logs_agent_route_id",
+		"idx_usage_logs_agent_route_path",
+	} {
+		if !db.Migrator().HasIndex(&UsageLog{}, index) {
+			t.Errorf("expected usage_logs to have index %s", index)
+		}
+	}
+
+	type fieldContract struct {
+		name string
+		tag  string
+	}
+	for _, contract := range []fieldContract{
+		{name: "RouteSourceAgentID", tag: "size:64;index"},
+		{name: "AgentRouteID", tag: "index"},
+		{name: "AgentRoutePath", tag: "size:16;index"},
+	} {
+		field, ok := reflect.TypeOf(UsageLog{}).FieldByName(contract.name)
+		if !ok {
+			t.Errorf("UsageLog.%s is missing", contract.name)
+			continue
+		}
+		if got := field.Tag.Get("gorm"); got != contract.tag {
+			t.Errorf("UsageLog.%s gorm tag = %q, want %q", contract.name, got, contract.tag)
+		}
 	}
 }
 

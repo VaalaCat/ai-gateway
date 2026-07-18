@@ -2,10 +2,13 @@ package eventbus
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
 )
+
+var ErrClosed = errors.New("event bus closed")
 
 type memSub struct {
 	id      uint64
@@ -48,17 +51,23 @@ func (b *MemoryBus) Publish(ctx context.Context, event Event) error {
 	}
 	b.mu.RUnlock()
 
+	var handlerErrors []error
 	for _, s := range matched {
-		handler := s.handler
-		go handler(ctx, event)
+		if err := s.handler(ctx, event); err != nil {
+			handlerErrors = append(handlerErrors, err)
+		}
 	}
-	return nil
+	return errors.Join(handlerErrors...)
 }
 
 func (b *MemoryBus) Subscribe(topic string, handler EventHandler) (Subscription, error) {
 	id := b.nextID.Add(1)
 	sub := &memSub{id: id, topic: topic, handler: handler, bus: b}
 	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return nil, ErrClosed
+	}
 	b.subs[id] = sub
 	b.mu.Unlock()
 	return sub, nil
@@ -68,6 +77,10 @@ func (b *MemoryBus) SubscribePattern(pattern string, handler EventHandler) (Subs
 	id := b.nextID.Add(1)
 	sub := &memSub{id: id, pattern: pattern, handler: handler, bus: b}
 	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return nil, ErrClosed
+	}
 	b.subs[id] = sub
 	b.mu.Unlock()
 	return sub, nil

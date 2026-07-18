@@ -2,6 +2,7 @@ package dataflow
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"testing"
 )
@@ -16,7 +17,7 @@ func TestStepForwardClientHeaders_AppliesOntoHTTPReq(t *testing.T) {
 	p := &Pass{HTTPReq: req}
 
 	s := &StepForwardClientHeaders{inbound: inbound, crossProtocol: false}
-	if err := s.Apply(p); err != nil {
+	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatalf("Apply err = %v", err)
 	}
 	if got := req.Header.Get("User-Agent"); got != "claude-cli/1.0" {
@@ -32,11 +33,11 @@ func TestStepForwardClientHeaders_AppliesOntoHTTPReq(t *testing.T) {
 
 func TestStepForwardClientHeaders_NilInboundOrReqNoop(t *testing.T) {
 	s := &StepForwardClientHeaders{inbound: nil}
-	if err := s.Apply(&Pass{HTTPReq: nil}); err != nil {
+	if err := s.Apply(context.Background(), &Pass{HTTPReq: nil}); err != nil {
 		t.Fatalf("nil req Apply err = %v", err)
 	}
 	req, _ := http.NewRequest(http.MethodPost, "https://up.example.com", nil)
-	if err := s.Apply(&Pass{HTTPReq: req}); err != nil {
+	if err := s.Apply(context.Background(), &Pass{HTTPReq: req}); err != nil {
 		t.Fatalf("nil inbound Apply err = %v", err)
 	}
 	if _, ok := req.Header["User-Agent"]; ok {

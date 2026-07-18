@@ -3,18 +3,20 @@ package entitycache
 import (
 	"context"
 	"errors"
-	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"golang.org/x/sync/singleflight"
 )
 
 // Config 是 LRUCache 的构造参数。
 type Config[K comparable, V any] struct {
 	// Capacity 是最大条目数（必须 > 0）。
 	Capacity int
+
+	// MaxConcurrentLoads 限制同时冷加载的不同 key 数。0 使用有界默认值；负值非法。
+	MaxConcurrentLoads int
 
 	// Loader 在 Get miss 时被调用。可为 nil（仅本地缓存）。
 	Loader Loader[K, V]
@@ -33,6 +35,8 @@ type Config[K comparable, V any] struct {
 	// 非 nil 且 Loader 非 nil 时启用 stale-while-revalidate + detached 冷 miss。
 	// nil 时退化为原行为(冷 miss 沿用调用方 ctx,不做后台刷新)。
 	Refresh func() RefreshConfig
+
+	Lifecycle *Lifecycle
 }
 
 // entry 是 LRU 内部存储单元，区分正常值和负缓存条目。
@@ -41,6 +45,18 @@ type entry[V any] struct {
 	missing  bool  // true 表示负缓存条目
 	expireAt int64 // 仅在 missing=true 时有效（unix nano）
 	loadedAt int64 // unix nano:最近一次成功写入(load/Set/Apply)时间
+}
+
+type loadOutcome[V any] struct {
+	value V
+	found bool
+	err   error
+}
+
+type loadFlight[V any] struct {
+	done    chan struct{}
+	outcome loadOutcome[V]
+	closed  bool
 }
 
 // LRUCache 基于 hashicorp/golang-lru，带 Loader、负缓存、metrics。
@@ -58,10 +74,13 @@ type LRUCache[K comparable, V any] struct {
 	loadErrors    atomic.Int64
 	invalidations atomic.Int64
 
-	sf singleflight.Group
+	loadMu      sync.Mutex
+	loadFlights map[K]*loadFlight[V]
+	loadLimit   int
 
 	refresher  *Refresher[K, V]
 	refreshCfg func() RefreshConfig
+	lifecycle  *Lifecycle
 }
 
 // NewLRUCache 构造 LRUCache。Capacity <= 0 返回错误（fail-fast）。
@@ -69,11 +88,27 @@ func NewLRUCache[K comparable, V any](cfg Config[K, V]) (*LRUCache[K, V], error)
 	if cfg.Capacity <= 0 {
 		return nil, errors.New("entitycache: Config.Capacity must be > 0")
 	}
+	if cfg.MaxConcurrentLoads < 0 {
+		return nil, errors.New("entitycache: Config.MaxConcurrentLoads must be >= 0")
+	}
+	loadLimit := cfg.MaxConcurrentLoads
+	if loadLimit == 0 || loadLimit > 64 {
+		loadLimit = 64
+	}
+	if loadLimit > cfg.Capacity {
+		loadLimit = cfg.Capacity
+	}
 	c := &LRUCache[K, V]{
 		cap:         cfg.Capacity,
 		loader:      cfg.Loader,
 		negativeTTL: cfg.NegativeTTL,
 		now:         cfg.Now,
+		lifecycle:   cfg.Lifecycle,
+		loadFlights: make(map[K]*loadFlight[V]),
+		loadLimit:   loadLimit,
+	}
+	if c.lifecycle == nil {
+		c.lifecycle = NewLifecycle()
 	}
 	if c.now == nil {
 		c.now = time.Now
@@ -90,7 +125,7 @@ func NewLRUCache[K comparable, V any](cfg Config[K, V]) (*LRUCache[K, V], error)
 	if cfg.Refresh != nil {
 		c.refreshCfg = cfg.Refresh
 		if cfg.Loader != nil {
-			c.refresher = NewRefresher[K, V](cfg.Loader, cfg.Refresh)
+			c.refresher = NewRefresherWithLifecycle[K, V](cfg.Loader, cfg.Refresh, c.lifecycle)
 		}
 	}
 	return c, nil
@@ -136,27 +171,98 @@ func (c *LRUCache[K, V]) Get(ctx context.Context, key K) (V, bool, error) {
 	return c.loadAndStore(ctx, key)
 }
 
-// loadAndStore 通过 singleflight 拉取并写入缓存。
+// loadAndStore lets one caller own the key load while followers wait without
+// registering lifecycle workers or spawning internal goroutines.
 func (c *LRUCache[K, V]) loadAndStore(ctx context.Context, key K) (V, bool, error) {
-	sfKey := fmt.Sprintf("%v", key)
-	res, err, _ := c.sf.Do(sfKey, func() (any, error) {
-		lctx, cancel := c.loadContext(ctx)
-		defer cancel()
-		return c.loader.Load(lctx, key)
-	})
+	if cause := context.Cause(ctx); cause != nil {
+		var zero V
+		return zero, false, cause
+	}
+	flight, leader, err := c.beginLoad(key)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			c.storeNegative(key)
-			var zero V
-			return zero, false, ErrNotFound
-		}
-		c.loadErrors.Add(1)
 		var zero V
 		return zero, false, err
 	}
-	v, _ := res.(V)
+	if leader {
+		if c.refreshCfg == nil {
+			c.finishLoad(key, flight, c.runLoad(ctx, key))
+		} else if !c.lifecycle.GoLoad(func(parent context.Context) {
+			c.finishLoad(key, flight, c.runLoad(parent, key))
+		}) {
+			c.finishLoad(key, flight, loadOutcome[V]{err: context.Canceled})
+		}
+	}
+	select {
+	case <-ctx.Done():
+		var zero V
+		return zero, false, context.Cause(ctx)
+	case <-flight.done:
+		return flight.outcome.value, flight.outcome.found, flight.outcome.err
+	}
+}
+
+func (c *LRUCache[K, V]) beginLoad(key K) (*loadFlight[V], bool, error) {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	if flight := c.loadFlights[key]; flight != nil {
+		return flight, false, nil
+	}
+	if cached, ok := c.cache.Peek(key); ok {
+		if !cached.missing {
+			return completedLoad(loadOutcome[V]{value: cached.value, found: true}), false, nil
+		}
+		if c.now().UnixNano() < cached.expireAt {
+			return completedLoad(loadOutcome[V]{err: ErrNotFound}), false, nil
+		}
+		c.cache.Remove(key)
+	}
+	if len(c.loadFlights) >= c.loadLimit {
+		return nil, false, ErrLoadLimitReached
+	}
+	flight := &loadFlight[V]{done: make(chan struct{})}
+	c.loadFlights[key] = flight
+	return flight, true, nil
+}
+
+func completedLoad[V any](outcome loadOutcome[V]) *loadFlight[V] {
+	flight := &loadFlight[V]{done: make(chan struct{}), outcome: outcome}
+	close(flight.done)
+	return flight
+}
+
+func (c *LRUCache[K, V]) finishLoad(key K, flight *loadFlight[V], outcome loadOutcome[V]) {
+	c.loadMu.Lock()
+	if c.loadFlights[key] != flight || flight.closed {
+		c.loadMu.Unlock()
+		return
+	}
+	flight.outcome = outcome
+	flight.closed = true
+	c.loadMu.Unlock()
+
+	close(flight.done)
+
+	c.loadMu.Lock()
+	if c.loadFlights[key] == flight {
+		delete(c.loadFlights, key)
+	}
+	c.loadMu.Unlock()
+}
+
+func (c *LRUCache[K, V]) runLoad(parent context.Context, key K) loadOutcome[V] {
+	lctx, cancel := c.loadContext(parent)
+	defer cancel()
+	v, err := c.loader.Load(lctx, key)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			c.storeNegative(key)
+			return loadOutcome[V]{err: ErrNotFound}
+		}
+		c.loadErrors.Add(1)
+		return loadOutcome[V]{err: err}
+	}
 	c.store(key, v)
-	return v, true, nil
+	return loadOutcome[V]{value: v, found: true}
 }
 
 // maybeRefresh 当条目超过 RefreshAfter 且已配 refresher 时,触发一次后台刷新(serve-stale)。
@@ -195,9 +301,9 @@ func (c *LRUCache[K, V]) loadContext(ctx context.Context) (context.Context, cont
 		return context.WithCancel(ctx)
 	}
 	if d := c.refreshCfg().LoadTimeout; d > 0 {
-		return context.WithTimeout(context.Background(), d)
+		return context.WithTimeout(ctx, d)
 	}
-	return context.WithCancel(context.Background())
+	return context.WithCancel(ctx)
 }
 
 // store 写入正向条目并盖 loadedAt 时间戳;LRU 淘汰时计数。

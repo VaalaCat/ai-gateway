@@ -68,8 +68,9 @@ func newHandlerTestCtx(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 
 	h := NewHandler(application, byokcrypto.NewStaticProvider(cipher))
 	ctx := &app.Context{
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: 1, GroupID: 1},
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: 1, GroupID: 1},
+		OwnerContext: t.Context(),
 	}
 	return h, ctx, db
 }
@@ -187,7 +188,7 @@ func TestPortalUpdate_OwnerCheck(t *testing.T) {
 	pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 99, Name: "x", Status: 1}
 	db.Create(pc)
 	// Build a ctx that represents user 1 (not 99)
-	bobCtx := &app.Context{App: h.App, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1}}
+	bobCtx := &app.Context{App: h.App, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1}, OwnerContext: t.Context()}
 	_, err := h.PortalUpdate(bobCtx, UpdateRequest{
 		ID:     strconv.FormatUint(uint64(pc.ID), 10),
 		Fields: map[string]any{"name": "hacked"},
@@ -250,7 +251,7 @@ func TestPortalDelete_OwnerCheck(t *testing.T) {
 	h, _, db := newHandlerTestCtx(t)
 	pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 99, Name: "x", Status: 1}
 	db.Create(pc)
-	bobCtx := &app.Context{App: h.App, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1}}
+	bobCtx := &app.Context{App: h.App, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1}, OwnerContext: t.Context()}
 	_, err := h.PortalDelete(bobCtx, api.IDPathRequest{ID: strconv.FormatUint(uint64(pc.ID), 10)})
 	if err == nil {
 		t.Fatal("cross-owner delete should 404")
@@ -296,7 +297,7 @@ func TestPortalUpdateKey_OwnerCheck(t *testing.T) {
 	h, _, db := newHandlerTestCtx(t)
 	pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 99, Name: "x", Status: 1, KeyCipher: []byte("x"), KeyLast4: "xxxx"}
 	db.Create(pc)
-	bobCtx := &app.Context{App: h.App, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1}}
+	bobCtx := &app.Context{App: h.App, UserInfo: &app.UserInfo{UserID: 1, GroupID: 1}, OwnerContext: t.Context()}
 	_, err := h.PortalUpdateKey(bobCtx, UpdateKeyRequest{
 		ID:  strconv.FormatUint(uint64(pc.ID), 10),
 		Key: "sk-new",

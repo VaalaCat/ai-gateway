@@ -10,6 +10,14 @@ export interface SettingsResponse {
   settings: Record<string, string>;
 }
 
+export type AgentRelaySettingsPatch = Partial<{
+  "agent.relay_default_uri": string;
+  "agent.relay_fallback_enabled": "0" | "1";
+  "agent.connectivity_probe_success_ttl_seconds": string;
+  "agent.connectivity_probe_failure_retry_min_seconds": string;
+  "agent.connectivity_probe_failure_retry_max_seconds": string;
+}>;
+
 export function useSystemStats() {
   return useQuery({
     queryKey: ["system-stats"],
@@ -57,6 +65,18 @@ export function useUpdateSettings() {
     mutationFn: (body: { settings: Record<string, string> }) =>
       api.put<SettingsResponse>("/admin/system/settings", body),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["system-settings"] });
+    },
+  });
+}
+
+export function useUpdateAgentRelaySettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { settings: AgentRelaySettingsPatch }) =>
+      api.put<SettingsResponse>("/admin/system/settings", body),
+    onSuccess: (data) => {
+      qc.setQueryData(["system-settings"], data);
       qc.invalidateQueries({ queryKey: ["system-settings"] });
     },
   });

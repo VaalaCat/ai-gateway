@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -301,7 +302,7 @@ func (r *Recorder) ResetAttempt() {
 // SnapshotAttempt 场景不 flush（mid-attempt 快照）。
 func (r *Recorder) buildTraceRecord() *TraceRecord {
 	rec := &TraceRecord{
-		Timings:        r.timings,
+		Timings:        cloneTimings(r.timings),
 		FailStage:      r.failStage,
 		UpstreamStatus: r.upstreamStatus, // 始终填入:消费方在 snapshot 上无视 verbose 直接读它(轻量字段,无安全风险)
 	}
@@ -387,13 +388,55 @@ func (r *Recorder) SnapshotAttempt() {
 	r.attempts = append(r.attempts, r.buildTraceRecord())
 }
 
+// AppendAttempt appends a trace produced by a remote attempt. A nil trace is
+// kept as an empty snapshot so Attempts indexes continue to match fallback Seq.
+func (r *Recorder) AppendAttempt(record *TraceRecord) {
+	if r == nil {
+		return
+	}
+	r.attempts = append(r.attempts, cloneTraceRecord(record))
+}
+
 // Attempts 返回已快照的逐候选 TraceRecord（顺序即候选顺序）。
 // nil 接收者安全（返回 nil）。
 func (r *Recorder) Attempts() []*TraceRecord {
 	if r == nil {
 		return nil
 	}
-	return r.attempts
+	attempts := make([]*TraceRecord, len(r.attempts))
+	for i, attempt := range r.attempts {
+		attempts[i] = cloneTraceRecord(attempt)
+	}
+	return attempts
+}
+
+func cloneTraceRecord(record *TraceRecord) *TraceRecord {
+	if record == nil {
+		return &TraceRecord{Timings: map[Stage]time.Duration{}}
+	}
+	return &TraceRecord{
+		InboundPath:        strings.Clone(record.InboundPath),
+		InboundHeaders:     record.InboundHeaders.Clone(),
+		InboundBody:        strings.Clone(record.InboundBody),
+		OutboundPath:       strings.Clone(record.OutboundPath),
+		OutboundHeaders:    record.OutboundHeaders.Clone(),
+		OutboundBody:       strings.Clone(record.OutboundBody),
+		ResponseHeaders:    record.ResponseHeaders.Clone(),
+		UpstreamBody:       strings.Clone(record.UpstreamBody),
+		ClientResponseBody: strings.Clone(record.ClientResponseBody),
+		UpstreamStatus:     record.UpstreamStatus,
+		FailStage:          record.FailStage,
+		Timings:            cloneTimings(record.Timings),
+		Verbose:            record.Verbose,
+	}
+}
+
+func cloneTimings(timings map[Stage]time.Duration) map[Stage]time.Duration {
+	cloned := make(map[Stage]time.Duration, len(timings))
+	for stage, duration := range timings {
+		cloned[stage] = duration
+	}
+	return cloned
 }
 
 // LastSnapshotVerbose 返回最近一次 SnapshotAttempt 的 verbose 判定

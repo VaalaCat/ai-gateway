@@ -13,7 +13,7 @@ import (
 
 func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusResponse, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

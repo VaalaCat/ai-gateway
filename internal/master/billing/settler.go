@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -73,16 +74,28 @@ func (s *Settler) Start() {
 	})
 }
 
+// Settle is the void, fire-and-forget wrapper used by the legacy ws
+// usage.reported subscriber: per-entry failures are logged inside
+// SettleBatch and swallowed here, matching the async publish semantics
+// (agent already got its ack before this runs).
 func (s *Settler) Settle(ctx context.Context, agentID string, logs []protocol.UsageLogEntry) {
+	_ = s.SettleBatch(ctx, agentID, logs)
+}
+
+// SettleBatch 逐条结算并返回聚合错误;成功条目照常落库/扣费,失败条目计入返回值。
+// 供同步摄取路径(HTTP ingest)用:调用方以非 nil 返回决定 5xx,让 agent 重试整批;
+// 已成功条目靠 request_id 去重天然幂等,重试不会双计。
+func (s *Settler) SettleBatch(ctx context.Context, agentID string, logs []protocol.UsageLogEntry) error {
+	var errs []error
 	for _, entry := range logs {
 		if err := s.settleOne(ctx, agentID, entry); err != nil {
 			s.Logger.Error("settle failed",
-				zap.String("request_id", entry.RequestID),
-				zap.Error(err),
-			)
+				zap.String("request_id", entry.RequestID), zap.Error(err))
+			errs = append(errs, fmt.Errorf("request %s: %w", entry.RequestID, err))
 		}
 	}
 	s.publishQuotaSync(ctx, agentID, logs)
+	return errors.Join(errs...)
 }
 
 // publishQuotaSync 结算完一批 usage 后，把受影响 user 的最新 Quota 定向回送给来源
@@ -130,6 +143,8 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		return err
 	}
 	if exists {
+		s.Logger.Debug("usage settle dedup hit (retransmit correctly ignored)",
+			zap.String("request_id", entry.RequestID), zap.String("agent_id", agentID))
 		return nil // already processed
 	}
 
@@ -189,6 +204,10 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 	}
 
 	channelName, channelType := parseChannelSnapshot(entry.Other)
+	executionAgentID := agentID
+	if entry.ExecutionAgentID != nil {
+		executionAgentID = *entry.ExecutionAgentID
+	}
 
 	log := models.UsageLog{
 		UserID:             entry.UserID,
@@ -196,7 +215,10 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		ChannelID:          entry.ChannelID,
 		PrivateChannelID:   entry.PrivateChannelID,
 		OwnerType:          entry.OwnerType,
-		AgentID:            agentID,
+		AgentID:            executionAgentID,
+		RouteSourceAgentID: entry.RouteSourceAgentID,
+		AgentRouteID:       entry.AgentRouteID,
+		AgentRoutePath:     entry.AgentRoutePath,
 		ModelName:          entry.ModelName,
 		CreatedAt:          entry.Timestamp,
 		PromptTokens:       entry.PromptTokens,

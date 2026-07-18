@@ -13,7 +13,7 @@ import (
 func (h *Handler) Get(c *app.Context, req api.IDPathRequest) (models.User, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	user, err := q.User().GetByID(uint(id))

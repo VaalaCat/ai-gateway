@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
@@ -113,39 +113,21 @@ export function TokenTemplateSyncDialog({ template, onOpenChange }: Props) {
   const tc = useTranslations("common");
 
   const previewMut = usePreviewSyncTokenTemplate();
+  const previewAsync = previewMut.mutateAsync;
   const syncMut = useSyncTokenTemplate();
 
   const [fields, setFields] = useState<string[]>(DEFAULT_FIELDS);
   const [preview, setPreview] = useState<SyncPreviewResponse | null>(null);
-  // 记录已为哪个 template.id 重置过字段勾选，避免 template 切换那一帧用上一个 template 的残留 fields 发预览。
-  const resetForId = useRef<number | null>(null);
-
+  const handlePreviewFailure = useEffectEvent(() => {
+    toast.error(t("sync.previewFailed"));
+    onOpenChange(false);
+  });
   useEffect(() => {
-    if (!template) {
-      resetForId.current = null;
-      setPreview(null);
-      return;
-    }
-    // template 刚变化：把字段勾选还原成默认、清掉旧预览。若当前 fields 已是默认引用，
-    // setFields 不会触发 re-render，则直接落到下面发预览；否则等 setFields 触发的下一帧再发，
-    // 两条路径都只发一次预览请求。
-    if (resetForId.current !== template.id) {
-      resetForId.current = template.id;
-      setPreview(null);
-      if (fields !== DEFAULT_FIELDS) {
-        setFields(DEFAULT_FIELDS);
-        return;
-      }
-    }
-    previewMut
-      .mutateAsync({ id: template.id, fields })
+    if (!template) return;
+    previewAsync({ id: template.id, fields })
       .then(setPreview)
-      .catch(() => {
-        toast.error(t("sync.previewFailed"));
-        onOpenChange(false);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [template?.id, fields]);
+      .catch(handlePreviewFailure);
+  }, [fields, previewAsync, template]);
 
   const handleConfirm = async () => {
     if (!template) return;

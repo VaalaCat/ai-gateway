@@ -40,6 +40,14 @@ type ChannelConfig struct {
 	// 由 upstream/channelconfig.go 在 BuildChannelConfig 时根据 OtherSettings 中的
 	// model_thinking_passthrough 规则匹配 cfg.Model 后填入。
 	SendBackThinking bool `json:"send_back_thinking,omitempty"`
+	// InlineImageURL 为 true 时,StepInlineImages 在出站编码前把消息里 MediaURL 形式的
+	// 图片下载内联成 base64(MediaB64)。从 Channel.OtherSettings["inline_image_url"] 读入。
+	InlineImageURL bool `json:"inline_image_url,omitempty"`
+	// RequestFieldPermissions is applied once, immediately before outbound
+	// encoding, so every native codec follows the same forwarding policy.
+	RequestFieldPermissions RequestFieldPermissions `json:"request_field_permissions"`
+	// ClaudeBetaQuery appends beta=true to Claude Messages request URLs.
+	ClaudeBetaQuery bool `json:"claude_beta_query,omitempty"`
 }
 
 // defaultEndpointPaths maps each protocol to its standard endpoint path.

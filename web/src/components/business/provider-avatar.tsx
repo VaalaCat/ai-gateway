@@ -13,22 +13,34 @@ const PROVIDER_ICON_SUPPORTED = new Set([
 
 // Providers NOT in ProviderIcon but have Avatar components in @lobehub/icons
 // These use lazy-loaded Avatar imports as fallback
-const AVATAR_FALLBACKS: Record<string, () => Promise<{ default: ComponentType<{ size?: number }> }>> = {
-  aws: () => import("@lobehub/icons").then(m => ({ default: (m as Record<string, any>).Aws?.Avatar })),
-  baai: () => import("@lobehub/icons").then(m => ({ default: (m as Record<string, any>).BAAI?.Avatar })),
-  aionlabs: () => import("@lobehub/icons").then(m => ({ default: (m as Record<string, any>).AionLabs?.Avatar })),
-  inflection: () => import("@lobehub/icons").then(m => ({ default: (m as Record<string, any>).Inflection?.Avatar })),
-  voyage: () => import("@lobehub/icons").then(m => ({ default: (m as Record<string, any>).Voyage?.Avatar })),
+type AvatarSizeProps = { size: number };
+
+const AVATAR_FALLBACKS: Record<string, () => Promise<{ default: ComponentType<AvatarSizeProps> }>> = {
+  aws: async () => {
+    const Avatar = (await import("@lobehub/icons")).Aws.Avatar;
+    return { default: function AwsAvatar(props: AvatarSizeProps) { return <Avatar {...props} />; } };
+  },
+  baai: async () => {
+    const Avatar = (await import("@lobehub/icons")).BAAI.Avatar;
+    return { default: function BAAIAvatar(props: AvatarSizeProps) { return <Avatar {...props} />; } };
+  },
+  aionlabs: async () => {
+    const Avatar = (await import("@lobehub/icons")).AionLabs.Avatar;
+    return { default: function AionLabsAvatar(props: AvatarSizeProps) { return <Avatar {...props} />; } };
+  },
+  inflection: async () => {
+    const Avatar = (await import("@lobehub/icons")).Inflection.Avatar;
+    return { default: function InflectionAvatar(props: AvatarSizeProps) { return <Avatar {...props} />; } };
+  },
+  voyage: async () => {
+    const Avatar = (await import("@lobehub/icons")).Voyage.Avatar;
+    return { default: function VoyageAvatar(props: AvatarSizeProps) { return <Avatar {...props} />; } };
+  },
 };
 
-// Cache lazy components
-const lazyCache = new Map<string, ComponentType<{ size?: number }>>();
-function getLazyAvatar(key: string) {
-  if (!lazyCache.has(key) && AVATAR_FALLBACKS[key]) {
-    lazyCache.set(key, lazy(AVATAR_FALLBACKS[key]));
-  }
-  return lazyCache.get(key);
-}
+const LAZY_AVATARS = Object.fromEntries(
+  Object.entries(AVATAR_FALLBACKS).map(([key, load]) => [key, lazy(load)]),
+) as Record<string, ComponentType<AvatarSizeProps>>;
 
 interface ProviderAvatarProps {
   provider: string; // lobehub icon key (lowercase)
@@ -44,7 +56,7 @@ export function ProviderAvatar({ provider, size = 14 }: ProviderAvatarProps) {
   }
 
   // Fallback to lazy Avatar for unsupported providers
-  const LazyAvatar = getLazyAvatar(key);
+  const LazyAvatar = LAZY_AVATARS[key];
   if (LazyAvatar) {
     return (
       <Suspense fallback={<span style={{ width: size, height: size }} />}>

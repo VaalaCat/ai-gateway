@@ -1,14 +1,16 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 )
 
 type APIError struct {
 	Status  int
-	Code    string         // 结构化错误 code（前端 i18n 用）
+	Code    string // 结构化错误 code（前端 i18n 用）
 	Message string
 	Details map[string]any // 结构化错误细节
 	Cause   error
@@ -56,6 +58,10 @@ var _ ErrorMapper = DefaultErrorMapper{}
 type DefaultErrorMapper struct{}
 
 func (DefaultErrorMapper) Map(err error) (int, any) {
+	var routeErr protocol.PublicRouteError
+	if errors.As(err, &routeErr) {
+		return http.StatusBadGateway, routeErr
+	}
 	if apiErr, ok := err.(*APIError); ok {
 		// 当包含结构化 code 时，按 spec §4.2 渲染：{code, message, details}
 		if apiErr.Code != "" {
@@ -70,7 +76,7 @@ func (DefaultErrorMapper) Map(err error) (int, any) {
 		}
 		return apiErr.Status, gin.H{"error": apiErr.Error()}
 	}
-	return http.StatusInternalServerError, gin.H{"error": err.Error()}
+	return http.StatusInternalServerError, gin.H{"error": "internal server error"}
 }
 
 // ErrorWithCode 用于需要结构化错误响应的端点（按 code 做前端 i18n）。

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
@@ -104,16 +104,9 @@ export function ProviderFormDialog({ mode, open, onOpenChange, initial }: Props)
   const tc = useTranslations("common");
   const create = useCreateOAuthProvider();
   const update = useUpdateOAuthProvider();
-  const [form, setForm] = useState<FormState>({});
-
-  useEffect(() => {
-    if (!open) return;
-    if (mode === "create") {
-      setForm({ enabled: true, protocol: "oidc" });
-    } else if (initial) {
-      setForm(pickFormState(initial));
-    }
-  }, [open, mode, initial]);
+  const [form, setForm] = useState<FormState>(() =>
+    mode === "create" ? { enabled: true, protocol: "oidc" } : initial ? pickFormState(initial) : {},
+  );
 
   const isSubmitting = create.isPending || update.isPending;
 

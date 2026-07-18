@@ -14,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
+import { EntityLabel } from "@/components/business/entity-label";
 import { RoutingFormValues } from "../types";
 
 export interface BasicSectionProps {
@@ -22,6 +23,7 @@ export interface BasicSectionProps {
   // 仅 user 模式生效——由 RoutingForm 透传：
   selectedTokenID?: string;
   onSelectTokenID?: (id: string) => void;
+  lockedTokenID?: number;
 }
 
 export function BasicSection({
@@ -29,9 +31,11 @@ export function BasicSection({
   apiMode = "admin",
   selectedTokenID,
   onSelectTokenID,
+  lockedTokenID,
 }: BasicSectionProps) {
   const t = useTranslations("modelRoutings");
   const isUserMode = apiMode === "user";
+  const isTokenMode = lockedTokenID !== undefined;
   const scope = form.watch("scope");
 
   return (
@@ -56,7 +60,15 @@ export function BasicSection({
         )}
       />
 
-      {apiMode === "user" && (
+      {isTokenMode ? (
+        <FormItem>
+          <FormLabel>{t("field.token")}</FormLabel>
+          <div className="flex min-h-9 items-center rounded-md border bg-muted/30 px-3 py-2 text-sm">
+            <EntityLabel entity="token" id={lockedTokenID} />
+          </div>
+          <p className="text-xs text-muted-foreground">{t("field.tokenLockedHint")}</p>
+        </FormItem>
+      ) : apiMode === "user" ? (
         <FormItem>
           <FormLabel>{t("field.token")}</FormLabel>
           <EntityPicker
@@ -67,9 +79,9 @@ export function BasicSection({
           />
           <p className="text-xs text-muted-foreground">{t("field.tokenHint")}</p>
         </FormItem>
-      )}
+      ) : null}
 
-      {!isUserMode && (
+      {!isUserMode && !isTokenMode && (
         <FormField
           control={form.control}
           name="scope"
@@ -95,7 +107,7 @@ export function BasicSection({
         />
       )}
 
-      {scope === "user" && !isUserMode && (
+      {scope === "user" && !isUserMode && !isTokenMode && (
         <FormField
           control={form.control}
           name="user_id"
@@ -124,7 +136,9 @@ export function BasicSection({
             <div>
               <FormLabel>{t("field.enabled")}</FormLabel>
               <p className="text-xs text-muted-foreground">
-                {isUserMode ? t("field.enabledHintUser") : t("field.enabledHint")}
+                {isUserMode || isTokenMode
+                  ? t("field.enabledHintUser")
+                  : t("field.enabledHint")}
               </p>
             </div>
             <Switch checked={field.value} onCheckedChange={field.onChange} />

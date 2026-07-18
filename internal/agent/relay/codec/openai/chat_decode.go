@@ -57,6 +57,7 @@ func (c *ChatCodec) DecodeRequest(r *http.Request) (*codec.Request, error) {
 	req.Logprobs = raw.Logprobs
 	req.TopLogprobs = raw.TopLogprobs
 	req.ServiceTier = raw.ServiceTier
+	req.SafetyIdentifier = raw.SafetyIdentifier
 	req.ResponseFormat = raw.ResponseFormat
 	req.StreamOptions = raw.StreamOptions
 	req.ReasoningEffort = raw.ReasoningEffort

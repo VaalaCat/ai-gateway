@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/durhist"
 	"gorm.io/gorm"
 )
 
@@ -1585,11 +1586,9 @@ type LogsTotals struct {
 	SparkP95    []int64 `json:"spark_p95"`
 }
 
-// LogsTotals 聚合 usage_logs 在 r 窗口内的请求总数 / 失败数 / duration p95 / 最慢请求 / 24-slot spark。
-// 非 admin scope 自动注入 user_id 过滤。
-// p95 计算用 SQLite 友好的 OFFSET 近似 (跟 stageP95 / PercentileTTFT 同思路)。
+// LogsTotals:admin 走 rollup(usage_hourly_bucket totals/sparks + usage_duration_histograms
+// slowest/p95),窗口内 rollup 无行则回退原表(未回填保护,spec §12);user scope 恒走原表。
 func (q *adminStatsQuery) LogsTotals(r ObsRange, scope Scope) (LogsTotals, error) {
-	db := q.ctx.GetDB()
 	if r.End <= r.Start {
 		return LogsTotals{
 			SparkTotal:  make([]int64, 24),
@@ -1597,6 +1596,22 @@ func (q *adminStatsQuery) LogsTotals(r ObsRange, scope Scope) (LogsTotals, error
 			SparkP95:    make([]int64, 24),
 		}, nil
 	}
+	if scope.IsAdmin {
+		res, ok, err := q.logsTotalsFromRollups(r)
+		if err == nil && ok {
+			return res, nil
+		}
+		// err != nil 或 rollup 空窗:静默回退原表(回填期间的正确性优先)
+	}
+	return q.logsTotalsFromRaw(r, scope)
+}
+
+// logsTotalsFromRaw 聚合 usage_logs 在 r 窗口内的请求总数 / 失败数 / duration p95 / 最慢请求 / 24-slot spark。
+// 非 admin scope 自动注入 user_id 过滤。
+// p95 计算用 SQLite 友好的 OFFSET 近似 (跟 stageP95 / PercentileTTFT 同思路)。
+// 原 LogsTotals 函数体原样搬移,行为不变(既有测试 + user scope 依赖此路径)。
+func (q *adminStatsQuery) logsTotalsFromRaw(r ObsRange, scope Scope) (LogsTotals, error) {
+	db := q.ctx.GetDB()
 
 	base := func() *gorm.DB {
 		q := db.Model(&models.UsageLog{}).
@@ -1660,6 +1675,181 @@ func (q *adminStatsQuery) LogsTotals(r ObsRange, scope Scope) (LogsTotals, error
 		Total: agg.Total, Failed: agg.Failed, P95Ms: p95, SlowestMs: agg.Slowest,
 		SparkTotal: sparkTotal, SparkFailed: sparkFailed, SparkP95: sparkP95,
 	}, nil
+}
+
+// utcDateHour 把 unix 秒转成 rollup 维度 (date, hour)。
+func utcDateHour(ts int64) (string, int) {
+	t := time.Unix(ts, 0).UTC()
+	return t.Format("2006-01-02"), t.Hour()
+}
+
+// hourWindow 给 rollup 表加 [start,end) 的 (date,hour) 复合谓词(end 排他)。
+//
+// 精度权衡(用户已确认接受):窗口端点非整点时,该端点所在的小时被"整桶"纳入
+// (小时级 rollup 无桶内切分)。默认"过去 7 天"视图 Start 恒非整点 → 最老一个
+// 小时被整桶多算,totals 相对误差 <1%;24h spark 最左槽同理可能偏大。
+// 需要精确口径时选整日日期筛选(date-picker 产出整日边界,天然对齐)。
+func hourWindow(db *gorm.DB, start, end int64) *gorm.DB {
+	sd, sh := utcDateHour(start)
+	ed, eh := utcDateHour(end - 1)
+	return db.Where(
+		"(date > ? OR (date = ? AND hour >= ?)) AND (date < ? OR (date = ? AND hour <= ?))",
+		sd, sd, sh, ed, ed, eh,
+	)
+}
+
+// logsTotalsFromRollups 从 usage_hourly_bucket(totals/sparks)+ usage_duration_histograms
+// (slowest/p95,17 槽 SUM 后经 durhist.EstimatePercentile 插值)读 admin scope 的 LogsTotals。
+// ok=false 表示窗口内 rollup 无行(未回填),调用方应回退 logsTotalsFromRaw;
+// 同样地,若小时桶有成功请求但直方图侧表 17 槽全空(部署后/rebuild 前的历史窗口,
+// 侧表比 usage_hourly_bucket 新)也视为未回填,回退原表拿真实 p95/slowest(spec §12)。
+func (q *adminStatsQuery) logsTotalsFromRollups(r ObsRange) (LogsTotals, bool, error) {
+	db := q.ctx.GetDB()
+
+	// totals(通用计数走 usage_hourly_bucket)
+	type totalsAgg struct {
+		Rows   int64 `gorm:"column:bucket_rows"`
+		Total  int64 `gorm:"column:total"`
+		Failed int64 `gorm:"column:failed"`
+	}
+	var agg totalsAgg
+	if err := hourWindow(db.Model(&models.UsageHourlyBucket{}), r.Start, r.End).
+		Select(`COUNT(*) AS bucket_rows,
+			COALESCE(SUM(request_count),0) AS total,
+			COALESCE(SUM(failed_count),0) AS failed`).
+		Scan(&agg).Error; err != nil {
+		return LogsTotals{}, false, err
+	}
+	if agg.Rows == 0 {
+		return LogsTotals{}, false, nil // 窗口未回填 → 回退原表
+	}
+
+	// slowest + 合并直方图(usage_duration_histograms)
+	type histAgg struct {
+		Max int64 `gorm:"column:max_ms"`
+		H0  int64 `gorm:"column:s0"`
+		H1  int64 `gorm:"column:s1"`
+		H2  int64 `gorm:"column:s2"`
+		H3  int64 `gorm:"column:s3"`
+		H4  int64 `gorm:"column:s4"`
+		H5  int64 `gorm:"column:s5"`
+		H6  int64 `gorm:"column:s6"`
+		H7  int64 `gorm:"column:s7"`
+		H8  int64 `gorm:"column:s8"`
+		H9  int64 `gorm:"column:s9"`
+		H10 int64 `gorm:"column:s10"`
+		H11 int64 `gorm:"column:s11"`
+		H12 int64 `gorm:"column:s12"`
+		H13 int64 `gorm:"column:s13"`
+		H14 int64 `gorm:"column:s14"`
+		H15 int64 `gorm:"column:s15"`
+		H16 int64 `gorm:"column:s16"`
+	}
+	var ha histAgg
+	if err := hourWindow(db.Model(&models.UsageDurationHistogram{}), r.Start, r.End).
+		Select(`COALESCE(MAX(max_duration_ms),0) AS max_ms,
+			COALESCE(SUM(h0),0) AS s0, COALESCE(SUM(h1),0) AS s1, COALESCE(SUM(h2),0) AS s2,
+			COALESCE(SUM(h3),0) AS s3, COALESCE(SUM(h4),0) AS s4, COALESCE(SUM(h5),0) AS s5,
+			COALESCE(SUM(h6),0) AS s6, COALESCE(SUM(h7),0) AS s7, COALESCE(SUM(h8),0) AS s8,
+			COALESCE(SUM(h9),0) AS s9, COALESCE(SUM(h10),0) AS s10, COALESCE(SUM(h11),0) AS s11,
+			COALESCE(SUM(h12),0) AS s12, COALESCE(SUM(h13),0) AS s13, COALESCE(SUM(h14),0) AS s14,
+			COALESCE(SUM(h15),0) AS s15, COALESCE(SUM(h16),0) AS s16`).
+		Scan(&ha).Error; err != nil {
+		return LogsTotals{}, false, err
+	}
+	counts := [durhist.NumSlots]int64{ha.H0, ha.H1, ha.H2, ha.H3, ha.H4, ha.H5, ha.H6, ha.H7, ha.H8, ha.H9, ha.H10, ha.H11, ha.H12, ha.H13, ha.H14, ha.H15, ha.H16}
+
+	var histTotal int64
+	for _, c := range counts {
+		histTotal += c
+	}
+	// 小时桶有成功请求但直方图侧表尚未回填(部署后/rebuild 前的历史窗口)→
+	// 回退原表拿真实 p95/slowest(spec §12 "侧表无数据则回退原表")。
+	// 注意用"存在成功"区分:全失败窗口直方图本就该空,p95=0 与 raw 一致,不回退。
+	if histTotal == 0 && agg.Total > agg.Failed {
+		return LogsTotals{}, false, nil
+	}
+
+	p95 := durhist.EstimatePercentile(counts, 0.95, ha.Max)
+
+	// 24-slot sparks:窗口 [End-24h, End) 按 (date,hour) 分组
+	winStart := r.End - 24*3600
+	if winStart < r.Start {
+		winStart = r.Start
+	}
+	sparkTotal, sparkFailed, err := q.rollupSparks(winStart, r.End)
+	if err != nil {
+		return LogsTotals{}, false, err
+	}
+	sparkP95, err := q.rollupSparkMax(winStart, r.End)
+	if err != nil {
+		return LogsTotals{}, false, err
+	}
+
+	return LogsTotals{
+		Total: agg.Total, Failed: agg.Failed, P95Ms: p95, SlowestMs: ha.Max,
+		SparkTotal: sparkTotal, SparkFailed: sparkFailed, SparkP95: sparkP95,
+	}, true, nil
+}
+
+// rollupSparks:usage_hourly_bucket 按 (date,hour) SUM,散点到 24 槽
+// (槽下标算法与 logsHourlySpark(上面)一致:(hourUnix-winStart)/3600)。
+func (q *adminStatsQuery) rollupSparks(winStart, end int64) (total, failed []int64, err error) {
+	type row struct {
+		Date   string `gorm:"column:date"`
+		Hour   int    `gorm:"column:hour"`
+		Total  int64  `gorm:"column:total"`
+		Failed int64  `gorm:"column:failed"`
+	}
+	var rows []row
+	if err = hourWindow(q.ctx.GetDB().Model(&models.UsageHourlyBucket{}), winStart, end).
+		Select(`date, hour, COALESCE(SUM(request_count),0) AS total, COALESCE(SUM(failed_count),0) AS failed`).
+		Group("date, hour").Scan(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+	total, failed = make([]int64, 24), make([]int64, 24)
+	for _, rr := range rows {
+		t, perr := time.Parse("2006-01-02", rr.Date)
+		if perr != nil {
+			continue
+		}
+		hourUnix := t.Unix() + int64(rr.Hour)*3600
+		idx := int((hourUnix - winStart) / 3600)
+		if idx >= 0 && idx < 24 {
+			total[idx] += rr.Total
+			failed[idx] += rr.Failed
+		}
+	}
+	return total, failed, nil
+}
+
+// rollupSparkMax:usage_duration_histograms 每小时 MAX(max_duration_ms)
+// (语义对齐原 logsHourlySparkMax:每小时最慢成功请求)。
+func (q *adminStatsQuery) rollupSparkMax(winStart, end int64) ([]int64, error) {
+	type row struct {
+		Date string `gorm:"column:date"`
+		Hour int    `gorm:"column:hour"`
+		Max  int64  `gorm:"column:max_ms"`
+	}
+	var rows []row
+	if err := hourWindow(q.ctx.GetDB().Model(&models.UsageDurationHistogram{}), winStart, end).
+		Select(`date, hour, COALESCE(MAX(max_duration_ms),0) AS max_ms`).
+		Group("date, hour").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]int64, 24)
+	for _, rr := range rows {
+		t, perr := time.Parse("2006-01-02", rr.Date)
+		if perr != nil {
+			continue
+		}
+		hourUnix := t.Unix() + int64(rr.Hour)*3600
+		idx := int((hourUnix - winStart) / 3600)
+		if idx >= 0 && idx < 24 {
+			out[idx] = rr.Max
+		}
+	}
+	return out, nil
 }
 
 // logsHourlySpark 把 [winStart, end) 切成 24 个 hour-slot, 统计每槽 COUNT(*)。

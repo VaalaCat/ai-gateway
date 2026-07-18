@@ -2,7 +2,6 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -19,36 +18,36 @@ type AgentIDQuery struct {
 
 // GetInflight fetches the in-flight request snapshot from a remote agent.
 func (h *Handler) GetInflight(c *app.Context, req AgentIDQuery) (json.RawMessage, error) {
-	if h.HubCall == nil {
-		return nil, api.InternalError("hub not available", nil)
-	}
-	id, _ := strconv.ParseUint(req.ID, 10, 64)
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
-	ag, err := q.Agent().GetByID(uint(id))
-	if err != nil {
-		return nil, api.NotFoundError("agent not found")
-	}
-	res, err := h.HubCall(ag.AgentID, consts.RPCAgentInflight, nil, 10*time.Second)
-	if err != nil {
-		return nil, api.BadRequestError(fmt.Sprintf("inflight query failed: %v", err), nil)
-	}
-	return res, nil
+	return h.callDiagnostic(c, req, consts.RPCAgentInflight, 10*time.Second)
 }
 
 // GetGoroutines fetches a goroutine dump from a remote agent (admin only).
 func (h *Handler) GetGoroutines(c *app.Context, req AgentIDQuery) (json.RawMessage, error) {
-	if h.HubCall == nil {
-		return nil, api.InternalError("hub not available", nil)
+	return h.callDiagnostic(c, req, consts.RPCAgentGoroutines, 15*time.Second)
+}
+
+func (h *Handler) callDiagnostic(c *app.Context, req AgentIDQuery, method string, timeout time.Duration) (json.RawMessage, error) {
+	if h.Connections == nil || h.HubCallSession == nil {
+		return nil, api.InternalError("connection service not available", nil)
+	}
+	if apiErr := requestContextAPIError(c); apiErr != nil {
+		return nil, apiErr
 	}
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
-	ag, err := q.Agent().GetByID(uint(id))
+	agent, err := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Agent().GetByID(uint(id))
 	if err != nil {
 		return nil, api.NotFoundError("agent not found")
 	}
-	res, err := h.HubCall(ag.AgentID, consts.RPCAgentGoroutines, nil, 15*time.Second)
-	if err != nil {
-		return nil, api.BadRequestError(fmt.Sprintf("goroutine dump failed: %v", err), nil)
+	snapshot := h.Connections.Build(*agent)
+	if snapshot.Control.State != "connected" || snapshot.Control.SessionGeneration == 0 {
+		return nil, controlDisconnectedAPIError()
 	}
-	return res, nil
+	if apiErr := requestContextAPIError(c); apiErr != nil {
+		return nil, apiErr
+	}
+	result, err := h.HubCallSession(agent.AgentID, snapshot.Control.SessionGeneration, method, nil, timeout)
+	if err != nil {
+		return nil, operationAPIError(err, "")
+	}
+	return result, nil
 }

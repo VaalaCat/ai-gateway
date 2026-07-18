@@ -41,7 +41,7 @@ type EffectiveWeight struct {
 const previewMaxDepth = 5
 
 func (h *Handler) Preview(c *app.Context, req PreviewRequest) (PreviewResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	// 加载所有 global routings，构建 enabled/disabled 两份索引

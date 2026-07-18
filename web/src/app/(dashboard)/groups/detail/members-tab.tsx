@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { ColumnDef } from "@tanstack/react-table";
@@ -31,9 +31,11 @@ export function MembersTab({ groupId }: { groupId: number }) {
     search: { kind: "text", placeholder: tc("search") },
   } satisfies FilterSpec), [tc]);
 
-  const [filterValues, setFilterValues] = useFilterState(filterSpec);
-
-  useEffect(() => { setPage(1); }, [filterValues]);
+  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
+  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
+    setPage(1);
+    setFilterValuesRaw(next);
+  };
 
   const { data, isLoading } = useUsers({
     page,

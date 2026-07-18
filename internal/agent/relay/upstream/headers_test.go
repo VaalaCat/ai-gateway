@@ -38,7 +38,6 @@ func TestForwardClientHeaders_ForwardsSafeAndStripsManaged(t *testing.T) {
 	inbound.Set("X-Forwarded-For", "1.2.3.4")
 	inbound.Set("CF-Ray", "xyz")
 	inbound.Set("X-Vaala-Request-ID", "rid")
-	inbound.Set("anthropic-version", "2023-06-01")
 	inbound.Set("Expect", "100-continue")
 	inbound.Set("OpenAI-Organization", "org-123")
 
@@ -54,7 +53,7 @@ func TestForwardClientHeaders_ForwardsSafeAndStripsManaged(t *testing.T) {
 	for _, k := range []string{
 		"Authorization", "x-api-key", "Content-Type", "Content-Length",
 		"Connection", "Accept-Encoding", "Host", "Cookie",
-		"X-Forwarded-For", "CF-Ray", "X-Vaala-Request-ID", "anthropic-version",
+		"X-Forwarded-For", "CF-Ray", "X-Vaala-Request-ID",
 		"Expect", "OpenAI-Organization",
 	} {
 		absent(t, dst, k)
@@ -65,6 +64,7 @@ func TestForwardClientHeaders_BetaSameProtoForwardsCrossProtoStrips(t *testing.T
 	build := func() http.Header {
 		in := http.Header{}
 		in.Set("anthropic-beta", "prompt-caching-2024-07-31")
+		in.Set("anthropic-version", "2023-06-01")
 		in.Set("OpenAI-Beta", "assistants=v2")
 		in.Set("X-Stainless-Lang", "js")
 		return in
@@ -73,13 +73,42 @@ func TestForwardClientHeaders_BetaSameProtoForwardsCrossProtoStrips(t *testing.T
 	same := http.Header{}
 	ForwardClientHeaders(same, build(), false)
 	has(t, same, "anthropic-beta", "prompt-caching-2024-07-31")
+	has(t, same, "anthropic-version", "2023-06-01")
 	has(t, same, "OpenAI-Beta", "assistants=v2")
 	has(t, same, "X-Stainless-Lang", "js")
 
 	cross := http.Header{}
 	ForwardClientHeaders(cross, build(), true)
 	absent(t, cross, "anthropic-beta")
+	absent(t, cross, "anthropic-version")
 	absent(t, cross, "OpenAI-Beta")
+	absent(t, cross, "X-Stainless-Lang")
+}
+
+func TestForwardClientHeaders_StripsEdgeOneKeepsStainlessSameProto(t *testing.T) {
+	build := func() http.Header {
+		in := http.Header{}
+		in.Set("EO-Client-IP", "1.2.3.4")
+		in.Set("Eo-Log-Uuid", "abc")
+		in.Set("X-Stainless-Timeout", "600")
+		in.Set("X-Stainless-Lang", "js")
+		return in
+	}
+
+	// passthrough / 同协议:EdgeOne 边缘泄漏头剥离,SDK 指纹头(含 Timeout)保留。
+	same := http.Header{}
+	ForwardClientHeaders(same, build(), false)
+	absent(t, same, "EO-Client-IP")
+	absent(t, same, "Eo-Log-Uuid")
+	has(t, same, "X-Stainless-Timeout", "600")
+	has(t, same, "X-Stainless-Lang", "js")
+
+	// 跨协议:EdgeOne 头仍剥离(基础设施泄漏与协议无关);SDK 指纹头此时才按前缀剥。
+	cross := http.Header{}
+	ForwardClientHeaders(cross, build(), true)
+	absent(t, cross, "EO-Client-IP")
+	absent(t, cross, "Eo-Log-Uuid")
+	absent(t, cross, "X-Stainless-Timeout")
 	absent(t, cross, "X-Stainless-Lang")
 }
 

@@ -76,6 +76,7 @@ export default function ProfilePage() {
       <AccountSecuritySection />
 
       <ProfileFormDialog
+        key={`profile-${profile.id}-${editOpen}`}
         mode="self"
         open={editOpen}
         onOpenChange={setEditOpen}

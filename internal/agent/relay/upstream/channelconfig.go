@@ -11,13 +11,14 @@ import (
 // resolved upstream model name.
 func BuildChannelConfig(ch *models.Channel, model string, outboundProto codec.Protocol) *codec.ChannelConfig {
 	cfg := &codec.ChannelConfig{
-		BaseURL:      ch.GetBaseURL(),
-		APIKey:       ch.Key,
-		Model:        model,
-		Organization: ch.Organization,
-		APIVersion:   ch.ApiVersion,
-		SystemPrompt: ch.SystemPrompt,
-		RoleMapping:  ch.RoleMapping,
+		BaseURL:                 ch.GetBaseURL(),
+		APIKey:                  ch.Key,
+		Model:                   model,
+		Organization:            ch.Organization,
+		APIVersion:              ch.ApiVersion,
+		SystemPrompt:            ch.SystemPrompt,
+		RoleMapping:             ch.RoleMapping,
+		RequestFieldPermissions: codec.DefaultRequestFieldPermissions(),
 	}
 
 	cfg.EndpointPath = codec.ResolveEndpointPath(ch.Endpoints, outboundProto)
@@ -45,6 +46,27 @@ func BuildChannelConfig(ch *models.Channel, model string, outboundProto codec.Pr
 		if err := json.Unmarshal([]byte(ch.OtherSettings), &other); err == nil {
 			if v, ok := other["builtin_tool_fallback"].(string); ok {
 				cfg.BuiltinToolFallback = v
+			}
+			if v, ok := other["inline_image_url"].(bool); ok {
+				cfg.InlineImageURL = v
+			}
+			if v, ok := other["allow_service_tier"].(bool); ok {
+				cfg.RequestFieldPermissions.AllowServiceTier = v
+			}
+			if v, ok := other["allow_inference_geo"].(bool); ok {
+				cfg.RequestFieldPermissions.AllowInferenceGeo = v
+			}
+			if v, ok := other["disable_store"].(bool); ok {
+				cfg.RequestFieldPermissions.AllowStore = !v
+			}
+			if v, ok := other["allow_safety_identifier"].(bool); ok {
+				cfg.RequestFieldPermissions.AllowSafetyIdentifier = v
+			}
+			if v, ok := other["allow_include_obfuscation"].(bool); ok {
+				cfg.RequestFieldPermissions.AllowIncludeObfuscation = v
+			}
+			if v, ok := other["claude_beta_query"].(bool); ok {
+				cfg.ClaudeBetaQuery = v
 			}
 		}
 	}

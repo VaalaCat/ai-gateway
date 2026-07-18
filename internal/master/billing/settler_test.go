@@ -30,8 +30,27 @@ func setupTestDB(t *testing.T) (*gorm.DB, *testAppProvider) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	models.AutoMigrate(db)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := models.AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
 	return db, &testAppProvider{db: db}
+}
+
+func TestSetupTestDBOwnsSingleSQLiteMemoryConnection(t *testing.T) {
+	db, _ := setupTestDB(t)
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sqlDB.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1 for connection-local SQLite memory schema", got)
+	}
 }
 
 // mockAggregator records every Submit invocation so tests can assert on
@@ -126,6 +145,62 @@ func TestSettleUsage(t *testing.T) {
 	if logCount != 1 {
 		t.Errorf("duplicate should be ignored, got %d logs", logCount)
 	}
+}
+
+func TestSettlePersistsAgentRouteScalarsVerbatim(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	db.Create(&models.User{Username: "route-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
+	settler := NewSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+
+	entries := []protocol.UsageLogEntry{
+		{
+			RequestID: "req-route-direct", UserID: 1, Status: 1, Timestamp: time.Now().Unix(),
+			RouteSourceAgentID: "source-a", AgentRouteID: 42, AgentRoutePath: "direct",
+		},
+		{
+			RequestID: "req-route-local", UserID: 1, Status: 1, Timestamp: time.Now().Unix(),
+			RouteSourceAgentID: "source-local", AgentRouteID: 43, AgentRoutePath: "local",
+		},
+		{
+			RequestID: "req-route-old", UserID: 1, Status: 1, Timestamp: time.Now().Unix(),
+		},
+	}
+	settler.Settle(context.Background(), "executing-agent", entries)
+
+	var got []models.UsageLog
+	require.NoError(t, db.Where("request_id LIKE ?", "req-route-%").Order("request_id").Find(&got).Error)
+	require.Len(t, got, 3)
+	require.Equal(t, "source-a", got[0].RouteSourceAgentID)
+	require.Equal(t, uint(42), got[0].AgentRouteID)
+	require.Equal(t, "direct", got[0].AgentRoutePath)
+	require.Equal(t, "source-local", got[1].RouteSourceAgentID)
+	require.Equal(t, uint(43), got[1].AgentRouteID)
+	require.Equal(t, "local", got[1].AgentRoutePath)
+	require.Empty(t, got[2].RouteSourceAgentID)
+	require.Zero(t, got[2].AgentRouteID)
+	require.Empty(t, got[2].AgentRoutePath)
+}
+
+// behavior change: pointer presence, rather than string emptiness, selects the
+// execution agent persisted on UsageLog.
+func TestSettlerExecutionAgentIDPointerPresence(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	db.Create(&models.User{Username: "execution-agent-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
+	settler := NewSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+	target, empty := "target-a", ""
+
+	settler.Settle(context.Background(), "authenticated-source", []protocol.UsageLogEntry{
+		{RequestID: "req-execution-1-old", UserID: 1, Status: 1, Timestamp: time.Now().Unix()},
+		{RequestID: "req-execution-2-target", UserID: 1, Status: 1, Timestamp: time.Now().Unix(), ExecutionAgentID: &target},
+		{RequestID: "req-execution-3-empty", UserID: 1, Status: 1, Timestamp: time.Now().Unix(), ExecutionAgentID: &empty},
+	})
+
+	var got []models.UsageLog
+	require.NoError(t, db.Where("request_id LIKE ?", "req-execution-%").Order("request_id").Find(&got).Error)
+	require.Len(t, got, 3)
+	require.Equal(t, "authenticated-source", got[0].AgentID)
+	require.Equal(t, "target-a", got[1].AgentID)
+	require.Empty(t, got[2].AgentID)
 }
 
 // TestSettle_PublishesUserQuotaSync 验证结算后把受影响 user 的最新 Quota 定向回送
@@ -1010,6 +1085,7 @@ func TestSettler_BehaviorEquivalentToLegacy(t *testing.T) {
 		func(rows []dao.HourlyBucketRow) error {
 			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertHourlyBucket(rows)
 		},
+		nil,
 	)
 	settlerA := NewSettlerWithAggregator(appA, busA, logger, agg)
 
@@ -1198,4 +1274,120 @@ func TestSettler_NilAggregatorFallsBackToNoop(t *testing.T) {
 	var count int64
 	db.Model(&models.UsageLog{}).Where("request_id = ?", "req-nil-agg-1").Count(&count)
 	require.Equal(t, int64(1), count, "usage log should still be created")
+}
+
+// TestSettleBatch_ReturnsErrorButSettlesRest 验证 SettleBatch 的同步、error-返回
+// 契约:供 HTTP 摄取路径用,调用方以非 nil 返回决定 5xx 让 agent 重试整批。
+//
+//   - success:全部条目结算成功 → 返回 nil,行都落库。
+//   - failure:usage_logs 表被 drop(模拟 SQLITE_BUSY 等结算期故障)→ 全部条目
+//     失败 → 返回非 nil 聚合错误。
+//   - Settle(void wrapper) 在同样的失败场景下不 panic(错误已在内部记日志吞掉)。
+func TestSettleBatch_ReturnsErrorButSettlesRest(t *testing.T) {
+	t.Run("success_all_settle_returns_nil_error", func(t *testing.T) {
+		db, appProv := setupTestDB(t)
+		bus := eventbus.NewMemoryBus()
+		logger := zap.NewNop()
+
+		db.Create(&models.User{Username: "batch-ok-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
+		db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+		settler := NewSettler(appProv, bus, logger)
+		err := settler.SettleBatch(context.Background(), "agent-batch", []protocol.UsageLogEntry{
+			{
+				RequestID:        "req-batch-1",
+				UserID:           1,
+				TokenID:          1,
+				ChannelID:        1,
+				ModelName:        "gpt-4o",
+				PromptTokens:     100,
+				CompletionTokens: 50,
+				Status:           1,
+				Timestamp:        time.Now().Unix(),
+			},
+			{
+				RequestID:        "req-batch-2",
+				UserID:           1,
+				TokenID:          1,
+				ChannelID:        1,
+				ModelName:        "gpt-4o",
+				PromptTokens:     200,
+				CompletionTokens: 75,
+				Status:           1,
+				Timestamp:        time.Now().Unix(),
+			},
+		})
+		require.NoError(t, err, "all entries settle cleanly → nil error")
+
+		var count int64
+		db.Model(&models.UsageLog{}).Where("request_id IN ?", []string{"req-batch-1", "req-batch-2"}).Count(&count)
+		require.Equal(t, int64(2), count, "both entries must be persisted")
+	})
+
+	t.Run("failure_dropped_table_returns_non_nil_error", func(t *testing.T) {
+		db, appProv := setupTestDB(t)
+		bus := eventbus.NewMemoryBus()
+		logger := zap.NewNop()
+
+		db.Create(&models.User{Username: "batch-fail-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
+		db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+
+		// 模拟结算期基础设施故障(如 rebuild 长事务持锁 → SQLITE_BUSY):drop
+		// usage_logs 表让每条 Create 都失败。
+		require.NoError(t, db.Migrator().DropTable(&models.UsageLog{}))
+
+		settler := NewSettler(appProv, bus, logger)
+		err := settler.SettleBatch(context.Background(), "agent-batch-fail", []protocol.UsageLogEntry{
+			{
+				RequestID:        "req-batch-fail-1",
+				UserID:           1,
+				TokenID:          1,
+				ChannelID:        1,
+				ModelName:        "gpt-4o",
+				PromptTokens:     100,
+				CompletionTokens: 50,
+				Status:           1,
+				Timestamp:        time.Now().Unix(),
+			},
+			{
+				RequestID:        "req-batch-fail-2",
+				UserID:           1,
+				TokenID:          1,
+				ChannelID:        1,
+				ModelName:        "gpt-4o",
+				PromptTokens:     200,
+				CompletionTokens: 75,
+				Status:           1,
+				Timestamp:        time.Now().Unix(),
+			},
+		})
+		require.Error(t, err, "settle failures must surface as a non-nil aggregated error so the caller 5xx's")
+	})
+
+	t.Run("void_wrapper_does_not_panic_on_failure", func(t *testing.T) {
+		db, appProv := setupTestDB(t)
+		bus := eventbus.NewMemoryBus()
+		logger := zap.NewNop()
+
+		db.Create(&models.User{Username: "batch-void-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
+		db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
+		require.NoError(t, db.Migrator().DropTable(&models.UsageLog{}))
+
+		settler := NewSettler(appProv, bus, logger)
+		require.NotPanics(t, func() {
+			settler.Settle(context.Background(), "agent-batch-void", []protocol.UsageLogEntry{
+				{
+					RequestID:        "req-batch-void-1",
+					UserID:           1,
+					TokenID:          1,
+					ChannelID:        1,
+					ModelName:        "gpt-4o",
+					PromptTokens:     100,
+					CompletionTokens: 50,
+					Status:           1,
+					Timestamp:        time.Now().Unix(),
+				},
+			})
+		})
+	})
 }

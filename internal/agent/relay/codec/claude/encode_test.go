@@ -766,3 +766,107 @@ func TestClaudeStreamEncode_ToolCallCorrectShape(t *testing.T) {
 		t.Errorf("concatenated partial_json = %q, want {\"a\":1}", got)
 	}
 }
+
+func TestEncodeRequest_DropsEmptyTextBlock(t *testing.T) {
+	c := &ClaudeCodec{}
+	req := &codec.Request{
+		Model: "claude-x",
+		Messages: []codec.Message{
+			{Role: codec.RoleAssistant, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: ""},
+				{Type: codec.ContentTypeText, Text: "Hello! I see you're working on..."},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "claude-x"}
+	httpReq, err := c.EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+	if strings.Contains(string(bodyBytes), `{"type":"text"}`) {
+		t.Errorf("body contains illegal empty text block: %s", bodyBytes)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msg := raw["messages"].([]any)[0].(map[string]any)
+	if msg["content"] != "Hello! I see you're working on..." {
+		t.Errorf("content = %#v, want real text string shorthand", msg["content"])
+	}
+}
+
+func TestEncodeRequest_SingleEmptyTextBecomesEmptyString(t *testing.T) {
+	c := &ClaudeCodec{}
+	req := &codec.Request{
+		Model: "claude-x",
+		Messages: []codec.Message{
+			{Role: codec.RoleAssistant, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: ""},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "claude-x"}
+	httpReq, err := c.EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	json.Unmarshal(bodyBytes, &raw)
+	msg := raw["messages"].([]any)[0].(map[string]any)
+	if msg["content"] != "" {
+		t.Errorf("content = %#v, want empty string", msg["content"])
+	}
+}
+
+func TestEncodeRequest_TwoRealTextBlocksUnchanged(t *testing.T) {
+	c := &ClaudeCodec{}
+	req := &codec.Request{
+		Model: "claude-x",
+		Messages: []codec.Message{
+			{Role: codec.RoleUser, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: "first"},
+				{Type: codec.ContentTypeText, Text: "second"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "claude-x"}
+	httpReq, err := c.EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	json.Unmarshal(bodyBytes, &raw)
+	content := raw["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want 2", len(content))
+	}
+}
+
+// 回归护栏:thinking-only 消息不得被兜底误改;现状 content:null,应保持。
+func TestEncodeRequest_ThinkingOnlyMessageUnchanged(t *testing.T) {
+	c := &ClaudeCodec{}
+	req := &codec.Request{
+		Model: "claude-x",
+		Messages: []codec.Message{
+			{Role: codec.RoleAssistant, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeThinking, Text: "let me think"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "claude-x"}
+	httpReq, err := c.EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	json.Unmarshal(bodyBytes, &raw)
+	msg := raw["messages"].([]any)[0].(map[string]any)
+	if v, present := msg["content"]; !present || v != nil {
+		t.Errorf("thinking-only content should stay null, got present=%v val=%#v", present, v)
+	}
+}

@@ -25,7 +25,7 @@ func (h *Handler) Trend(c *app.Context, req TrendRequest) (TrendResponse, error)
 	var userID *uint
 	userID = middleware.ScopedUserID(scope, nil)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	items, err := q.Stats().GetTrend(days, userID)

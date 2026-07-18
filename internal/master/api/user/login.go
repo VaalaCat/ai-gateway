@@ -11,7 +11,7 @@ import (
 )
 
 func (h *Handler) Login(c *app.Context, req LoginRequest) (LoginResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	identifier := strings.TrimSpace(req.Username)

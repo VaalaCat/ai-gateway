@@ -24,7 +24,7 @@ func (h *Handler) ListMyIdentities(c *app.Context, _ api.EmptyRequest) ([]Identi
 	if c.UserInfo == nil {
 		return nil, api.UnauthorizedError("missing auth")
 	}
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	idents, err := q.OAuthIdentity().ListByUserID(c.UserInfo.UserID)
 	if err != nil {
 		return nil, api.InternalError("list failed", err)
@@ -67,7 +67,7 @@ func (h *Handler) DeleteIdentity(c *app.Context, req DeleteIdentityRequest) (api
 	if err != nil {
 		return api.StatusResponse{}, api.NotFoundError("not found")
 	}
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	user, err := q.User().GetByID(c.UserInfo.UserID)
 	if err != nil {
 		return api.StatusResponse{}, api.InternalError("user lookup", err)
@@ -80,7 +80,7 @@ func (h *Handler) DeleteIdentity(c *app.Context, req DeleteIdentityRequest) (api
 	if cnt <= 1 && !user.PasswordSet {
 		return api.StatusResponse{}, api.ConflictError("last_login_method", nil)
 	}
-	m := dao.NewAdminMutation(dao.NewContext(c.App))
+	m := dao.NewAdminMutation(dao.NewContextWithContext(c.App, c.RequestContext()))
 	affected, err := m.OAuthIdentity().DeleteByIDForUser(uint(id), c.UserInfo.UserID)
 	if err != nil {
 		return api.StatusResponse{}, api.InternalError("delete failed", err)

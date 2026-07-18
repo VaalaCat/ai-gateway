@@ -1,3 +1,8 @@
+# base = alpine:root + busybox shell + 自带 ca-certificates(实测 bookworm-slim/ubuntu
+# 都不带 CA bundle,出站 TLS 会 x509 报错;ko 无 Dockerfile 阶段装不了包)。
+# musl 对 CGO_ENABLED=0 的静态 Go 二进制无影响;排障可直接 kubectl exec + apk add。
+defaultBaseImage: alpine:3.21
+
 builds:
   - id: ai-gateway
     main: ./cmd

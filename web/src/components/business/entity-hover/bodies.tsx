@@ -4,7 +4,8 @@ import type { ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import { User as UserIcon, Server, KeyRound, Cpu, type LucideIcon } from "lucide-react";
 
-import { StatusBadge, RoleBadge, OnlineBadge } from "@/components/business/status-badge";
+import { StatusBadge, RoleBadge } from "@/components/business/status-badge";
+import { AgentConnectionStatus } from "@/components/business/agent-connection-status";
 import { ChannelBillingBadge, billingBadge } from "@/components/business/channel-billing-badge";
 import { CopyableText } from "@/components/business/copyable-text";
 import { EntityLabel } from "@/components/business/entity-label";
@@ -25,7 +26,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function UserBody({ item }: { item: User }) {
   const t = useTranslations("entityHover");
   return (
-    <div className="space-y-1">
+    <div className="flex flex-col gap-1">
       {item.email && <Field label={t("email")}>{item.email}</Field>}
       <Field label={t("role")}><RoleBadge role={item.role} /></Field>
       <Field label={t("balance")}>{formatMoneyCompact(item.quota)}</Field>
@@ -37,7 +38,7 @@ function UserBody({ item }: { item: User }) {
 function ChannelBody({ item }: { item: Channel }) {
   const t = useTranslations("entityHover");
   return (
-    <div className="space-y-1">
+    <div className="flex flex-col gap-1">
       {billingBadge(item).kind !== "none" && (
         <Field label={t("billing")}><ChannelBillingBadge channel={item} /></Field>
       )}
@@ -52,7 +53,7 @@ function TokenBody({ item }: { item: Token }) {
     ? item.models.split(",").map((s) => s.trim()).filter(Boolean).length
     : 0;
   return (
-    <div className="space-y-1">
+    <div className="flex flex-col gap-1">
       <Field label={t("owner")}>
         <EntityLabel entity="user" id={item.user_id} hover={false} />
       </Field>
@@ -70,7 +71,7 @@ function AgentBody({ item }: { item: Agent }) {
   const t = useTranslations("entityHover");
   const tags = item.tags ? item.tags.split(",").map((s) => s.trim()).filter(Boolean) : [];
   return (
-    <div className="space-y-1">
+    <div className="flex flex-col gap-1">
       <Field label={t("nodeId")}><CopyableText text={item.agent_id} /></Field>
       {tags.length > 0 && <Field label={t("tags")}>{tags.join(", ")}</Field>}
     </div>
@@ -98,5 +99,5 @@ export const ENTITY_HOVER_STATUS: Partial<Record<EntityName, (item: unknown) => 
   user: (i) => <StatusBadge status={(i as User).status} />,
   channel: (i) => <StatusBadge status={(i as Channel).status} />,
   token: (i) => <StatusBadge status={(i as Token).status} />,
-  agent: (i) => <OnlineBadge lastSeen={(i as Agent).last_seen} />,
+  agent: (i) => <AgentConnectionStatus kind="control" value={(i as Agent).connection.control} />,
 };

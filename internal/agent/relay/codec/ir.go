@@ -121,6 +121,8 @@ type Request struct {
 	TopLogprobs      *int           `json:"top_logprobs,omitempty"`
 	User             string         `json:"user,omitempty"`
 	ServiceTier      string         `json:"service_tier,omitempty"`
+	InferenceGeo     string         `json:"inference_geo,omitempty"`
+	SafetyIdentifier string         `json:"safety_identifier,omitempty"`
 	ResponseFormat   any            `json:"response_format,omitempty"`
 	StreamOptions    map[string]any `json:"stream_options,omitempty"`
 
@@ -135,8 +137,8 @@ type Request struct {
 
 // ToolChoice defines the canonical IR form for tool selection.
 type ToolChoice struct {
-	Type string `json:"type"`           // "auto", "required", "none", "function"
-	Name string `json:"name,omitempty"` // function name, only when Type="function"
+	Type string `json:"type"`           // "auto", "required", "none", "function", "custom"
+	Name string `json:"name,omitempty"` // tool name, when Type="function" or "custom"
 }
 
 // ---------------------------------------------------------------------------

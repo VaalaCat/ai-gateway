@@ -110,7 +110,7 @@ export interface ChannelSettings {
   system_prompt_override?: boolean;
 }
 
-export type BuiltinToolFallbackPolicy = "drop" | "error" | "passthrough";
+export type BuiltinToolFallbackPolicy = "drop" | "error" | "passthrough" | "function";
 
 export interface ChannelOtherSettings {
   azure_responses_version?: string;
@@ -120,6 +120,7 @@ export interface ChannelOtherSettings {
   allow_service_tier?: boolean;
   allow_inference_geo?: boolean;
   allow_safety_identifier?: boolean;
+  inline_image_url?: boolean;
   disable_store?: boolean;
   allow_include_obfuscation?: boolean;
   aws_key_type?: string;
@@ -159,21 +160,336 @@ export interface AgentAddress {
   tag: string;
 }
 
-export interface Agent {
+export type ControlState = "connected" | "disconnected";
+export type ControlHealth = "healthy" | "degraded" | "unknown";
+export type RelaySupport = "supported" | "unsupported";
+export type RelayConfigState = "configured" | "not_configured" | "disabled";
+export type RelayAvailability = "ready" | "draining" | "unavailable";
+export type RelayConvergence = "converged" | "applying" | "degraded";
+export type RelayMode = "inherit" | "custom" | "disabled";
+export type PeerRouteMode = "direct_first" | "relay_only";
+export type DirectNetwork =
+  | "unknown"
+  | "checking"
+  | "reachable"
+  | "degraded"
+  | "unreachable"
+  | "stale";
+export type DirectIdentity =
+  | "unknown"
+  | "verified"
+  | "mismatch"
+  | "invalid_response";
+export type AgentOperation =
+  | "full_sync"
+  | "probe"
+  | "relay_reconnect"
+  | "relay_drain"
+  | "relay_disconnect"
+  | "direct_circuit_reset"
+  | "interrupt";
+
+export interface RecentConnectionError {
+  code: string;
+  stage: string;
+  message: string;
+  occurred_at: number;
+  count: number;
+}
+
+export interface RouteFailureDiagnostic {
+  request_id: string;
+  source_agent_id: string;
+  target_agent_id: string;
+  route_id: number;
+  path_kind: string;
+  stage: string;
+  commit_state: string;
+  reason_code: string;
+  occurred_at: number;
+}
+
+export interface ControlSnapshot {
+  state: ControlState;
+  health: ControlHealth;
+  reason_codes: string[];
+  session_generation: number;
+  connected_at: number;
+  heartbeat_at: number;
+  runtime_reported_at: number;
+  last_seen: number;
+}
+
+export interface RelayDesiredSnapshot {
+  mode: RelayMode;
+  configured_uri: string;
+  effective_uri: string;
+  desired_generation: number;
+}
+
+export interface RelayActiveSnapshot {
+  uri: string;
+  active_generation: number;
+  session_generation: number;
+  connected_at: number;
+  streams: number;
+  retry_at: number;
+}
+
+export interface RelaySnapshot {
+  support: RelaySupport;
+  config: RelayConfigState;
+  availability: RelayAvailability;
+  accepting_new_streams: boolean;
+  convergence: RelayConvergence;
+  desired: RelayDesiredSnapshot;
+  active: RelayActiveSnapshot;
+  recent_errors: RecentConnectionError[];
+}
+
+export interface RelaySummary {
+  support: RelaySupport;
+  config: RelayConfigState;
+  availability: RelayAvailability;
+  accepting_new_streams: boolean;
+  convergence: RelayConvergence;
+  streams: number;
+}
+
+export interface DirectSummary {
+  state: DirectNetwork;
+  reachable: number;
+  degraded: number;
+  unreachable: number;
+  stale: number;
+  total: number;
+}
+
+export interface DirectTargetSnapshot {
+  target_agent_id: string;
+  target_name: string;
+  addresses: AgentAddress[];
+  network: DirectNetwork;
+  identity: DirectIdentity;
+  eligible: boolean;
+  checking: boolean;
+  probe_generation: number;
+  address_fingerprint: string;
+  checked_at: number;
+  latency_ms: number;
+  last_error?: RecentConnectionError | null;
+  recent_errors: RecentConnectionError[];
+}
+
+export type DirectPathState =
+  | "disabled"
+  | "unsupported"
+  | "checking"
+  | "reachable"
+  | "degraded"
+  | "unreachable"
+  | "unknown"
+  | "stale";
+
+export type RelayPathState =
+  | "checking"
+  | "reachable"
+  | "unreachable"
+  | "unavailable"
+  | "unknown"
+  | "unsupported"
+  | "stale";
+
+export interface RelayPathSummary {
+  state: RelayPathState | "degraded";
+  reachable: number;
+  unreachable: number;
+  unavailable: number;
+  unknown: number;
+  unsupported: number;
+  stale: number;
+  total: number;
+}
+
+export interface RouteDirectTargetSnapshot {
+  state: DirectPathState;
+  addresses: AgentAddress[];
+  network: DirectNetwork;
+  identity: DirectIdentity;
+  eligible: boolean;
+  checking: boolean;
+  probe_generation: number;
+  address_fingerprint: string;
+  checked_at: number;
+  latency_ms: number;
+  last_error?: RecentConnectionError | null;
+}
+
+export interface RouteRelayTargetSnapshot {
+  target_agent_id: string;
+  target_name: string;
+  state: RelayPathState;
+  stage?: "open" | "commit" | "response";
+  checking: boolean;
+  probe_generation: number;
+  relay_fingerprint: string;
+  source_relay_generation: number;
+  target_relay_generation: number;
+  checked_at: number;
+  latency_ms: number;
+  last_error?: RecentConnectionError | null;
+}
+
+export interface RouteTargetSnapshot {
+  target_agent_id: string;
+  target_name: string;
+  direct: RouteDirectTargetSnapshot;
+  relay: RouteRelayTargetSnapshot;
+}
+
+export interface RouteTargetSummaries {
+  direct: DirectSummary;
+  relay: RelayPathSummary;
+}
+
+export interface OperationStatus {
+  operation: AgentOperation;
+  allowed: boolean;
+  denial_code?: string;
+}
+
+export interface ConnectionSnapshot {
+  version: "v1";
+  snapshot_epoch: string;
+  snapshot_seq: number;
+  observed_at: number;
+  agent_id: string;
+  admin_status: number;
+  control: ControlSnapshot;
+  relay: RelaySnapshot;
+  direct: {
+    generation?: number;
+    summary: DirectSummary;
+    targets?: Record<string, DirectTargetSnapshot>;
+  };
+  target_summaries: RouteTargetSummaries;
+  allowed_operations: OperationStatus[];
+}
+
+export interface ConnectionSummary {
+  version: "v1";
+  snapshot_epoch: string;
+  snapshot_seq: number;
+  observed_at: number;
+  control: ControlSnapshot;
+  relay: RelaySummary;
+  direct: DirectSummary;
+  targets: RouteTargetSummaries;
+}
+
+export interface RouteTargetsPage {
+  snapshot_epoch: string;
+  snapshot_seq: number;
+  observed_at: number;
+  summaries: RouteTargetSummaries;
+  data: RouteTargetSnapshot[];
+  next_cursor?: string;
+  limit: number;
+}
+
+export interface ProbeScope {
+  kind: "all_enabled" | "tag" | "targets";
+  tag?: string;
+  target_agent_ids?: string[];
+}
+
+export interface ProbeAck {
+  probe_id: string;
+  probe_generation: number;
+  scope: ProbeScope;
+  state: "queued";
+  target_total: number;
+  snapshot_seq: number;
+}
+
+export interface ManualProbeProgress {
+  probe_id: string;
+  state: "queued" | "running" | "completed" | "failed" | "cancelled";
+  target_total: number;
+  remaining: number;
+  started_at?: number;
+  completed_at?: number;
+}
+
+export interface OperationAck {
+  operation_id: string;
+  state: "accepted";
+  snapshot_seq: number;
+}
+
+export interface AgentOperationRequest {
+  target_agent_id?: string;
+  request_id?: string;
+  expected_epoch: string;
+  expected_control_generation?: number;
+  expected_relay_generation?: number;
+}
+
+export interface ConnectionDiagnostics {
+  snapshot_epoch: string;
+  snapshot_seq: number;
+  observed_at: number;
+  control: ControlSnapshot & { recent_errors: RecentConnectionError[] };
+  relay: RelaySnapshot;
+  direct: {
+    summary: DirectSummary;
+    recent_errors: RecentConnectionError[];
+  };
+  route_failures: RouteFailureDiagnostic[];
+}
+
+interface AgentBase {
   id: number;
   agent_id: string;
-  secret?: string;
   name: string;
   status: number;
-  // Legacy field from backend, currently represents effective addresses.
-  http_addresses: string;
-  configured_http_addresses?: string;
-  effective_http_addresses?: string;
   tags: string;
   proxy_url: string;
+  relay_mode: RelayMode;
+  peer_route_mode: PeerRouteMode;
   last_seen: number;
   created_at: number;
 }
+
+export interface AgentRecord extends AgentBase {
+  secret?: string;
+  http_addresses: string;
+  relay_uri: string;
+}
+
+export interface AgentListItem extends AgentBase {
+  // Legacy admin-only field; when present it contains effective addresses.
+  http_addresses?: string;
+  configured_http_addresses?: string;
+  effective_http_addresses?: string;
+  connection: ConnectionSummary;
+}
+
+export type Agent = AgentListItem;
+
+export type AgentPatch = Partial<
+  Pick<
+    AgentRecord,
+    | "name"
+    | "status"
+    | "tags"
+    | "http_addresses"
+    | "proxy_url"
+    | "relay_mode"
+    | "relay_uri"
+    | "peer_route_mode"
+  >
+>;
 
 export interface OnlineAgentInfo {
   agent_id: string;
@@ -183,6 +499,7 @@ export interface OnlineAgentInfo {
   configured_http_addresses?: string;
   effective_http_addresses?: string;
   last_seen: number;
+  pending_usage?: number;
 }
 
 export interface CacheEntityStats {
@@ -206,32 +523,17 @@ export interface AgentRuntime {
   active_connections: number;
   version: number;
   master_version: number;
+  pending_usage: number;
   cache_stats?: Record<string, CacheEntityStats>;
 }
 
-export interface AgentDetail extends Agent {
-  runtime?: AgentRuntime;
-}
-
-export interface AddressProbeResult {
-  url: string;
-  tag: string;
-  reachable: boolean;
-  latency_ms: number;
-  error: string;
-}
-
-export interface ConnectivityResult {
-  target_agent_id: string;
-  target_name: string;
-  results: AddressProbeResult[];
-}
-
-export interface ConnectivityReport {
-  agent_id: string;
-  checked_at: number;
-  results: ConnectivityResult[];
-}
+export type AgentDetail = AgentRecord & {
+  configured_http_addresses?: string;
+  effective_http_addresses?: string;
+  runtime: AgentRuntime | null;
+  connection: ConnectionSnapshot;
+  route_targets: RouteTargetsPage;
+};
 
 export interface UsageLog {
   id: number;
@@ -646,9 +948,10 @@ export interface RoutingMember {
 export interface ModelRouting {
   id: number;
   name: string;
-  scope: 'global' | 'user';
+  scope: 'global' | 'user' | 'token';
   user_id: number;
-  members: RoutingMember[];
+  token_id: number;
+  members: RoutingMember[] | string;
   enabled: boolean;
   remark: string;
   created_at: number;
@@ -658,6 +961,7 @@ export interface ModelRouting {
 export interface RoutingCandidates {
   models: string[];
   global_routings: string[];
+  visible_refs?: string[];
 }
 
 export interface RoutingNamesResp {
@@ -889,4 +1193,36 @@ export interface AgentHealthRow {
 export interface RecentHealthResponse {
   agents: AgentHealthRow[];
   window_secs: number;
+}
+export interface DeliveryQueueItem {
+  request_id: string;
+  bytes: number;
+  attempts: number;
+  degrade_level: number;
+  next_at: number;
+}
+export interface AgentQueueRow {
+  agent_id: number;
+  agent_name: string;
+  store_len: number;
+  retry_len: number;
+  total_bytes: number;
+  oldest_ts: number;
+  last_success_at: number;
+  last_error: string;
+  inflight: number;
+  items: DeliveryQueueItem[];
+}
+export interface DeliveryBoardResponse {
+  agents: AgentQueueRow[];
+  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+}
+export interface DeliveryOpRequest {
+  agent_id: number;
+  op: "retry_now" | "degrade" | "drop";
+  request_ids?: string[];
+  level?: number;
+}
+export interface DeliveryOpResponse {
+  affected: number;
 }

@@ -29,7 +29,7 @@ type AdminBaseURLUsageResponse struct {
 // list for a BaseURL prefix. Admin-only — registered on the auth (admin) group.
 // Pure read; does not mutate the allowlist itself.
 func (h *Handler) AdminBaseURLUsage(c *app.Context, req AdminBaseURLUsageRequest) (AdminBaseURLUsageResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	count, owners, err := dao.NewAdminQuery(daoCtx).PrivateChannel().CountByBaseURLPrefix(req.Prefix)
 	if err != nil {
 		return AdminBaseURLUsageResponse{}, api.InternalError("count private channels by base_url prefix", err)

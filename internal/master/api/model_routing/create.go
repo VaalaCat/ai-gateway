@@ -24,14 +24,17 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (models.ModelRouting
 		Enabled: req.Enabled,
 		Remark:  req.Remark,
 	}
+	return h.createRouting(c, &r)
+}
 
-	daoCtx := dao.NewContext(c.App)
+func (h *Handler) createRouting(c *app.Context, r *models.ModelRouting) (models.ModelRouting, error) {
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	m := dao.NewAdminMutation(daoCtx)
 
-	if ve := m.ModelRouting().Create(&r); ve != nil {
+	if ve := m.ModelRouting().Create(r); ve != nil {
 		return models.ModelRouting{}, validateErrorToAPI(ve)
 	}
 
-	h.publishEvent(events.ActionCreate, &r)
-	return r, nil
+	h.publishEvent(c, events.ActionCreate, r)
+	return *r, nil
 }

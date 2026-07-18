@@ -40,14 +40,15 @@ func newInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	return &Handler{}, db, application
 }
 
-func makeInsightsCtx(application app.Application, userID uint, isAdmin bool) *app.Context {
+func makeInsightsCtx(t *testing.T, application app.Application, userID uint, isAdmin bool) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	ginCtx.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
 	return &app.Context{
-		Context:  ginCtx,
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: userID, GroupID: 1},
+		Context:      ginCtx,
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: userID, GroupID: 1},
+		OwnerContext: t.Context(),
 	}
 }
 
@@ -111,7 +112,7 @@ func TestGet_AgentType_Success(t *testing.T) {
 	seedAgentBucket(t, db, date, 10, 5, "ag-1", "gpt-4o", 10, 8, 100, 50, 500, 5, 250, 5000, 100)
 	seedAgentBucket(t, db, date, 11, 6, "ag-1", "claude-3", 5, 5, 50, 30, 300, 5, 200, 4000, 80)
 
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	resp, err := h.Get(ctx, GetRequest{Type: "agent", ID: "ag-1", Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Get agent: %v", err)
@@ -176,7 +177,7 @@ func TestGet_AgentType_IDNotFound_404(t *testing.T) {
 	h, _, application := newInsightsTestCtx(t)
 	start, end := insightsDayRange()
 
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	_, err := h.Get(ctx, GetRequest{Type: "agent", ID: "does-not-exist", Start: start, End: end, Gran: "day"})
 	if err == nil {
 		t.Fatalf("expected 404, got nil")
@@ -197,7 +198,7 @@ func TestGet_StubType_Returns501(t *testing.T) {
 	h, _, application := newInsightsTestCtx(t)
 	start, end := insightsDayRange()
 
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	_, err := h.Get(ctx, GetRequest{Type: "channel", ID: "5", Start: start, End: end})
 	if err == nil {
 		t.Fatalf("expected 501, got nil")
@@ -218,7 +219,7 @@ func TestGet_UnknownType_Returns404(t *testing.T) {
 	h, _, application := newInsightsTestCtx(t)
 	start, end := insightsDayRange()
 
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	_, err := h.Get(ctx, GetRequest{Type: "garbage", ID: "1", Start: start, End: end})
 	if err == nil {
 		t.Fatalf("expected 404, got nil")
@@ -240,7 +241,7 @@ func TestGet_RangeOutOfBounds_Returns400(t *testing.T) {
 	now := time.Now().UTC().Unix()
 	seedAgentRow(t, db, "ag-1", "Agent One", 1, now-1800)
 
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	// gran=day 上限 365 天,400 天必越界。
 	_, err := h.Get(ctx, GetRequest{Type: "agent", ID: "ag-1", Start: now - 400*86400, End: now, Gran: "day"})
 	if err == nil {

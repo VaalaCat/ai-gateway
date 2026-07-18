@@ -1,9 +1,8 @@
 package auth
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +13,8 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
 	"github.com/gin-gonic/gin"
 )
+
+var ErrModelNotAllowed = errors.New(consts.ErrModelNotAllowed)
 
 func TokenAuth(store *cache.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -93,28 +94,21 @@ func TokenAuth(store *cache.Store) gin.HandlerFunc {
 		// === 查链结束 ===
 
 		c.Set(consts.CtxKeyUserInfo, userInfo)
-
-		// Skip model extraction for GET requests (e.g., /v1/models)
-		if c.Request.Method == "GET" {
-			c.Next()
-			return
-		}
-
-		// Check model permission
-		requestModel := extractModel(c)
-		if requestModel != "" {
-			if len(userInfo.TokenModels) > 0 && !utils.ModelMatches(requestModel, userInfo.TokenModels) {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": consts.ErrModelNotAllowed})
-				return
-			}
-			if len(userInfo.GroupModels) > 0 && !utils.ModelMatches(requestModel, userInfo.GroupModels) {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": consts.ErrModelNotAllowed})
-				return
-			}
-		}
-
 		c.Next()
 	}
+}
+
+func AuthorizeModel(user *app.UserInfo, model string) error {
+	if user == nil {
+		return nil
+	}
+	if len(user.TokenModels) > 0 && !utils.ModelMatches(model, user.TokenModels) {
+		return ErrModelNotAllowed
+	}
+	if len(user.GroupModels) > 0 && !utils.ModelMatches(model, user.GroupModels) {
+		return ErrModelNotAllowed
+	}
+	return nil
 }
 
 func extractAPIKey(c *gin.Context) string {
@@ -126,19 +120,4 @@ func extractAPIKey(c *gin.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(c.GetHeader(consts.HeaderXAPIKey))
-}
-
-func extractModel(c *gin.Context) string {
-	// Read body and put it back
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return ""
-	}
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-	var body struct {
-		Model string `json:"model"`
-	}
-	json.Unmarshal(bodyBytes, &body)
-	return body.Model
 }

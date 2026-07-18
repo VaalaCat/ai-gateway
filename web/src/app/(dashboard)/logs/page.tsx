@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { ChevronRight, KeyRound, RefreshCw } from "lucide-react";
@@ -9,6 +9,7 @@ import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +20,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 import { DateCell } from "@/components/business/date-cell";
 import { CostDetailCell } from "@/components/business/cost-cell";
@@ -30,9 +38,6 @@ import { FallbackChain } from "@/components/business/fallback-chain";
 import { RateLimitSection } from "@/components/business/rate-limit-section";
 import { EntityLabel } from "@/components/business/entity-label";
 import { KpiGrid } from "@/components/business/kpi-grid";
-import { StageDistributionBar } from "@/components/business/stage-distribution-bar";
-import { RELAY_STAGE_ORDER } from "@/lib/constants/relay/stages";
-import { toStageBuckets } from "@/lib/utils/to-stage-buckets";
 
 import { formatDuration, formatFactor, formatMoneyCompact } from "@/lib/utils/format";
 import { useLogs } from "@/lib/api/logs";
@@ -40,6 +45,7 @@ import { useLogsInsights } from "@/lib/api/logs-insights";
 import { useChannels } from "@/lib/api/channels";
 import { useBYOKChannels } from "@/lib/api/byok-channels";
 import { useAuth } from "@/lib/auth";
+import { useUserPref } from "@/hooks/use-user-pref";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { UsageLog } from "@/lib/types";
 
@@ -68,7 +74,6 @@ export default function LogsPage() {
 function LogsPageContent() {
   const t = useTranslations("logs");
   const tc = useTranslations("common");
-  const tStage = useTranslations("common.relayStage");
   const { isAdmin } = useAuth();
 
   const { data: channelsData } = useChannels({ page_size: 100 }, { enabled: isAdmin });
@@ -98,6 +103,7 @@ function LogsPageContent() {
       visible: (ctx: { isAdmin: boolean; hasOwnBYOK?: unknown }) => ctx.isAdmin || Boolean(ctx.hasOwnBYOK),
     },
     model_name: { kind: "picker", entity: "model" },
+    request_id: { kind: "text", placeholder: t("searchRequestId") },
     status: {
       kind: "enum",
       options: [
@@ -110,11 +116,13 @@ function LogsPageContent() {
 
   const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.LOGS);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.LOGS);
   const [rawLog, setRawLog] = useState<UsageLog | null>(null);
 
-  const now = useMemo(() => Math.floor(Date.now() / 1000), []);
+  // 自动刷新间隔(ms);null=关。用户级持久化,多账号不串扰。
+  const [autoRefreshMs, setAutoRefreshMs] = useUserPref<number | null>("logs-auto-refresh", null);
+
+  const [now] = useState(() => Math.floor(Date.now() / 1000));
   const defaultStart = now - 7 * 86_400;
   const insights = useLogsInsights(
     {
@@ -123,30 +131,38 @@ function LogsPageContent() {
     },
   );
 
-  const { data, isLoading, isFetching, refetch } = useLogs({
-    page,
-    page_size: pageSize,
-    ...(filterValues.start ? { start: Number(filterValues.start) } : {}),
-    ...(filterValues.end ? { end: Number(filterValues.end) } : {}),
-    ...(filterValues.user_id ? { user_id: Number(filterValues.user_id) } : {}),
-    ...(filterValues.token_id ? { token_id: Number(filterValues.token_id) } : {}),
-    ...(filterValues.channel_id ? { channel_id: Number(filterValues.channel_id) } : {}),
-    ...(filterValues.private_channel_id ? { private_channel_id: Number(filterValues.private_channel_id) } : {}),
-    ...(filterValues.model_name ? { model_name: String(filterValues.model_name) } : {}),
-    ...(filterValues.status ? { status: String(filterValues.status) } : {}),
-  });
+  const { data, isLoading, isFetching, refetch } = useLogs(
+    {
+      page,
+      page_size: pageSize,
+      ...(filterValues.start ? { start: Number(filterValues.start) } : {}),
+      ...(filterValues.end ? { end: Number(filterValues.end) } : {}),
+      ...(filterValues.user_id ? { user_id: Number(filterValues.user_id) } : {}),
+      ...(filterValues.token_id ? { token_id: Number(filterValues.token_id) } : {}),
+      ...(filterValues.channel_id ? { channel_id: Number(filterValues.channel_id) } : {}),
+      ...(filterValues.private_channel_id ? { private_channel_id: Number(filterValues.private_channel_id) } : {}),
+      ...(filterValues.model_name ? { model_name: String(filterValues.model_name) } : {}),
+      ...(filterValues.request_id ? { request_id: String(filterValues.request_id) } : {}),
+      ...(filterValues.status ? { status: String(filterValues.status) } : {}),
+    },
+    { refetchInterval: autoRefreshMs ?? false },
+  );
 
   const logs = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
 
-  const handlePaginationChange = (newPage: number, newPageSize: number) => {
-    if (newPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(newPageSize);
-    } else {
-      setPage(newPage);
+  // 陈旧书签(?page=99 但只有 14 页)自动回退到最后一页,避免空表格死角。
+  // total===0 不回退(空结果集合法停在第 1/1 页);pageCount 恒 >=1,回退后 page<=pageCount,不会再触发,无死循环。
+  useEffect(() => {
+    if (!isLoading && total > 0 && page > pageCount) {
+      setPagination(pageCount, pageSize);
     }
+  }, [isLoading, total, page, pageCount, pageSize, setPagination]);
+
+  const handlePaginationChange = (newPage: number, newPageSize: number) => {
+    // 改每页条数回第 1 页(语义与 DataTablePagination 的 onPaginationChange(1, size) 一致)
+    setPagination(newPageSize !== pageSize ? 1 : newPage, newPageSize);
   };
 
   const handleRefresh = () => {
@@ -158,7 +174,7 @@ function LogsPageContent() {
     return JSON.stringify(rawLog, null, 2);
   }, [rawLog]);
 
-  const renderAffinityBadge = (status?: string) => {
+  const renderAffinityBadge = useCallback((status?: string) => {
     if (status === "hit") {
       return (
         <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 font-normal text-xs">
@@ -174,7 +190,7 @@ function LogsPageContent() {
       );
     }
     return null;
-  };
+  }, [t]);
 
   const columns: ColumnDef<UsageLog>[] = useMemo(() => {
     const billingModeLabel = (row: UsageLog): string | undefined => {
@@ -436,7 +452,7 @@ function LogsPageContent() {
     );
 
     return cols;
-  }, [isAdmin, t, tc]);
+  }, [isAdmin, renderAffinityBadge, t, tc]);
 
   const renderExpandedRow = (row: Row<UsageLog>) => {
     const log = row.original;
@@ -566,13 +582,6 @@ function LogsPageContent() {
         );
       })()}
 
-      <StageDistributionBar
-        title={t("errorByStage")}
-        loading={insights.isLoading}
-        order={RELAY_STAGE_ORDER}
-        data={toStageBuckets(insights.data?.error_by_stage, tStage)}
-      />
-
       <DataTable
         columns={columns}
         data={logs}
@@ -584,6 +593,7 @@ function LogsPageContent() {
         onPaginationChange={handlePaginationChange}
         defaultColumnVisibility={defaultColumnVisibility}
         storageKey="logs"
+        getRowId={(row) => String(row.id)}
         renderExpandedRow={renderExpandedRow}
         toolbar={
           <FilterableToolbar
@@ -591,6 +601,22 @@ function LogsPageContent() {
             value={filterValues}
             onChange={setFilterValues}
             context={{ hasOwnBYOK }}
+            secondaryContent={
+              <Select
+                value={autoRefreshMs === null ? "off" : String(autoRefreshMs)}
+                onValueChange={(v) => setAutoRefreshMs(v === "off" ? null : Number(v))}
+              >
+                <SelectTrigger className="w-40" size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="off">{t("autoRefreshOff")}</SelectItem>
+                  <SelectItem value="5000">{t("autoRefreshEvery", { seconds: 5 })}</SelectItem>
+                  <SelectItem value="10000">{t("autoRefreshEvery", { seconds: 10 })}</SelectItem>
+                  <SelectItem value="30000">{t("autoRefreshEvery", { seconds: 30 })}</SelectItem>
+                </SelectContent>
+              </Select>
+            }
             secondaryActions={[
               {
                 label: isFetching ? t("refreshing") : t("refresh"),

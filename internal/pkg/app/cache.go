@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
 )
@@ -52,7 +51,7 @@ type Store interface {
 	// --- Agent 操作 ---
 	GetAgent(agentID string) *models.Agent
 	SetAgent(agent *models.Agent)
-	UpdateAgentAutoAddresses(agentID string, addrs []agentproxy.Address)
+	UpdateAgentAutoAddresses(agentID string, addrs []AgentAddress)
 	DeleteAgent(agentID string)
 	GetAgentsByTag(tag string) []*models.Agent
 	GetAllAgents() []*models.Agent
@@ -79,7 +78,7 @@ type Store interface {
 type Syncer interface {
 	SetClient(client WSClient)
 	FullSync(ctx context.Context) error
-	SubscribeEvents()
+	SubscribeEvents() error
 	StartPeriodicCheck(ctx context.Context)
 }
 

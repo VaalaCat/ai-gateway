@@ -76,7 +76,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (api.StatusResponse,
 		}
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

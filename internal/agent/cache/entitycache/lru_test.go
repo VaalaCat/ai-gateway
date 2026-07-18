@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sourcegraph/conc"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLRUCache_BasicSetGetDelete(t *testing.T) {
@@ -133,6 +136,9 @@ func TestLRUCache_RejectsZeroCapacity(t *testing.T) {
 	if _, err := NewLRUCache[string, int](Config[string, int]{Capacity: -1}); err == nil {
 		t.Fatal("Capacity<0 should error")
 	}
+	if _, err := NewLRUCache[string, int](Config[string, int]{Capacity: 4, MaxConcurrentLoads: -1}); err == nil {
+		t.Fatal("MaxConcurrentLoads<0 should error")
+	}
 }
 
 type stubLoader[K comparable, V any] struct {
@@ -192,6 +198,361 @@ func TestLRUCache_LoaderErrorTransparent(t *testing.T) {
 	c.Get(context.Background(), "k")
 	if loader.calls.Load() != 2 {
 		t.Fatalf("loader should be retried on error: calls=%d", loader.calls.Load())
+	}
+}
+
+func TestLRUCacheLifecycleJoinsDetachedColdLoadAfterCallerCancel(t *testing.T) {
+	lifecycle := NewLifecycle()
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(ctx context.Context, _ string) (int, error) {
+		close(entered)
+		<-ctx.Done()
+		close(exited)
+		return 0, context.Cause(ctx)
+	}}
+	c, err := NewLRUCache(Config[string, int]{
+		Capacity:  4,
+		Loader:    loader,
+		Refresh:   func() RefreshConfig { return RefreshConfig{LoadTimeout: time.Hour} },
+		Lifecycle: lifecycle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller, cancel := context.WithCancelCause(context.Background())
+	callerCause := errors.New("caller left")
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(caller, "blocked")
+		result <- err
+	}()
+	<-entered
+	cancel(callerCause)
+	if err := <-result; !errors.Is(err, callerCause) {
+		t.Fatalf("Get = %v, want caller cause", err)
+	}
+	loads, refreshes := lifecycle.ResourceCounts()
+	if loads != 1 || refreshes != 0 {
+		t.Fatalf("counts before Close = loads:%d refreshes:%d", loads, refreshes)
+	}
+	lifecycle.Close()
+	<-exited
+	loads, refreshes = lifecycle.ResourceCounts()
+	if loads != 0 || refreshes != 0 {
+		t.Fatalf("counts after Close = loads:%d refreshes:%d", loads, refreshes)
+	}
+	select {
+	case <-lifecycle.Done():
+	default:
+		t.Fatal("Lifecycle.Done remained open after loader exit")
+	}
+}
+
+func TestLRUCacheDetachedColdMissHasOneOwnerForHundredFollowers(t *testing.T) {
+	const callers = 100
+	lifecycle := NewLifecycle()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(context.Context, string) (int, error) {
+		close(entered)
+		<-release
+		return 42, nil
+	}}
+	c, err := NewLRUCache(Config[string, int]{
+		Capacity: 4,
+		Loader:   loader,
+		Refresh: func() RefreshConfig {
+			return RefreshConfig{LoadTimeout: time.Minute}
+		},
+		Lifecycle: lifecycle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(lifecycle.Close)
+	var releaseOnce sync.Once
+	releaseLoad := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseLoad)
+
+	start := make(chan struct{})
+	returned := make(chan int, callers)
+	results := make([]int, callers)
+	errs := make([]error, callers)
+	cancels := make([]context.CancelCauseFunc, callers)
+	var workers conc.WaitGroup
+	for i := range callers {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancels[i] = cancel
+		workers.Go(func() {
+			<-start
+			results[i], _, errs[i] = c.Get(ctx, "same")
+			returned <- i
+		})
+	}
+	close(start)
+	<-entered
+	require.Eventually(t, func() bool {
+		loads, refreshes := lifecycle.ResourceCounts()
+		return loader.calls.Load() == 1 && loads == 1 && refreshes == 0
+	}, time.Second, time.Millisecond, "one detached load owner")
+
+	followerCause := errors.New("follower canceled")
+	for i := 1; i <= callers/2; i++ {
+		cancels[i](followerCause)
+	}
+	for range callers / 2 {
+		i := <-returned
+		if i == 0 || !errors.Is(errs[i], followerCause) {
+			t.Fatalf("canceled follower %d returned (%d, %v)", i, results[i], errs[i])
+		}
+	}
+	loads, refreshes := lifecycle.ResourceCounts()
+	if loads != 1 || loader.calls.Load() != 1 {
+		t.Fatalf("after follower cancellation: loads=%d loader_calls=%d, want 1/1", loads, loader.calls.Load())
+	}
+
+	releaseLoad()
+	workers.Wait()
+	if errs[0] != nil || results[0] != 42 {
+		t.Fatalf("owner result = (%d, %v), want (42, nil)", results[0], errs[0])
+	}
+	require.Eventually(t, func() bool {
+		loads, refreshes := lifecycle.ResourceCounts()
+		return loads == 0 && refreshes == 0
+	}, time.Second, time.Millisecond, "detached load owner exit")
+	lifecycle.Close()
+	loads, refreshes = lifecycle.ResourceCounts()
+	if loads != 0 || refreshes != 0 {
+		t.Fatalf("counts after Close = loads:%d refreshes:%d", loads, refreshes)
+	}
+}
+
+func TestLRUCacheRejectsUniqueLoadsAboveLimit(t *testing.T) {
+	lifecycle := NewLifecycle()
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(_ context.Context, key string) (int, error) {
+		entered <- key
+		<-release
+		return len(key), nil
+	}}
+	c, err := NewLRUCache(Config[string, int]{
+		Capacity:           8,
+		MaxConcurrentLoads: 2,
+		Loader:             loader,
+		Refresh:            func() RefreshConfig { return RefreshConfig{LoadTimeout: time.Minute} },
+		Lifecycle:          lifecycle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(lifecycle.Close)
+	var workers conc.WaitGroup
+	for _, key := range []string{"a", "bb"} {
+		key := key
+		workers.Go(func() { _, _, _ = c.Get(context.Background(), key) })
+	}
+	<-entered
+	<-entered
+
+	if _, _, err := c.Get(context.Background(), "ccc"); !errors.Is(err, ErrLoadLimitReached) {
+		t.Fatalf("overflow Get error = %v, want %v", err, ErrLoadLimitReached)
+	}
+	canceledCause := errors.New("caller canceled before admission")
+	canceledCtx, cancel := context.WithCancelCause(context.Background())
+	cancel(canceledCause)
+	if _, _, err := c.Get(canceledCtx, "dddd"); !errors.Is(err, canceledCause) {
+		t.Fatalf("canceled overflow Get error = %v, want %v", err, canceledCause)
+	}
+	if got := loader.calls.Load(); got != 2 {
+		t.Fatalf("loader calls = %d, want 2", got)
+	}
+	close(release)
+	workers.Wait()
+}
+
+func TestLRUCacheSameKeyFollowerJoinsWhenUniqueLoadLimitIsFull(t *testing.T) {
+	lifecycle := NewLifecycle()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(context.Context, string) (int, error) {
+		close(entered)
+		<-release
+		return 42, nil
+	}}
+	c, err := NewLRUCache(Config[string, int]{
+		Capacity:           4,
+		MaxConcurrentLoads: 1,
+		Loader:             loader,
+		Refresh:            func() RefreshConfig { return RefreshConfig{LoadTimeout: time.Minute} },
+		Lifecycle:          lifecycle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(lifecycle.Close)
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(context.Background(), "same")
+		result <- err
+	}()
+	<-entered
+	flight, leader, err := c.beginLoad("same")
+	if err != nil || leader || flight == nil {
+		t.Fatalf("same-key follower admission = (flight:%v leader:%v err:%v), want existing flight", flight != nil, leader, err)
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("leader Get: %v", err)
+	}
+}
+
+func TestLRUCacheLoadLimitCapacityReturnsAfterCompletion(t *testing.T) {
+	lifecycle := NewLifecycle()
+	releaseFirst := make(chan struct{})
+	enteredFirst := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(_ context.Context, key string) (int, error) {
+		if key == "first" {
+			close(enteredFirst)
+			<-releaseFirst
+		}
+		return len(key), nil
+	}}
+	c, err := NewLRUCache(Config[string, int]{
+		Capacity:           4,
+		MaxConcurrentLoads: 1,
+		Loader:             loader,
+		Refresh:            func() RefreshConfig { return RefreshConfig{LoadTimeout: time.Minute} },
+		Lifecycle:          lifecycle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(lifecycle.Close)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(context.Background(), "first")
+		firstDone <- err
+	}()
+	<-enteredFirst
+	if _, _, err := c.Get(context.Background(), "overflow"); !errors.Is(err, ErrLoadLimitReached) {
+		t.Fatalf("overflow Get error = %v, want %v", err, ErrLoadLimitReached)
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Get: %v", err)
+	}
+	if value, found, err := c.Get(context.Background(), "second"); err != nil || !found || value != len("second") {
+		t.Fatalf("second Get after release = (%d, %v, %v)", value, found, err)
+	}
+}
+
+func TestLRUCacheLifecycleCloseReleasesLoadLimitCapacity(t *testing.T) {
+	lifecycle := NewLifecycle()
+	entered := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(ctx context.Context, _ string) (int, error) {
+		close(entered)
+		<-ctx.Done()
+		return 0, context.Cause(ctx)
+	}}
+	c, err := NewLRUCache(Config[string, int]{
+		Capacity:           4,
+		MaxConcurrentLoads: 1,
+		Loader:             loader,
+		Refresh:            func() RefreshConfig { return RefreshConfig{LoadTimeout: time.Minute} },
+		Lifecycle:          lifecycle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(context.Background(), "first")
+		result <- err
+	}()
+	<-entered
+	lifecycle.Close()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Get after Lifecycle.Close = %v, want canceled", err)
+	}
+	c.loadMu.Lock()
+	flights := len(c.loadFlights)
+	c.loadMu.Unlock()
+	if flights != 0 {
+		t.Fatalf("load flights after Close = %d, want 0", flights)
+	}
+	if _, _, err := c.Get(context.Background(), "second"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("new Get after Lifecycle.Close = %v, want canceled", err)
+	}
+}
+
+func TestLRUCacheDelayedMissUsesValueStoredBeforeFlightAdmission(t *testing.T) {
+	c, err := NewLRUCache(Config[string, int]{Capacity: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.store("same", 42)
+
+	flight, leader, err := c.beginLoad("same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leader {
+		c.finishLoad("same", flight, loadOutcome[int]{value: 42, found: true})
+		t.Fatal("delayed miss became a second load leader after value was stored")
+	}
+	select {
+	case <-flight.done:
+		if flight.outcome.err != nil || !flight.outcome.found || flight.outcome.value != 42 {
+			t.Fatalf("completed flight = %+v, want cached value 42", flight.outcome)
+		}
+	default:
+		t.Fatal("cached value did not produce a completed flight")
+	}
+}
+
+func TestLRUCacheCallerOwnedColdMissPropagatesCallerCause(t *testing.T) {
+	lifecycle := NewLifecycle()
+	entered := make(chan struct{})
+	loaderCanceled := make(chan error, 1)
+	loader := &stubLoader[string, int]{fn: func(ctx context.Context, _ string) (int, error) {
+		close(entered)
+		<-ctx.Done()
+		loaderCanceled <- context.Cause(ctx)
+		return 0, context.Cause(ctx)
+	}}
+	c, err := NewLRUCache(Config[string, int]{Capacity: 4, Loader: loader, Lifecycle: lifecycle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(lifecycle.Close)
+
+	callerCtx, cancel := context.WithCancelCause(context.Background())
+	callerCause := errors.New("caller canceled")
+	result := make(chan error, 1)
+	var worker conc.WaitGroup
+	worker.Go(func() {
+		_, _, err := c.Get(callerCtx, "same")
+		result <- err
+	})
+	<-entered
+	cancel(callerCause)
+	select {
+	case cause := <-loaderCanceled:
+		if !errors.Is(cause, callerCause) {
+			t.Fatalf("loader cause = %v, want %v", cause, callerCause)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("caller-owned loader did not observe caller cancellation")
+	}
+	worker.Wait()
+	if err := <-result; !errors.Is(err, callerCause) {
+		t.Fatalf("Get = %v, want %v", err, callerCause)
+	}
+	loads, refreshes := lifecycle.ResourceCounts()
+	if loads != 0 || refreshes != 0 {
+		t.Fatalf("caller-owned load registered lifecycle workers: loads:%d refreshes:%d", loads, refreshes)
 	}
 }
 
@@ -417,9 +778,9 @@ func TestLRUCache_NegativeCacheExpiryDoesNotCountAsEviction(t *testing.T) {
 		Now:         func() time.Time { return *clock },
 	})
 
-	c.Get(context.Background(), "k")       // 写入负缓存
+	c.Get(context.Background(), "k") // 写入负缓存
 	*clock = now.Add(31 * time.Second)
-	c.Get(context.Background(), "k")       // TTL 过期 → cache.Remove + 重新拉
+	c.Get(context.Background(), "k") // TTL 过期 → cache.Remove + 重新拉
 
 	// 仅 capacity 驱逐计数；TTL 过期清理不应该计入
 	if s := c.Stats(); s.Evictions != 0 {

@@ -19,6 +19,8 @@ type respRequest struct {
 	ToolChoice        any             `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
 	Store             *bool           `json:"store,omitempty"`
+	SafetyIdentifier  string          `json:"safety_identifier,omitempty"`
+	StreamOptions     map[string]any  `json:"stream_options,omitempty"`
 	Reasoning         *respReasoning  `json:"reasoning,omitempty"`
 	Include           []string        `json:"include,omitempty"`
 	PromptCacheKey    string          `json:"prompt_cache_key,omitempty"`
@@ -47,8 +49,9 @@ type respFunctionCallInput struct {
 }
 
 type respInputContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
 }
 
 type respTool struct {
@@ -86,6 +89,7 @@ type respOutputItem struct {
 	CallID    string             `json:"call_id,omitempty"`
 	Name      string             `json:"name,omitempty"`
 	Arguments string             `json:"arguments,omitempty"`
+	Input     string             `json:"input,omitempty"`
 }
 
 // respFunctionCallOutputInput represents a function_call_output input item.

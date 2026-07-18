@@ -1,83 +1,79 @@
 "use client";
 
 import { Suspense, useState } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { ArrowLeft, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { AgentConnectionsPanel } from "@/components/business/agent-connections-panel";
+import { AgentConnectionStatus } from "@/components/business/agent-connection-status";
+import { CacheStatsTable } from "@/components/business/cache-stats-table";
+import { CopyableText } from "@/components/business/copyable-text";
+import { DateCell } from "@/components/business/date-cell";
+import { InflightTable } from "@/components/business/inflight-table";
+import { InflightBlockDetail } from "@/components/observability/inflight-block-detail";
 import { Badge } from "@/components/ui/badge";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { OnlineBadge } from "@/components/business/status-badge";
-import { DateCell } from "@/components/business/date-cell";
-import { CopyableText } from "@/components/business/copyable-text";
-import { CacheStatsTable } from "@/components/business/cache-stats-table";
-
-import { cn } from "@/lib/utils";
-import { useAgentDetail, useConnectivityReport, useCheckConnectivity, useFullSyncAgents, useAgentInflight, useAgentGoroutines, useInterruptInflight } from "@/lib/api/agents";
+import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  useAgentDetail,
+  useAgentGoroutines,
+  useAgentInflight,
+  useFullSyncAgents,
+  useInterruptInflight,
+} from "@/lib/api/agents";
 import type { GoroutineDump } from "@/lib/api/agents";
-import { InflightTable } from "@/components/business/inflight-table";
-import { InflightBlockDetail } from "@/components/observability/inflight-block-detail";
 import { formatErrorToast } from "@/lib/api/error-toast";
+import type { AgentAddress, AgentDetail, GlobalInflightRow } from "@/lib/types";
 import { formatDuration, formatUptime } from "@/lib/utils/format";
-import type { AgentAddress, GlobalInflightRow } from "@/lib/types";
-import { useAgentHealth } from "@/lib/hooks/use-agent-health";
-import { SaturationBar } from "@/components/business/health-status-dot";
+import { useAgentConnections } from "@/lib/hooks/use-agent-connections";
+import { routeTargetsPageMatchesSnapshot } from "@/lib/agent-connection-snapshot";
 
 function parseAddresses(raw: string): AgentAddress[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed;
-  } catch { /* ignore */ }
-  return [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function Stat({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <div className="text-xs text-muted-foreground truncate">{label}</div>
-      <div className="text-sm font-medium truncate mt-0.5">{children}</div>
+      <div className="truncate text-xs text-muted-foreground">{label}</div>
+      <div className="mt-0.5 min-w-0 truncate text-sm font-medium">{children}</div>
     </div>
   );
 }
 
-function GoroutineDumpDialog({
-  open,
-  onOpenChange,
-  data,
-}: {
+function GoroutineDumpDialog({ open, onOpenChange, data }: {
   open: boolean;
-  onOpenChange: (v: boolean) => void;
+  onOpenChange: (open: boolean) => void;
   data: GoroutineDump | null;
 }) {
   const t = useTranslations("agents");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+      <DialogContent className="flex max-h-[80vh] max-w-3xl flex-col">
         <DialogHeader>
-          <DialogTitle>
-            {data ? t("goroutineDumpTitle", { count: data.count }) : t("goroutineDump")}
-          </DialogTitle>
+          <DialogTitle>{data ? t("goroutineDumpTitle", { count: data.count }) : t("goroutineDump")}</DialogTitle>
+          <DialogDescription className="sr-only">{t("goroutineDumpDescription")}</DialogDescription>
         </DialogHeader>
-        <div className="flex-1 overflow-auto min-h-0">
-          <pre className="text-xs whitespace-pre-wrap break-all p-2 bg-muted rounded">
-            {data?.dump ?? ""}
-          </pre>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <pre className="whitespace-pre-wrap break-all rounded-md bg-muted p-2 text-xs">{data?.dump ?? ""}</pre>
         </div>
       </DialogContent>
     </Dialog>
@@ -88,46 +84,33 @@ function InflightSection({ agentId, agentName }: { agentId: number; agentName: s
   const t = useTranslations("agents");
   const tc = useTranslations("common");
   const { data: rows = [], isFetching, refetch } = useAgentInflight(agentId);
-  const goroutinesMutation = useAgentGoroutines();
+  const goroutines = useAgentGoroutines();
   const interrupt = useInterruptInflight();
   const [dumpOpen, setDumpOpen] = useState(false);
   const [dumpData, setDumpData] = useState<GoroutineDump | null>(null);
   const [selected, setSelected] = useState<GlobalInflightRow | null>(null);
 
-  const handleGoroutineDump = async () => {
+  const loadDump = async () => {
     try {
-      const result = await goroutinesMutation.mutateAsync(agentId);
-      setDumpData(result);
+      setDumpData(await goroutines.mutateAsync(agentId));
       setDumpOpen(true);
-    } catch (e) {
-      toast.error(formatErrorToast(e, tc("error")));
+    } catch (error) {
+      toast.error(formatErrorToast(error, tc("error")));
     }
   };
 
   return (
-    <div className="rounded-md border">
-      <div className="flex items-center justify-between px-4 py-3">
+    <section className="rounded-md border">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
         <h2 className="text-sm font-medium">{t("inflightTitle")}</h2>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            <RefreshCw className={`mr-1 size-3 ${isFetching ? "animate-spin" : ""}`} />
+          <Button type="button" variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
+            {isFetching ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
             {t("inflightRefresh")}
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 text-xs"
-            onClick={handleGoroutineDump}
-            disabled={goroutinesMutation.isPending}
-          >
-            <RefreshCw className={`mr-1 size-3 ${goroutinesMutation.isPending ? "animate-spin" : ""}`} />
-            {goroutinesMutation.isPending ? t("goroutineDumping") : t("goroutineDump")}
+          <Button type="button" variant="outline" size="sm" onClick={() => void loadDump()} disabled={goroutines.isPending}>
+            {goroutines.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
+            {goroutines.isPending ? t("goroutineDumping") : t("goroutineDump")}
           </Button>
         </div>
       </div>
@@ -135,29 +118,92 @@ function InflightSection({ agentId, agentName }: { agentId: number; agentName: s
         <InflightTable
           rows={rows}
           emptyText={t("inflightEmpty")}
-          onSelectRow={(row) =>
-            setSelected({ ...row, agent_id: agentId, agent_name: agentName } as GlobalInflightRow)
-          }
-          onInterrupt={(row) =>
-            interrupt.mutate(
-              { agent_id: agentId, id: row.id },
-              {
-                onSuccess: () => { toast.success(t("inflightInterrupted")); },
-                onError: (e) => toast.error(formatErrorToast(e, tc("error"))),
-              },
-            )
-          }
+          onSelectRow={(row) => setSelected({ ...row, agent_id: agentId, agent_name: agentName } as GlobalInflightRow)}
+          onInterrupt={(row) => interrupt.mutate(
+            { agent_id: agentId, id: row.id },
+            {
+              onSuccess: () => toast.success(t("inflightInterrupted")),
+              onError: (error) => toast.error(formatErrorToast(error, tc("error"))),
+            },
+          )}
         />
       </div>
       <InflightBlockDetail row={selected} onClose={() => setSelected(null)} />
       <GoroutineDumpDialog open={dumpOpen} onOpenChange={setDumpOpen} data={dumpData} />
+    </section>
+  );
+}
+
+function OverviewTab({ agent }: { agent: AgentDetail }) {
+  const t = useTranslations("agents");
+  const addresses = parseAddresses(agent.effective_http_addresses ?? agent.http_addresses);
+  const tags = agent.tags.split(",").map((tag) => tag.trim()).filter(Boolean);
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <section className="rounded-md border">
+        <div className="grid grid-cols-2 gap-x-8 gap-y-4 p-4 sm:grid-cols-4">
+          <Stat label={t("agentId")}><CopyableText text={agent.agent_id} /></Stat>
+          <Stat label={t("lastSeen")}><DateCell timestamp={agent.last_seen} relative /></Stat>
+          <Stat label={t("tags")}>
+            {tags.length > 0 ? <span className="flex flex-wrap gap-1">{tags.map((tag) => <Badge key={tag} variant="secondary">{tag}</Badge>)}</span> : "-"}
+          </Stat>
+          <Stat label={t("proxyUrl")}>{agent.proxy_url || "-"}</Stat>
+        </div>
+        {addresses.length > 0 ? (
+          <div className="flex min-w-0 items-start gap-3 border-t px-4 py-3">
+            <span className="shrink-0 text-xs leading-5 text-muted-foreground">{t("httpAddresses")}</span>
+            <div className="flex min-w-0 flex-wrap gap-x-4 gap-y-1.5">
+              {addresses.map((address, index) => (
+                <span key={`${address.url}-${address.tag}-${index}`} className="inline-flex min-w-0 items-center gap-1.5">
+                  <code className="max-w-full break-all rounded bg-muted px-1.5 py-0.5 text-xs">{address.url}</code>
+                  {address.tag ? <Badge variant="outline">{address.tag}</Badge> : null}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function RuntimeTab({ agent }: { agent: AgentDetail }) {
+  const t = useTranslations("agents");
+  const runtime = agent.runtime;
+  if (!runtime) {
+    return <Empty><EmptyHeader><EmptyTitle>{t("noRuntime")}</EmptyTitle></EmptyHeader></Empty>;
+  }
+  const drift = runtime.master_version - runtime.version;
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <section className="rounded-md border p-4">
+        <div className="grid grid-cols-2 gap-x-8 gap-y-4 sm:grid-cols-3 lg:grid-cols-5">
+          <Stat label={t("uptime")}>{formatUptime(runtime.uptime)}</Stat>
+          <Stat label={t("cachedTokens")}>{runtime.cached_tokens}</Stat>
+          <Stat label={t("cachedChannels")}>{runtime.cached_channels}</Stat>
+          <Stat label={t("cachedModels")}>{runtime.cached_models}</Stat>
+          <Stat label={t("activeConnections")}>{runtime.active_connections}</Stat>
+          <Stat label={t("pendingUsage")}>{runtime.pending_usage ?? 0}</Stat>
+          <Stat label={t("version")}>{runtime.version}</Stat>
+          <Stat label={t("masterVersion")}>{runtime.master_version}</Stat>
+          <Stat label={t("versionDrift")}><Badge variant={drift === 0 ? "secondary" : "destructive"}>{drift}</Badge></Stat>
+        </div>
+      </section>
+      {runtime.cache_stats ? (
+        <section className="rounded-md border">
+          <div className="border-b px-4 py-3"><h2 className="text-sm font-medium">{t("agentSectionTitle")}</h2></div>
+          <div className="p-4"><CacheStatsTable data={runtime.cache_stats} mode="agent" /></div>
+        </section>
+      ) : null}
+      <InflightSection agentId={agent.id} agentName={agent.name} />
     </div>
   );
 }
 
 export default function AgentDetailPage() {
+  const tc = useTranslations("common");
   return (
-    <Suspense fallback={<div className="flex items-center justify-center py-12 text-muted-foreground">Loading...</div>}>
+    <Suspense fallback={<div className="flex flex-col gap-3 py-8" aria-label={tc("loading")}><Skeleton className="h-8 w-48" /><Skeleton className="h-56 w-full" /></div>}>
       <AgentDetailContent />
     </Suspense>
   );
@@ -169,239 +215,99 @@ function AgentDetailContent() {
   const id = Number(searchParams.get("id"));
   const t = useTranslations("agents");
   const tc = useTranslations("common");
-  const ht = useTranslations("observability.health");
-  const health = useAgentHealth();
-  const h = health.byId.get(id);
+  const detail = useAgentDetail(id);
+  const monitored = useAgentConnections(id, undefined, {
+    enabled: Boolean(detail.data),
+    initialSnapshot: detail.data?.connection,
+  });
+  const fullSync = useFullSyncAgents();
 
-  const { data: agent, isLoading, refetch } = useAgentDetail(id);
-  const { data: connectivity } = useConnectivityReport(id);
-  const checkMutation = useCheckConnectivity();
-  const fullSyncMutation = useFullSyncAgents();
-
-  const handleCheck = async () => {
+  const runFullSync = async () => {
+    if (!detail.data) return;
     try {
-      await checkMutation.mutateAsync(id);
-      toast.success(tc("success"));
-    } catch (e) {
-      toast.error(formatErrorToast(e, tc("error")));
-    }
-  };
-
-  const handleFullSync = async () => {
-    if (!agent) return;
-    try {
-      const result = await fullSyncMutation.mutateAsync({ agent_ids: [agent.agent_id] });
-      const r = result.results[0];
-      if (r?.success) {
-        toast.success(`${t("fullSync")}: v${r.version}, ${formatDuration(r.duration_ms ?? 0)}`);
-        refetch();
-      } else {
-        toast.error(r?.error || tc("error"));
+      const result = await fullSync.mutateAsync({ agent_ids: [detail.data.agent_id] });
+      const first = result.results[0];
+      if (!first?.success) {
+        toast.error(first?.error || tc("error"));
+        return;
       }
-    } catch (e) {
-      toast.error(formatErrorToast(e, tc("error")));
+      toast.success(`${t("fullSync")}: v${first.version}, ${formatDuration(first.duration_ms ?? 0)}`);
+      await detail.refetch();
+    } catch (error) {
+      toast.error(formatErrorToast(error, tc("error")));
     }
   };
 
-  if (isLoading || !agent) {
+  if (detail.isError && !detail.data) {
     return (
-      <div className="flex items-center justify-center py-12 text-muted-foreground">
-        {tc("loading")}
-      </div>
+      <Alert variant="destructive" role="alert">
+        <AlertTitle>{t("detailLoadFailed")}</AlertTitle>
+        <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+          <span>{t("detailLoadFailedDescription")}</span>
+          <Button type="button" variant="outline" size="sm" onClick={() => void detail.refetch()}>{t("retry")}</Button>
+        </AlertDescription>
+      </Alert>
     );
   }
-
-  const isOnline = agent.last_seen > 0 && (Date.now() / 1000 - agent.last_seen) < 120;
-  const addresses = parseAddresses(agent.effective_http_addresses || agent.http_addresses);
-  const tags = agent.tags ? agent.tags.split(",").map((s: string) => s.trim()).filter(Boolean) : [];
-  const rt = agent.runtime;
-  const drift = rt ? rt.master_version - rt.version : 0;
-
+  if (detail.isLoading || !detail.data) {
+    return <div className="flex flex-col gap-3 py-8" aria-label={tc("loading")}><Skeleton className="h-8 w-48" /><Skeleton className="h-56 w-full" /></div>;
+  }
+  const agent = detail.data;
+  const snapshot = monitored.data ?? agent.connection;
+  const connectionStale = monitored.stale;
+  const routeTargetsPage = monitored.routeTargetsPage ?? (
+    routeTargetsPageMatchesSnapshot(agent.route_targets, snapshot)
+      ? agent.route_targets
+      : undefined
+  );
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center gap-2">
-        <Button variant="ghost" size="icon" className="size-8 shrink-0" onClick={() => router.push("/agents")}>
-          <ArrowLeft className="size-4" />
+    <div className="flex min-w-0 flex-col gap-4">
+      {detail.isError ? (
+        <Alert variant="destructive" role="alert">
+          <AlertTitle>{t("detailLoadFailed")}</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>{t("detailLoadFailedDescription")}</span>
+            <Button type="button" variant="outline" size="sm" onClick={() => void detail.refetch()}>{t("retry")}</Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      <header className="flex min-w-0 items-center gap-2">
+        <Button type="button" variant="ghost" size="icon" className="shrink-0" aria-label={t("backToList")} onClick={() => router.push("/agents")}>
+          <ArrowLeft data-icon="inline-start" />
         </Button>
-        <h1 className="text-lg font-semibold truncate">{agent.name}</h1>
-        <OnlineBadge lastSeen={agent.last_seen} />
+        <h1 className="min-w-0 truncate text-lg font-semibold">{agent.name}</h1>
+        <AgentConnectionStatus kind="control" value={snapshot.control} />
         <Button
+          type="button"
           variant="outline"
           size="sm"
-          className="h-7 text-xs ml-auto"
-          onClick={handleFullSync}
-          disabled={fullSyncMutation.isPending || !isOnline}
+          className="ml-auto shrink-0"
+          onClick={() => void runFullSync()}
+          disabled={connectionStale || fullSync.isPending || snapshot.control.state !== "connected"}
         >
-          <RefreshCw className={`mr-1 size-3 ${fullSyncMutation.isPending ? "animate-spin" : ""}`} />
-          {fullSyncMutation.isPending ? t("syncing") : t("fullSync")}
+          {fullSync.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
+          {fullSync.isPending ? t("syncing") : t("fullSync")}
         </Button>
-      </div>
+      </header>
 
-      {/* Info + Runtime — single bordered panel */}
-      <div className="rounded-md border">
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-x-8 gap-y-3 p-4">
-          <Stat label={t("agentId")}>
-            <CopyableText text={agent.agent_id} />
-          </Stat>
-          <Stat label={t("lastSeen")}>
-            <DateCell timestamp={agent.last_seen} relative />
-          </Stat>
-          <Stat label={t("tags")}>
-            {tags.length > 0 ? (
-              <span className="flex flex-wrap gap-1">
-                {tags.map((tag: string) => <Badge key={tag} variant="secondary" className="text-xs px-1.5 py-0">{tag}</Badge>)}
-              </span>
-            ) : "-"}
-          </Stat>
-          <Stat label={t("proxyUrl")}>{agent.proxy_url || "-"}</Stat>
-          {rt && (
-            <>
-              <Stat label={t("uptime")}>{formatUptime(rt.uptime)}</Stat>
-              <Stat label={t("cachedTokens")}>{rt.cached_tokens}</Stat>
-              <Stat label={t("cachedChannels")}>{rt.cached_channels}</Stat>
-              <Stat label={t("cachedModels")}>{rt.cached_models}</Stat>
-              <Stat label={t("version")}>{rt.version}</Stat>
-              <Stat label={t("masterVersion")}>{rt.master_version}</Stat>
-              <Stat label={t("versionDrift")}>
-                {drift === 0
-                  ? <Badge variant="secondary" className="text-xs px-1.5 py-0">0</Badge>
-                  : <Badge variant="destructive" className="text-xs px-1.5 py-0">{drift}</Badge>}
-              </Stat>
-              <Stat label={t("activeConnections")}>{rt.active_connections}</Stat>
-            </>
-          )}
-        </div>
-        {addresses.length > 0 && (
-          <div className="border-t px-4 py-3 flex items-start gap-3">
-            <span className="text-xs text-muted-foreground shrink-0 leading-5">{t("httpAddresses")}</span>
-            <div className="flex flex-wrap gap-x-4 gap-y-1.5 min-w-0">
-              {addresses.map((addr, i) => (
-                <span key={i} className="inline-flex items-center gap-1.5">
-                  <code className="text-xs bg-muted rounded px-1.5 py-0.5 break-all">{addr.url}</code>
-                  {addr.tag && <Badge variant="outline" className="text-xs px-1.5 py-0 shrink-0">{addr.tag}</Badge>}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Live metrics */}
-      {h && (
-        <div className="rounded-md border">
-          <div className="px-4 py-3 border-b">
-            <h2 className="text-sm font-medium">{ht("title")}</h2>
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-8 gap-y-3 p-4">
-            <Stat label={ht("field.inflight")}>{h.inflight}</Stat>
-            <Stat label={ht("field.qps")}>{h.qps.toFixed(2)}</Stat>
-            <Stat label={ht("field.errorRate")}>
-              <span
-                className={cn(
-                  h.errorRate * 100 >= health.thresholds.errRedPct
-                    ? "text-red-600 dark:text-red-400"
-                    : h.errorRate * 100 >= health.thresholds.errYellowPct
-                      ? "text-amber-600 dark:text-amber-400"
-                      : "",
-                )}
-              >
-                {(h.errorRate * 100).toFixed(1)}%
-              </span>
-            </Stat>
-            <Stat label={ht("field.saturation")}>
-              <SaturationBar pct={h.saturationPct} hasWaiters={h.hasWaiters} />
-            </Stat>
-          </div>
-        </div>
-      )}
-
-      {/* Cache — matching bordered panel */}
-      {rt?.cache_stats && (
-        <div className="rounded-md border">
-          <div className="px-4 py-3 border-b">
-            <h2 className="text-sm font-medium">{t("agentSectionTitle")}</h2>
-          </div>
-          <div className="p-4">
-            <CacheStatsTable data={rt.cache_stats} mode="agent" />
-          </div>
-        </div>
-      )}
-
-      {/* In-Flight Requests */}
-      <InflightSection agentId={id} agentName={agent.name} />
-
-      {/* Connectivity — matching bordered panel */}
-      <div className="rounded-md border">
-        <div className="flex items-center justify-between px-4 py-3">
-          <h2 className="text-sm font-medium">{t("connectivity")}</h2>
-          <div className="flex items-center gap-3">
-            {connectivity && connectivity.checked_at > 0 && (
-              <span className="text-xs text-muted-foreground">
-                {t("checkedAt")}: <DateCell timestamp={connectivity.checked_at} relative />
-              </span>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs"
-              onClick={handleCheck}
-              disabled={checkMutation.isPending}
-            >
-              <RefreshCw className={`mr-1 size-3 ${checkMutation.isPending ? "animate-spin" : ""}`} />
-              {checkMutation.isPending ? t("checking") : t("checkConnectivity")}
-            </Button>
-          </div>
-        </div>
-        {connectivity && connectivity.checked_at > 0 && connectivity.results && connectivity.results.length > 0 ? (
-          <div className="border-t">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="h-8">{t("targetAgent")}</TableHead>
-                  <TableHead className="h-8">{t("address")}</TableHead>
-                  <TableHead className="h-8">{tc("status")}</TableHead>
-                  <TableHead className="h-8">{t("latency")}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {connectivity.results.flatMap((cr) =>
-                  cr.results.map((r, i) => (
-                    <TableRow key={`${cr.target_agent_id}-${i}`}>
-                      {i === 0 ? (
-                        <TableCell rowSpan={cr.results.length} className="py-1.5">
-                          <div className="text-sm font-medium">{cr.target_name}</div>
-                          <div className="text-xs text-muted-foreground">{cr.target_agent_id}</div>
-                        </TableCell>
-                      ) : null}
-                      <TableCell className="py-1.5">
-                        <code className="text-xs">{r.url}</code>
-                        {r.tag && <Badge variant="outline" className="ml-1.5 text-xs px-1.5 py-0">{r.tag}</Badge>}
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        {r.reachable ? (
-                          <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 text-xs px-1.5 py-0">
-                            {t("reachable")}
-                          </Badge>
-                        ) : (
-                          <Badge variant="destructive" className="text-xs px-1.5 py-0">{t("unreachable")}</Badge>
-                        )}
-                      </TableCell>
-                      <TableCell className="py-1.5">
-                        {r.reachable ? formatDuration(r.latency_ms) : r.error || "-"}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        ) : (
-          <div className="border-t px-4 py-3">
-            <p className="text-xs text-muted-foreground">{t("noResults")}</p>
-          </div>
-        )}
-      </div>
+      <Tabs defaultValue="overview" className="min-w-0">
+        <TabsList>
+          <TabsTrigger value="overview">{t("overview")}</TabsTrigger>
+          <TabsTrigger value="connections">{t("connections")}</TabsTrigger>
+          <TabsTrigger value="runtime">{t("runtime")}</TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview" className="mt-4"><OverviewTab agent={agent} /></TabsContent>
+        <TabsContent value="connections" className="mt-4">
+          <AgentConnectionsPanel
+            agentId={agent.id}
+            snapshot={snapshot}
+            initialRouteTargetsPage={routeTargetsPage}
+            stale={connectionStale}
+            loading={detail.isFetching || monitored.isFetching}
+          />
+        </TabsContent>
+        <TabsContent value="runtime" className="mt-4"><RuntimeTab agent={agent} /></TabsContent>
+      </Tabs>
     </div>
   );
 }

@@ -1,8 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
 import type {
   AllInflightResponse,
   BreakerBoardResponse,
+  DeliveryBoardResponse,
+  DeliveryOpRequest,
+  DeliveryOpResponse,
   LimiterUsageResponse,
   RecentHealthResponse,
 } from "@/lib/types";
@@ -31,6 +34,24 @@ export function useBreakerBoard() {
     queryFn: () =>
       api.get<BreakerBoardResponse>("/admin/observability/breaker-board"),
     refetchInterval: 5000,
+  });
+}
+
+export function useDeliveryBoard() {
+  return useQuery({
+    queryKey: ["observability", "delivery-board"],
+    queryFn: () =>
+      api.get<DeliveryBoardResponse>("/admin/observability/delivery-board"),
+    refetchInterval: 5000,
+  });
+}
+
+export function useDeliveryOp() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (req: DeliveryOpRequest) =>
+      api.post<DeliveryOpResponse>("/admin/observability/delivery-op", req),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["observability", "delivery-board"] }),
   });
 }
 

@@ -41,14 +41,15 @@ func newDashboardTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	return &Handler{}, db, application
 }
 
-func makeDashboardCtx(application app.Application, userID uint, isAdmin bool) *app.Context {
+func makeDashboardCtx(t *testing.T, application app.Application, userID uint, isAdmin bool) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	ginCtx.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
 	return &app.Context{
-		Context:  ginCtx,
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: userID, GroupID: 1},
+		Context:      ginCtx,
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: userID, GroupID: 1},
+		OwnerContext: t.Context(),
 	}
 }
 
@@ -115,7 +116,7 @@ func TestDashboard_Admin_IncludesAllBlocks(t *testing.T) {
 	seedDashboardHourlyBucket(t, db, date, 10, "gpt-4o", 5)
 	seedDashboardHourlyBucket(t, db, date, 11, "claude-3", 3)
 
-	ctx := makeDashboardCtx(application, 1, true)
+	ctx := makeDashboardCtx(t, application, 1, true)
 	resp, err := h.Dashboard(ctx, DashboardRequest{Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Dashboard admin: %v", err)
@@ -153,7 +154,7 @@ func TestDashboard_User_OmitsAdminFields(t *testing.T) {
 	// seed 一条 usage_log 让 user-scope KpiBundle.Requests 有值。
 	seedDashboardUserLog(t, db, 1, start+3600)
 
-	ctx := makeDashboardCtx(application, 1, false)
+	ctx := makeDashboardCtx(t, application, 1, false)
 	resp, err := h.Dashboard(ctx, DashboardRequest{Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Dashboard user: %v", err)
@@ -203,7 +204,7 @@ func TestDashboard_Leaderboard_SortedByTokens(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("seed chatty: %v", err)
 	}
-	ctx := makeDashboardCtx(application, 1, true)
+	ctx := makeDashboardCtx(t, application, 1, true)
 	resp, err := h.Dashboard(ctx, DashboardRequest{Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Dashboard: %v", err)
@@ -248,7 +249,7 @@ func TestDashboard_NonAdmin_UserIDCollapsed(t *testing.T) {
 	// 为另一个 user 99 写一条 usage_log（本次请求不应看到）。
 	seedDashboardUserLogWithID(t, db, 99, start+3600, "collapse-user-99")
 
-	ctx := makeDashboardCtx(application, 1, false)
+	ctx := makeDashboardCtx(t, application, 1, false)
 	// 非 admin 传入 UserID=99（他人），应被折叠为 0，DAO EffectiveUserID 取 scope.UserID=1。
 	resp, err := h.Dashboard(ctx, DashboardRequest{Start: start, End: end, Gran: "day", UserID: 99})
 	if err != nil {
@@ -265,7 +266,7 @@ func TestDashboard_RangeOutOfBounds_Returns400(t *testing.T) {
 	now := time.Now().UTC().Unix()
 	// gran=day max 365 天；这里给 400 天必越界。
 	start := now - 400*86400
-	ctx := makeDashboardCtx(application, 1, true)
+	ctx := makeDashboardCtx(t, application, 1, true)
 	_, err := h.Dashboard(ctx, DashboardRequest{Start: start, End: now, Gran: "day"})
 	if err == nil {
 		t.Fatalf("expected 400 RangeOutOfBounds, got nil")

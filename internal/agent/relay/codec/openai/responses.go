@@ -41,9 +41,10 @@ func parseToolChoiceResponses(raw any) *codec.ToolChoice {
 			return &codec.ToolChoice{Type: "none"}
 		}
 	case map[string]any:
-		if v["type"] == "function" {
+		typ, _ := v["type"].(string)
+		if typ == "function" || typ == "custom" {
 			if name, ok := v["name"].(string); ok {
-				return &codec.ToolChoice{Type: "function", Name: name}
+				return &codec.ToolChoice{Type: typ, Name: name}
 			}
 		}
 	}
@@ -57,8 +58,8 @@ func encodeToolChoiceResponses(tc *codec.ToolChoice) any {
 	switch tc.Type {
 	case "auto", "required", "none":
 		return tc.Type
-	case "function":
-		return map[string]any{"type": "function", "name": tc.Name}
+	case "function", "custom":
+		return map[string]any{"type": tc.Type, "name": tc.Name}
 	}
 	return nil
 }

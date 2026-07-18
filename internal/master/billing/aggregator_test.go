@@ -2,12 +2,14 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -269,7 +271,7 @@ func (f *fakeBillingMutator) snapshotTokens() [][]dao.TokenDailyRow {
 func TestAggregator_FlushSnapshotsAndPersists(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 
 	log := &models.UsageLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
@@ -297,7 +299,7 @@ func TestAggregator_FlushSnapshotsAndPersists(t *testing.T) {
 func TestAggregator_FlushEmptyBufferNoOp(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 
 	// boundary: 无 Submit 的 Flush 不发起调用
 	require.NoError(t, a.Flush())
@@ -309,7 +311,7 @@ func TestAggregator_FlushEmptyBufferNoOp(t *testing.T) {
 func TestAggregator_FlushFailureClearsBufferAnyway(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{err: assert.AnError}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 
 	log := &models.UsageLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
@@ -326,7 +328,7 @@ func TestAggregator_FlushFailureClearsBufferAnyway(t *testing.T) {
 func TestAggregator_FlushHourlyBucketRoundTrip(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 
 	streamLog := &models.UsageLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
@@ -358,7 +360,7 @@ func TestAggregator_TickerFlushesPeriodically(t *testing.T) {
 		MaxRows:    0, // disable maxRows for this test
 	})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -370,7 +372,7 @@ func TestAggregator_TickerFlushesPeriodically(t *testing.T) {
 
 	// success: Stop force-flush 最后一批
 	a.Submit(&models.UsageLog{UserID: 1, TokenID: 99, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
-	a.Stop()
+	_ = a.Stop(context.Background())
 	found := false
 	for _, batch := range fake.snapshotTokens() {
 		for _, r := range batch {
@@ -388,12 +390,12 @@ func TestAggregator_MaxRowsTriggersEarlyFlush(t *testing.T) {
 		MaxRows:    3,
 	})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.Start(ctx)
-	defer a.Stop()
+	defer a.Stop(context.Background())
 
 	// 同一 UsageLog 触发 1 token + 1 channel + 1 hourly = 3 distinct keys
 	// 累积 1 个 Submit 后 total = 3 = maxRows 阈值 → 应触发 flush
@@ -411,7 +413,7 @@ func TestAggregator_MaxRowsTriggersEarlyFlush(t *testing.T) {
 func TestAggregator_NoTickerWhenFlushEveryZero(t *testing.T) {
 	a := NewAggregator(nil, zap.NewNop(), AggregatorOptions{FlushEvery: 0, MaxRows: 0})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -419,13 +421,13 @@ func TestAggregator_NoTickerWhenFlushEveryZero(t *testing.T) {
 	a.Submit(&models.UsageLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
 	time.Sleep(40 * time.Millisecond)
 	require.Empty(t, fake.snapshotTokens(), "flushEvery=0 不应触发自动 flush")
-	a.Stop()
+	_ = a.Stop(context.Background())
 }
 
 func TestAggregator_StopConcurrentSafe(t *testing.T) {
 	a := NewAggregator(nil, zap.NewNop(), AggregatorOptions{FlushEvery: 10 * time.Millisecond})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.Start(ctx)
@@ -437,8 +439,77 @@ func TestAggregator_StopConcurrentSafe(t *testing.T) {
 	for i := 0; i < callers; i++ {
 		go func() {
 			defer wg.Done()
-			a.Stop()
+			_ = a.Stop(context.Background())
 		}()
 	}
 	wg.Wait()
+}
+
+func TestAggregatorHistogramAccumulateAndFlush(t *testing.T) {
+	a := NewAggregator(nil, nil, AggregatorOptions{FlushEvery: 0, MaxRows: 0})
+	var got []dao.DurationHistogramRow
+	a.SetFlushFns(nil, nil, nil, func(rows []dao.DurationHistogramRow) error {
+		got = append(got, rows...)
+		return nil
+	})
+
+	// 同 (date,hour,channel,model,agent) 两条成功 + 一条失败
+	base := &models.UsageLog{Status: 1, Duration: 9500, ChannelID: 5, ModelName: "gpt-4o", AgentID: "a1", CreatedAt: 1783497600}
+	a.Submit(base)
+	second := *base
+	second.Duration = 58000
+	a.Submit(&second)
+	failed := *base
+	failed.Status = 0
+	failed.Duration = 999999
+	a.Submit(&failed)
+
+	a.Flush() // 或本包测试用的手动触发方式(对照既有测试 :280-290)
+	if len(got) != 1 {
+		t.Fatalf("rows = %d, want 1(同维度合并)", len(got))
+	}
+	r := got[0]
+	if r.Hist[6] != 1 || r.Hist[11] != 1 { // 9500→slot6, 58000→slot11
+		t.Fatalf("hist = %v, want slot6=1 slot11=1", r.Hist)
+	}
+	if r.MaxDurationMs != 58000 {
+		t.Fatalf("max = %d, want 58000(失败请求 999999 不参与)", r.MaxDurationMs)
+	}
+	var total int64
+	for _, c := range r.Hist {
+		total += c
+	}
+	if total != 2 {
+		t.Fatalf("hist total = %d, want 2(status=0 不入)", total)
+	}
+}
+
+func TestAggregatorCloseDeadlineCancelsFinalFlushAndRejectsRestart(t *testing.T) {
+	a := NewAggregator(nil, zap.NewNop(), AggregatorOptions{FlushEvery: time.Hour})
+	flushEntered := make(chan struct{})
+	a.SetFlushContextFns(func(ctx context.Context, _ []dao.TokenDailyRow) error {
+		close(flushEntered)
+		<-ctx.Done()
+		return context.Cause(ctx)
+	}, nil, nil, nil)
+	a.Submit(&models.UsageLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := a.Close(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close = %v, want deadline exceeded", err)
+	}
+	<-flushEntered
+	select {
+	case <-a.Done():
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Aggregator Done did not close after deadline")
+	}
+	if got := a.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("resources after Close = %+v", got)
+	}
+	a.Start(context.Background())
+	if got := a.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("Start after Close created resources: %+v", got)
+	}
 }

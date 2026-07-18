@@ -41,14 +41,15 @@ func newMonitoringTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	return &Handler{}, db, application
 }
 
-func makeMonitoringCtx(application app.Application, userID uint, isAdmin bool) *app.Context {
+func makeMonitoringCtx(t *testing.T, application app.Application, userID uint, isAdmin bool) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	ginCtx.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
 	return &app.Context{
-		Context:  ginCtx,
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: userID, GroupID: 1},
+		Context:      ginCtx,
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: userID, GroupID: 1},
+		OwnerContext: t.Context(),
 	}
 }
 
@@ -141,7 +142,7 @@ func TestMonitoringInsights_Admin_FullStructure(t *testing.T) {
 	seedFailLog(t, db, 1, 5, start+3700, "upstream_dispatch", "fail-1")
 	seedFailLog(t, db, 1, 6, start+3800, "outbound_encode", "fail-2")
 
-	ctx := makeMonitoringCtx(application, 1, true)
+	ctx := makeMonitoringCtx(t, application, 1, true)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Insights admin: %v", err)
@@ -198,7 +199,7 @@ func TestMonitoringInsights_UserScope_Forbidden(t *testing.T) {
 	h, _, application := newMonitoringTestCtx(t)
 	start, end := monitoringDayRange()
 
-	ctx := makeMonitoringCtx(application, 1, false)
+	ctx := makeMonitoringCtx(t, application, 1, false)
 	_, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day"})
 	if err == nil {
 		t.Fatalf("expected forbidden for user scope, got nil")
@@ -217,7 +218,7 @@ func TestMonitoringInsights_RangeOutOfBounds_Returns400(t *testing.T) {
 	now := time.Now().UTC().Unix()
 	// gran=day max 365 天;给 400 天必越界。
 	start := now - 400*86400
-	ctx := makeMonitoringCtx(application, 1, true)
+	ctx := makeMonitoringCtx(t, application, 1, true)
 	_, err := h.Insights(ctx, InsightsRequest{Start: start, End: now, Gran: "day"})
 	if err == nil {
 		t.Fatalf("expected 400 RangeOutOfBounds, got nil")

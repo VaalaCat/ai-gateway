@@ -11,8 +11,11 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +26,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 )
 
 // Phase 是 pipeline 外层阶段（4 个），跟 attempt 内部的 Stage 严格区分。
@@ -38,22 +42,22 @@ const (
 // RelayMode describes the relay path taken for a request.
 // 取值固定 3 种：native / passthrough / legacy。由 ModePicker 在 Planner 阶段填入
 // Attempt.Mode，下游 Dispatcher 据此选择 backend 实现。
-type RelayMode string
+type RelayMode = attemptproxy.ExecutionMode
 
 const (
-	ModeNative      RelayMode = "native"
-	ModePassthrough RelayMode = "passthrough"
-	ModeLegacy      RelayMode = "legacy"
+	ModeNative      = attemptproxy.ModeNative
+	ModePassthrough = attemptproxy.ModePassthrough
+	ModeLegacy      = attemptproxy.ModeLegacy
 )
 
 // ChannelSource 标识 Attempt 来自 admin shared channel 还是用户 BYOK private channel。
 // 在 publish 阶段决定 usage_log 写 channel_id 还是 private_channel_id。
 // Pool 阶段由 lister 在装配 ScoredCandidate 时填入；Solver 透传到 Attempt。
-type ChannelSource string
+type ChannelSource = attemptproxy.ChannelSource
 
 const (
-	SourceAdmin   ChannelSource = "admin"
-	SourcePrivate ChannelSource = "private"
+	SourceAdmin   = attemptproxy.SourceAdmin
+	SourcePrivate = attemptproxy.SourcePrivate
 )
 
 // RelayContext 跟 master app.Context 同源风格：内嵌 *gin.Context + 强类型字段。
@@ -63,8 +67,9 @@ type RelayContext struct {
 
 	Agent app.AgentApplication
 
-	Input    RelayInput
-	State    *RelayState
+	Input     RelayInput
+	State     *RelayState
+	Resources *RequestResources
 	// Inflight 是该请求在 in-flight 注册表里的句柄;可能为 nil(无注册表时)。
 	Inflight *inflight.Entry
 }
@@ -79,6 +84,161 @@ type RelayInput struct {
 	IsStream        bool
 	InboundProto    codec.Protocol
 	ForcedChannelID uint
+	BodyLimits      app.BodyLimits
+	HardSelector    app.AgentSelector
+}
+
+var (
+	ErrRequestResourcesClosed = errors.New("request resources closed")
+	ErrRequestBodyUnavailable = errors.New("request body unavailable")
+)
+
+type requestBodyError struct {
+	code  string
+	cause error
+}
+
+func (e *requestBodyError) Error() string         { return e.code }
+func (e *requestBodyError) BodyErrorCode() string { return e.code }
+func (e *requestBodyError) Unwrap() error         { return e.cause }
+
+func requestBodyFailure(cause error) error {
+	return &requestBodyError{code: "body_store_failed", cause: cause}
+}
+
+func requestBodyCaptureFailure(cause error) error {
+	var coded interface{ BodyErrorCode() string }
+	if errors.As(cause, &coded) && coded.BodyErrorCode() == "body_too_large" {
+		return &requestBodyError{code: "body_too_large", cause: cause}
+	}
+	return requestBodyFailure(cause)
+}
+
+type RequestResources struct {
+	mu        sync.RWMutex
+	body      app.ReplayBody
+	closed    bool
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (r *RequestResources) Body() app.ReplayBody {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.body
+}
+
+func (r *RequestResources) Replace(
+	ctx context.Context,
+	store app.BodyStore,
+	src io.Reader,
+	limits app.BodyLimits,
+) error {
+	next, err := captureReplayBody(ctx, store, src, limits)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		_ = next.Close()
+		return ErrRequestResourcesClosed
+	}
+	old := r.body
+	r.body = next
+	r.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	return nil
+}
+
+// CaptureAndReplaceWithReader prepares both the replay body and its first reader
+// before atomically replacing the currently owned body.
+func (r *RequestResources) CaptureAndReplaceWithReader(
+	ctx context.Context,
+	store app.BodyStore,
+	src io.Reader,
+	limits app.BodyLimits,
+) (app.ReplayBody, io.ReadCloser, error) {
+	next, err := captureReplayBody(ctx, store, src, limits)
+	if err != nil {
+		return nil, nil, requestBodyCaptureFailure(err)
+	}
+	reader, err := next.Open()
+	if err != nil {
+		return nil, nil, requestBodyFailure(errors.Join(err, closePreparedReplayBody(ctx, next)))
+	}
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, nil, requestBodyFailure(errors.Join(
+			ErrRequestResourcesClosed,
+			reader.Close(),
+			closePreparedReplayBody(ctx, next),
+		))
+	}
+	old := r.body
+	r.body = next
+	r.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	return next, reader, nil
+}
+
+type closeAndWaitReplayBody interface {
+	CloseAndWait(context.Context) error
+}
+
+func closePreparedReplayBody(ctx context.Context, body app.ReplayBody) error {
+	if closer, ok := body.(closeAndWaitReplayBody); ok {
+		return closer.CloseAndWait(ctx)
+	}
+	// Generic ReplayBody implementations have no Store owner that can outlive
+	// this call, so close synchronously instead of detaching an unowned goroutine.
+	return body.Close()
+}
+
+func captureReplayBody(
+	ctx context.Context,
+	store app.BodyStore,
+	src io.Reader,
+	limits app.BodyLimits,
+) (app.ReplayBody, error) {
+	if store == nil {
+		return nil, ErrRequestBodyUnavailable
+	}
+	body, err := store.Capture(ctx, src, limits)
+	if err != nil {
+		return nil, err
+	}
+	if body == nil {
+		return nil, ErrRequestBodyUnavailable
+	}
+	return body, nil
+}
+
+func (r *RequestResources) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		body := r.body
+		r.body = nil
+		r.mu.Unlock()
+		if body != nil {
+			r.closeErr = body.Close()
+		}
+	})
+	return r.closeErr
 }
 
 // RelayState 是 stage 沿途累加的可变状态。
@@ -88,7 +248,6 @@ type RelayState struct {
 	Execution ExecutionResult
 	FailPhase Phase
 	Err       error
-	Forwarded bool
 	// StreamOpened：限流 wait 期间已为 stream 写出 SSE 头+保活帧（但未必写过真实内容）。
 	// 与 Execution.Outcome.Written（已写真实内容）区分：仅保活时仍可 fallback，
 	// 最终失败要走 SSE error event 而非 JSON。
@@ -139,12 +298,17 @@ type AttemptResult struct {
 }
 
 // ExecutionResult 是 Executor 阶段产出：被采用的 attempt + 最终 result + 终态 error。
-// Used.Channel != nil 表示 Executor 至少 dispatch 过一次（用作"有过 attempt"信号）。
 type ExecutionResult struct {
-	Used    Attempt
-	Outcome AttemptResult
-	Err     error
-	History []models.AttemptRecord // fallback 链路:每候选一条,Executor 累加
+	Used               Attempt
+	Outcome            AttemptResult
+	Err                error
+	ProviderDispatched bool                   // Dispatcher.Dispatch 至少实际进入过一次
+	ExecutionAgentID   string                 // 最终采用 attempt 的实际执行 agent；未 dispatch 时不可信
+	RouteSourceAgentID string                 // 拥有 Plan 并负责发布 usage 的入口 agent
+	AgentRouteID       uint                   // 最终采用 attempt 的数据库 route id；hard/local 可为 0
+	AgentRouteKind     string                 // none / hard / token / channel
+	AgentRoutePath     app.RoutePath          // 最终采用 attempt 的 local / direct / relay
+	History            []models.AttemptRecord // fallback 链路:每候选一条,Executor 累加
 }
 
 // Dispatcher 是 Executor 调用的 attempt 派发器抽象。
@@ -161,6 +325,7 @@ var (
 	ErrInvalidBody            = errors.New(consts.ErrInvalidRequestBody)
 	ErrModelRequired          = errors.New(consts.ErrModelRequired)
 	ErrInvalidForcedChannelID = errors.New("invalid X-Channel-ID")
+	ErrInvalidAgentSelector   = errors.New("invalid agent selector")
 )
 
 // Planner 阶段的 4 个哨兵 error。

@@ -4,18 +4,35 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
+	masteroperations "github.com/VaalaCat/ai-gateway/internal/master/operations"
 	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
 type Handler struct {
-	GetOnlineAgentIDs func() []string
-	GetRuntime        func(agentID string) *msync.AgentRuntime
-	HubCall           func(agentID string, method string, params any, timeout time.Duration) (json.RawMessage, error)
-	Hub               *msync.Hub // 用于获取合并后的地址
+	GetOnlineAgentIDs    func() []string
+	GetRuntime           func(agentID string) *msync.AgentRuntime
+	RevokeControlSession func(agentID string) bool
+	GetProbeProgress     func(sourceID, probeID string) (protocol.ManualProbeProgress, bool)
+	Connections          *connectivity.Service
+	ControlSessions      connectivity.ControlSource
+	Operations           *masteroperations.Service
+	HubCallSession       func(agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error)
+	Hub                  *msync.Hub // 用于获取合并后的地址
+	Now                  func() time.Time
+
+	routeTargetsPagesMu    sync.Mutex
+	routeTargetsPages      map[routeTargetsSnapshotKey]routeTargetsSnapshotEntry
+	routeTargetsPageAccess uint64
 }
+
+type ProbeAck = protocol.ProbeAck
+type ManualProbeProgress = protocol.ManualProbeProgress
 
 type ListRequest struct {
 	api.PaginationQuery
@@ -30,15 +47,25 @@ type CreateRequest struct {
 	HTTPAddresses string `json:"http_addresses"`
 	Tags          string `json:"tags"`
 	ProxyURL      string `json:"proxy_url"`
+	RelayMode     string `json:"relay_mode"`
+	RelayURI      string `json:"relay_uri"`
+	PeerRouteMode string `json:"peer_route_mode"`
+}
+
+type AgentPatch struct {
+	Name          *string `json:"name"`
+	Status        *int    `json:"status"`
+	Tags          *string `json:"tags"`
+	HTTPAddresses *string `json:"http_addresses"`
+	ProxyURL      *string `json:"proxy_url"`
+	RelayMode     *string `json:"relay_mode"`
+	RelayURI      *string `json:"relay_uri"`
+	PeerRouteMode *string `json:"peer_route_mode"`
 }
 
 type UpdateRequest struct {
-	ID     string         `uri:"id" binding:"required"`
-	Fields map[string]any `json:"-"`
-}
-
-func (r *UpdateRequest) SetBodyMap(fields map[string]any) {
-	r.Fields = fields
+	ID string `uri:"id" binding:"required"`
+	AgentPatch
 }
 
 type GenerateEnrollmentTokenRequest struct {

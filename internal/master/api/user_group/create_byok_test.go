@@ -33,8 +33,9 @@ func setupBYOKTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	ginCtx, _ := gin.CreateTestContext(w)
 
 	ctx := &app.Context{
-		Context: ginCtx,
-		App:     application,
+		Context:      ginCtx,
+		App:          application,
+		OwnerContext: t.Context(),
 		UserInfo: &app.UserInfo{
 			UserID:  1,
 			GroupID: 1,

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	agentappkg "github.com/VaalaCat/ai-gateway/internal/agent/app"
 	"github.com/VaalaCat/ai-gateway/internal/agent/auth"
+	bodypkg "github.com/VaalaCat/ai-gateway/internal/agent/body"
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	agentrelay "github.com/VaalaCat/ai-gateway/internal/agent/relay"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend"
@@ -47,13 +49,17 @@ type testEnv struct {
 	cancelCtx context.CancelFunc
 }
 
-func newTestMasterRuntimeConfig(listen string) *config.MasterRuntimeConfig {
+func newTestMasterRuntimeConfig(t *testing.T, listen string) *config.MasterRuntimeConfig {
+	t.Helper()
 	return &config.MasterRuntimeConfig{
 		LogLevel: "info",
 		Master: config.MasterConfig{
 			Listen:    listen,
 			DBPath:    ":memory:",
 			JWTSecret: "test-secret",
+		},
+		Agent: config.AgentConfig{
+			CredentialsFile: filepath.Join(t.TempDir(), "embedded-agent.json"),
 		},
 		Runtime: config.RuntimeConfig{
 			RelayTimeout:        30,
@@ -70,7 +76,7 @@ func setupFullEnv(t *testing.T, agentID string, retryMax int) *testEnv {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
 
-	masterCfg := newTestMasterRuntimeConfig(":0")
+	masterCfg := newTestMasterRuntimeConfig(t, ":0")
 	srv, err := master.New(masterCfg, logger)
 	if err != nil {
 		t.Fatalf("new master: %v", err)
@@ -103,15 +109,39 @@ func setupFullEnv(t *testing.T, agentID string, retryMax int) *testEnv {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
-	// Start reporter so usage events flow back to master
-	rep := reporter.New(agentBus, client, logger, 100, 1*time.Second, agentID)
+	// Start reporter so usage events flow back to master via acked HTTP delivery
+	// (store → uploader → reporter, mirrors internal/agent/server.go:startReporter).
+	const usageBatchMax = 100
+	pendingStore := reporter.NewMemPendingUsageStore(usageBatchMax*10, logger)
+	uploader, err := reporter.NewUsageUploader(reporter.UploaderConfig{
+		Store:         pendingStore,
+		MasterURL:     masterTS.URL,
+		AgentID:       agentID,
+		Secret:        agentID + "-secret",
+		FlushInterval: 200 * time.Millisecond,
+		BatchMax:      usageBatchMax,
+		BackoffMaxSec: func() int { return 1 },
+		Logger:        logger,
+	})
+	if err != nil {
+		cancel()
+		client.Close()
+		masterTS.Close()
+		t.Fatalf("new usage uploader: %v", err)
+	}
+	rep := reporter.New(agentBus, logger, pendingStore, uploader, nil)
 	rep.Start(ctx)
 
 	pool := upstream.NewTransportPool(100, 10, 30*time.Second, upstream.KeepaliveConfig{Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 3})
 	relayCfg := &config.AgentRuntimeConfig{
 		Relay: config.RelayConfig{Timeout: 30},
 	}
-	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, relayCfg, pool)
+	bodyStore, err := bodypkg.NewStore(bodypkg.StoreOptions{Directory: t.TempDir()})
+	if err != nil {
+		t.Fatalf("new request body store: %v", err)
+	}
+	t.Cleanup(func() { _ = bodyStore.Close(context.Background()) })
+	agentApp := agentappkg.NewDefaultAgentApplication(store, bodyStore, logger, relayCfg, pool)
 	relayHandler := agentrelay.NewHandler(agentBus, agentApp, backend.NewDispatcher(agentApp), nil, nil, nil)
 
 	agentRouter := gin.New()

@@ -1,6 +1,7 @@
 package codec_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -347,5 +348,36 @@ func TestClaude2Chat_ToolChoice(t *testing.T) {
 	}
 	if tc != "required" {
 		t.Errorf("tool_choice = %v, want required", tc)
+	}
+}
+
+// TestClaude2Chat_DropsEmptyAssistantTextBlock: 完整 Anthropic→OpenAI 路径，忠实复现
+// 用户场景——历史 assistant 消息含空文本块，出站不得产生非法 {"type":"text"}。
+func TestClaude2Chat_DropsEmptyAssistantTextBlock(t *testing.T) {
+	body := `{"model":"claude-sonnet-4","max_tokens":1024,"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"text"},{"type":"text","text":"Hello! I see you're working on..."}]},
+		{"role":"user","content":"continue"}
+	]}`
+	result := roundTripRequest(t, codec.ProtocolClaude, codec.ProtocolOpenAIChat, body)
+
+	raw, _ := json.Marshal(result)
+	if strings.Contains(string(raw), `{"type":"text"}`) {
+		t.Errorf("outbound contains illegal empty text block: %s", raw)
+	}
+
+	msgs := mustGetArray(t, result, "messages")
+	var found bool
+	for _, m := range msgs {
+		mm := m.(map[string]any)
+		if mm["role"] == "assistant" {
+			found = true
+			if mm["content"] != "Hello! I see you're working on..." {
+				t.Errorf("assistant content = %#v, want real text string", mm["content"])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no assistant message in output")
 	}
 }

@@ -11,8 +11,8 @@ func TestBuildDataFlowResponse_EmptyChannel(t *testing.T) {
 	if resp.ResolvedProtocol != "openai_chat" {
 		t.Fatalf("ResolvedProtocol = %q, want openai_chat", resp.ResolvedProtocol)
 	}
-	if len(resp.Steps) != 10 {
-		t.Fatalf("Steps len = %d, want 10 (full catalog)", len(resp.Steps))
+	if len(resp.Steps) != 11 {
+		t.Fatalf("Steps len = %d, want 11 (full catalog)", len(resp.Steps))
 	}
 	active := map[string]bool{}
 	for _, s := range resp.Steps {

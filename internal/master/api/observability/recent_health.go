@@ -29,7 +29,7 @@ type RecentHealthResponse struct {
 func (h *Handler) GetRecentHealth(c *app.Context, _ api.EmptyRequest) (RecentHealthResponse, error) {
 	win := h.healthWindowSecs(c)
 	since := time.Now().Unix() - int64(win)
-	rows, err := dao.NewAdminQuery(dao.NewContext(c.App)).Stats().RecentAgentHealth(since)
+	rows, err := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Stats().RecentAgentHealth(since)
 	if err != nil {
 		return RecentHealthResponse{}, api.InternalError("recent health query failed", err)
 	}
@@ -53,7 +53,7 @@ func (h *Handler) healthWindowSecs(c *app.Context) int {
 			win = v
 		}
 	}
-	records, err := dao.NewAdminQuery(dao.NewContext(c.App)).Setting().GetAll()
+	records, err := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Setting().GetAll()
 	if err == nil {
 		for _, r := range records {
 			if r.Key == "health_window_seconds" {

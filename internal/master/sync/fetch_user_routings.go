@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
@@ -40,6 +41,7 @@ func (userRoutingsFetchHandler) Fetch(_ context.Context, q dao.AdminQuery, key s
 			Name:    r.Name,
 			Scope:   r.Scope,
 			UserID:  r.UserID,
+			TokenID: r.TokenID,
 			Members: members,
 			Enabled: r.Enabled,
 		})
@@ -52,4 +54,21 @@ func (userRoutingsFetchHandler) Fetch(_ context.Context, q dao.AdminQuery, key s
 		return nil, nil, false, err
 	}
 	return payload, nil, true, nil
+}
+
+func routingMap(rows []models.ModelRouting) *protocol.TokenRoutingMap {
+	routings := make(map[string]*protocol.SyncedRouting, len(rows))
+	for i := range rows {
+		r := &rows[i]
+		if !r.Enabled {
+			continue
+		}
+		var members []protocol.RoutingMember
+		_ = json.Unmarshal([]byte(r.Members), &members)
+		routings[r.Name] = &protocol.SyncedRouting{
+			ID: r.ID, Name: r.Name, Scope: r.Scope, UserID: r.UserID, TokenID: r.TokenID,
+			Members: members, Enabled: r.Enabled,
+		}
+	}
+	return &protocol.TokenRoutingMap{Routings: routings}
 }

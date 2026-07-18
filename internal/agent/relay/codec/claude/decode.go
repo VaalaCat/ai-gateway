@@ -29,13 +29,15 @@ func (c *ClaudeCodec) DecodeRequest(r *http.Request) (*codec.Request, error) {
 	}
 
 	req := &codec.Request{
-		Model:       raw.Model,
-		Stream:      raw.Stream,
-		MaxTokens:   raw.MaxTokens,
-		Temperature: raw.Temperature,
-		TopP:        raw.TopP,
-		TopK:        raw.TopK,
-		StopWords:   raw.StopSeqs,
+		Model:        raw.Model,
+		Stream:       raw.Stream,
+		MaxTokens:    raw.MaxTokens,
+		Temperature:  raw.Temperature,
+		TopP:         raw.TopP,
+		TopK:         raw.TopK,
+		StopWords:    raw.StopSeqs,
+		ServiceTier:  raw.ServiceTier,
+		InferenceGeo: raw.InferenceGeo,
 	}
 
 	// C2: tool_choice decode

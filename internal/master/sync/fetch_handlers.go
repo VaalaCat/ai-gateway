@@ -35,6 +35,7 @@ func NewFetchRegistry(cipher *byokcrypto.Cipher) *FetchRegistry {
 	r.Register(events.EntityToken, tokenFetchHandler{})
 	r.Register(events.EntityUser, userFetchHandler{})
 	r.Register(events.EntityUserRoutings, userRoutingsFetchHandler{})
+	r.Register(events.EntityTokenRoutings, tokenRoutingsFetchHandler{})
 	r.Register(events.EntityPrivateChannel, &privateChannelsVisibleFetchHandler{cipher: cipher})
 	return r
 }
@@ -49,4 +50,3 @@ func (r *FetchRegistry) Resolve(entity string) (FetchHandler, bool) {
 	h, ok := r.handlers[entity]
 	return h, ok
 }
-

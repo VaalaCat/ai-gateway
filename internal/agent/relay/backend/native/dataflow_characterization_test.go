@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
@@ -243,6 +245,215 @@ func TestChar_ProtocolOverride(t *testing.T) {
 	// 由 claude outbound codec 注入默认值),进一步证明走的是 claude 出站 codec。
 	if _, ok := cap.Body["max_tokens"]; !ok {
 		t.Fatalf("claude outbound body should carry max_tokens, got body keys: %v", cap.Body)
+	}
+}
+
+// behavior change: Chat Completions image_url content must survive the full
+// native dataflow when the selected upstream protocol is Responses.
+func TestChar_ChatToResponsesPreservesImageContent(t *testing.T) {
+	ch := &models.Channel{
+		ChannelCore: models.ChannelCore{
+			ID: 1, Type: consts.ChannelTypeOpenAI, Status: 1, Weight: 1,
+			OtherSettings: `{"model_protocol_override":[{"model":"real-model","overrides":{"openai_chat":"openai_responses"}}]}`,
+		},
+		Key:    "k",
+		Models: "real-model",
+	}
+
+	tests := []struct {
+		name      string
+		content   string
+		wantTypes []string
+		wantURL   string
+	}{
+		{
+			name:      "data URL after text",
+			content:   `[{"type":"text","text":"Describe this image in one sentence."},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,/9j/4AAQ"}}]`,
+			wantTypes: []string{"input_text", "input_image"},
+			wantURL:   "data:image/jpeg;base64,/9j/4AAQ",
+		},
+		{
+			name:      "remote URL after text",
+			content:   `[{"type":"text","text":"Describe this image."},{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]`,
+			wantTypes: []string{"input_text", "input_image"},
+			wantURL:   "https://example.com/image.png",
+		},
+		{
+			name:      "image only boundary",
+			content:   `[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]`,
+			wantTypes: []string{"input_image"},
+			wantURL:   "data:image/png;base64,iVBORw0KGgo=",
+		},
+		{
+			name:      "malformed data URL remains visible to upstream validation",
+			content:   `[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64"}}]`,
+			wantTypes: []string{"input_image"},
+			wantURL:   "data:image/jpeg;base64",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"model":"real-model","messages":[{"role":"user","content":` + tt.content + `}]}`
+			cap := runRelayCapture(t, ch, body, codec.ProtocolOpenAIChat, "real-model")
+			if cap.Path != "/v1/responses" {
+				t.Fatalf("upstream path = %q, want /v1/responses", cap.Path)
+			}
+			input, ok := cap.Body["input"].([]any)
+			if !ok || len(input) != 1 {
+				t.Fatalf("upstream input = %#v, want one message", cap.Body["input"])
+			}
+			message, ok := input[0].(map[string]any)
+			if !ok {
+				t.Fatalf("input[0] = %#v, want message object", input[0])
+			}
+			content, ok := message["content"].([]any)
+			if !ok || len(content) != len(tt.wantTypes) {
+				t.Fatalf("upstream content = %#v, want types %v", message["content"], tt.wantTypes)
+			}
+			for i, wantType := range tt.wantTypes {
+				block, ok := content[i].(map[string]any)
+				if !ok || block["type"] != wantType {
+					t.Fatalf("content[%d] = %#v, want type %q", i, content[i], wantType)
+				}
+			}
+			image := content[len(content)-1].(map[string]any)
+			if image["image_url"] != tt.wantURL {
+				t.Fatalf("image_url = %#v, want %q", image["image_url"], tt.wantURL)
+			}
+		})
+	}
+}
+
+// behavior change: function fallback makes partial Responses implementations
+// usable by converting named custom tools and dropping tools with no callable
+// function identity. This reproduces the tools[4].function validation failure
+// returned by SGLang-backed Responses compatibility endpoints.
+func TestChar_ResponsesFunctionToolFallback(t *testing.T) {
+	ch := &models.Channel{
+		ChannelCore: models.ChannelCore{
+			ID: 1, Type: consts.ChannelTypeOpenAI, Status: 1, Weight: 1,
+			SupportedAPITypes: `["responses"]`,
+			Endpoints:         `{"responses":"/api/v1/responses"}`,
+			OtherSettings:     `{"builtin_tool_fallback":"function"}`,
+		},
+		Key:    "k",
+		Models: "glm-5.2",
+	}
+	body := `{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"custom_tool_call","call_id":"call_previous","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},
+			{"type":"custom_tool_call_output","call_id":"call_previous","output":"Done"},
+			{"role":"user","content":[{"type":"input_text","text":"continue"}]}
+		],
+		"tools":[
+			{"type":"function","name":"exec_command","description":"Run a command","parameters":{"type":"object"}},
+			{"type":"custom","name":"apply_patch","description":"Edit files","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}},
+			{"type":"web_search","external_web_access":false}
+		]
+	}`
+
+	cap := runRelayCapture(t, ch, body, codec.ProtocolOpenAIResponses, "glm-5.2")
+	if cap.Path != "/api/v1/responses" {
+		t.Fatalf("upstream path = %q, want /api/v1/responses", cap.Path)
+	}
+	tools, ok := cap.Body["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("upstream tools = %#v, want exec_command and converted apply_patch", cap.Body["tools"])
+	}
+	for i, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok || tool["type"] != "function" {
+			t.Fatalf("tools[%d] = %#v, want function tool", i, raw)
+		}
+	}
+	applyPatch := tools[1].(map[string]any)
+	if applyPatch["name"] != "apply_patch" {
+		t.Fatalf("converted tool name = %#v, want apply_patch", applyPatch["name"])
+	}
+	parameters, ok := applyPatch["parameters"].(map[string]any)
+	if !ok || parameters["type"] != "object" {
+		t.Fatalf("converted parameters = %#v, want object schema", applyPatch["parameters"])
+	}
+	input, ok := cap.Body["input"].([]any)
+	if !ok || len(input) != 3 {
+		t.Fatalf("upstream input = %#v, want converted custom call/output plus user message", cap.Body["input"])
+	}
+	for i, wantType := range []string{"function_call", "function_call_output", "message"} {
+		item, ok := input[i].(map[string]any)
+		if !ok || item["type"] != wantType {
+			t.Fatalf("input[%d] = %#v, want type %q", i, input[i], wantType)
+		}
+	}
+}
+
+func TestChar_ResponsesFunctionFallbackRestoresCustomToolCall(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
+			var upstreamBody string
+			if stream {
+				upstreamBody = strings.Join([]string{
+					`event: response.created`,
+					`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","model":"glm-5.2"}}`,
+					``,
+					`event: response.output_item.added`,
+					`data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_patch","name":"apply_patch","arguments":""}}`,
+					``,
+					`event: response.function_call_arguments.delta`,
+					`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"input\":\"*** Begin Patch\\n"}`,
+					``,
+					`event: response.function_call_arguments.done`,
+					`data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}"}`,
+					``,
+					`event: response.output_item.done`,
+					`data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_patch","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}"}}`,
+					``,
+					`event: response.completed`,
+					`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","model":"glm-5.2"}}`,
+					``,
+				}, "\n")
+			} else {
+				upstreamBody = `{"id":"resp_1","object":"response","status":"completed","model":"glm-5.2","output":[{"type":"function_call","id":"fc_1","call_id":"call_patch","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}"}]}`
+			}
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(upstreamBody))
+			}))
+			defer upstream.Close()
+
+			ch := &models.Channel{
+				ChannelCore: models.ChannelCore{
+					ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1,
+					SupportedAPITypes: `["responses"]`,
+					OtherSettings:     `{"builtin_tool_fallback":"function"}`,
+				},
+				Key: "k", Models: "glm-5.2",
+			}
+			body := []byte(`{"model":"gpt-5.5","stream":` + strconv.FormatBool(stream) + `,"input":"edit","tools":[{"type":"custom","name":"apply_patch","description":"Edit files","format":{"type":"grammar"}}]}`)
+			rctx, recorder := newNativeTestCtx(t, body, codec.ProtocolOpenAIResponses, stream)
+
+			result := (&Backend{}).Relay(rctx, state.Attempt{Channel: ch, RealModel: "glm-5.2"})
+			if result.Err != nil {
+				t.Fatalf("Relay: %v", result.Err)
+			}
+			got := recorder.Body.String()
+			if !strings.Contains(got, `"type":"custom_tool_call"`) {
+				t.Fatalf("client response did not restore custom_tool_call: %s", got)
+			}
+			if !strings.Contains(got, `"input":"*** Begin Patch\n*** End Patch"`) {
+				t.Fatalf("client response did not unwrap custom tool input: %s", got)
+			}
+			if strings.Contains(got, `"type":"function_call"`) {
+				t.Fatalf("client response leaked fallback function_call: %s", got)
+			}
+		})
 	}
 }
 

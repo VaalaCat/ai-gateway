@@ -44,7 +44,7 @@ func inviteCtx(t *testing.T, db *gorm.DB, isAdmin bool, userID uint) *app.Contex
 	if isAdmin {
 		role = consts.RoleAdmin
 	}
-	c := &app.Context{Context: g, App: a, UserInfo: &app.UserInfo{UserID: userID, Role: role}}
+	c := &app.Context{Context: g, App: a, UserInfo: &app.UserInfo{UserID: userID, Role: role}, OwnerContext: t.Context()}
 	g.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
 	return c
 }

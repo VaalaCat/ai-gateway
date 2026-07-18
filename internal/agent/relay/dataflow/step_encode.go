@@ -2,6 +2,7 @@ package dataflow
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 
@@ -15,25 +16,29 @@ import (
 // EncodeConfig 是翻译成上游格式时真正需要的配置(原 43 字段 ChannelConfig 瘦身后剩余)。
 // 不含 Model——上游 model 在 Apply 时取 Pass.Working.Model。
 type EncodeConfig struct {
-	BaseURL             string
-	APIKey              string
-	Organization        string
-	APIVersion          string
-	EndpointPath        string
-	SystemPromptInInput bool
-	BuiltinToolFallback string
+	BaseURL                 string
+	APIKey                  string
+	Organization            string
+	APIVersion              string
+	EndpointPath            string
+	SystemPromptInInput     bool
+	BuiltinToolFallback     string
+	RequestFieldPermissions codec.RequestFieldPermissions
+	ClaudeBetaQuery         bool
 }
 
 func (e EncodeConfig) toChannelConfig(model string) *codec.ChannelConfig {
 	return &codec.ChannelConfig{
-		BaseURL:             e.BaseURL,
-		APIKey:              e.APIKey,
-		Model:               model,
-		Organization:        e.Organization,
-		APIVersion:          e.APIVersion,
-		EndpointPath:        e.EndpointPath,
-		SystemPromptInInput: e.SystemPromptInInput,
-		BuiltinToolFallback: e.BuiltinToolFallback,
+		BaseURL:                 e.BaseURL,
+		APIKey:                  e.APIKey,
+		Model:                   model,
+		Organization:            e.Organization,
+		APIVersion:              e.APIVersion,
+		EndpointPath:            e.EndpointPath,
+		SystemPromptInInput:     e.SystemPromptInInput,
+		BuiltinToolFallback:     e.BuiltinToolFallback,
+		RequestFieldPermissions: e.RequestFieldPermissions,
+		ClaudeBetaQuery:         e.ClaudeBetaQuery,
 	}
 }
 
@@ -49,11 +54,12 @@ type StepEncode struct {
 
 func (s *StepEncode) Key() string { return "encode" }
 
-func (s *StepEncode) Apply(p *Pass) error {
+func (s *StepEncode) Apply(_ context.Context, p *Pass) error {
 	if p.Rec != nil {
 		p.Rec.WithStage(trace.StageOutboundEncode)
 	}
 	cfg := s.enc.toChannelConfig(p.Working.Model)
+	codec.FilterOptionalRequestFields(p.Working, cfg.RequestFieldPermissions)
 	httpReq, err := s.oc.EncodeRequest(p.Working, cfg)
 	if err != nil {
 		if p.Rec != nil {

@@ -1,10 +1,10 @@
 package token
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -22,7 +22,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 	scope := middleware.GetScope(c.Context)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -52,6 +52,17 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 	// Enabling a token requires positive balance; disabling is always allowed.
 	if scope != nil && !scope.IsAdmin {
 		allowed := map[string]any{}
+		if v, ok := updates["models"]; ok {
+			if !q.Setting().LookupBool(consts.SettingKeyTokenModelWhitelistSelfService, false) {
+				return models.Token{}, api.ErrorWithCode(
+					http.StatusForbidden,
+					"model_whitelist_edit_forbidden",
+					"token model whitelist self-service is disabled",
+					nil,
+				)
+			}
+			allowed["models"] = v
+		}
 		if v, ok := updates["name"]; ok {
 			allowed["name"] = v
 		}
@@ -97,7 +108,11 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 
 	// Validate models JSON format if present
 	if modelsRaw, ok := updates["models"]; ok {
-		if modelsStr, isStr := modelsRaw.(string); isStr && modelsStr != "" {
+		modelsStr, isStr := modelsRaw.(string)
+		if !isStr {
+			return models.Token{}, api.BadRequestError("models must be a JSON array string", nil)
+		}
+		if modelsStr != "" {
 			var patterns []string
 			if err := json.Unmarshal([]byte(modelsStr), &patterns); err != nil {
 				return models.Token{}, api.BadRequestError("invalid models JSON: must be a JSON array of strings", err)
@@ -128,7 +143,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 		return models.Token{}, api.InternalError("update token failed", err)
 	}
 
-	if err := events.PublishTokenUpdate(context.Background(), c.GetBus(), *token); err != nil {
+	if err := events.PublishTokenUpdate(c.RequestContext(), c.GetBus(), *token); err != nil {
 		return models.Token{}, api.InternalError("publish token.update failed", err)
 	}
 	return *token, nil

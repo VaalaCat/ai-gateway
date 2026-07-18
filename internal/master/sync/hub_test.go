@@ -3,6 +3,7 @@ package sync_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,8 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func setupMaster(t *testing.T) *master.Server {
@@ -87,6 +90,87 @@ func TestWSConnectionAndFullSync(t *testing.T) {
 	json.Unmarshal(resp.Items, &tokens)
 	if len(tokens) != 2 {
 		t.Errorf("items = %d, want 2", len(tokens))
+	}
+}
+
+func TestWSFullSyncRejectsMasterSigningKeyEntities(t *testing.T) {
+	srv := setupMaster(t)
+	sqlDB, err := srv.DB.DB()
+	if err != nil {
+		t.Fatalf("get master database: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown master: %v", err)
+		}
+		if err := srv.Bus.Close(); err != nil {
+			t.Errorf("close event bus: %v", err)
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close master database: %v", err)
+		}
+	})
+	privateMarker := bytes.Repeat([]byte("sync-private-signing-marker"), 3)
+	privateMarker = privateMarker[:64]
+	quietDB := srv.DB.Session(&gorm.Session{Logger: srv.DB.Logger.LogMode(gormlogger.Silent)})
+	result := quietDB.Model(&models.MasterSigningKey{}).
+		Where("active_slot = ?", 1).
+		UpdateColumn("private_key", privateMarker)
+	if result.Error != nil || result.RowsAffected != 1 {
+		t.Fatalf("seed private signing marker: affected=%d err=%v", result.RowsAffected, result.Error)
+	}
+	agent := models.Agent{AgentID: "signing-isolation-agent", Secret: "test-secret", Name: "test", Status: 1}
+	if err := quietDB.Create(&agent).Error; err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	ts := httptest.NewServer(srv.Router)
+	defer ts.Close()
+	headers := http.Header{}
+	headers.Set(consts.HeaderXAgentID, agent.AgentID)
+	headers.Set(consts.HeaderXAgentSecret, agent.Secret)
+	client, err := ws.Dial(
+		context.Background(),
+		"ws"+strings.TrimPrefix(ts.URL, "http")+"/ws/agent",
+		zap.NewNop(),
+		headers,
+	)
+	if err != nil {
+		t.Fatalf("dial agent websocket: %v", err)
+	}
+	defer client.Close()
+
+	for _, entity := range []string{"master_signing_key", "master_signing_keys"} {
+		t.Run(entity, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			raw, err := client.Call(ctx, consts.RPCSyncFullSync, protocol.FullSyncRequest{
+				Entity:   entity,
+				PageSize: protocol.FullSyncMaxPageSize,
+			})
+			if err == nil {
+				t.Fatal("master signing key full-sync entity must be rejected")
+			}
+			if len(raw) != 0 {
+				t.Fatal("rejected master signing key full-sync must not return data")
+			}
+			requireNoSyncSigningState(t, []byte(err.Error()), privateMarker)
+		})
+	}
+}
+
+func requireNoSyncSigningState(t *testing.T, raw, privateMarker []byte) {
+	t.Helper()
+	if bytes.Contains(raw, privateMarker) || bytes.Contains(raw, []byte(base64.StdEncoding.EncodeToString(privateMarker))) {
+		t.Fatal("sync surface exposed private signing material")
+	}
+	lower := strings.ToLower(string(raw))
+	for _, forbidden := range []string{"privatekey", "private_key", "active_slot", "master_signing"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatal("sync surface exposed a private signing field")
+		}
 	}
 }
 
@@ -252,12 +336,12 @@ func TestHub_HandleFetchEntity_TokenFound(t *testing.T) {
 	if tok.Key != "sk-hub-test" {
 		t.Fatalf("Token.Key = %q, want sk-hub-test", tok.Key)
 	}
-	var su protocol.SyncedUser
-	if err := json.Unmarshal(fer.Side, &su); err != nil {
+	var side protocol.TokenFetchSide
+	if err := json.Unmarshal(fer.Side, &side); err != nil {
 		t.Fatalf("unmarshal side: %v", err)
 	}
-	if su.GroupID != 5 {
-		t.Fatalf("GroupID = %d, want 5", su.GroupID)
+	if side.User == nil || side.User.GroupID != 5 {
+		t.Fatalf("side user = %+v, want group 5", side.User)
 	}
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
@@ -121,6 +121,8 @@ export default function PricingSyncPage() {
   const source = useSearchParams().get("source") ?? "";
 
   const fetchPricing = useFetchPricing();
+  const fetchPricingAsync = fetchPricing.mutateAsync;
+  const loadGeneration = useRef(0);
   const applyPricing = useApplyPricing();
   const [resp, setResp] = useState<FetchPricingResponse | null>(null);
 
@@ -135,21 +137,36 @@ export default function PricingSyncPage() {
   const [noChangeOpen, setNoChangeOpen] = useState(false);
   const [unmatchedOpen, setUnmatchedOpen] = useState(false);
 
-  const load = useMemo(() => async () => {
-    try {
-      const r = await fetchPricing.mutateAsync(source ? { source } : undefined);
-      setResp(r);
-      setRemoved(new Set());
-      setExcluded(new Set());
-      setOverrides({});
-      setAppliedCount(0);
-      setExpanded(new Set());
-      setSelected(new Set());
-    } catch (e) { toast.error(formatErrorToast(e, t("fetchFailed"))); }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source]);
+  const applyFetchedPricing = useCallback((result: FetchPricingResponse) => {
+    setResp(result);
+    setRemoved(new Set());
+    setExcluded(new Set());
+    setOverrides({});
+    setAppliedCount(0);
+    setExpanded(new Set());
+    setSelected(new Set());
+  }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
+    try {
+      const r = await fetchPricingAsync(source ? { source } : undefined);
+      if (generation !== loadGeneration.current) return;
+      applyFetchedPricing(r);
+    } catch (e) {
+      if (generation === loadGeneration.current) toast.error(formatErrorToast(e, t("fetchFailed")));
+    }
+  }, [applyFetchedPricing, fetchPricingAsync, source, t]);
+
+  useEffect(() => {
+    const generation = ++loadGeneration.current;
+    void fetchPricingAsync(source ? { source } : undefined).then((result) => {
+      if (generation === loadGeneration.current) applyFetchedPricing(result);
+    }).catch((error) => {
+      if (generation === loadGeneration.current) toast.error(formatErrorToast(error, t("fetchFailed")));
+    });
+    return () => { loadGeneration.current += 1; };
+  }, [applyFetchedPricing, fetchPricingAsync, source, t]);
 
   const matches = useMemo(() => resp?.matches ?? [], [resp]);
 
@@ -160,7 +177,7 @@ export default function PricingSyncPage() {
   const matchSearch = (r: PricingRecommendation) => !q || r.model_name.toLowerCase().includes(q);
 
   const review = outstandingChanged.filter((r) => r.confidence === "needs_review" && matchSearch(r));
-  const visibleSelectedIds = useMemo(() => pickVisibleSelected(review, selected), [review, selected]);
+  const visibleSelectedIds = pickVisibleSelected(review, selected);
   const selectedCount = visibleSelectedIds.length;
   const allSelected = review.length > 0 && selectedCount === review.length;
   const someSelected = selectedCount > 0 && !allSelected;

@@ -16,7 +16,7 @@ func (h *Handler) Get(c *app.Context, req GetRequest) (models.OAuthProvider, err
 		return models.OAuthProvider{}, api.BadRequestError("invalid id", err)
 	}
 
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	p, err := q.OAuthProvider().GetByID(uint(id64))
 	if err != nil {
 		return models.OAuthProvider{}, api.NotFoundError(consts.ErrNotFound)

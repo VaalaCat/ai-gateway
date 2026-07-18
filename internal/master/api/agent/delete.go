@@ -14,7 +14,7 @@ import (
 func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusResponse, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -24,6 +24,9 @@ func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusRespo
 	}
 	if err := m.Agent().Delete(uint(id)); err != nil {
 		return api.StatusResponse{}, api.InternalError("delete agent failed", err)
+	}
+	if h.RevokeControlSession != nil {
+		h.RevokeControlSession(agent.AgentID)
 	}
 	events.PublishAgentRevoked(context.Background(), c.GetBus(), *agent)
 	events.PublishAgentDelete(context.Background(), c.GetBus(), *agent)

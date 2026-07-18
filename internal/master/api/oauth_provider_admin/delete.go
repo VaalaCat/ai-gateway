@@ -16,7 +16,7 @@ func (h *Handler) Delete(c *app.Context, req DeleteRequest) (api.StatusResponse,
 	}
 	id := uint(id64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

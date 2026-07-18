@@ -47,7 +47,7 @@ func (h *Handler) Get(c *app.Context, req GetRequest) (GetResponse, error) {
 		return GetResponse{}, err
 	}
 
-	ctx := newProviderCtx(c.App, scope)
+	ctx := newProviderCtx(c.RequestContext(), c.App, scope)
 
 	meta, err := provider.Meta(ctx, req.ID)
 	if err != nil {

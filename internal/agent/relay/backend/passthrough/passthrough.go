@@ -129,18 +129,11 @@ func (b *Backend) dispatchUpstream(ctx context.Context, req *http.Request, ch *m
 
 // extractPassthroughUsage 从 Recorder 抓取的上行 body 抽 usage + responseText。
 //
-// 归一化规则：
-//   - cacheReadTokens > 0 时，OpenAI 格式 prompt_tokens 已经包含 cached tokens，需要减去。
-//
-// 返回顺序对应 state.AttemptResult 的对应字段，保持原 Relay 写法。
+// prompt 的"非缓存"归一化已下沉进 ExtractUsageFromPassthroughBody / ParseUsageJSON
+// （在知道上游格式的地方按需减 OpenAI within-prompt 缓存，不误伤 Claude/llama 的
+// 独立缓存桶），此处不再做盲减。返回顺序对应 state.AttemptResult 的对应字段。
 func extractPassthroughUsage(body []byte, isStream bool) (promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens int, responseText string) {
 	promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens = upstream.ExtractUsageFromPassthroughBody(body, isStream)
-
-	// Normalize: if cacheReadTokens were extracted from prompt_tokens_details
-	// (OpenAI format), prompt_tokens includes cached tokens and we must subtract.
-	if cacheReadTokens > 0 && promptTokens >= cacheReadTokens {
-		promptTokens -= cacheReadTokens
-	}
 
 	// Extract response text from captured body for token estimation
 	responseText = upstream.ExtractTextFromPassthroughBody(body, isStream)

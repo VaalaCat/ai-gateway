@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from "react";
 import { useTranslations } from "next-intl";
-import { ColumnDef } from "@tanstack/react-table";
+import { ColumnDef, type VisibilityState } from "@tanstack/react-table";
 import { toast } from "sonner";
 import { ChevronRight, Copy, Database, MoreHorizontal, Plus, RefreshCw, Ticket, Info } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -31,7 +31,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -41,12 +40,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
-import { OnlineBadge } from "@/components/business/status-badge";
-import { StatusSelect } from "@/components/business/status-select";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { CopyableText } from "@/components/business/copyable-text";
-import { DateCell } from "@/components/business/date-cell";
 import { AgentAddressEditor } from "@/components/business/agent-address-editor";
+import { AgentConnectionStatus } from "@/components/business/agent-connection-status";
+import { AgentEditDialog } from "@/components/business/agent-edit-dialog";
 import { formatErrorToast } from "@/lib/api/error-toast";
 
 import {
@@ -59,18 +57,13 @@ import { AgentExpandedRow } from "@/components/business/agent-expanded-row";
 import {
   useAgents,
   useCreateAgent,
-  useUpdateAgent,
   useDeleteAgent,
   useGenerateEnrollmentToken,
   useFullSyncAgents,
-  useOnlineAgents,
 } from "@/lib/api/agents";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { Agent } from "@/lib/types";
-import { cn } from "@/lib/utils";
-import { useAgentHealth } from "@/lib/hooks/use-agent-health";
-import { StatusDot, SaturationBar } from "@/components/business/health-status-dot";
-import { AgentHealthSummary } from "@/components/business/agent-health-summary";
+import { useBreakpoint } from "@/lib/hooks/use-breakpoint";
 
 export default function AgentsPage() {
   const t = useTranslations("agents");
@@ -85,8 +78,8 @@ export default function AgentsPage() {
     status: {
       kind: "enum",
       options: [
-        { value: "1", label: t("statusOnline") },
-        { value: "0", label: t("statusOffline") },
+        { value: "1", label: t("connection.enabled") },
+        { value: "0", label: t("connection.disabled") },
       ],
       placeholder: t("filterByStatus"),
     },
@@ -105,11 +98,11 @@ export default function AgentsPage() {
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
 
-  const ht = useTranslations("observability.health");
-  const health = useAgentHealth();
-  const [anomalyOnly, setAnomalyOnly] = useState(false);
-  const tableData = anomalyOnly ? health.anomalies : agents;
-  const defaultColumnVisibility = { id: false, agent_id: false, tags: false, created_at: false };
+  const breakpoint = useBreakpoint();
+  const [desktopColumnVisibility, setDesktopColumnVisibility] = useState<VisibilityState>({});
+  const columnVisibility = breakpoint === "xs"
+    ? { select: false, admin: false, control: false, direct: false, relay: false }
+    : desktopColumnVisibility;
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -123,20 +116,16 @@ export default function AgentsPage() {
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
 
   const createMutation = useCreateAgent();
-  const updateMutation = useUpdateAgent();
   const deleteMutation = useDeleteAgent();
   const enrollMutation = useGenerateEnrollmentToken();
   const fullSyncMutation = useFullSyncAgents();
-  const { data: onlineData } = useOnlineAgents();
-  const onlineAgentIds = new Set((onlineData ?? []).map((a) => a.agent_id));
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [editItem, setEditItem] = useState<Agent | null>(null);
+  const [editAgentId, setEditAgentId] = useState<number | null>(null);
   const [deleteItem, setDeleteItem] = useState<Agent | null>(null);
   const [enrollOpen, setEnrollOpen] = useState(false);
 
   const [createForm, setCreateForm] = useState({ name: "", agent_id: "", secret: "", tags: "", http_addresses: "", proxy_url: "" });
-  const [editForm, setEditForm] = useState({ name: "", status: "1", tags: "", http_addresses: "", proxy_url: "" });
   const [enrollTTL, setEnrollTTL] = useState("3600");
   const [enrollToken, setEnrollToken] = useState("");
 
@@ -153,24 +142,6 @@ export default function AgentsPage() {
       toast.success(tc("success"));
       setCreateOpen(false);
       setCreateForm({ name: "", agent_id: "", secret: "", tags: "", http_addresses: "", proxy_url: "" });
-    } catch (e) {
-      toast.error(formatErrorToast(e, tc("error")));
-    }
-  };
-
-  const handleEdit = async () => {
-    if (!editItem) return;
-    try {
-      await updateMutation.mutateAsync({
-        id: editItem.id,
-        name: editForm.name,
-        status: Number(editForm.status),
-        tags: editForm.tags,
-        http_addresses: editForm.http_addresses,
-        proxy_url: editForm.proxy_url,
-      });
-      toast.success(tc("success"));
-      setEditItem(null);
     } catch (e) {
       toast.error(formatErrorToast(e, tc("error")));
     }
@@ -195,17 +166,6 @@ export default function AgentsPage() {
     } catch (e) {
       toast.error(formatErrorToast(e, tc("error")));
     }
-  };
-
-  const openEdit = (agent: Agent) => {
-    setEditForm({
-      name: agent.name,
-      status: String(agent.status),
-      tags: agent.tags || "",
-      http_addresses: agent.configured_http_addresses ?? agent.http_addresses ?? "",
-      proxy_url: agent.proxy_url || "",
-    });
-    setEditItem(agent);
   };
 
   const handleFullSync = async (agentIds?: string[], all?: boolean) => {
@@ -237,144 +197,88 @@ export default function AgentsPage() {
         />
       ),
       cell: ({ row }) => (
-        <Checkbox
-          checked={row.getIsSelected()}
-          onCheckedChange={(value) => row.toggleSelected(!!value)}
-          aria-label="Select row"
-        />
-      ),
-      enableHiding: false,
-    },
-    {
-      id: "expand",
-      header: "",
-      cell: ({ row }) => (
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-6"
-          onClick={() => row.toggleExpanded()}
-        >
-          <ChevronRight
-            className={`size-4 transition-transform ${row.getIsExpanded() ? "rotate-90" : ""}`}
+        <span onClick={(event) => event.stopPropagation()}>
+          <Checkbox
+            checked={row.getIsSelected()}
+            onCheckedChange={(value) => row.toggleSelected(!!value)}
+            aria-label="Select row"
           />
-        </Button>
+        </span>
       ),
       enableHiding: false,
     },
     {
-      accessorKey: "id",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={tc("id")} />,
-    },
-    {
-      accessorKey: "agent_id",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={t("agentId")} />,
-    },
-    {
+      id: "agent",
       accessorKey: "name",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={tc("name")} />,
-    },
-    {
-      accessorKey: "tags",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={t("tags")} />,
-      cell: ({ row }) => {
-        const tags = row.original.tags ? row.original.tags.split(",").map((s: string) => s.trim()).filter(Boolean) : [];
-        return tags.length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {tags.map((tag: string) => <Badge key={tag} variant="secondary">{tag}</Badge>)}
-          </div>
-        ) : <span className="text-muted-foreground">-</span>;
-      },
-    },
-    {
-      id: "online_status",
-      header: tc("status"),
-      cell: ({ row }) => {
-        const h = health.byId.get(row.original.id);
-        return h ? (
-          <StatusDot status={h.status} red={h.red} />
-        ) : (
-          <OnlineBadge lastSeen={row.original.last_seen} />
-        );
-      },
-    },
-    {
-      id: "health_inflight",
-      header: ht("field.inflight"),
-      cell: ({ row }) => {
-        const h = health.byId.get(row.original.id);
-        return h ? (
-          <span className="tabular-nums">{h.inflight}</span>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        );
-      },
-    },
-    {
-      id: "health_qps",
-      header: ht("field.qps"),
-      cell: ({ row }) => {
-        const h = health.byId.get(row.original.id);
-        return h ? (
-          <span className="tabular-nums">{h.qps.toFixed(2)}</span>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        );
-      },
-    },
-    {
-      id: "health_error",
-      header: ht("field.errorRate"),
-      cell: ({ row }) => {
-        const h = health.byId.get(row.original.id);
-        if (!h) return <span className="text-muted-foreground">—</span>;
-        const pct = h.errorRate * 100;
-        return (
-          <span
-            className={cn(
-              "tabular-nums",
-              pct >= health.thresholds.errRedPct
-                ? "text-red-600 dark:text-red-400"
-                : pct >= health.thresholds.errYellowPct
-                  ? "text-amber-600 dark:text-amber-400"
-                  : "",
-            )}
+      header: ({ column }) => <DataTableColumnHeader column={column} title={t("connection.agent")} />,
+      enableHiding: false,
+      cell: ({ row }) => (
+        <div className="flex min-w-48 items-start gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={row.getIsExpanded() ? t("connection.collapse") : t("connection.expand")}
+            aria-expanded={row.getIsExpanded()}
+            onClick={(event) => {
+              event.stopPropagation();
+              row.toggleExpanded();
+            }}
           >
-            {pct.toFixed(1)}%
-          </span>
-        );
-      },
+            <ChevronRight data-icon="inline-start" className={row.getIsExpanded() ? "rotate-90 transition-transform" : "transition-transform"} />
+          </Button>
+          <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium">{row.original.name}</div>
+              <div className="truncate font-mono text-xs text-muted-foreground">{row.original.agent_id}</div>
+            </div>
+            {breakpoint === "xs" ? (
+              <dl className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1">
+                <dt className="text-xs text-muted-foreground">{t("connection.admin")}</dt>
+                <dd className="min-w-0"><AgentConnectionStatus kind="admin" status={row.original.status} /></dd>
+                <dt className="text-xs text-muted-foreground">{t("connection.control")}</dt>
+                <dd className="min-w-0"><AgentConnectionStatus kind="control" value={row.original.connection.control} /></dd>
+                <dt className="text-xs text-muted-foreground">{t("connection.direct")}</dt>
+                <dd className="min-w-0"><AgentConnectionStatus kind="direct" value={row.original.connection.direct} /></dd>
+                <dt className="text-xs text-muted-foreground">{t("connection.relay")}</dt>
+                <dd className="min-w-0"><AgentConnectionStatus kind="relay" value={row.original.connection.relay} /></dd>
+              </dl>
+            ) : null}
+          </div>
+        </div>
+      ),
     },
     {
-      id: "health_saturation",
-      header: ht("field.saturation"),
-      cell: ({ row }) => {
-        const h = health.byId.get(row.original.id);
-        return h ? (
-          <SaturationBar pct={h.saturationPct} hasWaiters={h.hasWaiters} />
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        );
-      },
+      id: "admin",
+      header: t("connection.admin"),
+      cell: ({ row }) => <AgentConnectionStatus kind="admin" status={row.original.status} />,
     },
     {
-      accessorKey: "last_seen",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={t("lastSeen")} />,
-      cell: ({ row }) => <DateCell timestamp={row.original.last_seen} relative />,
+      id: "control",
+      header: t("connection.control"),
+      cell: ({ row }) => <AgentConnectionStatus kind="control" value={row.original.connection.control} />,
     },
     {
-      accessorKey: "created_at",
-      header: ({ column }) => <DataTableColumnHeader column={column} title={tc("createdAt")} />,
-      cell: ({ row }) => <DateCell timestamp={row.original.created_at} />,
+      id: "direct",
+      header: t("connection.direct"),
+      cell: ({ row }) => <AgentConnectionStatus kind="direct" value={row.original.connection.direct} />,
+    },
+    {
+      id: "relay",
+      header: t("connection.relay"),
+      cell: ({ row }) => <AgentConnectionStatus kind="relay" value={row.original.connection.relay} />,
     },
     {
       id: "actions",
+      size: 48,
       header: tc("actions"),
+      enableHiding: false,
       cell: ({ row }) => (
+        <div className="flex w-8 justify-end" onClick={(event) => event.stopPropagation()}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-8">
-              <MoreHorizontal className="size-4" />
+            <Button variant="ghost" size="icon-sm" aria-label={t("connection.actionsFor", { name: row.original.name })}>
+              <MoreHorizontal data-icon="inline-start" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -383,11 +287,11 @@ export default function AgentsPage() {
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => handleFullSync([row.original.agent_id])}
-              disabled={!onlineAgentIds.has(row.original.agent_id) || fullSyncMutation.isPending}
+              disabled={row.original.connection.control.state !== "connected" || fullSyncMutation.isPending}
             >
               {t("fullSync")}
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openEdit(row.original)}>
+            <DropdownMenuItem onClick={() => setEditAgentId(row.original.id)}>
               {tc("edit")}
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -398,12 +302,13 @@ export default function AgentsPage() {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        </div>
       ),
     },
   ];
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <Collapsible>
         <div className="flex items-start justify-between">
           <div>
@@ -418,7 +323,7 @@ export default function AgentsPage() {
           </CollapsibleTrigger>
         </div>
         <CollapsibleContent>
-          <div className="rounded-md border p-4 space-y-3 mt-3">
+          <div className="mt-3 flex flex-col gap-3 rounded-md border p-4">
             <p className="text-sm text-muted-foreground">{t("usageGuideDesc")}</p>
             <div className="overflow-x-auto">
               <Table>
@@ -464,26 +369,23 @@ export default function AgentsPage() {
         </CollapsibleContent>
       </Collapsible>
 
-      <AgentHealthSummary
-        counts={health.counts}
-        anomalyOnly={anomalyOnly}
-        onAnomalyOnlyChange={(v) => {
-          setAnomalyOnly(v);
-          setRowSelection({});
-        }}
-      />
-
       <DataTable
         columns={columns}
-        data={tableData}
+        data={agents}
         loading={isLoading}
-        defaultColumnVisibility={defaultColumnVisibility}
-        total={anomalyOnly ? tableData.length : total}
+        defaultColumnVisibility={breakpoint === "xs" ? undefined : {}}
+        columnVisibilityState={columnVisibility}
+        onColumnVisibilityChange={(next) => {
+          if (breakpoint !== "xs") setDesktopColumnVisibility(next);
+        }}
+        total={total}
         page={page}
         pageSize={pageSize}
         pageCount={pageCount}
-        onPaginationChange={anomalyOnly ? undefined : handlePaginationChange}
-        renderExpandedRow={(row) => <AgentExpandedRow agent={row.original} />}
+        onPaginationChange={handlePaginationChange}
+        getRowId={(row) => String(row.id)}
+        tableLayout={breakpoint === "xs" ? "fixed" : "auto"}
+        renderExpandedRow={(row) => <AgentExpandedRow agent={row.original} expanded={row.getIsExpanded()} />}
         rowSelection={rowSelection}
         onRowSelectionChange={setRowSelection}
         toolbar={
@@ -498,8 +400,8 @@ export default function AgentsPage() {
                 loading: fullSyncMutation.isPending,
                 onClick: () => {
                   const selectedIds = Object.keys(rowSelection)
-                    .map((idx) => tableData[Number(idx)]?.agent_id)
-                    .filter(Boolean);
+                    .map((id) => agents.find((agent) => String(agent.id) === id)?.agent_id)
+                    .filter((id): id is string => Boolean(id));
                   handleFullSync(selectedIds);
                 },
               },
@@ -546,29 +448,29 @@ export default function AgentsPage() {
           <DialogHeader>
             <DialogTitle>{t("createAgent")}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
+          <div className="flex flex-col gap-4 py-4">
+            <div className="flex flex-col gap-2">
               <Label>{tc("name")}</Label>
               <Input
                 value={createForm.name}
                 onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
               />
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label>{t("agentId")}</Label>
               <Input
                 value={createForm.agent_id}
                 onChange={(e) => setCreateForm({ ...createForm, agent_id: e.target.value })}
               />
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label>{t("secret")}</Label>
               <Input
                 value={createForm.secret}
                 onChange={(e) => setCreateForm({ ...createForm, secret: e.target.value })}
               />
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label>{t("tags")}</Label>
               <Input
                 placeholder={t("tagsPlaceholder")}
@@ -580,7 +482,7 @@ export default function AgentsPage() {
               value={createForm.http_addresses}
               onChange={(v) => setCreateForm({ ...createForm, http_addresses: v })}
             />
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label>{t("proxyUrl")}</Label>
               <Input
                 placeholder={t("proxyUrlPlaceholder")}
@@ -596,48 +498,11 @@ export default function AgentsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Edit Dialog */}
-      <Dialog open={!!editItem} onOpenChange={(open) => { if (!open) setEditItem(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{tc("edit")}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>{tc("name")}</Label>
-              <Input
-                value={editForm.name}
-                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-              />
-            </div>
-            <StatusSelect value={editForm.status} onChange={(v) => setEditForm({ ...editForm, status: v })} />
-            <div className="space-y-2">
-              <Label>{t("tags")}</Label>
-              <Input
-                placeholder={t("tagsPlaceholder")}
-                value={editForm.tags}
-                onChange={(e) => setEditForm({ ...editForm, tags: e.target.value })}
-              />
-            </div>
-            <AgentAddressEditor
-              value={editForm.http_addresses}
-              onChange={(v) => setEditForm({ ...editForm, http_addresses: v })}
-            />
-            <div className="space-y-2">
-              <Label>{t("proxyUrl")}</Label>
-              <Input
-                placeholder={t("proxyUrlPlaceholder")}
-                value={editForm.proxy_url}
-                onChange={(e) => setEditForm({ ...editForm, proxy_url: e.target.value })}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditItem(null)}>{tc("cancel")}</Button>
-            <Button onClick={handleEdit} disabled={updateMutation.isPending}>{tc("save")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <AgentEditDialog
+        open={editAgentId !== null}
+        agentId={editAgentId}
+        onOpenChange={(open) => { if (!open) setEditAgentId(null); }}
+      />
 
       {/* Enrollment Token Dialog */}
       <Dialog open={enrollOpen} onOpenChange={setEnrollOpen}>
@@ -645,9 +510,9 @@ export default function AgentsPage() {
           <DialogHeader>
             <DialogTitle>{t("enrollmentToken")}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 py-4">
+          <div className="flex flex-col gap-4 py-4">
             {!enrollToken ? (
-              <div className="space-y-2">
+              <div className="flex flex-col gap-2">
                 <Label>{t("ttl")}</Label>
                 <Input
                   type="number"
@@ -656,11 +521,11 @@ export default function AgentsPage() {
                 />
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="flex flex-col gap-2">
                 <Label>{t("enrollmentToken")}</Label>
                 <CopyableText text={enrollToken} />
                 <p className="text-sm text-muted-foreground">{t("tokenGenerated")}</p>
-                <div className="mt-4 space-y-2 rounded-md bg-muted p-3 text-sm">
+                <div className="mt-4 flex flex-col gap-2 rounded-md bg-muted p-3 text-sm">
                   <p className="font-medium">{t("enrollmentGuide")}</p>
                   <p className="text-muted-foreground">{t("enrollmentStep1")}</p>
                   <p className="text-muted-foreground">{t("enrollmentStep2")}</p>

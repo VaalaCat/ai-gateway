@@ -1,8 +1,8 @@
 package legacy
 
 import (
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	newapi "github.com/VaalaCat/ai-gateway/internal/agent/relay/legacy"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"go.uber.org/zap"
@@ -36,7 +36,11 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	rec.WithStage(trace.StageUpstreamDispatch)
 
 	relayMode := newapi.Path2RelayMode(c.Request.URL.Path)
-	lr := newapi.Relay(c, ch, bodyBytes, modelName, isStream, relayMode, true, b.logger())
+	var owner *newapi.TransportOwner
+	if provider, ok := b.Agent.(interface{ GetLegacyTransportOwner() *newapi.TransportOwner }); ok {
+		owner = provider.GetLegacyTransportOwner()
+	}
+	lr := newapi.RelayWithOwner(owner, c, ch, bodyBytes, modelName, isStream, relayMode, true, b.logger())
 
 	result := state.AttemptResult{
 		PromptTokens:     lr.PromptTokens,

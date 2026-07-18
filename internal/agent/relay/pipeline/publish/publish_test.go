@@ -18,10 +18,12 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/stretchr/testify/require"
 )
 
 // newGinCtxForTest 构造一个最小可用的 *gin.Context。包级隔离副本，
@@ -138,8 +140,7 @@ func newCaptureBus(t *testing.T) *captureBus {
 }
 
 func (b *captureBus) wait() {
-	// MemoryBus delivery is async via goroutine — small sleep suffices for tests.
-	time.Sleep(20 * time.Millisecond)
+	// Publish returns only after MemoryBus completes matching handlers.
 }
 
 func (b *captureBus) last() protocol.UsageLogEntry {
@@ -310,17 +311,184 @@ func TestPublishExecuteSuccess(t *testing.T) {
 	}
 }
 
-func TestPublishForwardedSkipped(t *testing.T) {
+func TestPublishSourceOwnedRemoteProviderAttemptEmitsUsage(t *testing.T) {
+	for _, route := range []state.ExecutionResult{
+		{
+			RouteSourceAgentID: "source", AgentRouteID: 42, ExecutionAgentID: "target-a",
+			AgentRoutePath: app.RoutePathDirect, ProviderDispatched: true,
+		},
+		{
+			RouteSourceAgentID: "source", AgentRouteID: 43, ExecutionAgentID: "target-b",
+			AgentRoutePath: app.RoutePathRelay, ProviderDispatched: true,
+		},
+	} {
+		rctx := newPublishTestRctx()
+		rctx.State.FailPhase = state.PhaseExecute
+		rctx.State.Execution = route
+
+		cb := newCaptureBus(t)
+		NewPublisher(cb.bus, zap.NewNop(), nil).Publish(rctx)
+
+		if cb.count() != 1 {
+			t.Fatalf("remote source route %q emitted %d usage rows, want 1", route.AgentRoutePath, cb.count())
+		}
+		require.NotNil(t, cb.last().ExecutionAgentID)
+		require.Equal(t, route.ExecutionAgentID, *cb.last().ExecutionAgentID)
+	}
+}
+
+// behavior change: the ordinary entry source owns usage even when execution
+// fails before provider dispatch.
+func TestPublishPreProviderAgentRouteSourceEmitsUsageWithEmptyExecutionAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		execution state.ExecutionResult
+		reason    string
+	}{
+		{
+			name: "soft precommit cancel",
+			execution: state.ExecutionResult{
+				RouteSourceAgentID: "source", AgentRoutePath: app.RoutePathDirect,
+			},
+			reason: "request_cancelled",
+		},
+		{
+			name: "commit uncertain without provider result",
+			execution: state.ExecutionResult{
+				RouteSourceAgentID: "source", AgentRoutePath: app.RoutePathDirect,
+			},
+			reason: "commit_uncertain",
+		},
+		{
+			name: "hard unavailable uses local path",
+			execution: state.ExecutionResult{
+				RouteSourceAgentID: "source", AgentRoutePath: app.RoutePathLocal,
+			},
+			reason: "target_not_found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rctx := newPublishTestRctx()
+			rctx.State.Execution = tc.execution
+			rctx.State.FailPhase = state.PhaseExecute
+			rctx.State.Err = errors.New(tc.reason)
+
+			cb := newCaptureBus(t)
+			NewPublisher(cb.bus, zap.NewNop(), nil).Publish(rctx)
+
+			require.Equal(t, 1, cb.count())
+			require.NotNil(t, cb.last().ExecutionAgentID)
+			require.Empty(t, *cb.last().ExecutionAgentID)
+		})
+	}
+}
+
+func TestPublishLocalAgentRouteFallbackEmitsUsage(t *testing.T) {
 	rctx := newPublishTestRctx()
-	rctx.State.Forwarded = true
+	rctx.State.Execution = state.ExecutionResult{
+		RouteSourceAgentID: "source", AgentRouteID: 44, ExecutionAgentID: "source",
+		AgentRoutePath: app.RoutePathLocal, ProviderDispatched: true,
+	}
 
 	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop(), nil)
-	p.Publish(rctx)
-	cb.wait()
+	NewPublisher(cb.bus, zap.NewNop(), nil).Publish(rctx)
 
-	if cb.count() != 0 {
-		t.Errorf("Forwarded should skip publish, count = %d", cb.count())
+	if cb.count() != 1 {
+		t.Fatalf("local route fallback emitted %d usage rows, want 1", cb.count())
+	}
+}
+
+// behavior change: Publisher itself has no route-based skip. The target
+// attempt endpoint emits zero usage by construction because it never owns a Publisher.
+func TestPublishCannotBeSuppressedByTrustedIngress(t *testing.T) {
+	for _, kind := range []string{agentproxy.IngressKindDirect, agentproxy.IngressKindTunnel} {
+		rctx := newPublishTestRctx()
+		meta := agentproxy.IngressMeta{
+			Kind: kind, SourceAgentID: "source", RouteID: 42, Hop: 1,
+		}
+		rctx.Request = rctx.Request.WithContext(agentproxy.WithIngressMeta(rctx.Request.Context(), meta))
+		rctx.State.FailPhase = state.PhaseCtxBuild
+		rctx.State.Err = state.ErrReadBody
+
+		cb := newCaptureBus(t)
+		NewPublisher(cb.bus, zap.NewNop(), nil).Publish(rctx)
+
+		if cb.count() != 1 {
+			t.Fatalf("trusted %s ingress suppressed Publisher: got %d rows, want 1", kind, cb.count())
+		}
+	}
+}
+
+func TestPublishTrustedIngressFailureStillEmitsUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "attempt limiter reject", err: state.ErrRateLimited},
+		{name: "request body open failure", err: errors.New("replay body open failed")},
+	} {
+		for _, kind := range []string{agentproxy.IngressKindDirect, agentproxy.IngressKindTunnel} {
+			t.Run(tc.name+"/"+kind, func(t *testing.T) {
+				rctx := newPublishTestRctx()
+				meta := agentproxy.IngressMeta{
+					Kind: kind, SourceAgentID: "source", RouteID: 42, Hop: 1,
+				}
+				rctx.Request = rctx.Request.WithContext(agentproxy.WithIngressMeta(rctx.Request.Context(), meta))
+				rctx.State.FailPhase = state.PhaseExecute
+				rctx.State.Execution = state.ExecutionResult{
+					Used: state.Attempt{
+						Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 7}},
+					},
+					Outcome: state.AttemptResult{Err: tc.err},
+					Err:     tc.err,
+				}
+
+				cb := newCaptureBus(t)
+				NewPublisher(cb.bus, zap.NewNop(), nil).Publish(rctx)
+
+				require.Equal(t, 1, cb.count())
+				require.NotNil(t, cb.last().ExecutionAgentID)
+				require.Empty(t, *cb.last().ExecutionAgentID)
+			})
+		}
+	}
+}
+
+func TestPublishPublicHeadersCannotSuppressLocalUsage(t *testing.T) {
+	rctx := newPublishTestRctx()
+	rctx.Request.Header.Set(consts.HeaderXAgentRouteID, "42")
+	rctx.Request.Header.Set(consts.HeaderXAgentHop, "1")
+	rctx.State.FailPhase = state.PhaseCtxBuild
+	rctx.State.Err = state.ErrReadBody
+
+	cb := newCaptureBus(t)
+	NewPublisher(cb.bus, zap.NewNop(), nil).Publish(rctx)
+
+	if cb.count() != 1 {
+		t.Fatalf("public reserved headers suppressed local usage: count=%d, want 1", cb.count())
+	}
+}
+
+func TestPublishPropagatesRequestContextToUsageEvent(t *testing.T) {
+	type contextKey struct{}
+	marker := &struct{}{}
+	rctx := newPublishTestRctx()
+	rctx.Request = rctx.Request.WithContext(context.WithValue(rctx.Request.Context(), contextKey{}, marker))
+
+	bus := eventbus.NewMemoryBus()
+	var got any
+	_, err := events.SubscribeUsageCompleted(bus, func(ctx context.Context, _ protocol.UsageLogEntry) error {
+		got = ctx.Value(contextKey{})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	NewPublisher(bus, zap.NewNop(), nil).Publish(rctx)
+
+	if got != marker {
+		t.Fatal("usage event did not receive request-derived context")
 	}
 }
 
@@ -606,22 +774,6 @@ func TestPublishNilState_NoPanicNoPublish(t *testing.T) {
 
 	if cb.count() != 0 {
 		t.Errorf("nil State must not emit usage log, got %d", cb.count())
-	}
-}
-
-func TestPublishForwardedAfterNilGuard(t *testing.T) {
-	// boundary: rctx + State 都有，但 Forwarded=true → 跳过 publish。
-	// 跟前面 nil 防御共用一条短路链路，独立断言一次防止合并 regression。
-	cb := newCaptureBus(t)
-	p := NewPublisher(cb.bus, zap.NewNop(), nil)
-
-	rctx := newPublishTestRctx()
-	rctx.State.Forwarded = true
-	p.Publish(rctx)
-	cb.wait()
-
-	if cb.count() != 0 {
-		t.Errorf("Forwarded=true must not emit usage log, got %d", cb.count())
 	}
 }
 

@@ -27,7 +27,7 @@ func (h *Handler) ListTokens(c *app.Context, req ListTokensRequest) (api.Paginat
 	filterUserID := middleware.ScopedUserID(scope, reqUserID)
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	items, total, err := q.Billing().ListTokenBilling(dao.ListOptions{Page: page, PageSize: pageSize}, dao.TokenBillingListFilter{
 		UserID:    filterUserID,
@@ -63,7 +63,7 @@ func (h *Handler) TokenDaily(c *app.Context, req TokenDailyRequest) (TokenDailyR
 		return TokenDailyResponse{}, api.BadRequestError("invalid date range", err)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	token, err := q.Token().GetByID(tokenID)

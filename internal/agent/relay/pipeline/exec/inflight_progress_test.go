@@ -51,7 +51,7 @@ func TestExecutor_Inflight_SingleSuccess_CurrentThenCleared(t *testing.T) {
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	reg := trackInflight(rctx)
 	d.reg = reg
-	(&Executor{Dispatcher: d}).Run(rctx)
+	(newLocalTestExecutor(d, nil, nil)).Run(rctx)
 
 	if len(d.snaps) != 1 || d.snaps[0].CurrentAttempt == nil || d.snaps[0].CurrentAttempt.ChannelName != "c1" {
 		t.Fatalf("current attempt at dispatch time wrong: %+v", d.snaps)
@@ -74,7 +74,7 @@ func TestExecutor_Inflight_FallbackSecond_ShowsPriorAttemptAndCurrent(t *testing
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	reg := trackInflight(rctx)
 	d.reg = reg
-	(&Executor{Dispatcher: d}).Run(rctx)
+	(newLocalTestExecutor(d, nil, nil)).Run(rctx)
 
 	if len(d.snaps) != 2 {
 		t.Fatalf("want 2 dispatch snapshots, got %d", len(d.snaps))
@@ -97,7 +97,7 @@ func TestExecutor_Inflight_BreakerOpenSkip_MarkedInChain(t *testing.T) {
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	reg := trackInflight(rctx)
 	d.reg = reg
-	(&Executor{Dispatcher: d}).Run(rctx)
+	(newLocalTestExecutor(d, nil, nil)).Run(rctx)
 
 	final := reg.Snapshot()[0]
 	if len(final.View.FallbackChain) != 2 {

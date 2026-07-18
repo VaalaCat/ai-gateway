@@ -1,12 +1,104 @@
 package dao
 
 import (
+	"errors"
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/sourcegraph/conc/pool"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestAdminUserMutationUpdateQuotaInt64Bounds(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	mutation := NewAdminMutation(ctx).User()
+
+	tests := []struct {
+		name         string
+		initialQuota int64
+		delta        int64
+		wantQuota    int64
+		wantError    bool
+	}{
+		{name: "positive update", initialQuota: 10, delta: 5, wantQuota: 15},
+		{name: "zero update", initialQuota: 10, delta: 0, wantQuota: 10},
+		{name: "maximum boundary", initialQuota: math.MaxInt64 - 1, delta: 1, wantQuota: math.MaxInt64},
+		{name: "minimum boundary", initialQuota: math.MinInt64 + 1, delta: -1, wantQuota: math.MinInt64},
+		{name: "positive overflow", initialQuota: math.MaxInt64, delta: 1, wantQuota: math.MaxInt64, wantError: true},
+		{name: "negative overflow", initialQuota: math.MinInt64, delta: -1, wantQuota: math.MinInt64, wantError: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			user := &models.User{
+				Username: "quota_bounds_" + strings.ReplaceAll(tc.name, " ", "_"),
+				Quota:    tc.initialQuota,
+			}
+			require.NoError(t, db.Create(user).Error)
+
+			err := mutation.UpdateQuota(user.ID, tc.delta)
+
+			var storedQuota any
+			var storageType string
+			row := db.Raw("SELECT quota, typeof(quota) FROM users WHERE id = ?", user.ID).Row()
+			require.NoError(t, row.Scan(&storedQuota, &storageType))
+			require.Equal(t, "integer", storageType)
+			require.Equal(t, tc.wantQuota, storedQuota)
+			if tc.wantError {
+				require.ErrorIs(t, err, ErrQuotaOutOfRange)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestAdminUserMutationUpdateQuotaConcurrentBoundary(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	mutation := NewAdminMutation(ctx).User()
+	user := &models.User{
+		Username: "quota_concurrent_boundary",
+		Quota:    math.MaxInt64 - 1,
+	}
+	require.NoError(t, db.Create(user).Error)
+
+	start := make(chan struct{})
+	updates := pool.NewWithResults[error]().WithMaxGoroutines(2)
+	for range 2 {
+		updates.Go(func() error {
+			<-start
+			return mutation.UpdateQuota(user.ID, 1)
+		})
+	}
+	close(start)
+	errs := updates.Wait()
+
+	succeeded := 0
+	rejected := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrQuotaOutOfRange):
+			rejected++
+		default:
+			require.NoError(t, err, "unexpected database error")
+		}
+	}
+	require.Equal(t, 1, succeeded)
+	require.Equal(t, 1, rejected)
+
+	var storedQuota any
+	var storageType string
+	row := db.Raw("SELECT quota, typeof(quota) FROM users WHERE id = ?", user.ID).Row()
+	require.NoError(t, row.Scan(&storedQuota, &storageType))
+	require.Equal(t, "integer", storageType)
+	require.Equal(t, int64(math.MaxInt64), storedQuota)
+}
 
 func TestUserDAO(t *testing.T) {
 	ctx, db := setupAdminContext(t)

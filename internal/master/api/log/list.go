@@ -59,7 +59,7 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[m
 		pcIDFilter = &pc
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	// 非 admin 用户传 private_channel_id 必须是自己拥有的；
@@ -81,6 +81,7 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[m
 			ModelName:        req.ModelName,
 			Status:           statusFilter,
 			PrivateChannelID: pcIDFilter,
+			RequestID:        req.RequestID,
 		},
 	)
 	if err != nil {

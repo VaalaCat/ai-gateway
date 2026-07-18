@@ -34,9 +34,10 @@ func setupTplUpdateTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	ginCtx, _ := gin.CreateTestContext(w)
 
 	ctx := &app.Context{
-		Context:  ginCtx,
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: 1, GroupID: 1, Role: 2},
+		Context:      ginCtx,
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: 1, GroupID: 1, Role: 2},
+		OwnerContext: t.Context(),
 	}
 
 	return &Handler{}, ctx, db

@@ -1,6 +1,10 @@
 package auth
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,6 +21,56 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
 )
+
+type cancelAwareTokenClient struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *cancelAwareTokenClient) Call(ctx context.Context, _ string, _ any) (json.RawMessage, error) {
+	close(c.entered)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.release:
+		return nil, errors.New("released test load")
+	}
+}
+
+func (*cancelAwareTokenClient) OnNotification(string, app.NotificationHandler) {}
+func (*cancelAwareTokenClient) Notify(string, any) error                       { return nil }
+func (*cancelAwareTokenClient) Close() error                                   { return nil }
+func (*cancelAwareTokenClient) ReadLoop()                                      {}
+
+func TestTokenAuthCacheLoadHonorsRequestCancellation(t *testing.T) {
+	client := &cancelAwareTokenClient{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(client.release)
+	store := cache.NewStore(client, config.AgentCacheConfig{})
+	router := setupRouter(store)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/test", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer uncached")
+	done := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		done <- w.Code
+	}()
+	select {
+	case <-client.entered:
+	case <-time.After(time.Second):
+		t.Fatal("TokenAuth did not enter cache loader")
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != http.StatusUnauthorized {
+			t.Fatalf("status after canceled cache load = %d", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TokenAuth cache load ignored request cancellation")
+	}
+}
 
 func setupRouter(store *cache.Store) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -116,21 +170,65 @@ func TestExpiredToken(t *testing.T) {
 	}
 }
 
-func TestModelNotAllowed(t *testing.T) {
-	store := cache.NewStore(nil, config.AgentCacheConfig{})
-	store.SetToken(&models.Token{ID: 1, Key: "sk-limited", UserID: 1, Status: 1, ExpiredAt: -1, Models: `["gpt-3.5-turbo"]`})
-	r := setupRouter(store)
-
-	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/test", strings.NewReader(`{"model":"gpt-4o"}`))
-	req.Header.Set("Authorization", "Bearer sk-limited")
-	req.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(w, req)
-
-	if w.Code != 403 {
-		t.Errorf("status = %d, want 403", w.Code)
+func TestAuthorizeModelTokenAndGroupMatchers(t *testing.T) {
+	tests := []struct {
+		name  string
+		user  *app.UserInfo
+		model string
+		allow bool
+	}{
+		{name: "no restrictions", user: &app.UserInfo{}, model: "gpt-4o", allow: true},
+		{name: "token allows", user: &app.UserInfo{TokenModels: []string{"gpt-.*"}}, model: "gpt-4o", allow: true},
+		{name: "token denies", user: &app.UserInfo{TokenModels: []string{"claude-.*"}}, model: "gpt-4o"},
+		{name: "group allows", user: &app.UserInfo{GroupModels: []string{"gpt-4o"}}, model: "gpt-4o", allow: true},
+		{name: "group denies", user: &app.UserInfo{GroupModels: []string{"gpt-3.5"}}, model: "gpt-4o"},
+		{name: "token allows but group denies", user: &app.UserInfo{TokenModels: []string{"gpt-.*"}, GroupModels: []string{"claude-.*"}}, model: "gpt-4o"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := AuthorizeModel(tt.user, tt.model)
+			if tt.allow && err != nil {
+				t.Fatalf("AuthorizeModel() = %v, want nil", err)
+			}
+			if !tt.allow && !errors.Is(err, ErrModelNotAllowed) {
+				t.Fatalf("AuthorizeModel() = %v, want ErrModelNotAllowed", err)
+			}
+		})
 	}
 }
+
+func TestTokenAuthDoesNotReadRequestBody(t *testing.T) {
+	store := cache.NewStore(nil, config.AgentCacheConfig{})
+	store.SetToken(&models.Token{
+		ID: 1, Key: "sk-limited", UserID: 1, Status: 1, ExpiredAt: -1,
+		Models: `["claude-.*"]`,
+	})
+	r := setupRouter(store)
+	body := &readSpy{reader: strings.NewReader(`{"model":"gpt-4o"}`)}
+	req := httptest.NewRequest(http.MethodPost, "/test", nil)
+	req.Body = body
+	req.Header.Set("Authorization", "Bearer sk-limited")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("TokenAuth status = %d, want 200 before model authorization", w.Code)
+	}
+	if body.reads != 0 {
+		t.Fatalf("TokenAuth read request body %d times", body.reads)
+	}
+}
+
+type readSpy struct {
+	reader io.Reader
+	reads  int
+}
+
+func (r *readSpy) Read(p []byte) (int, error) {
+	r.reads++
+	return r.reader.Read(p)
+}
+
+func (*readSpy) Close() error { return nil }
 
 func TestTokenAuth_PopulatesAllowedChannelIDs(t *testing.T) {
 	gin.SetMode(gin.TestMode)

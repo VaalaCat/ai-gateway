@@ -19,18 +19,28 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close test database: %v", err)
+		}
+	})
 	models.AutoMigrate(db)
 	return db
 }
 
-func newTestContext(db *gorm.DB) *app.Context {
+func newTestContext(t *testing.T, db *gorm.DB) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	testApp := app.NewApplication()
 	testApp.SetDB(db)
 	return &app.Context{
-		Context: ginCtx,
-		App:     testApp,
+		Context:      ginCtx,
+		App:          testApp,
+		OwnerContext: t.Context(),
 	}
 }
 
@@ -43,7 +53,7 @@ func TestStats_ReturnsTableCounts(t *testing.T) {
 	db.Create(&models.Token{UserID: 1, Key: "sk-1", Name: "t1", Status: 1, ExpiredAt: -1})
 
 	h := &Handler{ConnectedCount: func() int { return 3 }}
-	c := newTestContext(db)
+	c := newTestContext(t, db)
 
 	resp, err := h.Stats(c, StatsRequest{})
 	if err != nil {
@@ -98,7 +108,7 @@ func TestCleanupPreview_ReturnsCorrectCounts(t *testing.T) {
 	}
 
 	h := &Handler{}
-	c := newTestContext(db)
+	c := newTestContext(t, db)
 
 	resp, err := h.CleanupPreview(c, CleanupPreviewRequest{
 		Target:     "traces",
@@ -145,7 +155,7 @@ func TestCleanup_DeletesOldRecords(t *testing.T) {
 	}
 
 	h := &Handler{}
-	c := newTestContext(db)
+	c := newTestContext(t, db)
 
 	resp, err := h.Cleanup(c, CleanupRequest{
 		Target:     "traces",
@@ -186,7 +196,7 @@ func TestCleanupPreview_HourlyBuckets_CountsByDate(t *testing.T) {
 	}
 
 	h := &Handler{}
-	c := newTestContext(db)
+	c := newTestContext(t, db)
 	resp, err := h.CleanupPreview(c, CleanupPreviewRequest{
 		Target: "hourly_buckets", RetainDays: 7,
 	})
@@ -219,7 +229,7 @@ func TestCleanup_HourlyBuckets_DeletesByDate(t *testing.T) {
 	}
 
 	h := &Handler{}
-	c := newTestContext(db)
+	c := newTestContext(t, db)
 	resp, err := h.Cleanup(c, CleanupRequest{
 		Target: "hourly_buckets", RetainDays: 7,
 	})
@@ -247,7 +257,7 @@ func TestCleanup_InvalidTarget_Rejected(t *testing.T) {
 		Date: "2026-05-01", Hour: 0, ChannelID: 1, ModelName: "m", AgentID: "a",
 	})
 	h := &Handler{}
-	c := newTestContext(db)
+	c := newTestContext(t, db)
 	resp, err := h.Cleanup(c, CleanupRequest{
 		Target: "unknown_target", RetainDays: 7,
 	})

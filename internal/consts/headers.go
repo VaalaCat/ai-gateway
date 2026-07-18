@@ -12,13 +12,15 @@ const (
 	HeaderAnthropicVersion = "anthropic-version"
 
 	// X-Vaala-* custom headers
-	HeaderXRequestID       = "X-Vaala-Request-ID"
-	HeaderXChannelID       = "X-Vaala-Channel-ID"
-	HeaderXAgentID         = "X-Vaala-Agent-ID"
-	HeaderXAgentSecret     = "X-Vaala-Agent-Secret"
-	HeaderXAgentTag        = "X-Vaala-Agent-Tag"
-	HeaderXAgentAddressTag = "X-Vaala-Agent-Address-Tag"
-	HeaderXAgentHop        = "X-Vaala-Agent-Hop"
+	HeaderXRequestID          = "X-Vaala-Request-ID"
+	HeaderXChannelID          = "X-Vaala-Channel-ID"
+	HeaderXAgentID            = "X-Vaala-Agent-ID"
+	HeaderXAgentSecret        = "X-Vaala-Agent-Secret"
+	HeaderXAgentTag           = "X-Vaala-Agent-Tag"
+	HeaderXAgentAddressTag    = "X-Vaala-Agent-Address-Tag"
+	HeaderXAgentHop           = "X-Vaala-Agent-Hop"
+	HeaderXAgentForwardTicket = "X-Vaala-Agent-Forward-Ticket"
+	HeaderXAgentRouteID       = "X-Vaala-Agent-Route-ID"
 )
 
 // HTTP header values / prefixes.

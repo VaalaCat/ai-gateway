@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,12 +13,39 @@ import (
 	"unsafe"
 
 	apiagent "github.com/VaalaCat/ai-gateway/internal/master/api/agent"
+	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
+	masteroperations "github.com/VaalaCat/ai-gateway/internal/master/operations"
 	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 )
+
+type staticAgentControlSource map[string]connectivity.ControlSessionFact
+
+func (s staticAgentControlSource) GetControlSession(agentID string) (connectivity.ControlSessionFact, bool) {
+	fact, ok := s[agentID]
+	return fact, ok
+}
+
+type staticOperationAgentFinder struct{ agent models.Agent }
+
+func (f staticOperationAgentFinder) FindAgent(context.Context, string) (models.Agent, error) {
+	return f.agent, nil
+}
+
+type recordingProbeOperator struct {
+	sourceID   string
+	generation uint64
+	scope      protocol.ProbeScope
+}
+
+func (o *recordingProbeOperator) EnqueueManualSession(_ context.Context, sourceID string, generation uint64, scope protocol.ProbeScope) (protocol.ProbeAck, error) {
+	o.sourceID, o.generation, o.scope = sourceID, generation, scope
+	return protocol.ProbeAck{ProbeID: "probe-1", State: "queued"}, nil
+}
 
 func setHubAutoHTTPAddresses(t *testing.T, hub *msync.Hub, agentID string, addrs []agentproxy.Address) {
 	t.Helper()
@@ -119,63 +147,39 @@ func TestAgentDetailIncludesAutoDetectedHTTPAddresses(t *testing.T) {
 	}
 }
 
-func TestConnectivityUsesMergedAddresses(t *testing.T) {
+func TestConnectivityEnqueuesSchedulerProbeWithCurrentGeneration(t *testing.T) {
 	srv := setupTestMaster(t)
 
 	source := models.Agent{AgentID: "source-agent", Secret: "sec-source", Name: "source", Status: 1}
-	target := models.Agent{AgentID: "target-agent", Secret: "sec-target", Name: "target", Status: 1}
 	if err := srv.DB.Create(&source).Error; err != nil {
 		t.Fatalf("create source agent: %v", err)
 	}
-	if err := srv.DB.Create(&target).Error; err != nil {
-		t.Fatalf("create target agent: %v", err)
-	}
-
-	setHubAutoHTTPAddresses(t, srv.Hub, target.AgentID, []agentproxy.Address{
-		{URL: "http://10.0.0.9:8088", Tag: "auto-detected"},
-	})
-
-	var capturedParams any
+	connections := connectivity.NewService("address-test", connectivity.Sources{Control: staticAgentControlSource{
+		source.AgentID: {Generation: 1, ConnectedAt: time.Now().Unix()},
+	}}, connectivity.Options{})
+	probes := &recordingProbeOperator{}
 	h := &apiagent.Handler{
-		Hub: srv.Hub,
-		HubCall: func(agentID string, method string, params any, timeout time.Duration) (json.RawMessage, error) {
-			capturedParams = params
-			return json.RawMessage("[]"), nil
-		},
+		Hub: srv.Hub, Connections: connections,
+		Operations: masteroperations.NewService(t.Context(), staticOperationAgentFinder{agent: source}, masteroperations.Sources{
+			Connections: connections, Probes: probes,
+		}),
 	}
 
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
-	ctx := &app.Context{Context: ginCtx, App: srv.App, UserInfo: &app.UserInfo{Role: 2}}
+	ctx := &app.Context{Context: ginCtx, App: srv.App, UserInfo: &app.UserInfo{Role: 2}, OwnerContext: t.Context()}
 
-	_, err := h.CheckConnectivity(ctx, apiagent.ConnectivityRequest{ID: strconv.Itoa(int(source.ID))})
+	ack, err := h.CheckConnectivity(ctx, apiagent.ConnectivityRequest{ID: strconv.Itoa(int(source.ID))})
 	if err != nil {
 		t.Fatalf("check connectivity failed: %v", err)
 	}
-
-	rawCaptured, err := json.Marshal(capturedParams)
-	if err != nil {
-		t.Fatalf("marshal captured params: %v", err)
+	if ack.Body.ProbeID != "probe-1" || ack.Body.State != "queued" {
+		t.Fatalf("unexpected probe ack: %#v", ack)
 	}
-	var targets []struct {
-		AgentID       string          `json:"agent_id"`
-		HTTPAddresses json.RawMessage `json:"http_addresses"`
+	if probes.sourceID != source.AgentID || probes.generation != 1 {
+		t.Fatalf("probe lease = (%q, %d), want (%q, 1)", probes.sourceID, probes.generation, source.AgentID)
 	}
-	if err := json.Unmarshal(rawCaptured, &targets); err != nil {
-		t.Fatalf("unmarshal captured targets: %v", err)
-	}
-	if len(targets) != 1 {
-		t.Fatalf("expected 1 connectivity target, got %d (%s)", len(targets), string(rawCaptured))
-	}
-	if targets[0].AgentID != target.AgentID {
-		t.Fatalf("unexpected target agent id: %s", targets[0].AgentID)
-	}
-
-	var addrs []agentproxy.Address
-	if err := json.Unmarshal(targets[0].HTTPAddresses, &addrs); err != nil {
-		t.Fatalf("parse target http_addresses: %v", err)
-	}
-	if len(addrs) != 1 || addrs[0].URL != "http://10.0.0.9:8088" || addrs[0].Tag != "auto-detected" {
-		t.Fatalf("unexpected target addresses: %#v", addrs)
+	if !reflect.DeepEqual(probes.scope, protocol.ProbeScope{Kind: "all_enabled"}) {
+		t.Fatalf("probe scope = %#v, want all_enabled", probes.scope)
 	}
 }

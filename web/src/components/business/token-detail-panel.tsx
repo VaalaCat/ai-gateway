@@ -5,9 +5,11 @@ import { Badge } from "@/components/ui/badge";
 import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
 import { EntityLabel } from "@/components/business/entity-label";
+import { StatusBadge } from "@/components/business/status-badge";
 import { TokenAvailableModels } from "@/components/business/token-available-models";
+import { TokenModelRoutings } from "@/components/business/token-model-routings";
+import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/lib/auth";
-import { cn } from "@/lib/utils";
 import { parseModels } from "@/lib/parse-models";
 import type { Token } from "@/lib/types";
 
@@ -24,10 +26,11 @@ export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
   const channelIds = token.allowed_channel_ids ?? [];
 
   return (
-    <div className="grid gap-6 py-2 md:grid-cols-2">
-      <section className="space-y-2">
-        <h3 className="text-sm font-medium">{t("tokenInfo")}</h3>
-        <dl className="space-y-1.5 text-sm">
+    <div className="flex min-w-0 flex-col gap-5 py-2">
+      <div className="grid gap-6 md:grid-cols-2">
+        <section className="flex flex-col gap-2">
+          <h3 className="text-sm font-medium">{t("tokenInfo")}</h3>
+          <dl className="flex flex-col gap-1.5 text-sm">
           <Field label={t("fieldName")}>
             <span className="font-mono break-all">{token.name}</span>
           </Field>
@@ -46,10 +49,7 @@ export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
             </Field>
           )}
           <Field label={t("fieldStatus")}>
-            <span className={cn("inline-flex items-center gap-1", token.status === 1 ? "text-green-600" : "text-destructive")}>
-              <span className="inline-block size-1.5 rounded-full bg-current" />
-              {token.status === 1 ? tCommon("enabled") : tCommon("disabled")}
-            </span>
+            <StatusBadge status={token.status} />
           </Field>
           <Field label={t("fieldExpires")}>
             {token.expired_at
@@ -86,9 +86,12 @@ export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
           <Field label={t("fieldUpdated")}>
             <DateCell timestamp={token.updated_at} />
           </Field>
-        </dl>
-      </section>
-      <TokenAvailableModels tokenKey={token.key} />
+          </dl>
+        </section>
+        <TokenAvailableModels tokenKey={token.key} />
+      </div>
+      <Separator />
+      <TokenModelRoutings token={token} />
     </div>
   );
 }

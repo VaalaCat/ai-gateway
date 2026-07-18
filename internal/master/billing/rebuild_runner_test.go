@@ -1,12 +1,14 @@
 package billing
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -14,12 +16,14 @@ import (
 func newRunnerForTest(t *testing.T) *RebuildRunner {
 	t.Helper()
 	// retain 100ms so gc tests can observe cleanup
-	return NewRebuildRunner(nil, zap.NewNop(), 100*time.Millisecond)
+	r := NewRebuildRunner(nil, zap.NewNop(), 100*time.Millisecond)
+	r.Start(context.Background())
+	return r
 }
 
 func TestRebuildRunner_SubmitComputesSlices(t *testing.T) {
 	r := newRunnerForTest(t)
-	defer r.Stop()
+	defer r.Stop(context.Background())
 
 	// success: 单日窗口 → 24 分片
 	job, err := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-01", EndDate: "2026-05-01"})
@@ -35,7 +39,7 @@ func TestRebuildRunner_SubmitComputesSlices(t *testing.T) {
 
 func TestRebuildRunner_SubmitRejectsBadRange(t *testing.T) {
 	r := newRunnerForTest(t)
-	defer r.Stop()
+	defer r.Stop(context.Background())
 
 	// failure: start > end
 	_, err := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-02", EndDate: "2026-05-01"})
@@ -52,7 +56,7 @@ func TestRebuildRunner_SubmitRejectsBadRange(t *testing.T) {
 
 func TestRebuildRunner_GetReturnsKnownJobs(t *testing.T) {
 	r := newRunnerForTest(t)
-	defer r.Stop()
+	defer r.Stop(context.Background())
 
 	job, _ := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-01", EndDate: "2026-05-01"})
 	got, ok := r.Get(job.ID)
@@ -66,7 +70,7 @@ func TestRebuildRunner_GetReturnsKnownJobs(t *testing.T) {
 
 func TestRebuildRunner_ListReturnsAll(t *testing.T) {
 	r := newRunnerForTest(t)
-	defer r.Stop()
+	defer r.Stop(context.Background())
 
 	// boundary: 空列表
 	require.Empty(t, r.List())
@@ -115,7 +119,7 @@ func (f *fakeSliceRunner) snapshotCalls() []sliceCall {
 
 func TestRebuildRunner_RunSucceeds(t *testing.T) {
 	r := newRunnerForTest(t)
-	defer r.Stop()
+	defer r.Stop(context.Background())
 	fake := &fakeSliceRunner{}
 	r.SetSliceFn(fake.RebuildHourSlice)
 
@@ -139,7 +143,7 @@ func TestRebuildRunner_RunSucceeds(t *testing.T) {
 
 func TestRebuildRunner_RunFailsOnSliceError(t *testing.T) {
 	r := newRunnerForTest(t)
-	defer r.Stop()
+	defer r.Stop(context.Background())
 	fake := &fakeSliceRunner{
 		errOn: func(_ string, hour int) error {
 			if hour == 5 {
@@ -169,7 +173,7 @@ func TestRebuildRunner_StopMarksRunningAsCanceled(t *testing.T) {
 
 	job, _ := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-01", EndDate: "2026-05-07"})
 	time.Sleep(30 * time.Millisecond) // 让它跑几个分片
-	r.Stop()
+	_ = r.Stop(context.Background())
 
 	// 给 cancel 一点点时间传播
 	require.Eventually(t, func() bool {
@@ -178,3 +182,41 @@ func TestRebuildRunner_StopMarksRunningAsCanceled(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
+func TestRebuildRunnerCloseCancelsBlockedSliceAndRejectsRestart(t *testing.T) {
+	r := NewRebuildRunner(nil, zap.NewNop(), time.Hour)
+	if got := r.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("resources before Start = %+v", got)
+	}
+	r.Start(context.Background())
+	entered := make(chan struct{})
+	canceled := make(chan error, 1)
+	r.SetSliceContextFn(func(ctx context.Context, _ string, _ int, _ []string, _ bool) (*dao.BillingRebuildResult, error) {
+		close(entered)
+		<-ctx.Done()
+		cause := context.Cause(ctx)
+		canceled <- cause
+		return nil, cause
+	})
+	if _, err := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-01", EndDate: "2026-05-01"}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := r.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if cause := <-canceled; cause == nil {
+		t.Fatal("slice did not observe cancellation")
+	}
+	if got := r.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("resources after Close = %+v", got)
+	}
+	if _, err := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-01", EndDate: "2026-05-01"}); err == nil {
+		t.Fatal("Submit after Close succeeded")
+	}
+	r.Start(context.Background())
+	if got := r.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("Start after Close created resources: %+v", got)
+	}
+}

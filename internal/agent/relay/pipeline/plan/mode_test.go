@@ -3,8 +3,8 @@ package plan
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 
@@ -40,6 +40,34 @@ func TestModePicker_Passthrough(t *testing.T) {
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
 	if got != state.ModePassthrough {
 		t.Errorf("Passthrough channel + inbound==outbound → passthrough, got %q", got)
+	}
+}
+
+// behavior change: a tool fallback that rewrites request tools must run through
+// the native codec even when same-protocol passthrough is otherwise enabled.
+func TestModePicker_FunctionToolFallbackDisablesPassthrough(t *testing.T) {
+	ch := &models.Channel{ChannelCore: models.ChannelCore{
+		Type:               consts.ChannelTypeOpenAI,
+		SupportedAPITypes:  `["responses"]`,
+		PassthroughEnabled: true,
+		OtherSettings:      `{"builtin_tool_fallback":"function"}`,
+	}}
+	got := defaultModePicker{}.Pick(ch, "glm-5.2", codec.ProtocolOpenAIResponses)
+	if got != state.ModeNative {
+		t.Fatalf("function tool fallback requires native mode, got %q", got)
+	}
+}
+
+func TestModePicker_FunctionToolFallbackKeepsChatPassthrough(t *testing.T) {
+	ch := &models.Channel{ChannelCore: models.ChannelCore{
+		Type:               consts.ChannelTypeOpenAI,
+		SupportedAPITypes:  `["chat_completions"]`,
+		PassthroughEnabled: true,
+		OtherSettings:      `{"builtin_tool_fallback":"function"}`,
+	}}
+	got := defaultModePicker{}.Pick(ch, "glm-5.2", codec.ProtocolOpenAIChat)
+	if got != state.ModePassthrough {
+		t.Fatalf("chat channel does not use Responses function fallback, got %q", got)
 	}
 }
 
@@ -83,34 +111,5 @@ func TestModePicker_PassthroughOnlyWhenProtoMatches(t *testing.T) {
 	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolClaude)
 	if got != state.ModeNative {
 		t.Errorf("inbound!=outbound 时 Passthrough 应失效 → native, got %q", got)
-	}
-}
-
-// TestShouldPassthrough: 直测 shouldPassthrough 各分支组合。
-// 从 internal/agent/relay/passthrough_test.go 迁入——shouldPassthrough
-// 拆到 plan 子包后属于包级私有函数，单测只能放在同包内。
-func TestShouldPassthrough(t *testing.T) {
-	tests := []struct {
-		name        string
-		passthrough bool
-		supported   string
-		channelType int
-		inbound     codec.Protocol
-		want        bool
-	}{
-		{"disabled", false, `["responses"]`, 1, codec.ProtocolOpenAIResponses, false},
-		{"enabled same protocol", true, `["responses"]`, 1, codec.ProtocolOpenAIResponses, true},
-		{"enabled different protocol", true, `["chat-completion"]`, 1, codec.ProtocolOpenAIResponses, false},
-		{"enabled no supported types defaults to chat", true, "", 1, codec.ProtocolOpenAIChat, true},
-		{"enabled both supported inbound matches", true, `["responses","chat-completion"]`, 1, codec.ProtocolOpenAIResponses, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ch := &models.Channel{ChannelCore: models.ChannelCore{PassthroughEnabled: tt.passthrough, SupportedAPITypes: tt.supported, Type: tt.channelType}}
-			got := shouldPassthrough(ch, tt.inbound, "")
-			if got != tt.want {
-				t.Errorf("shouldPassthrough = %v, want %v", got, tt.want)
-			}
-		})
 	}
 }

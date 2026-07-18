@@ -8,6 +8,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/transform"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 )
 
 // defaultStepOrder 是代码级默认顺序(= 今天的执行顺序),不对外可配。
@@ -15,6 +16,7 @@ import (
 var defaultStepOrder = []string{
 	"model_mapping", "inject_system_prompt", "role_mapping",
 	"thinking_passthrough", "thinking_strip",
+	"inline_image",
 	"encode", "forward_client_headers", "param_override", "header_override", "upstream_script",
 }
 
@@ -65,16 +67,36 @@ var stepFactories = map[string]stepFactory{
 		}
 		return &StepThinkingStrip{rules: bc.thinking}
 	},
+	"inline_image": func(bc *buildContext) Step {
+		if !bc.cfg.InlineImageURL {
+			return nil
+		}
+		return &StepInlineImages{
+			fetch: upstream.FetchInlineImage,
+			// nil-safe:仅 master 自描述路径 Agent==nil,那条路只跑 Describe 不跑 Apply,
+			// 此闭包不会被调用;此处仍守卫,让 step "永不 fail 请求" 契约无死角(零值
+			// Settings → MaxBytes/Timeout=0 → 抓取全失败降级留 URL,而非 panic)。
+			settings: func() settings.AgentSettings {
+				if bc.deps.Agent == nil {
+					return settings.AgentSettings{}
+				}
+				return bc.deps.Agent.GetCache().Settings()
+			},
+			logger: bc.deps.Logger,
+		}
+	},
 	"encode": func(bc *buildContext) Step {
 		return &StepEncode{
 			enc: EncodeConfig{
-				BaseURL:             bc.cfg.BaseURL,
-				APIKey:              bc.cfg.APIKey,
-				Organization:        bc.cfg.Organization,
-				APIVersion:          bc.cfg.APIVersion,
-				EndpointPath:        bc.cfg.EndpointPath,
-				SystemPromptInInput: bc.cfg.SystemPromptInInput,
-				BuiltinToolFallback: bc.cfg.BuiltinToolFallback,
+				BaseURL:                 bc.cfg.BaseURL,
+				APIKey:                  bc.cfg.APIKey,
+				Organization:            bc.cfg.Organization,
+				APIVersion:              bc.cfg.APIVersion,
+				EndpointPath:            bc.cfg.EndpointPath,
+				SystemPromptInInput:     bc.cfg.SystemPromptInInput,
+				BuiltinToolFallback:     bc.cfg.BuiltinToolFallback,
+				RequestFieldPermissions: bc.cfg.RequestFieldPermissions,
+				ClaudeBetaQuery:         bc.cfg.ClaudeBetaQuery,
 			},
 			oc:        bc.oc,
 			proto:     bc.proto,

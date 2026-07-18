@@ -8,7 +8,7 @@ import (
 )
 
 func (h *Handler) List(c *app.Context, _ api.EmptyRequest) ([]models.OAuthProvider, error) {
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	providers, err := q.OAuthProvider().List()
 	if err != nil {
 		return nil, api.InternalError("list oauth providers failed", err)

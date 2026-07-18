@@ -18,13 +18,15 @@ import (
 
 func (c *ClaudeCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig) (*http.Request, error) {
 	raw := claudeRequest{
-		Model:       cfg.Model,
-		MaxTokens:   req.MaxTokens,
-		Stream:      req.Stream,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		TopK:        req.TopK,
-		StopSeqs:    req.StopWords,
+		Model:        cfg.Model,
+		MaxTokens:    req.MaxTokens,
+		Stream:       req.Stream,
+		Temperature:  req.Temperature,
+		TopP:         req.TopP,
+		TopK:         req.TopK,
+		StopSeqs:     req.StopWords,
+		ServiceTier:  req.ServiceTier,
+		InferenceGeo: req.InferenceGeo,
 	}
 
 	if raw.MaxTokens == 0 {
@@ -104,9 +106,10 @@ func (c *ClaudeCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig
 			cm.Role = "user"
 		} else {
 			// Build content blocks as raw JSON to support unknown types
+			filtered := codec.DropEmptyTextBlocks(m.Content)
 			var rawBlocks []json.RawMessage
 			hasRawJSON := false
-			for _, cb := range m.Content {
+			for _, cb := range filtered {
 				if cb.RawJSON != nil {
 					rawBlocks = append(rawBlocks, cb.RawJSON)
 					hasRawJSON = true
@@ -167,6 +170,14 @@ func (c *ClaudeCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig
 			} else if len(rawBlocks) > 0 {
 				b, _ := json.Marshal(rawBlocks)
 				cm.Content = b
+			} else if len(filtered) == 0 && len(m.Content) > 0 {
+				// message carried only empty text blocks → legal empty string
+				// (preserve prior [empty]→"" behavior; never emit illegal {"type":"text"}).
+				// Guard on len(filtered)==0, NOT len(rawBlocks)==0: a thinking-only
+				// message keeps filtered>0 (thinking survives the filter) so it must
+				// NOT fall here — its content stays as-is (null).
+				b, _ := json.Marshal("")
+				cm.Content = b
 			}
 		}
 
@@ -219,6 +230,11 @@ func (c *ClaudeCodec) EncodeRequest(req *codec.Request, cfg *codec.ChannelConfig
 	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
+	}
+	if cfg.ClaudeBetaQuery {
+		query := httpReq.URL.Query()
+		query.Set("beta", "true")
+		httpReq.URL.RawQuery = query.Encode()
 	}
 
 	httpReq.Header.Set(consts.HeaderContentType, consts.ContentTypeJSON)

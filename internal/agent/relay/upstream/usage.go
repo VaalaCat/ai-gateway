@@ -45,6 +45,9 @@ func EmitDroppedToolsLog(
 	inbound, outbound codec.Protocol,
 	policy string,
 ) {
+	if logger == nil || req == nil || req.Metadata == nil {
+		return
+	}
 	raw, ok := req.Metadata["dropped_tools"]
 	if !ok {
 		return
@@ -102,7 +105,8 @@ func ExtractUsageFromPassthroughBody(body []byte, isStream bool) (prompt, comple
 				Response struct {
 					Usage json.RawMessage `json:"usage"`
 				} `json:"response"`
-				Usage json.RawMessage `json:"usage"` // Chat format: usage at top level
+				Usage   json.RawMessage `json:"usage"`   // Chat format: usage at top level
+				Timings json.RawMessage `json:"timings"` // llama.cpp: non-standard usage sibling
 			}
 			if json.Unmarshal(data, &evt) != nil {
 				continue
@@ -114,22 +118,61 @@ func ExtractUsageFromPassthroughBody(body []byte, isStream bool) (prompt, comple
 			}
 			if len(usageData) > 0 {
 				prompt, completion, cacheRead, cacheWrite = ParseUsageJSON(usageData)
-				if prompt > 0 || completion > 0 {
+				// cacheRead/cacheWrite also count as a real usage frame: a fully
+				// cached prompt normalizes to prompt==0 yet still carries cache
+				// tokens we must not lose to an earlier "usage":null chunk.
+				if prompt > 0 || completion > 0 || cacheRead > 0 || cacheWrite > 0 {
 					return
 				}
+			}
+			// llama.cpp fallback: no standard usage, derive from `timings`
+			// (same gating/mapping as codec.usageFromWire — usage wins over timings).
+			if p, c, cr, ok := parseTimingsJSON(evt.Timings); ok {
+				return p, c, cr, 0
 			}
 		}
 		return
 	}
 
-	// Non-stream: parse top-level usage
+	// Non-stream: parse top-level usage, fall back to llama.cpp `timings`.
 	var respObj struct {
-		Usage json.RawMessage `json:"usage"`
+		Usage   json.RawMessage `json:"usage"`
+		Timings json.RawMessage `json:"timings"`
 	}
-	if json.Unmarshal(body, &respObj) == nil && len(respObj.Usage) > 0 {
-		prompt, completion, cacheRead, cacheWrite = ParseUsageJSON(respObj.Usage)
+	if json.Unmarshal(body, &respObj) == nil {
+		if len(respObj.Usage) > 0 {
+			prompt, completion, cacheRead, cacheWrite = ParseUsageJSON(respObj.Usage)
+		}
+		if prompt == 0 && completion == 0 {
+			if p, c, cr, ok := parseTimingsJSON(respObj.Timings); ok {
+				prompt, completion, cacheRead = p, c, cr
+			}
+		}
 	}
 	return
+}
+
+// parseTimingsJSON maps llama.cpp's non-standard `timings` object to gateway
+// usage, mirroring codec.usageFromWire exactly: prompt_n/predicted_n/cache_n are
+// mutually-exclusive counters mapped 1:1 to prompt/completion/cacheRead (no
+// prompt_n+cache_n). It reports ok=false unless prompt_n or predicted_n is
+// positive, gating out other upstreams' incidental empty/irrelevant timings.
+func parseTimingsJSON(data []byte) (prompt, completion, cacheRead int, ok bool) {
+	if len(data) == 0 {
+		return 0, 0, 0, false
+	}
+	var t struct {
+		PromptN    int `json:"prompt_n"`
+		PredictedN int `json:"predicted_n"`
+		CacheN     int `json:"cache_n"`
+	}
+	if json.Unmarshal(data, &t) != nil {
+		return 0, 0, 0, false
+	}
+	if t.PromptN <= 0 && t.PredictedN <= 0 {
+		return 0, 0, 0, false
+	}
+	return t.PromptN, t.PredictedN, t.CacheN, true
 }
 
 // extractClaudeSSEUsage extracts token usage from Claude SSE stream events.
@@ -217,15 +260,34 @@ func ParseUsageJSON(data []byte) (prompt, completion, cacheRead, cacheWrite int)
 	if completion == 0 {
 		completion = usage.CompletionTokens
 	}
-	// OpenAI: cached tokens from prompt_tokens_details or input_tokens_details
-	cacheRead = usage.InputTokensDetails.CachedTokens
-	if cacheRead == 0 {
-		cacheRead = usage.PromptTokensDetails.CachedTokens
-	}
-	// Claude: cache_read_input_tokens / cache_creation_input_tokens
-	if cacheRead == 0 {
+	// Normalize so prompt always represents NON-cached input tokens (the gateway
+	// invariant NormalizeUsage documents; the settler bills PromptTokens and
+	// CacheReadTokens as disjoint buckets). The subtraction is format-aware:
+	//
+	//   - OpenAI (prompt_tokens_details / input_tokens_details.cached_tokens): the
+	//     cached count is a SUBSET of prompt/input tokens → subtract it out. This is
+	//     safe by construction (OpenAI guarantees prompt_tokens >= cached_tokens).
+	//   - Claude (cache_read_input_tokens): a SEPARATE bucket already excluded from
+	//     input_tokens → keep prompt as-is, never subtract.
+	if openaiCached := firstNonZero(usage.InputTokensDetails.CachedTokens, usage.PromptTokensDetails.CachedTokens); openaiCached > 0 {
+		cacheRead = openaiCached
+		prompt -= cacheRead
+		if prompt < 0 {
+			prompt = 0
+		}
+	} else {
 		cacheRead = usage.CacheReadInputTokens
 	}
 	cacheWrite = usage.CacheCreationInputTokens
 	return
+}
+
+// firstNonZero returns the first non-zero argument, or 0 if all are zero.
+func firstNonZero(vals ...int) int {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }

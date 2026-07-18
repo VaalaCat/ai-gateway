@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/badge";
 
@@ -36,7 +37,8 @@ interface OnlineBadgeProps {
 
 export function OnlineBadge({ lastSeen, thresholdSeconds = 60 }: OnlineBadgeProps) {
   const t = useTranslations("agents");
-  const isOnline = lastSeen > 0 && Math.floor(Date.now() / 1000) - lastSeen < thresholdSeconds;
+  const [renderedAt] = useState(() => Math.floor(Date.now() / 1000));
+  const isOnline = lastSeen > 0 && renderedAt - lastSeen < thresholdSeconds;
   return (
     <Badge variant={isOnline ? "default" : "secondary"}>
       {isOnline ? t("online") : t("offline")}

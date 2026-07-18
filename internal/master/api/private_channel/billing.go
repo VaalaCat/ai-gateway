@@ -214,7 +214,7 @@ func (h *Handler) BillingByModel(c *app.Context, req BillingRangeRequest) (ByMod
 		return ByModelResponse{}, api.BadRequestError("invalid date range", err)
 	}
 
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	rows, err := q.Billing().ListPrivateChannelByModelByOwner(c.UserInfo.UserID, dao.ChannelBillingListFilter{
 		StartDate: from,
 		EndDate:   to,
@@ -246,7 +246,7 @@ func (h *Handler) BillingByModel(c *app.Context, req BillingRangeRequest) (ByMod
 
 // byokDailyRows 是 overview / by-channel 复用的取数封装。
 func byokDailyRows(c *app.Context, ownerID uint, from, to string) ([]dao.ChannelBillingDailyItem, error) {
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	rows, err := q.Billing().ListPrivateChannelDailyByOwner(ownerID, dao.ChannelBillingListFilter{
 		StartDate: from,
 		EndDate:   to,

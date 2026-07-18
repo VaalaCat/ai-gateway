@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -12,6 +13,50 @@ func TestNewContext_GetDB(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	if ctx.GetDB() != db {
 		t.Fatal("GetDB should return the app's DB")
+	}
+}
+
+func TestContextConstructorsRequireAndPreserveContext(t *testing.T) {
+	application, _ := setupTestApp(t)
+	t.Run("valid", func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), struct{}{}, "value")
+		admin := NewContextWithContext(application, ctx)
+		user := NewUserContextWithContext(application, ctx, &app.UserInfo{UserID: 7})
+		if admin.GetDB().Statement.Context != ctx {
+			t.Fatal("admin DAO context did not preserve caller context")
+		}
+		if user.GetDB().Statement.Context != ctx {
+			t.Fatal("user DAO context did not preserve caller context")
+		}
+	})
+	t.Run("canceled cause", func(t *testing.T) {
+		cause := errors.New("request canceled")
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(cause)
+		admin := NewContextWithContext(application, ctx)
+		user := NewUserContextWithContext(application, ctx, &app.UserInfo{UserID: 7})
+		if got := context.Cause(admin.GetDB().Statement.Context); !errors.Is(got, cause) {
+			t.Fatalf("admin DAO context cause = %v, want %v", got, cause)
+		}
+		if got := context.Cause(user.GetDB().Statement.Context); !errors.Is(got, cause) {
+			t.Fatalf("user DAO context cause = %v, want %v", got, cause)
+		}
+	})
+	for _, tt := range []struct {
+		name string
+		call func()
+	}{
+		{name: "admin nil", call: func() { NewContextWithContext(application, nil) }},
+		{name: "user nil", call: func() { NewUserContextWithContext(application, nil, &app.UserInfo{UserID: 7}) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("nil context did not panic")
+				}
+			}()
+			tt.call()
+		})
 	}
 }
 

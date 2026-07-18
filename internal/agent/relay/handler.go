@@ -3,8 +3,11 @@ package relay
 import (
 	"context"
 	"errors"
+	"net/http"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/auth"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/limiter"
@@ -52,6 +55,30 @@ type Handler struct {
 	executor  *exec.Executor
 	publisher *publish.Publisher
 	registry  *inflight.Registry
+	provider  attemptexec.ProviderAttemptExecutor
+}
+
+type handlerOptions struct {
+	sourceAgentID string
+	routes        exec.AttemptRouteBuilder
+	local         exec.LocalAttemptExecutor
+	remote        exec.RemoteAttemptExecutor
+}
+
+type HandlerOption func(*handlerOptions)
+
+func WithAttemptRouting(
+	sourceAgentID string,
+	routes exec.AttemptRouteBuilder,
+	local exec.LocalAttemptExecutor,
+	remote exec.RemoteAttemptExecutor,
+) HandlerOption {
+	return func(options *handlerOptions) {
+		options.sourceAgentID = sourceAgentID
+		options.routes = routes
+		options.local = local
+		options.remote = remote
+	}
 }
 
 // NewHandler 是规范构造器：
@@ -66,7 +93,15 @@ type Handler struct {
 //
 // bus 入参收窄自 app.Application（17 方法）→ app.EventBus（1 方法），
 // 因为 NewHandler 只需要 EventBus 一项；让测试 stub 不必满足 Application 全集。
-func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher state.Dispatcher, registry *inflight.Registry, permit limiter.PermitStore, breakers *resilience.Registry) *Handler {
+func NewHandler(
+	bus app.EventBus,
+	agentApp app.AgentApplication,
+	dispatcher state.Dispatcher,
+	registry *inflight.Registry,
+	permit limiter.PermitStore,
+	breakers *resilience.Registry,
+	options ...HandlerOption,
+) *Handler {
 	h := &Handler{
 		Agent:    agentApp,
 		registry: registry,
@@ -104,9 +139,37 @@ func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher stat
 	}
 
 	h.planner = plan.NewSolver(aff)
-	h.executor = &exec.Executor{Dispatcher: dispatcher, Sleep: sleepReader, Affinity: aff, Resilience: runner, Gate: gate}
+	h.provider = attemptexec.NewProviderExecutor(dispatcher, runner, gate)
+	routing := handlerOptions{}
+	for _, option := range options {
+		if option != nil {
+			option(&routing)
+		}
+	}
+	if routing.routes == nil {
+		var routeCache app.AgentCache
+		if agentApp != nil {
+			routeCache = agentApp.GetCache()
+		}
+		routing.routes = exec.NewAttemptRouteBuilder(routeCache)
+	}
+	if routing.local == nil {
+		routing.local = exec.NewLocalAttemptExecutor(routing.sourceAgentID, h.provider)
+	}
+	h.executor = &exec.Executor{
+		SourceAgentID: routing.sourceAgentID, Routes: routing.routes,
+		Local: routing.local, Remote: routing.remote, RequestGate: gate,
+		Sleep: sleepReader, Affinity: aff,
+	}
 	h.publisher = publish.NewPublisher(bus, logger, aff)
 	return h
+}
+
+func (h *Handler) ProviderAttemptExecutor() attemptexec.ProviderAttemptExecutor {
+	if h == nil {
+		return nil
+	}
+	return h.provider
 }
 
 // Relay is the generic handler for all AI API endpoints. It's a 4-stage pipeline
@@ -116,6 +179,7 @@ func NewHandler(bus app.EventBus, agentApp app.AgentApplication, dispatcher stat
 // 填多少 UsageLogEntry 字段，writeResponse 决定 HTTP 状态码 + 响应体。
 func (h *Handler) Relay(c *gin.Context) {
 	rctx := h.newRelayContext(c)
+	defer CloseContext(rctx)
 
 	// 包一层可取消 context,使管理员打断(Registry.Interrupt → cancel)能中断上游调用。
 	// 子 context 继承客户端断连语义;defer cancel 防泄漏。
@@ -140,8 +204,20 @@ func (h *Handler) Relay(c *gin.Context) {
 		h.finishRelay(rctx)
 		return
 	}
-
-	if h.applyRequestScripts(rctx) {
+	if err := auth.AuthorizeModel(rctx.Input.UserInfo, rctx.Input.Model); err != nil {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": consts.ErrModelNotAllowed})
+		return
+	}
+	rejected, err := h.applyRequestScripts(rctx)
+	if err != nil {
+		rctx.State.Err, rctx.State.FailPhase = err, state.PhaseCtxBuild
+		if rctx.State.Recorder != nil {
+			rctx.State.Recorder.WithFail(trace.StageInboundDecode, err)
+		}
+		h.finishRelay(rctx)
+		return
+	}
+	if rejected {
 		return // 已被脚本 reject 并写回响应
 	}
 
@@ -173,9 +249,6 @@ func (h *Handler) Relay(c *gin.Context) {
 		rctx.Inflight.Update(publish.ProjectUsageEntry(rctx))
 	}
 
-	if rctx.State.Forwarded {
-		return
-	}
 	if rctx.State.Execution.Err != nil {
 		rctx.State.Err = rctx.State.Execution.Err
 		rctx.State.FailPhase = state.PhaseExecute
@@ -194,31 +267,19 @@ func (h *Handler) finishRelay(rctx *state.RelayContext) {
 // Recorder 的 enabled 标志直接读 UserInfo.TraceEnabled（trace.Enabled 哨兵语义），
 // maxBodySize 走 AgentCache.TraceMaxBodySize。Handler 不再依赖任何 middleware 注入。
 func (h *Handler) newRelayContext(c *gin.Context) *state.RelayContext {
-	maxBody := 0
-	if h.Agent != nil {
-		if cache := h.Agent.GetCache(); cache != nil {
-			maxBody = cache.TraceMaxBodySize()
-		}
+	rctx := NewContext(c, h.Agent)
+	if h != nil && h.executor != nil {
+		rctx.State.Execution.RouteSourceAgentID = h.executor.SourceAgentID
 	}
-	return &state.RelayContext{
-		Context: c,
-		Agent:   h.Agent,
-		State: &state.RelayState{
-			Recorder: trace.NewRecorder(trace.Enabled(c), maxBody),
-		},
-	}
+	return rctx
 }
 
 // writeResponse 单一出口写 HTTP 响应：
-//   - 已被 forwarder 接管 → 跳过；
 //   - backend 已 Written（流式开始/部分写过 body） → 跳过，避免双写；
 //   - 无错 → 200 已由 backend 写完，跳过；
 //   - 有错且是 *common.UpstreamError → 把上游原始 body + status 透传给客户端；
 //   - 其它有错 → 用 state.StatusFromState 映射状态码 + JSON error body。
 func (h *Handler) writeResponse(rctx *state.RelayContext) {
-	if rctx.State.Forwarded {
-		return
-	}
 	if rctx.State.Execution.Outcome.Written {
 		return
 	}
@@ -257,5 +318,9 @@ func (h *Handler) writeResponse(rctx *state.RelayContext) {
 		return
 	}
 	code, msg := state.StatusFromState(rctx)
+	if public, ok := state.PublicRouteErrorFromState(rctx); ok {
+		rctx.JSON(code, public)
+		return
+	}
 	rctx.JSON(code, gin.H{"error": msg})
 }

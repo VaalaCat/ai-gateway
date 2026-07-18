@@ -122,15 +122,8 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
     Object.keys(overrideMap).length + (otherSettings.model_protocol_override?.length ?? 0);
   const overrideSummary =
     enabledCount < 2 ? t("encodeSummaryLocked") : t("encodeSummaryOverrides", { count: overrideTotal });
-  // 只数当前协议下实际可见的开关(与下方各 protos.* 门控的渲染一致),避免摘要多算看不到的项。
-  const openaiAny = protos.openaiChat || protos.openaiResponses;
   const behaviorOnCount = [
-    protos.claude && otherSettings.claude_beta_query,
-    protos.claude && otherSettings.allow_inference_geo,
-    openaiAny && otherSettings.allow_service_tier,
-    protos.openaiResponses && otherSettings.disable_store,
-    openaiAny && otherSettings.allow_include_obfuscation,
-    otherSettings.allow_safety_identifier,
+    otherSettings.builtin_tool_fallback && otherSettings.builtin_tool_fallback !== "drop",
     form.system_prompt_in_input,
   ].filter(Boolean).length;
   const behaviorSummary = t("encodeSummaryBehavior", { count: behaviorOnCount });
@@ -276,86 +269,6 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
           </div>
         </AccordionTrigger>
         <AccordionContent className="space-y-3 px-3 pb-3">
-          {/* Claude-only settings */}
-          {protos.claude && (
-            <>
-              <div className="flex items-center justify-between">
-                <Label>
-                  {t("claudeBetaQuery")}
-                  <FieldTip text={t("claudeBetaQueryTip")} />
-                </Label>
-                <Switch
-                  checked={!!otherSettings.claude_beta_query}
-                  onCheckedChange={(v) => updateOtherSettings({ claude_beta_query: v })}
-                />
-              </div>
-              <div className="flex items-center justify-between">
-                <Label>
-                  {t("allowInferenceGeo")}
-                  <FieldTip text={t("allowInferenceGeoTip")} />
-                </Label>
-                <Switch
-                  checked={!!otherSettings.allow_inference_geo}
-                  onCheckedChange={(v) => updateOtherSettings({ allow_inference_geo: v })}
-                />
-              </div>
-            </>
-          )}
-
-          {/* OpenAI chat or responses settings */}
-          {(protos.openaiChat || protos.openaiResponses) && (
-            <div className="flex items-center justify-between">
-              <Label>
-                {t("allowServiceTier")}
-                <FieldTip text={t("allowServiceTierTip")} />
-              </Label>
-              <Switch
-                checked={!!otherSettings.allow_service_tier}
-                onCheckedChange={(v) => updateOtherSettings({ allow_service_tier: v })}
-              />
-            </div>
-          )}
-
-          {/* Responses-only settings */}
-          {protos.openaiResponses && (
-            <div className="flex items-center justify-between">
-              <Label>
-                {t("disableStore")}
-                <FieldTip text={t("disableStoreTip")} />
-              </Label>
-              <Switch
-                checked={!!otherSettings.disable_store}
-                onCheckedChange={(v) => updateOtherSettings({ disable_store: v })}
-              />
-            </div>
-          )}
-
-          {/* OpenAI chat or responses settings */}
-          {(protos.openaiChat || protos.openaiResponses) && (
-            <div className="flex items-center justify-between">
-              <Label>
-                {t("allowIncludeObfuscation")}
-                <FieldTip text={t("allowIncludeObfuscationTip")} />
-              </Label>
-              <Switch
-                checked={!!otherSettings.allow_include_obfuscation}
-                onCheckedChange={(v) => updateOtherSettings({ allow_include_obfuscation: v })}
-              />
-            </div>
-          )}
-
-          {/* Always shown */}
-          <div className="flex items-center justify-between">
-            <Label>
-              {t("allowSafetyIdentifier")}
-              <FieldTip text={t("allowSafetyIdentifierTip")} />
-            </Label>
-            <Switch
-              checked={!!otherSettings.allow_safety_identifier}
-              onCheckedChange={(v) => updateOtherSettings({ allow_safety_identifier: v })}
-            />
-          </div>
-
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <Label>
               {t("builtinToolFallback")}
@@ -374,6 +287,7 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
                 <SelectItem value="drop">{t("builtinToolFallbackDrop")}</SelectItem>
                 <SelectItem value="error">{t("builtinToolFallbackError")}</SelectItem>
                 <SelectItem value="passthrough">{t("builtinToolFallbackPassthrough")}</SelectItem>
+                <SelectItem value="function">{t("builtinToolFallbackFunction")}</SelectItem>
               </SelectContent>
             </Select>
           </div>

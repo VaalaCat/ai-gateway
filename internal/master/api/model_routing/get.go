@@ -19,11 +19,11 @@ type GetResponse struct {
 func (h *Handler) Get(c *app.Context, req api.IDPathRequest) (GetResponse, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	r, err := q.ModelRouting().GetByID(uint(id))
-	if err != nil || r == nil {
+	if err != nil || r == nil || r.Scope == models.RoutingScopeToken {
 		return GetResponse{}, api.NotFoundError("model routing not found")
 	}
 	return GetResponse{
@@ -46,7 +46,7 @@ func expandRoutingToModels(r *models.ModelRouting, q dao.AdminQuery) []string {
 			return
 		}
 		for _, m := range members {
-			child, _ := q.ModelRouting().GetByName(models.RoutingScopeGlobal, 0, m.Ref)
+			child, _ := q.ModelRouting().GetByName(models.RoutingScopeGlobal, 0, 0, m.Ref)
 			if child != nil && child.Enabled {
 				visit(child, depth+1)
 			} else {

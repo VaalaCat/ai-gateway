@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -43,14 +43,14 @@ export function TokenAvailableModels({ tokenKey }: TokenAvailableModelsProps) {
     else toast.error(t("copyFailed"));
   };
 
-  const filtered = useMemo(() => {
+  const filtered = (() => {
     if (!data) return [];
     if (!query) return data;
     const q = query.toLowerCase();
     return data.filter((name) => name.toLowerCase().includes(q));
-  }, [data, query]);
+  })();
 
-  const groups = useMemo(() => groupModelsByProvider(filtered), [filtered]);
+  const groups = groupModelsByProvider(filtered);
   const showSearch = (data?.length ?? 0) > SEARCH_THRESHOLD;
 
   if (isLoading) {

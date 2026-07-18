@@ -10,7 +10,7 @@ import (
 )
 
 func (h *Handler) ApplyPricing(c *app.Context, req ApplyPricingRequest) (ApplyPricingResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

@@ -1,7 +1,7 @@
 package agent_route
 
 import (
-	"context"
+	"errors"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -10,52 +10,47 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"gorm.io/gorm"
 )
 
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.AgentRoute, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
 	existing, err := q.AgentRoute().GetByID(uint(id))
 	if err != nil {
-		return models.AgentRoute{}, api.NotFoundError(consts.ErrNotFound)
-	}
-
-	updates := req.Fields
-	if updates == nil {
-		updates = map[string]any{}
-	}
-	delete(updates, "id")
-	delete(updates, "created_at")
-	delete(updates, "priority")
-
-	sourceType := existing.SourceType
-	model := existing.Model
-	if v, ok := updates["source_type"]; ok {
-		if s, ok := v.(string); ok {
-			sourceType = s
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return models.AgentRoute{}, api.NotFoundError(consts.ErrNotFound)
 		}
+		return models.AgentRoute{}, api.InternalError("get agent route failed", err)
 	}
-	if v, ok := updates["model"]; ok {
-		if s, ok := v.(string); ok {
-			model = s
-		}
-	}
-	temp := models.AgentRoute{SourceType: sourceType, Model: model}
-	updates["priority"] = temp.CalcPriority()
 
-	if err := m.AgentRoute().Update(uint(id), updates); err != nil {
-		return models.AgentRoute{}, api.InternalError("update agent route failed", err)
+	merged := req.Merge(*existing)
+	if err := validateAgentRoute(q, merged); err != nil {
+		return models.AgentRoute{}, err
+	}
+	if err := m.AgentRoute().Update(&merged); err != nil {
+		switch {
+		case errors.Is(err, dao.ErrAgentRouteNotFound):
+			return models.AgentRoute{}, api.NotFoundError(consts.ErrNotFound)
+		case dao.IsAgentRouteUniqueConflict(err):
+			return models.AgentRoute{}, api.ConflictError("agent route already exists", err)
+		default:
+			return models.AgentRoute{}, api.InternalError("update agent route failed", err)
+		}
 	}
 
 	route, err := q.AgentRoute().GetByID(uint(id))
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return models.AgentRoute{}, api.NotFoundError(consts.ErrNotFound)
+		}
 		return models.AgentRoute{}, api.InternalError("get updated route failed", err)
 	}
 
-	_ = events.PublishAgentRouteUpdate(context.Background(), c.GetBus(), *route)
+	_ = events.PublishAgentRouteUpdate(c.RequestContext(), c.GetBus(), *route)
 	return *route, nil
 }

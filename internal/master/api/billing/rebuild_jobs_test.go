@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -13,7 +14,8 @@ import (
 
 func TestRebuildHandler_SubmitAndGet(t *testing.T) {
 	r := mbilling.NewRebuildRunner(nil, zap.NewNop(), time.Minute)
-	defer r.Stop()
+	r.Start(context.Background())
+	defer r.Stop(context.Background())
 	r.SetSliceFn(func(date string, hour int, targets []string, reset bool) (*dao.BillingRebuildResult, error) {
 		return &dao.BillingRebuildResult{ReplayedLogs: 1}, nil
 	})
@@ -78,7 +80,8 @@ func TestRebuildHandler_NilRunner(t *testing.T) {
 
 func TestRebuildHandler_RejectsBadRange(t *testing.T) {
 	r := mbilling.NewRebuildRunner(nil, zap.NewNop(), time.Minute)
-	defer r.Stop()
+	r.Start(context.Background())
+	defer r.Stop(context.Background())
 	h := &Handler{Runner: r}
 
 	// failure: 全空 → Runner.Submit 拒绝 → 400

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
@@ -29,23 +31,35 @@ import (
 var _ app.Store = (*Store)(nil)
 
 type Store struct {
-	tokenStore     *tokenStore
-	users          entitycache.EntityCache[uint, *protocol.SyncedUser]
-	channels       entitycache.EntityCache[uint, *models.Channel]
-	modelConfigs   entitycache.EntityCache[string, *models.ModelConfig]
-	agents         entitycache.EntityCache[string, *models.Agent]
-	userGroups     entitycache.EntityCache[uint, *models.UserGroup]
-	modelChannels  utils.SyncMap[string, []*models.Channel]
-	globalRoutings        entitycache.EntityCache[string, *protocol.SyncedRouting]
-	userRoutings          entitycache.EntityCache[uint, *protocol.UserRoutingMap]
+	tokenStore             *tokenStore
+	users                  entitycache.EntityCache[uint, *protocol.SyncedUser]
+	channels               entitycache.EntityCache[uint, *models.Channel]
+	modelConfigs           entitycache.EntityCache[string, *models.ModelConfig]
+	agents                 entitycache.EntityCache[string, *models.Agent]
+	userGroups             entitycache.EntityCache[uint, *models.UserGroup]
+	modelChannels          utils.SyncMap[string, []*models.Channel]
+	globalRoutings         entitycache.EntityCache[string, *protocol.SyncedRouting]
+	userRoutings           entitycache.EntityCache[uint, *protocol.UserRoutingMap]
+	tokenRoutings          entitycache.EntityCache[uint, *protocol.TokenRoutingMap]
 	visiblePrivateChannels entitycache.EntityCache[uint, *protocol.VisiblePrivateChannelSet]
 
 	RouteIndex *RouteIndex
 
 	LimiterIndex *LimiterIndex
 
-	version atomic.Int64
-	mu      sync.Mutex // protects index rebuild
+	version  atomic.Int64
+	mu       sync.Mutex // protects index rebuild
+	agentsMu sync.Mutex // protects configured agents, runtime addresses, and effective snapshots
+
+	agentCapabilitiesMu          sync.RWMutex
+	agentCapabilities            map[string][]string
+	configuredAgents             map[string]*models.Agent
+	directAddressSessionStarted  bool
+	directAddressMaster          string
+	configuredSnapshotReady      bool
+	acceptUnknownDirectAddresses bool
+	directAddressLatest          map[string]directAddressVersion
+	directAddressOverlays        map[string]string // key presence wins; an empty value is a tombstone
 
 	// settings 持有 master 同步过来的全局配置快照。
 	// 读路径走 atomic.Load(无锁,hot path);写路径(applySetting)用 settingsMu
@@ -53,11 +67,13 @@ type Store struct {
 	settingsMu sync.Mutex
 	settings   atomic.Pointer[settings.AgentSettings]
 
-	logger *zap.Logger
+	logger               *zap.Logger
+	resolveLogSuppressor *diagnostics.Suppressor
 
 	scripts *scriptStore
 
 	onChannelChange []func(old, new *models.Channel)
+	cacheLifecycle  *entitycache.Lifecycle
 }
 
 // NewStore 装配 agent 端缓存 Store。
@@ -67,13 +83,20 @@ type Store struct {
 // 选择性 LRU：tokens / users 走 LRU；channels / modelConfigs / agents / userGroups
 // 仍是 admin 维护的小规模实体，走 FullCache。
 func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
+	cacheLifecycle := entitycache.NewLifecycle()
 	s := &Store{
-		channels:     entitycache.NewFullCache[uint, *models.Channel](),
-		modelConfigs: entitycache.NewFullCache[string, *models.ModelConfig](),
-		agents:       entitycache.NewFullCache[string, *models.Agent](),
-		userGroups:   entitycache.NewFullCache[uint, *models.UserGroup](),
-		RouteIndex:   NewRouteIndex(),
-		LimiterIndex: NewLimiterIndex(),
+		channels:              entitycache.NewFullCache[uint, *models.Channel](),
+		modelConfigs:          entitycache.NewFullCache[string, *models.ModelConfig](),
+		agents:                entitycache.NewFullCache[string, *models.Agent](),
+		agentCapabilities:     make(map[string][]string),
+		configuredAgents:      make(map[string]*models.Agent),
+		directAddressLatest:   make(map[string]directAddressVersion),
+		directAddressOverlays: make(map[string]string),
+		userGroups:            entitycache.NewFullCache[uint, *models.UserGroup](),
+		RouteIndex:            NewRouteIndex(),
+		LimiterIndex:          NewLimiterIndex(),
+		cacheLifecycle:        cacheLifecycle,
+		resolveLogSuppressor:  diagnostics.NewSuppressor(diagnostics.SuppressorOptions{}),
 	}
 	{
 		snap := settings.AgentSettings{}
@@ -108,12 +131,11 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		userCap = 20000
 	}
 
-	users, err := newUserLRU(client, userCap, negTTL, refreshCfg)
+	users, err := newUserLRU(client, userCap, negTTL, refreshCfg, cacheLifecycle)
 	if err != nil {
 		panic(err)
 	}
 	s.users = users
-	s.tokenStore = newTokenStoreLRU(client, s.users, tokenCap, negTTL, refreshCfg)
 
 	s.globalRoutings = entitycache.NewFullCache[string, *protocol.SyncedRouting]()
 
@@ -130,11 +152,29 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		Loader:      routingLoader,
 		NegativeTTL: negTTL,
 		Refresh:     refreshCfg,
+		Lifecycle:   cacheLifecycle,
 	})
 	if err != nil {
 		panic(err)
 	}
 	s.userRoutings = userRoutings
+
+	var tokenRoutingLoader entitycache.Loader[uint, *protocol.TokenRoutingMap]
+	if client != nil {
+		tokenRoutingLoader = &loaders.TokenRoutingsLoader{Client: client}
+	}
+	tokenRoutings, err := entitycache.NewLRUCache(entitycache.Config[uint, *protocol.TokenRoutingMap]{
+		Capacity:    routingCap,
+		Loader:      tokenRoutingLoader,
+		NegativeTTL: negTTL,
+		Refresh:     refreshCfg,
+		Lifecycle:   cacheLifecycle,
+	})
+	if err != nil {
+		panic(err)
+	}
+	s.tokenRoutings = tokenRoutings
+	s.tokenStore = newTokenStoreLRU(client, s.users, s.tokenRoutings, tokenCap, negTTL, refreshCfg, cacheLifecycle)
 
 	pchanCap := cfg.PrivateChannelsCapacity
 	if pchanCap <= 0 {
@@ -150,6 +190,7 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 			Loader:      pchanLoader,
 			NegativeTTL: negTTL,
 			Refresh:     refreshCfg,
+			Lifecycle:   cacheLifecycle,
 		})
 	if err != nil {
 		panic(err)
@@ -157,6 +198,11 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 	s.visiblePrivateChannels = privateChans
 
 	return s
+}
+
+type directAddressVersion struct {
+	sessionGeneration uint64
+	sequence          uint64
 }
 
 // SetLogger 注入 zap.Logger，用于 routing apply / resolve 等可观测性日志。
@@ -171,7 +217,7 @@ func (s *Store) SetLogger(l *zap.Logger) {
 	}
 }
 
-func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration, refreshCfg func() entitycache.RefreshConfig) (entitycache.EntityCache[uint, *protocol.SyncedUser], error) {
+func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration, refreshCfg func() entitycache.RefreshConfig, lifecycle *entitycache.Lifecycle) (entitycache.EntityCache[uint, *protocol.SyncedUser], error) {
 	var loader entitycache.Loader[uint, *protocol.SyncedUser]
 	if client != nil {
 		loader = &loaders.UserLoader{Client: client}
@@ -181,20 +227,22 @@ func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration, refresh
 		Loader:      loader,
 		NegativeTTL: negTTL,
 		Refresh:     refreshCfg,
+		Lifecycle:   lifecycle,
 	})
 }
 
-func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *protocol.SyncedUser], capacity int, negTTL time.Duration, refreshCfg func() entitycache.RefreshConfig) *tokenStore {
+func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *protocol.SyncedUser], tokenRoutings entitycache.EntityCache[uint, *protocol.TokenRoutingMap], capacity int, negTTL time.Duration, refreshCfg func() entitycache.RefreshConfig, lifecycle *entitycache.Lifecycle) *tokenStore {
 	ts := &tokenStore{}
 	var loader entitycache.Loader[string, *models.Token]
 	if client != nil {
-		loader = &loaders.TokenLoader{Client: client, Users: users}
+		loader = &loaders.TokenLoader{Client: client, Users: users, TokenRoutings: tokenRoutings}
 	}
 	primary, err := entitycache.NewLRUCache(entitycache.Config[string, *models.Token]{
 		Capacity:    capacity,
 		Loader:      loader,
 		NegativeTTL: negTTL,
 		Refresh:     refreshCfg,
+		Lifecycle:   lifecycle,
 		OnEvict: func(_ string, tok *models.Token) {
 			if tok != nil {
 				ts.byID.Delete(tok.ID)
@@ -206,6 +254,28 @@ func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *
 	}
 	ts.primary = primary
 	return ts
+}
+
+func (s *Store) Close() {
+	if s != nil && s.cacheLifecycle != nil {
+		s.cacheLifecycle.Close()
+	}
+}
+
+func (s *Store) Done() <-chan struct{} {
+	if s == nil || s.cacheLifecycle == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return s.cacheLifecycle.Done()
+}
+
+func (s *Store) ResourceCounts() (loads, refreshes int64) {
+	if s == nil || s.cacheLifecycle == nil {
+		return 0, 0
+	}
+	return s.cacheLifecycle.ResourceCounts()
 }
 
 // === Token API ===
@@ -248,8 +318,8 @@ func (s *Store) GetUser(ctx context.Context, id uint) *protocol.SyncedUser {
 }
 
 func (s *Store) SetUser(u *protocol.SyncedUser) { s.users.Set(u.ID, u) }
-func (s *Store) DeleteUser(id uint)              { s.users.Delete(id) }
-func (s *Store) UserCount() int                  { return s.users.Len() }
+func (s *Store) DeleteUser(id uint)             { s.users.Delete(id) }
+func (s *Store) UserCount() int                 { return s.users.Len() }
 
 // SetUserQuota 更新已缓存 user 的 Quota 字段;用于配额扣减后的原地刷新。
 // 若 user 不在缓存中则静默忽略（不触发 loader 拉取）。
@@ -297,11 +367,65 @@ func (s *Store) ModelConfigCount() int                 { return s.modelConfigs.L
 
 func (s *Store) GetAgent(agentID string) *models.Agent {
 	v, _ := s.agents.Peek(agentID)
-	return v
+	return cloneAgent(v)
 }
-func (s *Store) SetAgent(agent *models.Agent) { s.agents.Set(agent.AgentID, agent) }
-func (s *Store) DeleteAgent(agentID string)   { s.agents.Delete(agentID) }
-func (s *Store) AgentCount() int              { return s.agents.Len() }
+func (s *Store) SetAgent(agent *models.Agent) {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	s.setConfiguredAgentLocked(agent)
+}
+func (s *Store) DeleteAgent(agentID string) {
+	s.agentsMu.Lock()
+	s.deleteConfiguredAgentLocked(agentID)
+	s.agentsMu.Unlock()
+	s.DeleteAgentCapabilities(agentID)
+}
+func (s *Store) AgentCount() int { return s.agents.Len() }
+
+func (s *Store) SetAgentCapabilities(agentID string, capabilities []string) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return
+	}
+	normalized := protocol.NormalizeAgentCapabilities(capabilities)
+	s.agentCapabilitiesMu.Lock()
+	if len(normalized) == 0 {
+		delete(s.agentCapabilities, agentID)
+	} else {
+		s.agentCapabilities[agentID] = append([]string(nil), normalized...)
+	}
+	s.agentCapabilitiesMu.Unlock()
+}
+
+func (s *Store) GetAgentCapabilities(agentID string) []string {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return nil
+	}
+	s.agentCapabilitiesMu.RLock()
+	capabilities := append([]string(nil), s.agentCapabilities[agentID]...)
+	s.agentCapabilitiesMu.RUnlock()
+	if len(capabilities) == 0 {
+		return nil
+	}
+	return capabilities
+}
+
+func (s *Store) DeleteAgentCapabilities(agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return
+	}
+	s.agentCapabilitiesMu.Lock()
+	delete(s.agentCapabilities, agentID)
+	s.agentCapabilitiesMu.Unlock()
+}
+
+func (s *Store) ClearAgentCapabilities() {
+	s.agentCapabilitiesMu.Lock()
+	s.agentCapabilities = make(map[string][]string)
+	s.agentCapabilitiesMu.Unlock()
+}
 
 // === UserGroup ===
 
@@ -331,8 +455,34 @@ func (s *Store) LoadModelConfigs(configs []models.ModelConfig) {
 	}
 }
 func (s *Store) LoadAgents(agents []models.Agent) {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	// behavior change: this call is the authoritative configured snapshot.
+	// Enter that state before pruning so each delete stays O(1).
+	s.configuredSnapshotReady = true
+	s.acceptUnknownDirectAddresses = false
+	present := make(map[string]struct{}, len(agents))
 	for i := range agents {
-		s.agents.Set(agents[i].AgentID, &agents[i])
+		if strings.TrimSpace(agents[i].AgentID) == "" {
+			continue
+		}
+		present[agents[i].AgentID] = struct{}{}
+		s.setConfiguredAgentLocked(&agents[i])
+	}
+	for agentID := range s.configuredAgents {
+		if _, ok := present[agentID]; !ok {
+			s.deleteConfiguredAgentLocked(agentID)
+		}
+	}
+	for agentID := range s.directAddressOverlays {
+		if _, ok := present[agentID]; !ok {
+			s.deleteConfiguredAgentLocked(agentID)
+		}
+	}
+	for agentID := range s.directAddressLatest {
+		if _, ok := present[agentID]; !ok {
+			s.deleteConfiguredAgentLocked(agentID)
+		}
 	}
 }
 func (s *Store) LoadUserGroups(groups []models.UserGroup) {
@@ -394,6 +544,20 @@ func (s *Store) FallbackSleepMs() int { return s.Settings().FallbackSleepMs }
 
 func (s *Store) Version() int64     { return s.version.Load() }
 func (s *Store) SetVersion(v int64) { s.version.Store(v) }
+
+// AdvanceVersion moves the local global version forward without requiring
+// adjacent values. Global versions may have gaps and stale pages may arrive.
+func (s *Store) AdvanceVersion(version int64) {
+	for {
+		current := s.version.Load()
+		if version <= current {
+			return
+		}
+		if s.version.CompareAndSwap(current, version) {
+			return
+		}
+	}
+}
 
 // === Model Index (派生) ===
 
@@ -470,28 +634,89 @@ func (s *Store) EffectiveAttemptLimiters(userID, groupID uint, src string, chann
 
 // === Agent helpers ===
 
-// UpdateAgentAutoAddresses updates in-memory auto-detected addresses for an
-// agent without overriding manually configured addresses.
-func (s *Store) UpdateAgentAutoAddresses(agentID string, addrs []agentproxy.Address) {
-	current, ok := s.agents.Peek(agentID)
-	if !ok || current == nil {
-		return
+// BeginDirectAddressSession removes runtime addresses from the previous
+// control snapshot while preserving authoritative manual configuration.
+func (s *Store) BeginDirectAddressSession(masterInstanceID string) {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+
+	s.directAddressSessionStarted = true
+	s.directAddressMaster = strings.TrimSpace(masterInstanceID)
+	s.configuredSnapshotReady = false
+	s.acceptUnknownDirectAddresses = true
+	s.directAddressLatest = make(map[string]directAddressVersion)
+	s.directAddressOverlays = make(map[string]string)
+	for agentID := range s.configuredAgents {
+		s.publishEffectiveAgentLocked(agentID)
 	}
-	if hasManualAgentAddresses(current.HTTPAddresses) {
-		return
+}
+
+// ApplyDirectAddressesUpdate applies a newer event from the active Master
+// epoch. The version high-water advances even when a manual address wins.
+func (s *Store) ApplyDirectAddressesUpdate(update protocol.AgentDirectAddressesUpdate) bool {
+	update.MasterInstanceID = strings.TrimSpace(update.MasterInstanceID)
+	update.AgentID = strings.TrimSpace(update.AgentID)
+	if update.MasterInstanceID == "" || update.AgentID == "" || update.SessionGeneration == 0 || update.Sequence == 0 {
+		return false
+	}
+	for _, address := range update.HTTPAddresses {
+		if strings.TrimSpace(address.URL) == "" || strings.TrimSpace(address.Tag) != "auto-detected" {
+			return false
+		}
 	}
 
-	next := *current
-	if len(addrs) == 0 {
-		next.HTTPAddresses = ""
-	} else {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	if update.MasterInstanceID != s.directAddressMaster {
+		return false
+	}
+	if s.configuredAgents[update.AgentID] == nil &&
+		(s.configuredSnapshotReady || !s.acceptUnknownDirectAddresses) {
+		return false
+	}
+	latest := s.directAddressLatest[update.AgentID]
+	if update.SessionGeneration < latest.sessionGeneration || update.Sequence <= latest.sequence {
+		return false
+	}
+	s.directAddressLatest[update.AgentID] = directAddressVersion{
+		sessionGeneration: update.SessionGeneration,
+		sequence:          update.Sequence,
+	}
+	addresses := ""
+	if len(update.HTTPAddresses) > 0 {
+		addrJSON, err := json.Marshal(update.HTTPAddresses)
+		if err != nil {
+			return false
+		}
+		addresses = string(addrJSON)
+	}
+	s.directAddressOverlays[update.AgentID] = addresses
+	if s.configuredAgents[update.AgentID] != nil {
+		s.publishEffectiveAgentLocked(update.AgentID)
+	}
+	return true
+}
+
+// UpdateAgentAutoAddresses updates in-memory auto-detected addresses for an
+// agent without overriding manually configured addresses. It remains for
+// callers that replace an already-authorized local snapshot.
+func (s *Store) UpdateAgentAutoAddresses(agentID string, addrs []agentproxy.Address) {
+	addresses := ""
+	if len(addrs) > 0 {
 		addrJSON, err := json.Marshal(addrs)
 		if err != nil {
 			return
 		}
-		next.HTTPAddresses = string(addrJSON)
+		addresses = string(addrJSON)
 	}
-	s.agents.Set(next.AgentID, &next)
+
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	if s.configuredAgents[agentID] == nil {
+		return
+	}
+	s.directAddressOverlays[agentID] = addresses
+	s.publishEffectiveAgentLocked(agentID)
 }
 
 // GetAgentsByTag returns all active agents that have the given tag.
@@ -503,7 +728,7 @@ func (s *Store) GetAgentsByTag(tag string) []*models.Agent {
 		}
 		for t := range strings.SplitSeq(agent.Tags, ",") {
 			if strings.TrimSpace(t) == tag {
-				result = append(result, agent)
+				result = append(result, cloneAgent(agent))
 				break
 			}
 		}
@@ -516,28 +741,69 @@ func (s *Store) GetAgentsByTag(tag string) []*models.Agent {
 func (s *Store) GetAllAgents() []*models.Agent {
 	var result []*models.Agent
 	s.agents.Range(func(_ string, agent *models.Agent) bool {
-		result = append(result, agent)
+		result = append(result, cloneAgent(agent))
 		return true
 	})
 	return result
 }
 
-func hasManualAgentAddresses(raw string) bool {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "[]" {
-		return false
+func cloneAgent(agent *models.Agent) *models.Agent {
+	if agent == nil {
+		return nil
 	}
-	addrs := agentproxy.ParseAddresses(raw)
-	if len(addrs) == 0 {
-		// Unknown format: keep existing value to avoid accidental override.
-		return true
+	next := *agent
+	return &next
+}
+
+func (s *Store) setConfiguredAgentLocked(agent *models.Agent) {
+	if agent == nil || strings.TrimSpace(agent.AgentID) == "" {
+		return
 	}
-	for _, addr := range addrs {
-		if strings.TrimSpace(addr.Tag) != "auto-detected" {
-			return true
+	configured := cloneAgent(agent)
+	s.configuredAgents[configured.AgentID] = configured
+	s.publishEffectiveAgentLocked(configured.AgentID)
+}
+
+func (s *Store) deleteConfiguredAgentLocked(agentID string) {
+	s.agents.Delete(agentID)
+	delete(s.configuredAgents, agentID)
+	delete(s.directAddressLatest, agentID)
+	delete(s.directAddressOverlays, agentID)
+	if !s.configuredSnapshotReady {
+		// A delete before the first authoritative snapshot makes unknown runtime
+		// ownership ambiguous. Drop unknown overlays and stay relay-only until
+		// LoadAgents establishes the configured base.
+		s.acceptUnknownDirectAddresses = false
+		for pendingAgentID := range s.directAddressOverlays {
+			if s.configuredAgents[pendingAgentID] == nil {
+				delete(s.directAddressOverlays, pendingAgentID)
+				delete(s.directAddressLatest, pendingAgentID)
+			}
 		}
 	}
-	return false
+}
+
+func (s *Store) publishEffectiveAgentLocked(agentID string) {
+	configured := s.configuredAgents[agentID]
+	if configured == nil {
+		s.agents.Delete(agentID)
+		return
+	}
+
+	effective := *configured
+	if !hasConfiguredAgentAddresses(configured.HTTPAddresses) {
+		if addresses, ok := s.directAddressOverlays[agentID]; ok {
+			effective.HTTPAddresses = addresses
+		} else if s.directAddressSessionStarted {
+			effective.HTTPAddresses = ""
+		}
+	}
+	s.agents.Set(agentID, &effective)
+}
+
+func hasConfiguredAgentAddresses(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	return raw != "" && raw != "[]" && raw != "null"
 }
 
 // GetSystemTestToken finds the system test token by name.
@@ -603,10 +869,10 @@ func (s *Store) HandleSyncEvent(entity, action string, data []byte) {
 			return
 		}
 		if action == events.ActionDelete {
-			s.agents.Apply(entitycache.ActionDelete, agent.AgentID, nil)
-		} else {
-			s.agents.Apply(entitycache.ActionSet, agent.AgentID, &agent)
+			s.DeleteAgent(agent.AgentID)
+			return
 		}
+		s.SetAgent(&agent)
 	case events.EntityAgentRoute:
 		var route models.AgentRoute
 		if err := json.Unmarshal(data, &route); err == nil {
@@ -712,7 +978,7 @@ func (s *Store) applyModelRoutingEvent(action string, r *models.ModelRouting) {
 		var members []protocol.RoutingMember
 		_ = json.Unmarshal([]byte(r.Members), &members)
 		s.SetGlobalRouting(r.Name, &protocol.SyncedRouting{
-			ID: r.ID, Name: r.Name, Scope: r.Scope, UserID: r.UserID,
+			ID: r.ID, Name: r.Name, Scope: r.Scope, UserID: r.UserID, TokenID: r.TokenID,
 			Members: members, Enabled: r.Enabled,
 		})
 		s.logger.Info("routing apply",
@@ -724,14 +990,18 @@ func (s *Store) applyModelRoutingEvent(action string, r *models.ModelRouting) {
 		)
 		return
 	}
-	// scope=user：失效该 user 的整块 cache
-	s.InvalidateUserRoutings(r.UserID)
+	if r.Scope == models.RoutingScopeToken {
+		s.InvalidateTokenRoutings(r.TokenID)
+	} else {
+		s.InvalidateUserRoutings(r.UserID)
+	}
 	s.logger.Info("routing apply",
 		zap.String("name", r.Name),
 		zap.String("scope", r.Scope),
 		zap.String("action", action),
 		zap.Int("member_count", 0), // user 范围以失效 cache 表达，count 不可知
 		zap.Uint("user_id", r.UserID),
+		zap.Uint("token_id", r.TokenID),
 	)
 }
 
@@ -757,7 +1027,7 @@ func (s *Store) LoadGlobalRoutings(items []models.ModelRouting) {
 		var members []protocol.RoutingMember
 		_ = json.Unmarshal([]byte(r.Members), &members)
 		s.globalRoutings.Set(r.Name, &protocol.SyncedRouting{
-			ID: r.ID, Name: r.Name, Scope: r.Scope, UserID: r.UserID,
+			ID: r.ID, Name: r.Name, Scope: r.Scope, UserID: r.UserID, TokenID: r.TokenID,
 			Members: members, Enabled: r.Enabled,
 		})
 	}
@@ -773,6 +1043,10 @@ func (s *Store) UserRoutingsCount() int {
 	return s.userRoutings.Len()
 }
 
+func (s *Store) TokenRoutingsCount() int {
+	return s.tokenRoutings.Len()
+}
+
 // SetGlobalRouting 写入全局 routing。WS push / FullSync 调用。
 func (s *Store) SetGlobalRouting(name string, r *protocol.SyncedRouting) {
 	s.globalRoutings.Set(name, r)
@@ -785,8 +1059,8 @@ func (s *Store) DeleteGlobalRouting(name string) {
 
 // GetGlobalRouting 返回 enabled 的全局 routing；disabled 或 not found 都返回 nil。
 // disabled 等同于运行时"临时移除"——校验层另有一份不过滤 enabled 的查询。
-func (s *Store) GetGlobalRouting(name string) *protocol.SyncedRouting {
-	v, _, err := s.globalRoutings.Get(context.Background(), name)
+func (s *Store) GetGlobalRouting(ctx context.Context, name string) *protocol.SyncedRouting {
+	v, _, err := s.globalRoutings.Get(ctx, name)
 	if reason := classifyResolveErr(err); reason != "" {
 		s.logResolveDegrade("global_routing", reason, zap.String("name", name))
 	}
@@ -812,13 +1086,34 @@ func (s *Store) ListGlobalRoutingNames() []string {
 
 // ListUserRoutingNames 返回当前用户 enabled user-scope routing 名，按字典序排序。
 // userID==0 或无 entry 时返回 nil。LRU miss 触发 loader 失败时同样返回 nil。
-func (s *Store) ListUserRoutingNames(userID uint) []string {
+func (s *Store) ListUserRoutingNames(ctx context.Context, userID uint) []string {
 	if userID == 0 {
 		return nil
 	}
-	m, ok, err := s.userRoutings.Get(context.Background(), userID)
+	m, ok, err := s.userRoutings.Get(ctx, userID)
 	if reason := classifyResolveErr(err); reason != "" {
 		s.logResolveDegrade("user_routing", reason, zap.Uint("user_id", userID))
+	}
+	if !ok || m == nil {
+		return nil
+	}
+	var names []string
+	for name, r := range m.Routings {
+		if r != nil && r.Enabled {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (s *Store) ListTokenRoutingNames(ctx context.Context, tokenID uint) []string {
+	if tokenID == 0 {
+		return nil
+	}
+	m, ok, err := s.tokenRoutings.Get(ctx, tokenID)
+	if reason := classifyResolveErr(err); reason != "" {
+		s.logResolveDegradeFor("token_routing", reason, strconv.FormatUint(uint64(tokenID), 10), zap.Uint("token_id", tokenID))
 	}
 	if !ok || m == nil {
 		return nil
@@ -845,12 +1140,20 @@ func (s *Store) InvalidateUserRoutings(userID uint) {
 	s.userRoutings.Delete(userID)
 }
 
-// ResolveRouting 按 spec §1.4 优先级解析：用户 routing > 全局 routing > nil（让上层当真实 model 处理）。
-func (s *Store) ResolveRouting(name string, userID uint) *protocol.SyncedRouting {
-	if userID > 0 {
-		m, ok, err := s.userRoutings.Get(context.Background(), userID)
+func (s *Store) SetTokenRoutings(tokenID uint, routings map[string]*protocol.SyncedRouting) {
+	s.tokenRoutings.Set(tokenID, &protocol.TokenRoutingMap{Routings: routings})
+}
+
+func (s *Store) InvalidateTokenRoutings(tokenID uint) {
+	s.tokenRoutings.Delete(tokenID)
+}
+
+// ResolveRouting 按 token > user > global 的优先级解析顶层路由。
+func (s *Store) ResolveRouting(ctx context.Context, name string, owner protocol.RoutingOwner) *protocol.SyncedRouting {
+	if owner.TokenID > 0 {
+		m, ok, err := s.tokenRoutings.Get(ctx, owner.TokenID)
 		if reason := classifyResolveErr(err); reason != "" {
-			s.logResolveDegrade("user_routing", reason, zap.Uint("user_id", userID))
+			s.logResolveDegradeFor("token_routing", reason, strconv.FormatUint(uint64(owner.TokenID), 10), zap.Uint("token_id", owner.TokenID))
 		}
 		if ok && m != nil {
 			if r, has := m.Routings[name]; has && r.Enabled {
@@ -858,7 +1161,18 @@ func (s *Store) ResolveRouting(name string, userID uint) *protocol.SyncedRouting
 			}
 		}
 	}
-	return s.GetGlobalRouting(name)
+	if owner.UserID > 0 {
+		m, ok, err := s.userRoutings.Get(ctx, owner.UserID)
+		if reason := classifyResolveErr(err); reason != "" {
+			s.logResolveDegrade("user_routing", reason, zap.Uint("user_id", owner.UserID))
+		}
+		if ok && m != nil {
+			if r, has := m.Routings[name]; has && r.Enabled {
+				return r
+			}
+		}
+	}
+	return s.GetGlobalRouting(ctx, name)
 }
 
 // === PrivateChannel API ===
@@ -1017,6 +1331,7 @@ func (s *Store) CacheSnapshot() map[string]protocol.CacheEntityStats {
 	putLRU("user_group", s.userGroups.Stats())
 	putLRU("model_routing", s.globalRoutings.Stats())
 	putLRU("user_routings", s.userRoutings.Stats())
+	putLRU("token_routings", s.tokenRoutings.Stats())
 	putLRU("private_channels_visible", s.visiblePrivateChannels.Stats())
 	for _, ncs := range s.namedStats() {
 		snap[ncs.CacheName()] = ncs.CacheStat()

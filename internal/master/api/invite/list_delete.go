@@ -19,7 +19,7 @@ func (h *Handler) ListMine(c *app.Context, req ListRequest) (api.PaginatedRespon
 		return api.PaginatedResponse[models.InviteCode]{}, api.UnauthorizedError("not authenticated")
 	}
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	uid := c.UserInfo.UserID // 服务端强制 creator = 当前用户,绝不信客户端
 	codes, total, err := q.InviteCode().ListAll(
 		dao.ListOptions{Page: page, PageSize: pageSize},
@@ -43,7 +43,7 @@ func (h *Handler) DeleteMine(c *app.Context, req api.IDPathRequest) (api.StatusR
 	if err != nil {
 		return api.StatusResponse{}, api.NotFoundError(consts.ErrNotFound)
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 	ic, err := q.InviteCode().GetByID(uint(id))
@@ -71,7 +71,7 @@ func (h *Handler) AdminList(c *app.Context, req ListRequest) (api.PaginatedRespo
 		cid := uint(u)
 		creatorID = &cid
 	}
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	codes, total, err := q.InviteCode().ListAll(
 		dao.ListOptions{Page: page, PageSize: pageSize},
 		dao.InviteCodeListFilter{Search: req.Search, CreatorID: creatorID},
@@ -91,7 +91,7 @@ func (h *Handler) AdminDelete(c *app.Context, req api.IDPathRequest) (api.Status
 	if err != nil {
 		return api.StatusResponse{}, api.NotFoundError(consts.ErrNotFound)
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 	if _, err := q.InviteCode().GetByID(uint(id)); err != nil {

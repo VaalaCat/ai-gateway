@@ -4,6 +4,7 @@
 package modelview
 
 import (
+	"context"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -29,7 +30,8 @@ type ModelStore interface {
 	GetAllModelNames() []string
 	GetChannelsForModel(name string) []*models.Channel
 	ListGlobalRoutingNames() []string
-	ListUserRoutingNames(userID uint) []string
+	ListUserRoutingNames(ctx context.Context, userID uint) []string
+	ListTokenRoutingNames(ctx context.Context, tokenID uint) []string
 	ListVisibleBYOKModelNamesForUser(userID uint) []string
 }
 
@@ -45,8 +47,8 @@ type ModelStore interface {
 //
 // ui == nil 或 ui.UserID == 0 时按"未认证"语义处理：admin 段无白名单过滤、BYOK 段空、
 // routing 段仅 global routing。
-func ListVisibleModels(store ModelStore, ui *app.UserInfo) []ListedModel {
-	ctx := newListingContext(store, ui)
+func ListVisibleModels(requestCtx context.Context, store ModelStore, ui *app.UserInfo) []ListedModel {
+	ctx := newListingContext(requestCtx, store, ui)
 	admin := collectAdmin(ctx)
 	byok := collectBYOK(ctx)
 	routing := collectRouting(ctx)
@@ -63,11 +65,14 @@ type listingContext struct {
 	routingSet   map[string]struct{}
 }
 
-func newListingContext(store ModelStore, ui *app.UserInfo) *listingContext {
+func newListingContext(ctx context.Context, store ModelStore, ui *app.UserInfo) *listingContext {
 	var names []string
 	names = append(names, store.ListGlobalRoutingNames()...)
 	if ui != nil && ui.UserID > 0 {
-		names = append(names, store.ListUserRoutingNames(ui.UserID)...)
+		names = append(names, store.ListUserRoutingNames(ctx, ui.UserID)...)
+	}
+	if ui != nil && ui.TokenID > 0 {
+		names = append(names, store.ListTokenRoutingNames(ctx, ui.TokenID)...)
 	}
 	set := make(map[string]struct{}, len(names))
 	for _, n := range names {
@@ -156,6 +161,14 @@ func collectRouting(ctx *listingContext) []ListedModel {
 			continue
 		}
 		seen[name] = struct{}{}
+		if ctx.ui != nil {
+			if len(ctx.ui.GroupModels) > 0 && !utils.ModelMatches(name, ctx.ui.GroupModels) {
+				continue
+			}
+			if len(ctx.ui.TokenModels) > 0 && !utils.ModelMatches(name, ctx.ui.TokenModels) {
+				continue
+			}
+		}
 		out = append(out, ListedModel{Name: name, OwnedBy: OwnedByRouting})
 	}
 	return out

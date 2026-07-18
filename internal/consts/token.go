@@ -1,0 +1,3 @@
+package consts
+
+const SettingKeyTokenModelWhitelistSelfService = "token_model_whitelist_self_service"

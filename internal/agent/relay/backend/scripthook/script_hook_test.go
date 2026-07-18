@@ -53,7 +53,7 @@ type stubAgent struct {
 }
 
 func (s stubAgent) GetCache() app.AgentCache              { return s.cache }
-func (s stubAgent) GetRouteForwarder() app.RouteForwarder { return nil }
+func (s stubAgent) GetBodyStore() app.BodyStore           { return nil }
 func (s stubAgent) GetLogger() *zap.Logger                { return zap.NewNop() }
 func (s stubAgent) GetConfig() *config.AgentRuntimeConfig { return nil }
 func (s stubAgent) GetTransportPool() app.TransportPool   { return nil }

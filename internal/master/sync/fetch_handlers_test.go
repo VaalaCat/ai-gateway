@@ -86,6 +86,18 @@ func TestTokenFetchHandler_Found_IncludesSyncedUser(t *testing.T) {
 	if err := m.Token().Create(tok); err != nil {
 		t.Fatal(err)
 	}
+	if err := m.Channel().Create(&models.Channel{
+		ChannelCore: models.ChannelCore{Name: "routing-model", Status: consts.StatusEnabled},
+		Models:      "gpt-4o",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ModelRouting().Create(&models.ModelRouting{
+		Name: "smart", Scope: models.RoutingScopeToken, TokenID: tok.ID, Enabled: true,
+		Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	data, side, found, err := tokenFetchHandler{}.Fetch(context.Background(), q, "sk-fetch-test")
 	if err != nil {
@@ -106,12 +118,18 @@ func TestTokenFetchHandler_Found_IncludesSyncedUser(t *testing.T) {
 	if len(side) == 0 {
 		t.Fatal("expected Side payload with SyncedUser")
 	}
-	var su protocol.SyncedUser
-	if err := json.Unmarshal(side, &su); err != nil {
+	var tokenSide protocol.TokenFetchSide
+	if err := json.Unmarshal(side, &tokenSide); err != nil {
 		t.Fatalf("unmarshal side: %v", err)
 	}
-	if su.ID != user.ID || su.GroupID != 7 {
-		t.Fatalf("SyncedUser mismatch: %+v", su)
+	if tokenSide.SchemaVersion != protocol.TokenFetchSideSchemaV1 {
+		t.Fatalf("schema version = %d", tokenSide.SchemaVersion)
+	}
+	if tokenSide.User == nil || tokenSide.User.ID != user.ID || tokenSide.User.GroupID != 7 {
+		t.Fatalf("SyncedUser mismatch: %+v", tokenSide.User)
+	}
+	if tokenSide.TokenRoutings == nil || tokenSide.TokenRoutings.Routings["smart"] == nil {
+		t.Fatalf("token routing side mismatch: %+v", tokenSide.TokenRoutings)
 	}
 }
 
@@ -144,12 +162,37 @@ func TestTokenFetchHandler_GroupIDZeroNormalizedToDefault(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("Fetch err=%v found=%v", err, found)
 	}
-	var su protocol.SyncedUser
-	if err := json.Unmarshal(side, &su); err != nil {
+	var tokenSide protocol.TokenFetchSide
+	if err := json.Unmarshal(side, &tokenSide); err != nil {
 		t.Fatal(err)
 	}
-	if su.GroupID != 1 {
-		t.Fatalf("GroupID=0 should normalize to 1 (default group), got %d", su.GroupID)
+	if tokenSide.User == nil || tokenSide.User.GroupID != 1 {
+		t.Fatalf("GroupID=0 should normalize to 1 (default group), got %+v", tokenSide.User)
+	}
+}
+
+func TestTokenRoutingsFetchHandler_EmptyAndInvalidKeys(t *testing.T) {
+	q, m := setupSyncDB(t)
+	token := &models.Token{Key: "sk-routing-empty", UserID: 1, Status: consts.StatusEnabled, Name: "empty"}
+	if err := m.Token().Create(token); err != nil {
+		t.Fatal(err)
+	}
+	data, _, found, err := tokenRoutingsFetchHandler{}.Fetch(context.Background(), q, strconv.FormatUint(uint64(token.ID), 10))
+	if err != nil || !found {
+		t.Fatalf("Fetch err=%v found=%v", err, found)
+	}
+	var got protocol.TokenRoutingMap
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Routings) != 0 {
+		t.Fatalf("empty token routing map = %+v", got.Routings)
+	}
+	for _, key := range []string{"bad", "0", "999999"} {
+		_, _, found, err := tokenRoutingsFetchHandler{}.Fetch(context.Background(), q, key)
+		if err != nil || found {
+			t.Fatalf("key %q: err=%v found=%v", key, err, found)
+		}
 	}
 }
 

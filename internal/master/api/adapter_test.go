@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,21 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/gin-gonic/gin"
 )
+
+func TestDefaultContextFactoryUsesRequestContext(t *testing.T) {
+	cause := errors.New("request canceled")
+	requestCtx, cancel := context.WithCancelCause(context.Background())
+	request := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(requestCtx)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = request
+
+	ctx := (DefaultContextFactory{}).Build(ginCtx)
+	cancel(cause)
+	<-ctx.RequestContext().Done()
+	if got := context.Cause(ctx.RequestContext()); !errors.Is(got, cause) {
+		t.Fatalf("built context cause = %v, want %v", got, cause)
+	}
+}
 
 type bodyMapReq struct {
 	ID     string         `uri:"id" binding:"required"`

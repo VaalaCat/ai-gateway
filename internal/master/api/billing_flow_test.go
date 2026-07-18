@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -287,6 +288,7 @@ func TestBillingChannelScope(t *testing.T) {
 
 func TestBillingChannelRebuild(t *testing.T) {
 	srv := setupTestMaster(t)
+	srv.RebuildRunner.Start(context.Background())
 	srv.InitAdminUser("admin", "admin123")
 	adminToken := loginHelper(t, srv, "admin", "admin123")
 

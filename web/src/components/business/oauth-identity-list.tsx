@@ -29,6 +29,10 @@ import { ApiError } from "@/lib/api/client";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import type { OAuthIdentityItem } from "@/lib/types-oauth";
 
+function redirectToOAuthLink(name: string, ticket: string) {
+  window.location.assign(`/api/oauth/${name}/link?ticket=${encodeURIComponent(ticket)}`);
+}
+
 export function OAuthIdentityList() {
   return (
     <Suspense fallback={null}>
@@ -87,7 +91,7 @@ function OAuthIdentityListInner() {
   const handleLink = async (name: string) => {
     try {
       const { ticket } = await issueLink.mutateAsync();
-      window.location.href = `/api/oauth/${name}/link?ticket=${encodeURIComponent(ticket)}`;
+      redirectToOAuthLink(name, ticket);
     } catch (e) {
       toast.error(formatErrorToast(e, tc("error")));
     }

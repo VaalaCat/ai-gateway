@@ -17,7 +17,7 @@ func newTestStore() *cache.Store {
 func TestResolve_NoRouting(t *testing.T) {
 	s := newTestStore()
 	ctx := NewResolveCtx()
-	if got := ResolveToRealModel(s, "gpt-4o", 0, ctx); got != "gpt-4o" {
+	if got := resolveToRealModel(s, "gpt-4o", 0, ctx); got != "gpt-4o" {
 		t.Errorf("no routing → return original ref, got %q", got)
 	}
 }
@@ -34,7 +34,7 @@ func TestResolve_FlatGlobal(t *testing.T) {
 	countA, countB := 0, 0
 	for i := 0; i < 1000; i++ {
 		ctx := NewResolveCtx()
-		result := ResolveToRealModel(s, "smart", 0, ctx)
+		result := resolveToRealModel(s, "smart", 0, ctx)
 		switch result {
 		case "a":
 			countA++
@@ -62,7 +62,7 @@ func TestResolve_PrioritySkip(t *testing.T) {
 	// 一直选 a（高 priority）
 	for i := 0; i < 100; i++ {
 		ctx := NewResolveCtx()
-		if got := ResolveToRealModel(s, "smart", 0, ctx); got != "a" {
+		if got := resolveToRealModel(s, "smart", 0, ctx); got != "a" {
 			t.Fatalf("high priority should win, got %q", got)
 		}
 	}
@@ -79,7 +79,7 @@ func TestResolve_AllExhausted(t *testing.T) {
 	})
 	ctx := NewResolveCtx()
 	ctx.excluded[1] = map[string]bool{"a": true, "b": true}
-	if got := ResolveToRealModel(s, "smart", 0, ctx); got != "" {
+	if got := resolveToRealModel(s, "smart", 0, ctx); got != "" {
 		t.Errorf("all exhausted → empty, got %q", got)
 	}
 }
@@ -104,7 +104,7 @@ func TestResolve_Nested(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
 		ctx := NewResolveCtx()
-		result := ResolveToRealModel(s, "my", 42, ctx)
+		result := resolveToRealModel(s, "my", 42, ctx)
 		seen[result] = true
 	}
 	if !seen["deepseek"] || !seen["qwen"] {
@@ -127,7 +127,7 @@ func TestResolve_CycleDefense(t *testing.T) {
 		Members: []protocol.RoutingMember{{Ref: "A", Priority: 0, Weight: 1}},
 	})
 	ctx := NewResolveCtx()
-	result := ResolveToRealModel(s, "A", 0, ctx)
+	result := resolveToRealModel(s, "A", 0, ctx)
 	if result != "" {
 		t.Errorf("cycle should return empty (no real model), got %q", result)
 	}
@@ -148,7 +148,7 @@ func TestResolve_DepthLimit(t *testing.T) {
 		})
 	}
 	ctx := NewResolveCtx()
-	result := ResolveToRealModel(s, "R1", 0, ctx)
+	result := resolveToRealModel(s, "R1", 0, ctx)
 	// 深度 5 限制：第 6 层（R6）会被拦截，整链失败
 	if result != "" {
 		t.Errorf("depth > 5 should fail resolution, got %q", result)
@@ -165,12 +165,12 @@ func TestResolve_AfterMarkExhausted(t *testing.T) {
 		},
 	})
 	ctx := NewResolveCtx()
-	first := ResolveToRealModel(s, "smart", 0, ctx)
+	first := resolveToRealModel(s, "smart", 0, ctx)
 	if first != "a" && first != "b" {
 		t.Fatalf("first resolve unexpected: %q", first)
 	}
 	ctx.MarkMemberExhausted(first)
-	second := ResolveToRealModel(s, "smart", 0, ctx)
+	second := resolveToRealModel(s, "smart", 0, ctx)
 	if second == first || (second != "a" && second != "b") {
 		t.Errorf("second resolve should pick the other; first=%q second=%q", first, second)
 	}
@@ -194,12 +194,12 @@ func TestResolve_AfterMarkExhausted_Nested(t *testing.T) {
 		},
 	})
 	ctx := NewResolveCtx()
-	first := ResolveToRealModel(s, "my", 42, ctx)
+	first := resolveToRealModel(s, "my", 42, ctx)
 	if first != "deepseek" && first != "qwen" {
 		t.Fatalf("first resolve unexpected: %q", first)
 	}
 	ctx.MarkMemberExhausted(first)
-	second := ResolveToRealModel(s, "my", 42, ctx)
+	second := resolveToRealModel(s, "my", 42, ctx)
 	if second == first || (second != "deepseek" && second != "qwen") {
 		t.Errorf("after MarkMemberExhausted nested: first=%q second=%q (should differ, both real models)", first, second)
 	}
@@ -221,7 +221,7 @@ func TestResolve_SelfNameShadowsRealModel(t *testing.T) {
 		},
 	})
 	ctx := NewResolveCtx()
-	if got := ResolveToRealModel(s, "gpt-5.5", 0, ctx); got != "gpt-5.5" {
+	if got := resolveToRealModel(s, "gpt-5.5", 0, ctx); got != "gpt-5.5" {
 		t.Errorf("self-name member should resolve to real model gpt-5.5, got %q", got)
 	}
 }
@@ -246,7 +246,7 @@ func TestResolve_OffPathRoutingWinsOverSameNameModel(t *testing.T) {
 		Members: []protocol.RoutingMember{{Ref: "N", Priority: 0, Weight: 1}},
 	})
 	ctx := NewResolveCtx()
-	if got := ResolveToRealModel(s, "outer", 0, ctx); got != "realM" {
+	if got := resolveToRealModel(s, "outer", 0, ctx); got != "realM" {
 		t.Errorf("off-path routing N should expand to its member realM (routing wins), got %q", got)
 	}
 }
@@ -267,12 +267,12 @@ func TestResolve_SelfNameFallbackAfterExhaust(t *testing.T) {
 		},
 	})
 	ctx := NewResolveCtx()
-	first := ResolveToRealModel(s, "gpt-5.5", 0, ctx)
+	first := resolveToRealModel(s, "gpt-5.5", 0, ctx)
 	if first != "gpt-5.5" {
 		t.Fatalf("first resolve should be gpt-5.5, got %q", first)
 	}
 	ctx.MarkMemberExhausted(first)
-	if second := ResolveToRealModel(s, "gpt-5.5", 0, ctx); second != "gpt-4o" {
+	if second := resolveToRealModel(s, "gpt-5.5", 0, ctx); second != "gpt-4o" {
 		t.Errorf("after exhaust primary, should fall back to gpt-4o, got %q", second)
 	}
 }

@@ -6,21 +6,24 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/durhist"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// Rebuild target identifiers. Empty Targets means rebuild all three.
+// Rebuild target identifiers. Empty Targets means rebuild all of them.
 const (
-	RebuildTargetTokenDaily   = "token_daily"
-	RebuildTargetChannelDaily = "channel_daily"
-	RebuildTargetHourlyBucket = "hourly_bucket"
+	RebuildTargetTokenDaily        = "token_daily"
+	RebuildTargetChannelDaily      = "channel_daily"
+	RebuildTargetHourlyBucket      = "hourly_bucket"
+	RebuildTargetDurationHistogram = "duration_histogram"
 )
 
 var rebuildAllTargets = []string{
 	RebuildTargetTokenDaily,
 	RebuildTargetChannelDaily,
 	RebuildTargetHourlyBucket,
+	RebuildTargetDurationHistogram,
 }
 
 // ErrInvalidRebuildTarget is returned by RebuildDailyRollups when a Targets
@@ -123,7 +126,7 @@ type BillingRebuildFilter struct {
 	StartDate string
 	EndDate   string
 	// Targets selects which aggregation tables to rebuild. Empty means all
-	// known targets: token_daily, channel_daily, hourly_bucket.
+	// known targets: token_daily, channel_daily, hourly_bucket, duration_histogram.
 	Targets []string
 }
 
@@ -168,6 +171,20 @@ type HourlyBucketRow struct {
 
 	LastUsedAt int64
 	UpdatedAt  int64
+}
+
+// DurationHistogramRow is the pre-aggregated input to BatchUpsertDurationHistogram.
+// 只含 status=1(成功)请求;Hist 槽定义见 internal/pkg/durhist。
+type DurationHistogramRow struct {
+	Date             string
+	Hour             int
+	ChannelID        uint
+	PrivateChannelID uint
+	ModelName        string
+	AgentID          string
+	MaxDurationMs    int64
+	Hist             [durhist.NumSlots]int64
+	UpdatedAt        int64
 }
 
 // ChannelDailyRow is the pre-aggregated input to BatchUpsertChannelDaily.
@@ -251,9 +268,11 @@ type AdminBillingMutation interface {
 	UpsertTokenDaily(log *models.UsageLog) error
 	UpsertChannelDaily(log *models.UsageLog) error
 	UpsertHourlyBucket(log *models.UsageLog) error
+	UpsertDurationHistogram(log *models.UsageLog) error
 	BatchUpsertTokenDaily(rows []TokenDailyRow) error
 	BatchUpsertChannelDaily(rows []ChannelDailyRow) error
 	BatchUpsertHourlyBucket(rows []HourlyBucketRow) error
+	BatchUpsertDurationHistogram(rows []DurationHistogramRow) error
 	RebuildDailyRollups(filter BillingRebuildFilter) (*BillingRebuildResult, error)
 	RebuildHourSlice(date string, hour int, targets []string, resetDailyForDate bool) (*BillingRebuildResult, error)
 	DeleteHourlyBucketsBefore(cutoff time.Time) (int64, error)
@@ -681,6 +700,19 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 			}
 		}
 
+		if targetSet[RebuildTargetDurationHistogram] {
+			hist := baseCtx.GetDB().Model(&models.UsageDurationHistogram{})
+			if filter.StartDate != "" {
+				hist = hist.Where("date >= ?", filter.StartDate)
+			}
+			if filter.EndDate != "" {
+				hist = hist.Where("date <= ?", filter.EndDate)
+			}
+			if err := hist.Delete(&models.UsageDurationHistogram{}).Error; err != nil {
+				return err
+			}
+		}
+
 		logQuery, err := applyUsageLogDateFilter(baseCtx.GetDB().Model(&models.UsageLog{}).Order("id ASC"), filter)
 		if err != nil {
 			return err
@@ -702,6 +734,11 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 				}
 				if targetSet[RebuildTargetHourlyBucket] {
 					if err := mutation.UpsertHourlyBucket(&log); err != nil {
+						return err
+					}
+				}
+				if targetSet[RebuildTargetDurationHistogram] {
+					if err := mutation.UpsertDurationHistogram(&log); err != nil {
 						return err
 					}
 				}
@@ -774,6 +811,14 @@ func (m *adminBillingMutation) RebuildHourSlice(
 			}
 		}
 
+		if targetSet[RebuildTargetDurationHistogram] {
+			if err := baseCtx.GetDB().
+				Where("date = ? AND hour = ?", date, hour).
+				Delete(&models.UsageDurationHistogram{}).Error; err != nil {
+				return err
+			}
+		}
+
 		logQuery := baseCtx.GetDB().
 			Model(&models.UsageLog{}).
 			Where("created_at >= ? AND created_at < ?", start, end).
@@ -797,6 +842,11 @@ func (m *adminBillingMutation) RebuildHourSlice(
 						return err
 					}
 				}
+				if targetSet[RebuildTargetDurationHistogram] {
+					if err := mutation.UpsertDurationHistogram(&log); err != nil {
+						return err
+					}
+				}
 				result.ReplayedLogs++
 			}
 			return nil
@@ -815,9 +865,10 @@ func resolveRebuildTargets(targets []string) (map[string]bool, error) {
 		targets = rebuildAllTargets
 	}
 	known := map[string]struct{}{
-		RebuildTargetTokenDaily:   {},
-		RebuildTargetChannelDaily: {},
-		RebuildTargetHourlyBucket: {},
+		RebuildTargetTokenDaily:        {},
+		RebuildTargetChannelDaily:      {},
+		RebuildTargetHourlyBucket:      {},
+		RebuildTargetDurationHistogram: {},
 	}
 	set := make(map[string]bool, len(targets))
 	for _, t := range targets {
@@ -1151,6 +1202,84 @@ func (m *adminBillingMutation) BatchUpsertHourlyBucket(rows []HourlyBucketRow) e
 		}
 		return nil
 	})
+}
+
+// BatchUpsertDurationHistogram merges pre-aggregated rows into
+// usage_duration_histograms: per-slot counts accumulate (h0..h16 += delta),
+// max_duration_ms takes the greater value (never regresses on replay/reorder).
+// Mirrors BatchUpsertHourlyBucket's OnConflict pattern; conflict key is the
+// same 6-dimension bucket (date, hour, channel_id, private_channel_id,
+// model_name, agent_id).
+func (m *adminBillingMutation) BatchUpsertDurationHistogram(rows []DurationHistogramRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	db := m.ctx.GetDB()
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, row := range rows {
+			rec := models.UsageDurationHistogram{
+				Date: row.Date, Hour: row.Hour,
+				ChannelID: row.ChannelID, PrivateChannelID: row.PrivateChannelID,
+				ModelName: row.ModelName, AgentID: row.AgentID,
+				MaxDurationMs: row.MaxDurationMs,
+				H0:            row.Hist[0], H1: row.Hist[1], H2: row.Hist[2], H3: row.Hist[3],
+				H4: row.Hist[4], H5: row.Hist[5], H6: row.Hist[6], H7: row.Hist[7],
+				H8: row.Hist[8], H9: row.Hist[9], H10: row.Hist[10], H11: row.Hist[11],
+				H12: row.Hist[12], H13: row.Hist[13], H14: row.Hist[14], H15: row.Hist[15],
+				H16:       row.Hist[16],
+				UpdatedAt: row.UpdatedAt,
+			}
+			assign := map[string]any{
+				// 槽计数累加
+				"h0": gorm.Expr("h0 + ?", row.Hist[0]), "h1": gorm.Expr("h1 + ?", row.Hist[1]),
+				"h2": gorm.Expr("h2 + ?", row.Hist[2]), "h3": gorm.Expr("h3 + ?", row.Hist[3]),
+				"h4": gorm.Expr("h4 + ?", row.Hist[4]), "h5": gorm.Expr("h5 + ?", row.Hist[5]),
+				"h6": gorm.Expr("h6 + ?", row.Hist[6]), "h7": gorm.Expr("h7 + ?", row.Hist[7]),
+				"h8": gorm.Expr("h8 + ?", row.Hist[8]), "h9": gorm.Expr("h9 + ?", row.Hist[9]),
+				"h10": gorm.Expr("h10 + ?", row.Hist[10]), "h11": gorm.Expr("h11 + ?", row.Hist[11]),
+				"h12": gorm.Expr("h12 + ?", row.Hist[12]), "h13": gorm.Expr("h13 + ?", row.Hist[13]),
+				"h14": gorm.Expr("h14 + ?", row.Hist[14]), "h15": gorm.Expr("h15 + ?", row.Hist[15]),
+				"h16": gorm.Expr("h16 + ?", row.Hist[16]),
+				// max 取大(跨方言:不用 GREATEST/max(x,y))
+				"max_duration_ms": gorm.Expr("CASE WHEN max_duration_ms >= ? THEN max_duration_ms ELSE ? END",
+					row.MaxDurationMs, row.MaxDurationMs),
+				"updated_at": row.UpdatedAt,
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{
+					{Name: "date"}, {Name: "hour"}, {Name: "channel_id"},
+					{Name: "private_channel_id"}, {Name: "model_name"}, {Name: "agent_id"},
+				},
+				DoUpdates: clause.Assignments(assign),
+			}).Create(&rec).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// UpsertDurationHistogram replays a single UsageLog into the duration
+// histogram side table (rebuild path only; the live path uses the batched
+// Aggregator). Same positioning as UpsertHourlyBucket; status != 1 is a
+// no-op because the histogram only tracks successful requests.
+func (m *adminBillingMutation) UpsertDurationHistogram(log *models.UsageLog) error {
+	if log == nil || log.Status != 1 {
+		return nil
+	}
+	ts := billingTimestamp(log)
+	t := time.Unix(ts, 0).UTC()
+	var row DurationHistogramRow
+	row.Date = t.Format("2006-01-02")
+	row.Hour = t.Hour()
+	row.ChannelID = log.ChannelID
+	row.PrivateChannelID = log.PrivateChannelID
+	row.ModelName = log.ModelName
+	row.AgentID = log.AgentID
+	row.MaxDurationMs = int64(log.Duration)
+	row.Hist[durhist.SlotIndex(int64(log.Duration))] = 1
+	row.UpdatedAt = ts
+	return m.BatchUpsertDurationHistogram([]DurationHistogramRow{row})
 }
 
 // ListPrivateChannelDailyByOwner 返回指定 owner 的全部 BYOK channel daily rollup 行。

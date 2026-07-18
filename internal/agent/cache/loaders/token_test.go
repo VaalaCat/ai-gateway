@@ -64,6 +64,33 @@ func TestTokenLoader_Found_WarmsUserSide(t *testing.T) {
 	}
 }
 
+func TestTokenLoader_VersionedSideWarmsUserAndTokenRoutings(t *testing.T) {
+	users := entitycache.NewFullCache[uint, *protocol.SyncedUser]()
+	tokenRoutings := entitycache.NewFullCache[uint, *protocol.TokenRoutingMap]()
+	tok := &models.Token{ID: 11, Key: "sk-versioned", UserID: 22, Status: 1}
+	tokB, _ := json.Marshal(tok)
+	sideB, _ := json.Marshal(protocol.TokenFetchSide{
+		SchemaVersion: protocol.TokenFetchSideSchemaV1,
+		User:          &protocol.SyncedUser{ID: 22, GroupID: 7},
+		TokenRoutings: &protocol.TokenRoutingMap{Routings: map[string]*protocol.SyncedRouting{
+			"smart": {ID: 1, Name: "smart", Scope: "token", TokenID: 11, Enabled: true},
+		}},
+	})
+	cli := &stubWSClient{respond: func(_ string, _ any) (json.RawMessage, error) {
+		return json.Marshal(protocol.FetchEntityResponse{Found: true, Data: tokB, Side: sideB})
+	}}
+	loader := &TokenLoader{Client: cli, Users: users, TokenRoutings: tokenRoutings}
+	if _, err := loader.Load(context.Background(), tok.Key); err != nil {
+		t.Fatal(err)
+	}
+	if user, ok := users.Peek(22); !ok || user.GroupID != 7 {
+		t.Fatalf("user side not warmed: %+v %v", user, ok)
+	}
+	if routings, ok := tokenRoutings.Peek(11); !ok || routings.Routings["smart"] == nil {
+		t.Fatalf("token routing side not warmed: %+v %v", routings, ok)
+	}
+}
+
 func TestTokenLoader_NotFoundReturnsErrNotFound(t *testing.T) {
 	users := entitycache.NewFullCache[uint, *protocol.SyncedUser]()
 	cli := &stubWSClient{respond: func(_ string, _ any) (json.RawMessage, error) {

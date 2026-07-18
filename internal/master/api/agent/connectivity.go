@@ -1,132 +1,83 @@
 package agent
 
 import (
-	"encoding/json"
-	"fmt"
-	"strconv"
-	gosync "sync"
-	"time"
+	"net/http"
 
-	"github.com/VaalaCat/ai-gateway/internal/consts"
-	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
+	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
 type ConnectivityRequest struct {
-	ID string `uri:"id" binding:"required"`
+	ID                        string              `uri:"id" binding:"required"`
+	Scope                     protocol.ProbeScope `json:"scope"`
+	ExpectedEpoch             string              `json:"expected_epoch"`
+	ExpectedControlGeneration uint64              `json:"expected_control_generation,omitempty"`
+	ExpectedRelayGeneration   uint64              `json:"expected_relay_generation,omitempty"`
 }
 
-type AddressProbeResult struct {
-	URL       string `json:"url"`
-	Tag       string `json:"tag"`
-	Reachable bool   `json:"reachable"`
-	LatencyMs int    `json:"latency_ms"`
-	Error     string `json:"error"`
+type ConnectivityProgressRequest struct {
+	ID      string `uri:"id" binding:"required"`
+	ProbeID string `form:"probe_id"`
 }
 
-type ConnectivityResult struct {
-	TargetAgentID string               `json:"target_agent_id"`
-	TargetName    string               `json:"target_name"`
-	Results       []AddressProbeResult `json:"results"`
-}
-
-type ConnectivityReport struct {
-	AgentID   string               `json:"agent_id"`
-	CheckedAt int64                `json:"checked_at"`
-	Results   []ConnectivityResult `json:"results"`
-}
-
-// In-memory cache for connectivity reports
-var (
-	connectivityCache   = make(map[string]*ConnectivityReport)
-	connectivityCacheMu gosync.RWMutex
-)
-
-func (h *Handler) CheckConnectivity(c *app.Context, req ConnectivityRequest) (ConnectivityReport, error) {
-	if h.HubCall == nil {
-		return ConnectivityReport{}, api.InternalError("hub not available", nil)
+// behavior change: POST enqueues the scheduler-backed probe and returns its full acknowledgement.
+func (h *Handler) CheckConnectivity(c *app.Context, req ConnectivityRequest) (api.Accepted[ProbeAck], error) {
+	if h.Operations == nil {
+		return api.Accepted[ProbeAck]{}, api.InternalError("operation service not available", nil)
+	}
+	if apiErr := requestContextAPIError(c); apiErr != nil {
+		return api.Accepted[ProbeAck]{}, apiErr
 	}
 
-	id, _ := strconv.ParseUint(req.ID, 10, 64)
-
-	daoCtx := dao.NewContext(c.App)
-	q := dao.NewAdminQuery(daoCtx)
-
-	sourceAgent, err := q.Agent().GetByID(uint(id))
+	sourceAgent, err := findAgentByID(c, req.ID)
 	if err != nil {
-		return ConnectivityReport{}, api.NotFoundError("agent not found")
+		return api.Accepted[ProbeAck]{}, err
 	}
-
-	// Gather all other agents' addresses
-	agents, err := q.Agent().ListActive(sourceAgent.AgentID)
+	if apiErr := requestContextAPIError(c); apiErr != nil {
+		return api.Accepted[ProbeAck]{}, apiErr
+	}
+	if req.Scope.Kind == "" {
+		req.Scope = protocol.ProbeScope{Kind: "all_enabled"}
+	}
+	ack, err := h.Operations.EnqueueProbe(c.RequestContext(), protocol.OperationRequest{
+		AgentID:                   sourceAgent.AgentID,
+		Operation:                 string(connectivity.OperationProbe),
+		ExpectedEpoch:             req.ExpectedEpoch,
+		ExpectedControlGeneration: req.ExpectedControlGeneration,
+		ExpectedRelayGeneration:   req.ExpectedRelayGeneration,
+	}, req.Scope)
 	if err != nil {
-		return ConnectivityReport{}, api.InternalError("list active agents failed", err)
-	}
-
-	type targetInfo struct {
-		AgentID       string          `json:"agent_id"`
-		Name          string          `json:"name"`
-		HTTPAddresses json.RawMessage `json:"http_addresses"`
-	}
-	targets := make([]targetInfo, 0, len(agents))
-	for _, a := range agents {
-		var mergedAddrs []agentproxy.Address
-		if h.Hub != nil {
-			mergedAddrs = h.Hub.GetAgentAddresses(a.AgentID, a.HTTPAddresses)
-		} else {
-			mergedAddrs = agentproxy.ParseAddresses(a.HTTPAddresses)
+		// behavior change: cancellation during enqueue takes precedence over operation errors.
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return api.Accepted[ProbeAck]{}, apiErr
 		}
-		if len(mergedAddrs) == 0 {
-			continue
-		}
-		addrJSON, err := json.Marshal(mergedAddrs)
-		if err != nil {
-			continue
-		}
-		targets = append(targets, targetInfo{
-			AgentID:       a.AgentID,
-			Name:          a.Name,
-			HTTPAddresses: addrJSON,
-		})
+		return api.Accepted[ProbeAck]{}, operationAPIError(err, connectivity.OperationProbe)
 	}
-
-	result, err := h.HubCall(sourceAgent.AgentID, consts.RPCAgentCheckConnectivity, targets, 30*time.Second)
-	if err != nil {
-		return ConnectivityReport{}, api.BadRequestError(fmt.Sprintf("connectivity check failed: %v", err), nil)
-	}
-
-	var report ConnectivityReport
-	report.AgentID = sourceAgent.AgentID
-	report.CheckedAt = time.Now().Unix()
-	if err := json.Unmarshal(result, &report.Results); err != nil {
-		return ConnectivityReport{}, api.InternalError("invalid agent response", err)
-	}
-
-	// Cache result
-	connectivityCacheMu.Lock()
-	connectivityCache[sourceAgent.AgentID] = &report
-	connectivityCacheMu.Unlock()
-
-	return report, nil
+	return api.Accepted[ProbeAck]{Body: ack}, nil
 }
 
-func (h *Handler) GetConnectivity(c *app.Context, req ConnectivityRequest) (*ConnectivityReport, error) {
-	id, _ := strconv.ParseUint(req.ID, 10, 64)
-
-	daoCtx := dao.NewContext(c.App)
-	q := dao.NewAdminQuery(daoCtx)
-
-	agent, err := q.Agent().GetByID(uint(id))
+func (h *Handler) GetConnectivity(c *app.Context, req ConnectivityProgressRequest) (ManualProbeProgress, error) {
+	if h.GetProbeProgress == nil {
+		return ManualProbeProgress{}, api.InternalError("probe progress service not available", nil)
+	}
+	if apiErr := requestContextAPIError(c); apiErr != nil {
+		return ManualProbeProgress{}, apiErr
+	}
+	if req.ProbeID == "" {
+		return ManualProbeProgress{}, api.ErrorWithCode(http.StatusBadRequest, "probe_id_required", "probe_id is required", nil)
+	}
+	agent, err := findAgentByID(c, req.ID)
 	if err != nil {
-		return nil, api.NotFoundError("agent not found")
+		return ManualProbeProgress{}, err
 	}
-	connectivityCacheMu.RLock()
-	report := connectivityCache[agent.AgentID]
-	connectivityCacheMu.RUnlock()
-	if report == nil {
-		return &ConnectivityReport{AgentID: agent.AgentID}, nil
+	if apiErr := requestContextAPIError(c); apiErr != nil {
+		return ManualProbeProgress{}, apiErr
 	}
-	return report, nil
+	progress, ok := h.GetProbeProgress(agent.AgentID, req.ProbeID)
+	if !ok {
+		return ManualProbeProgress{}, api.ErrorWithCode(http.StatusNotFound, "probe_not_found", "probe progress not found", nil)
+	}
+	return progress, nil
 }

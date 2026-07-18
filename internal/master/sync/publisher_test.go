@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,46 @@ type fakeNotify struct {
 	agentID string
 	method  string
 	params  any
+}
+
+type inertSubscription struct{}
+
+func (inertSubscription) Unsubscribe() error { return nil }
+
+type subscriptionAuditBus struct {
+	topics   []string
+	patterns []string
+}
+
+func (b *subscriptionAuditBus) Publish(context.Context, eventbus.Event) error { return nil }
+
+func (b *subscriptionAuditBus) Subscribe(topic string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
+	b.topics = append(b.topics, topic)
+	return inertSubscription{}, nil
+}
+
+func (b *subscriptionAuditBus) SubscribePattern(pattern string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
+	b.patterns = append(b.patterns, pattern)
+	return inertSubscription{}, nil
+}
+
+func (b *subscriptionAuditBus) Close() error { return nil }
+
+func (b *subscriptionAuditBus) matches(topic string) bool {
+	for _, subscribed := range b.topics {
+		if subscribed == topic {
+			return true
+		}
+	}
+	for _, pattern := range b.patterns {
+		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(topic, strings.TrimSuffix(pattern, "*")) {
+			return true
+		}
+		if pattern == topic {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeBroadcaster) Broadcast(_ string, params any) {
@@ -136,5 +177,29 @@ func TestPublisher_BroadcastsPrivateChannelInvalidate(t *testing.T) {
 	}
 	if len(payload.AffectedUserIDs) != 1 || payload.AffectedUserIDs[0] != 38 {
 		t.Fatalf("AffectedUserIDs = %v, want [38]", payload.AffectedUserIDs)
+	}
+}
+
+func TestPublisherAndEventRegistryExcludeMasterSigningSources(t *testing.T) {
+	bus := &subscriptionAuditBus{}
+	fb := &fakeBroadcaster{}
+	var version atomic.Int64
+	(&Publisher{hub: fb, bus: bus, version: &version, logger: zap.NewNop()}).Start()
+	registry := events.NewRegistry()
+
+	for _, entity := range []string{"master_signing_key", "master_signing_keys"} {
+		for _, action := range []string{events.ActionCreate, events.ActionUpdate, events.ActionDelete} {
+			for _, topic := range []string{
+				entity + "." + action,
+				"sync." + entity + "." + action,
+			} {
+				if bus.matches(topic) {
+					t.Fatal("publisher subscribed to a master signing topic")
+				}
+				if _, ok := registry.PayloadType(topic); ok {
+					t.Fatal("event registry exposed a master signing topic")
+				}
+			}
+		}
 	}
 }

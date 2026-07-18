@@ -9,8 +9,9 @@ import { OverviewTab } from "@/components/monitoring/overview-tab";
 import { InflightTab } from "@/components/monitoring/inflight-tab";
 import { LimiterTab } from "@/components/monitoring/limiter-tab";
 import { BreakerTab } from "@/components/monitoring/breaker-tab";
+import { DeliveryTab } from "@/components/monitoring/delivery-tab";
 
-const TABS = ["overview", "inflight", "limiter", "breaker"] as const;
+const TABS = ["overview", "inflight", "limiter", "breaker", "delivery"] as const;
 type TabKey = (typeof TABS)[number];
 
 export default function MonitoringPage() {
@@ -49,6 +50,7 @@ function Inner() {
         <TabsTrigger value="inflight">{t("tab.inflight")}</TabsTrigger>
         <TabsTrigger value="limiter">{t("tab.limiter")}</TabsTrigger>
         <TabsTrigger value="breaker">{t("tab.breaker")}</TabsTrigger>
+        <TabsTrigger value="delivery">{t("tab.delivery")}</TabsTrigger>
       </TabsList>
       <TabsContent value="overview">
         <OverviewTab />
@@ -61,6 +63,9 @@ function Inner() {
       </TabsContent>
       <TabsContent value="breaker">
         <BreakerTab />
+      </TabsContent>
+      <TabsContent value="delivery">
+        <DeliveryTab />
       </TabsContent>
     </Tabs>
   );

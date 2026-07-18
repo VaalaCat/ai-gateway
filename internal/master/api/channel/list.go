@@ -23,7 +23,7 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[m
 		statusFilter = &s
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	channels, total, err := q.Channel().List(

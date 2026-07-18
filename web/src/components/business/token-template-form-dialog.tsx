@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 
 import { Button } from "@/components/ui/button";
@@ -64,11 +64,7 @@ interface Props {
 export function TokenTemplateFormDialog({ open, onOpenChange, template, onSubmit, pending }: Props) {
   const t = useTranslations("tokenTemplates");
   const tc = useTranslations("common");
-  const [form, setForm] = useState<TokenTemplateFormValues>(EMPTY);
-
-  useEffect(() => {
-    if (open) setForm(template ? fromTemplate(template) : EMPTY);
-  }, [open, template]);
+  const [form, setForm] = useState<TokenTemplateFormValues>(() => template ? fromTemplate(template) : EMPTY);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

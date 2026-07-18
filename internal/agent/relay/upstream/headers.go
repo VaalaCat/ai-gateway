@@ -23,8 +23,6 @@ var alwaysStrippedHeaders = map[string]bool{
 	"x-goog-api-key": true, "openai-organization": true,
 	// 客户端身份:与 API 鉴权无关,部分上游因 cookie 行为异常。
 	"cookie": true,
-	// 协议版本:由 codec set 目标协议的。
-	"anthropic-version": true,
 	// 转发/CDN 泄漏(精确名;前缀见 alwaysStrippedPrefixes)
 	"forwarded": true, "x-real-ip": true, "cdn-loop": true,
 }
@@ -33,14 +31,18 @@ var alwaysStrippedHeaders = map[string]bool{
 var alwaysStrippedPrefixes = []string{
 	"x-forwarded-", // 任意转发变体
 	"cf-",          // Cloudflare 注入头 (CF-Ray 等); 短前缀有误杀风险, 已知可接受
+	"eo-",          // 腾讯 EdgeOne 边缘注入头 (EO-Client-IP/EO-Log-UUID 等); 同 cf- 短前缀风险, 已知可接受
 	"x-vaala-",     // 网关内部 header
 }
 
 // crossProtocolStrippedHeaders 仅入站协议 != 出站协议时剥离:源协议的 feature/beta
 // 开关,对不同目标协议无意义甚至报错。
 var crossProtocolStrippedHeaders = map[string]bool{
-	"anthropic-beta": true,
-	"openai-beta":    true,
+	// 协议版本/特性开关:同协议应透传(passthrough 无 codec 重编码,依赖客户端原值;
+	// native 同协议由 codec 先 set,dst 已有则不覆盖);跨协议对目标协议无意义甚至报错,才剥离。
+	"anthropic-version": true,
+	"anthropic-beta":    true,
+	"openai-beta":       true,
 }
 
 // crossProtocolStrippedPrefixes 仅跨协议剥离的前缀(小写)。

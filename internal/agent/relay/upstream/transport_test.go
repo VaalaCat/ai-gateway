@@ -1,7 +1,10 @@
 package upstream
 
 import (
+	"context"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +12,92 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
+
+func TestTransportCloseInvalidateClosesIdleConnection(t *testing.T) {
+	idle := make(chan struct{}, 1)
+	closed := make(chan struct{}, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateIdle:
+			select {
+			case idle <- struct{}{}:
+			default:
+			}
+		case http.StateClosed:
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	p := newTransportPool(4, 4, time.Second, defaultKc)
+	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 7, BaseURL: srv.URL}}
+	client := &http.Client{Transport: p.Get(ch)}
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_ = resp.Body.Close()
+	requireTransportSignal(t, idle, "idle connection")
+	p.Invalidate(ch.ID, ch.ProxyURL)
+	requireTransportSignal(t, closed, "invalidated idle connection close")
+}
+
+func TestTransportCloseIdleConnectionsClosesEveryCachedTransport(t *testing.T) {
+	closed := make(chan struct{}, 2)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- struct{}{}
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	p := newTransportPool(4, 4, time.Second, defaultKc)
+	for id := uint(1); id <= 2; id++ {
+		tr := p.Get(&models.Channel{ChannelCore: models.ChannelCore{ID: id, BaseURL: srv.URL}})
+		resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
+		if err != nil {
+			t.Fatalf("GET channel %d: %v", id, err)
+		}
+		_ = resp.Body.Close()
+	}
+	p.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for range 2 {
+		select {
+		case <-closed:
+		case <-ctx.Done():
+			t.Fatal("cached idle connections remained open")
+		}
+	}
+}
+
+func TestTransportCloseIdleConnectionsEmptyPool(t *testing.T) {
+	p := newTransportPool(4, 4, time.Second, defaultKc)
+	p.CloseIdleConnections()
+}
+
+func requireTransportSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatalf("timeout waiting for %s", name)
+	}
+}
 
 // TestTransportPoolImplementsInterface 断言 *transportPool 满足 app.TransportPool。
 // 编译期检查；签名漂移会让构建失败。

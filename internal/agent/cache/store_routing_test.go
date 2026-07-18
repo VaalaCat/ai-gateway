@@ -9,6 +9,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
 )
 
 // routingStubWSClient 是用于路由测试的最小 WSClient stub。
@@ -30,20 +31,75 @@ func TestResolveRouting_UserOverridesGlobal(t *testing.T) {
 	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
 		"smart": {Name: "smart", Scope: "user", UserID: 42, Enabled: true},
 	})
-	r := s.ResolveRouting("smart", 42)
+	r := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 42})
 	if r == nil || r.Scope != "user" {
 		t.Errorf("user routing should win, got %+v", r)
 	}
-	r2 := s.ResolveRouting("smart", 99)
+	r2 := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 99})
 	if r2 == nil || r2.Scope != "global" {
 		t.Errorf("user 99 has no override, should fall to global, got %+v", r2)
+	}
+}
+
+func TestResolveRouting_TokenOverridesUserAndGlobal(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetGlobalRouting("smart", &protocol.SyncedRouting{Name: "smart", Scope: "global", Enabled: true})
+	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
+		"smart": {Name: "smart", Scope: "user", UserID: 42, Enabled: true},
+	})
+	s.SetTokenRoutings(7, map[string]*protocol.SyncedRouting{
+		"smart": {Name: "smart", Scope: "token", TokenID: 7, Enabled: true},
+	})
+	got := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 42, TokenID: 7})
+	if got == nil || got.Scope != "token" {
+		t.Fatalf("token routing should win: %+v", got)
+	}
+	other := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 42, TokenID: 8})
+	if other == nil || other.Scope != "user" {
+		t.Fatalf("other token should fall through to user: %+v", other)
+	}
+	s.SetTokenRoutings(7, map[string]*protocol.SyncedRouting{
+		"smart": {Name: "smart", Scope: "token", TokenID: 7, Enabled: false},
+	})
+	disabled := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 42, TokenID: 7})
+	if disabled == nil || disabled.Scope != "user" {
+		t.Fatalf("disabled token routing should fall through: %+v", disabled)
+	}
+}
+
+func TestResolveRouting_TokenLoadFailureFallsBackToUser(t *testing.T) {
+	cli := &routingStubWSClient{respond: func(_ string, _ any) (json.RawMessage, error) {
+		return nil, ws.ErrConnClosed
+	}}
+	s := NewStore(cli, config.AgentCacheConfig{})
+	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
+		"smart": {Name: "smart", Scope: "user", UserID: 42, Enabled: true},
+	})
+	got := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 42, TokenID: 7})
+	if got == nil || got.Scope != "user" {
+		t.Fatalf("control failure should fall back to cached user routing: %+v", got)
+	}
+}
+
+func TestResolveRouting_CanceledTokenLoadDoesNotBlockFallback(t *testing.T) {
+	cli := &routingStubWSClient{respond: func(_ string, _ any) (json.RawMessage, error) {
+		t.Fatal("canceled context must not start a cold load")
+		return nil, nil
+	}}
+	s := NewStore(cli, config.AgentCacheConfig{})
+	s.SetGlobalRouting("smart", &protocol.SyncedRouting{Name: "smart", Scope: "global", Enabled: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := s.ResolveRouting(ctx, "smart", protocol.RoutingOwner{TokenID: 7})
+	if got == nil || got.Scope != "global" {
+		t.Fatalf("canceled token load should still use local global routing: %+v", got)
 	}
 }
 
 func TestResolveRouting_Disabled(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{Name: "smart", Scope: "global", Enabled: false})
-	if s.ResolveRouting("smart", 0) != nil {
+	if s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 0}) != nil {
 		t.Errorf("disabled global routing should return nil")
 	}
 }
@@ -55,7 +111,7 @@ func TestResolveRouting_UserDisabledFallsToGlobal(t *testing.T) {
 	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
 		"smart": {Name: "smart", Scope: "user", UserID: 42, Enabled: false},
 	})
-	r := s.ResolveRouting("smart", 42)
+	r := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 42})
 	if r == nil || r.Scope != "global" {
 		t.Errorf("user disabled should fall to global, got %+v", r)
 	}
@@ -63,7 +119,7 @@ func TestResolveRouting_UserDisabledFallsToGlobal(t *testing.T) {
 
 func TestResolveRouting_NoRouting(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
-	if s.ResolveRouting("nonexistent", 42) != nil {
+	if s.ResolveRouting(context.Background(), "nonexistent", protocol.RoutingOwner{UserID: 42}) != nil {
 		t.Errorf("expected nil for nonexistent routing")
 	}
 }
@@ -77,7 +133,7 @@ func TestUserRoutings_LoaderMiss(t *testing.T) {
 	}}
 	s := NewStore(cli, config.AgentCacheConfig{})
 	// LRU miss → Loader called → Found=false → ErrNotFound → ResolveRouting returns nil
-	if got := s.ResolveRouting("fast", 7); got != nil {
+	if got := s.ResolveRouting(context.Background(), "fast", protocol.RoutingOwner{UserID: 7}); got != nil {
 		t.Errorf("loader miss: expected nil, got %+v", got)
 	}
 }
@@ -95,7 +151,7 @@ func TestUserRoutings_LoaderFound(t *testing.T) {
 		return b, nil
 	}}
 	s := NewStore(cli, config.AgentCacheConfig{})
-	got := s.ResolveRouting("fast", 7)
+	got := s.ResolveRouting(context.Background(), "fast", protocol.RoutingOwner{UserID: 7})
 	if got == nil {
 		t.Fatal("loader found: expected routing, got nil")
 	}
@@ -115,13 +171,13 @@ func TestLoadGlobalRoutings_ReplacesAndFilters(t *testing.T) {
 	}
 	s.LoadGlobalRoutings(items)
 
-	if s.GetGlobalRouting("stale") != nil {
+	if s.GetGlobalRouting(context.Background(), "stale") != nil {
 		t.Error("stale routing should be replaced (cleared)")
 	}
-	if s.GetGlobalRouting("smart") == nil {
+	if s.GetGlobalRouting(context.Background(), "smart") == nil {
 		t.Error("smart routing should be loaded")
 	}
-	if s.GetGlobalRouting("off") != nil {
+	if s.GetGlobalRouting(context.Background(), "off") != nil {
 		t.Error("disabled routing should not be in cache")
 	}
 }
@@ -219,7 +275,7 @@ func TestListUserRoutingNames_OnlyEnabledSorted(t *testing.T) {
 		"smart":    {Name: "smart", Scope: "user", UserID: 42, Enabled: true},
 	})
 
-	got := s.ListUserRoutingNames(42)
+	got := s.ListUserRoutingNames(context.Background(), 42)
 	want := []string{"alpha", "smart"}
 	if len(got) != len(want) {
 		t.Fatalf("len=%d, want=%d (got=%v)", len(got), len(want), got)
@@ -233,7 +289,7 @@ func TestListUserRoutingNames_OnlyEnabledSorted(t *testing.T) {
 
 func TestListUserRoutingNames_ZeroUserIDReturnsNil(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
-	if got := s.ListUserRoutingNames(0); got != nil {
+	if got := s.ListUserRoutingNames(context.Background(), 0); got != nil {
 		t.Errorf("userID=0 should return nil, got %v", got)
 	}
 }
@@ -243,7 +299,7 @@ func TestListUserRoutingNames_OtherUserNotIncluded(t *testing.T) {
 	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
 		"only-42": {Name: "only-42", Scope: "user", UserID: 42, Enabled: true},
 	})
-	if got := s.ListUserRoutingNames(99); len(got) != 0 {
+	if got := s.ListUserRoutingNames(context.Background(), 99); len(got) != 0 {
 		t.Errorf("user 99 should not see user 42's routings, got %v", got)
 	}
 }

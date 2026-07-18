@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -42,16 +42,6 @@ export function BYOKCard({ group }: { group: UserGroup }) {
   const [enabledValue, setEnabledValue] = useState<boolean>(initialEnabled.value);
   const [maxOverride, setMaxOverride] = useState<boolean>(initialMax.override);
   const [maxValue, setMaxValue] = useState<number>(initialMax.value);
-
-  useEffect(() => {
-    const e = splitTri(group.byok_enabled);
-    const m = splitMax(group.byok_max_channels, MAX_VALUE_FALLBACK);
-    setEnabledOverride(e.override);
-    setEnabledValue(e.value);
-    setMaxOverride(m.override);
-    setMaxValue(m.value);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group.id]);
 
   const dirty =
     enabledOverride !== initialEnabled.override ||

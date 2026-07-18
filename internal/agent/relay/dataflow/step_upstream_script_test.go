@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +31,7 @@ func TestStepUpstreamScript_NoEngineNoop(t *testing.T) {
 		HTTPReq:  httptest.NewRequest(http.MethodPost, "https://up/v1/chat/completions", strings.NewReader(`{"a":1}`)),
 		Body:     []byte(`{"a":1}`),
 	}
-	if err := s.Apply(p); err != nil {
+	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Aborted {

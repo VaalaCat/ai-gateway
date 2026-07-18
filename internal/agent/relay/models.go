@@ -30,7 +30,7 @@ func ListModels(store *cache.Store) gin.HandlerFunc {
 				ui = got
 			}
 		}
-		items := modelview.ListVisibleModels(store, ui)
+		items := modelview.ListVisibleModels(c.Request.Context(), store, ui)
 
 		now := time.Now().Unix()
 		// var (not make) — preserve prior `null` rendering on empty list for zero-behavior-change.

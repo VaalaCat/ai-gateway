@@ -20,63 +20,106 @@ export const ROUTING_ERROR_KEYS: Record<string, string> = {
   referenced_by: "errors.referencedBy",
 };
 
-function routingBase(apiMode: "admin" | "user"): string {
+export type ModelRoutingApiMode = "admin" | "user";
+
+export type ModelRoutingOwner =
+  | { kind: "scope" }
+  | { kind: "token"; tokenId: number };
+
+const scopeOwner: ModelRoutingOwner = { kind: "scope" };
+
+function routingBase(apiMode: ModelRoutingApiMode, owner: ModelRoutingOwner): string {
+  if (owner.kind === "token") {
+    const prefix = apiMode === "admin" ? "/admin" : "";
+    return `${prefix}/tokens/${owner.tokenId}/model-routings`;
+  }
   return apiMode === "admin" ? "/admin/model-routings" : "/model-routings";
+}
+
+function ownerQueryKey(owner: ModelRoutingOwner): readonly [string, number] {
+  return [owner.kind, owner.kind === "token" ? owner.tokenId : 0];
+}
+
+function routingBody<T extends Record<string, unknown>>(
+  body: T,
+  owner: ModelRoutingOwner,
+): T | Omit<T, "scope" | "user_id" | "token_id"> {
+  if (owner.kind !== "token") return body;
+  const { scope: _scope, user_id: _userID, token_id: _tokenID, ...tokenBody } = body;
+  return tokenBody;
 }
 
 export function useModelRoutings(
   params: PaginatedParams & { scope?: 'global' | 'user'; user_id?: number } = {},
-  apiMode: "admin" | "user" = "admin"
+  apiMode: ModelRoutingApiMode = "admin",
+  owner: ModelRoutingOwner = scopeOwner,
 ) {
   return useQuery({
-    queryKey: ["model-routings", apiMode, params],
+    queryKey: ["model-routings", apiMode, ...ownerQueryKey(owner), params],
     queryFn: () =>
       api.get<PaginatedResponse<ModelRouting>>(
-        `${routingBase(apiMode)}${buildQuery(params)}`
+        `${routingBase(apiMode, owner)}${buildQuery(params)}`
       ),
   });
 }
 
-export function useModelRouting(id: number | null, apiMode: "admin" | "user" = "admin") {
+export function useModelRouting(
+  id: number | null,
+  apiMode: ModelRoutingApiMode = "admin",
+  owner: ModelRoutingOwner = scopeOwner,
+) {
   return useQuery({
-    queryKey: ["model-routing", apiMode, id],
-    queryFn: () => api.get<ModelRouting>(`${routingBase(apiMode)}/${id}`),
+    queryKey: ["model-routing", apiMode, ...ownerQueryKey(owner), id],
+    queryFn: () => api.get<ModelRouting>(`${routingBase(apiMode, owner)}/${id}`),
     enabled: id !== null && id > 0,
   });
 }
 
-export function useCreateModelRouting(apiMode: "admin" | "user" = "admin") {
+export function useCreateModelRouting(
+  apiMode: ModelRoutingApiMode = "admin",
+  owner: ModelRoutingOwner = scopeOwner,
+) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: {
       name: string;
-      scope: 'global' | 'user';
+      scope: 'global' | 'user' | 'token';
       user_id?: number;
+      token_id?: number;
       members: RoutingMember[];
       enabled?: boolean;
       remark?: string;
-    }) => api.post<ModelRouting>(routingBase(apiMode), body),
+    }) => api.post<ModelRouting>(routingBase(apiMode, owner), routingBody(body, owner)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-routings"] });
     },
   });
 }
 
-export function useUpdateModelRouting(apiMode: "admin" | "user" = "admin") {
+export function useUpdateModelRouting(
+  apiMode: ModelRoutingApiMode = "admin",
+  owner: ModelRoutingOwner = scopeOwner,
+) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...body }: { id: number } & Partial<ModelRouting>) =>
-      api.put<ModelRouting>(`${routingBase(apiMode)}/${id}`, body),
+      api.put<ModelRouting>(
+        `${routingBase(apiMode, owner)}/${id}`,
+        routingBody(body, owner),
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-routings"] });
     },
   });
 }
 
-export function useDeleteModelRouting(apiMode: "admin" | "user" = "admin") {
+export function useDeleteModelRouting(
+  apiMode: ModelRoutingApiMode = "admin",
+  owner: ModelRoutingOwner = scopeOwner,
+) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => api.delete<void>(`${routingBase(apiMode)}/${id}`),
+    mutationFn: (id: number) => api.delete<void>(`${routingBase(apiMode, owner)}/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-routings"] });
     },
@@ -95,24 +138,28 @@ export function useRoutingCandidates(opts?: { enabled?: boolean }) {
   });
 }
 
-export function usePreviewModelRouting(apiMode: "admin" | "user" = "admin") {
+export function usePreviewModelRouting(
+  apiMode: ModelRoutingApiMode = "admin",
+  owner: ModelRoutingOwner = scopeOwner,
+) {
   return useMutation({
     mutationFn: (body: {
       members: RoutingMember[];
       self_name?: string;
-      self_scope?: 'global' | 'user';
+      self_scope?: 'global' | 'user' | 'token';
       self_user_id?: number;
-    }) => api.post<RoutingPreview>(`${routingBase(apiMode)}/preview`, body),
+    }) => api.post<RoutingPreview>(`${routingBase(apiMode, owner)}/preview`, body),
   });
 }
 
 /**
  * 获取所有 enabled global routing 名（user portal 视图，admin 应继续走 useRoutingCandidates("admin")）。
  */
-export function useGlobalRoutingNames() {
+export function useGlobalRoutingNames(enabled = true) {
   return useQuery({
     queryKey: ["global-routing-names"],
     staleTime: 30_000,
+    enabled,
     queryFn: () =>
       api.get<RoutingNamesResp>("/model-routings/global-routing-names"),
   });
@@ -138,7 +185,7 @@ export function useGlobalRoutingNames() {
 export function useRoutingCandidatesByToken(
   tokenKey: string | null | undefined,
 ) {
-  const routingNamesQuery = useGlobalRoutingNames();
+  const routingNamesQuery = useGlobalRoutingNames(!!tokenKey);
 
   return useQuery({
     queryKey: ["routing-candidates-by-token", tokenKey],
@@ -156,10 +203,16 @@ export function useRoutingCandidatesByToken(
       if (!res.ok) {
         throw new Error(`/v1/models ${res.status}`);
       }
-      const body = (await res.json()) as { data?: { id: string }[] };
+      const body = (await res.json()) as {
+        data?: { id: string; owned_by?: string }[];
+      };
+      const visible = body.data ?? [];
       return {
-        models: (body.data ?? []).map((m) => m.id),
+        models: visible
+          .filter((model) => model.owned_by !== "ai-gateway-routing")
+          .map((model) => model.id),
         global_routings: routingNamesQuery.data?.names ?? [],
+        visible_refs: visible.map((model) => model.id),
       };
     },
   });

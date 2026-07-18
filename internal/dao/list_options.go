@@ -55,6 +55,7 @@ type UsageLogListFilter struct {
 	Status    *int
 	OwnerType        *string // nil = no filter; "admin" | "private"
 	PrivateChannelID *uint
+	RequestID        string // 精确匹配(唯一索引);"" = 不过滤
 }
 
 type TokenTemplateListFilter struct {

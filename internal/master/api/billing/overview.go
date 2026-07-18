@@ -21,7 +21,7 @@ func (h *Handler) Overview(c *app.Context, req OverviewRequest) (*dao.BillingOve
 
 	filterUserID := middleware.ScopedUserID(scope, reqUserID)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	overview, err := q.Billing().GetBillingOverview(dao.TokenBillingListFilter{
 		UserID:    filterUserID,

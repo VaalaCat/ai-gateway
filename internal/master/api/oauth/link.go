@@ -20,7 +20,7 @@ func (h *Handler) HandleLink(c *gin.Context) {
 		h.redirectLoginError(c, ErrUntrustedOrigin)
 		return
 	}
-	p, err := h.lookupEnabledProvider(providerName)
+	p, err := h.lookupEnabledProvider(c.Request.Context(), providerName)
 	if err != nil {
 		h.redirectLoginError(c, ErrUnknownProvider)
 		return

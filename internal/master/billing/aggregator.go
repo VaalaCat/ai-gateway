@@ -2,11 +2,16 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/durhist"
+	"github.com/sourcegraph/conc"
 	"go.uber.org/zap"
 )
 
@@ -14,9 +19,14 @@ import (
 // Injected via SetFlushFns so tests can use fakes; production wires the
 // real dao calls in master/server.go.
 type (
-	TokensFlushFn   func(rows []dao.TokenDailyRow) error
-	ChannelsFlushFn func(rows []dao.ChannelDailyRow) error
-	HourlyFlushFn   func(rows []dao.HourlyBucketRow) error
+	TokensFlushFn           func(rows []dao.TokenDailyRow) error
+	ChannelsFlushFn         func(rows []dao.ChannelDailyRow) error
+	HourlyFlushFn           func(rows []dao.HourlyBucketRow) error
+	HistogramFlushFn        func(rows []dao.DurationHistogramRow) error
+	TokensFlushContextFn    func(context.Context, []dao.TokenDailyRow) error
+	ChannelsFlushContextFn  func(context.Context, []dao.ChannelDailyRow) error
+	HourlyFlushContextFn    func(context.Context, []dao.HourlyBucketRow) error
+	HistogramFlushContextFn func(context.Context, []dao.DurationHistogramRow) error
 )
 
 // tokenKey is the composite primary key of token_daily_billing rows.
@@ -117,6 +127,10 @@ type hourlyDelta struct {
 	SumOutboundEncodeMs   int64
 	SumClientEncodeMs     int64
 
+	// 仅 Status==1 时累加(与上面五段延迟同一条件);直方图槽计数 + 最大值
+	Hist          [durhist.NumSlots]int64
+	MaxDurationMs int64
+
 	LastUsedAt int64
 	UpdatedAt  int64
 }
@@ -143,15 +157,25 @@ type Aggregator struct {
 	flushEvery time.Duration
 	maxRows    int
 
-	app      dao.AppProvider
-	logger   *zap.Logger
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	flushCh  chan struct{}
+	app          dao.AppProvider
+	logger       *zap.Logger
+	stopCh       chan struct{}
+	lifecycleMu  sync.Mutex
+	started      bool
+	closing      bool
+	closeOnce    sync.Once
+	workerCancel context.CancelCauseFunc
+	workers      conc.WaitGroup
+	done         chan struct{}
+	flushCh      chan struct{}
 
-	tokensFn   TokensFlushFn
-	channelsFn ChannelsFlushFn
-	hourlyFn   HourlyFlushFn
+	tokensFn      TokensFlushContextFn
+	channelsFn    ChannelsFlushContextFn
+	hourlyFn      HourlyFlushContextFn
+	histFn        HistogramFlushContextFn
+	activeWorkers atomic.Int64
+	activeTimers  atomic.Int64
+	inflight      atomic.Int64
 }
 
 // NewAggregator constructs an aggregator. app may be nil for pure-memory
@@ -167,6 +191,7 @@ func NewAggregator(app dao.AppProvider, logger *zap.Logger, opt AggregatorOption
 		app:        app,
 		logger:     logger,
 		stopCh:     make(chan struct{}),
+		done:       make(chan struct{}),
 		flushCh:    make(chan struct{}, 1),
 	}
 }
@@ -289,6 +314,12 @@ func (a *Aggregator) Submit(log *models.UsageLog) {
 			hd.SumUpstreamDecodeMs += int64(log.UpstreamDecodeMs)
 			hd.SumOutboundEncodeMs += int64(log.OutboundEncodeMs)
 			hd.SumClientEncodeMs += int64(log.ClientEncodeMs)
+
+			slot := durhist.SlotIndex(int64(log.Duration))
+			hd.Hist[slot]++
+			if int64(log.Duration) > hd.MaxDurationMs {
+				hd.MaxDurationMs = int64(log.Duration)
+			}
 		}
 		if ts > hd.LastUsedAt {
 			hd.LastUsedAt = ts
@@ -354,12 +385,33 @@ func aggSuccessFailureCounts(status int) (int64, int64) {
 
 // SetFlushFns installs the per-table batch persist functions. Pass nil
 // individually to disable that table's flush (e.g. for partial mock tests).
-func (a *Aggregator) SetFlushFns(t TokensFlushFn, c ChannelsFlushFn, h HourlyFlushFn) {
+func (a *Aggregator) SetFlushFns(t TokensFlushFn, c ChannelsFlushFn, h HourlyFlushFn, d HistogramFlushFn) {
+	var tc TokensFlushContextFn
+	var cc ChannelsFlushContextFn
+	var hc HourlyFlushContextFn
+	var dc HistogramFlushContextFn
+	if t != nil {
+		tc = func(_ context.Context, rows []dao.TokenDailyRow) error { return t(rows) }
+	}
+	if c != nil {
+		cc = func(_ context.Context, rows []dao.ChannelDailyRow) error { return c(rows) }
+	}
+	if h != nil {
+		hc = func(_ context.Context, rows []dao.HourlyBucketRow) error { return h(rows) }
+	}
+	if d != nil {
+		dc = func(_ context.Context, rows []dao.DurationHistogramRow) error { return d(rows) }
+	}
+	a.SetFlushContextFns(tc, cc, hc, dc)
+}
+
+func (a *Aggregator) SetFlushContextFns(t TokensFlushContextFn, c ChannelsFlushContextFn, h HourlyFlushContextFn, d HistogramFlushContextFn) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.tokensFn = t
 	a.channelsFn = c
 	a.hourlyFn = h
+	a.histFn = d
 }
 
 // Flush snapshots the in-memory buffers, resets them, and calls each
@@ -367,10 +419,14 @@ func (a *Aggregator) SetFlushFns(t TokensFlushFn, c ChannelsFlushFn, h HourlyFlu
 // still considered flushed (cleared) — retries would double-apply,
 // and rebuild can recover lost aggregation from UsageLog.
 //
-// Returns the FIRST error encountered (token > channel > hourly order);
-// subsequent errors are logged but not returned (avoid masking root cause).
-// Empty buffers short-circuit without calling any fn.
+// Returns the FIRST error encountered (token > channel > hourly > histogram
+// order); subsequent errors are logged but not returned (avoid masking root
+// cause). Empty buffers short-circuit without calling any fn.
 func (a *Aggregator) Flush() error {
+	return a.FlushContext(context.Background())
+}
+
+func (a *Aggregator) FlushContext(ctx context.Context) error {
 	a.mu.Lock()
 	if len(a.tokens) == 0 && len(a.channels) == 0 && len(a.hourly) == 0 {
 		a.mu.Unlock()
@@ -426,12 +482,28 @@ func (a *Aggregator) Flush() error {
 			UpdatedAt:                 v.UpdatedAt,
 		})
 	}
+	histRows := make([]dao.DurationHistogramRow, 0, len(a.hourly))
+	for k, v := range a.hourly {
+		var total int64
+		for _, c := range v.Hist {
+			total += c
+		}
+		if total == 0 {
+			continue // 该桶全是失败请求,无直方图增量
+		}
+		histRows = append(histRows, dao.DurationHistogramRow{
+			Date: k.Date, Hour: k.Hour,
+			ChannelID: k.ChannelID, PrivateChannelID: k.PrivateChannelID,
+			ModelName: k.ModelName, AgentID: k.AgentID,
+			MaxDurationMs: v.MaxDurationMs, Hist: v.Hist, UpdatedAt: v.UpdatedAt,
+		})
+	}
 
 	// reset buffers + capture fn refs while still under lock
 	a.tokens = make(map[tokenKey]*tokenDelta)
 	a.channels = make(map[channelKey]*channelDelta)
 	a.hourly = make(map[hourlyKey]*hourlyDelta)
-	tFn, cFn, hFn := a.tokensFn, a.channelsFn, a.hourlyFn
+	tFn, cFn, hFn, dFn := a.tokensFn, a.channelsFn, a.hourlyFn, a.histFn
 	a.mu.Unlock()
 
 	var firstErr error
@@ -448,13 +520,28 @@ func (a *Aggregator) Flush() error {
 		}
 	}
 	if tFn != nil {
-		logIfErr("token_daily", tFn(tokenRows), len(tokenRows))
+		a.inflight.Add(1)
+		err := tFn(ctx, tokenRows)
+		a.inflight.Add(-1)
+		logIfErr("token_daily", err, len(tokenRows))
 	}
 	if cFn != nil {
-		logIfErr("channel_daily", cFn(channelRows), len(channelRows))
+		a.inflight.Add(1)
+		err := cFn(ctx, channelRows)
+		a.inflight.Add(-1)
+		logIfErr("channel_daily", err, len(channelRows))
 	}
 	if hFn != nil {
-		logIfErr("hourly_bucket", hFn(hourlyRows), len(hourlyRows))
+		a.inflight.Add(1)
+		err := hFn(ctx, hourlyRows)
+		a.inflight.Add(-1)
+		logIfErr("hourly_bucket", err, len(hourlyRows))
+	}
+	if dFn != nil {
+		a.inflight.Add(1)
+		err := dFn(ctx, histRows)
+		a.inflight.Add(-1)
+		logIfErr("duration_histogram", err, len(histRows))
 	}
 	return firstErr
 }
@@ -466,42 +553,80 @@ func (a *Aggregator) Flush() error {
 // Exits cleanly on ctx.Done() or Stop(). Caller is responsible for
 // invoking Stop on shutdown to drain the final batch.
 func (a *Aggregator) Start(ctx context.Context) {
-	go func() {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	if a.started || a.closing || ctx == nil {
+		return
+	}
+	a.started = true
+	workerCtx, cancel := context.WithCancelCause(ctx)
+	a.workerCancel = cancel
+	a.activeWorkers.Add(1)
+	a.workers.Go(func() {
+		defer a.activeWorkers.Add(-1)
 		var ticker *time.Ticker
 		var tickC <-chan time.Time
 		if a.flushEvery > 0 {
+			a.activeTimers.Add(1)
 			ticker = time.NewTicker(a.flushEvery)
-			defer ticker.Stop()
+			defer func() { ticker.Stop(); a.activeTimers.Add(-1) }()
 			tickC = ticker.C
 		}
 		for {
 			select {
 			case <-tickC:
-				if err := a.Flush(); err != nil && a.logger != nil {
+				if err := a.FlushContext(workerCtx); err != nil && a.logger != nil {
 					a.logger.Warn("aggregator_flush_tick_failed", zap.Error(err))
 				}
 			case <-a.flushCh:
-				if err := a.Flush(); err != nil && a.logger != nil {
+				if err := a.FlushContext(workerCtx); err != nil && a.logger != nil {
 					a.logger.Warn("aggregator_flush_threshold_failed", zap.Error(err))
 				}
-			case <-ctx.Done():
+			case <-workerCtx.Done():
 				return
 			case <-a.stopCh:
 				return
 			}
 		}
-	}()
+	})
 }
 
 // Stop signals the background goroutine to exit and performs one final
 // force-flush to drain whatever is buffered. Safe to call concurrently
 // and idempotent (sync.Once guards the channel close; the final Flush
 // is a no-op when the buffer is already empty).
-func (a *Aggregator) Stop() {
-	a.stopOnce.Do(func() {
-		close(a.stopCh)
-	})
-	if err := a.Flush(); err != nil && a.logger != nil {
-		a.logger.Warn("aggregator_flush_on_shutdown_failed", zap.Error(err))
+func (a *Aggregator) Close(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("aggregator: nil close context")
 	}
+	a.closeOnce.Do(func() {
+		a.lifecycleMu.Lock()
+		a.closing = true
+		if a.workerCancel != nil {
+			a.workerCancel(context.Cause(ctx))
+		}
+		close(a.stopCh)
+		a.lifecycleMu.Unlock()
+		go func() {
+			a.workers.Wait()
+			if err := a.FlushContext(ctx); err != nil && a.logger != nil {
+				a.logger.Warn("aggregator_flush_on_shutdown_failed", zap.Error(err))
+			}
+			close(a.done)
+		}()
+	})
+	select {
+	case <-a.done:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (a *Aggregator) Stop(ctx context.Context) error { return a.Close(ctx) }
+
+func (a *Aggregator) Done() <-chan struct{} { return a.done }
+
+func (a *Aggregator) ResourceCounts() app.ResourceCounts {
+	return app.ResourceCounts{LifecycleWorkers: a.activeWorkers.Load(), Timers: a.activeTimers.Load(), Inflight: a.inflight.Load()}
 }

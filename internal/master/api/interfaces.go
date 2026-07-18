@@ -29,6 +29,11 @@ type BodyProvider interface {
 	Body() any
 }
 
+type HTTPResponse interface {
+	HTTPStatus() int
+	ResponseBody() any
+}
+
 type BodyMapSetter interface {
 	SetBodyMap(map[string]any)
 }

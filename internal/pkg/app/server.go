@@ -2,7 +2,12 @@ package app
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"time"
 
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,4 +26,32 @@ type AgentServer interface {
 	RunBackground(ctx context.Context)
 	Shutdown(ctx context.Context) error
 	MountRoutes(router *gin.Engine)
+	GetRelayLink() RelayLink
+}
+
+type RelayRequest struct {
+	Purpose       tunnel.StreamPurpose
+	TargetAgentID string
+	RouteID       uint
+	RequestID     string
+	Method        string
+	Path          string
+	Header        http.Header
+	BodyLength    int64
+	Remaining     time.Duration
+	Hop           uint8
+	Attempt       *attemptwire.AttemptProxyMeta
+}
+
+type RelayStream interface {
+	Commit(ctx context.Context) error
+	Upload(ctx context.Context, src io.Reader) error
+	CopyResponse(ctx context.Context, dst http.ResponseWriter) error
+	CommitState() tunnel.CommitState
+	Cancel(cause error)
+	Close() error
+}
+
+type RelayLink interface {
+	OpenStream(ctx context.Context, req RelayRequest) (RelayStream, error)
 }

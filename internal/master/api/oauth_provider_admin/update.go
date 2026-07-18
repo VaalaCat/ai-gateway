@@ -31,7 +31,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.OAuthProvide
 	}
 	id := uint(id64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

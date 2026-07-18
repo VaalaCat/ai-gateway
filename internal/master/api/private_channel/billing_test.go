@@ -219,7 +219,7 @@ func TestBillingByModel_BYOK_ExcludesAdminLogs(t *testing.T) {
 
 func TestBillingOverview_BYOK_Unauthenticated(t *testing.T) {
 	h, _, _ := newHandlerTestCtx(t)
-	anonCtx := &app.Context{App: h.App} // UserInfo nil
+	anonCtx := &app.Context{App: h.App, OwnerContext: t.Context()} // UserInfo nil
 	_, err := h.BillingOverview(anonCtx, BillingRangeRequest{})
 	if err == nil {
 		t.Fatalf("expected unauthenticated error")

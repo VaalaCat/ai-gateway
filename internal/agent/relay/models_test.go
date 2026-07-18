@@ -350,9 +350,8 @@ func TestListModels_UserRoutingNotIncludedForOtherUser(t *testing.T) {
 	}
 }
 
-// TestListModels_TokenModelsDoesNotFilterRouting —— TokenModels=[gpt-4o] 时
-// claude-router (routing) 仍应出现；claude-3-opus (model) 应被过滤。
-func TestListModels_TokenModelsDoesNotFilterRouting(t *testing.T) {
+// behavior change: routing alias 与真实模型一样同时受 GroupModels 和 TokenModels 约束。
+func TestListModels_TokenModelsFiltersRoutingAlias(t *testing.T) {
 	store := newStoreWithChannels(t,
 		models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: consts.StatusEnabled}, Models: "gpt-4o,claude-3-opus"},
 	)
@@ -362,23 +361,17 @@ func TestListModels_TokenModelsDoesNotFilterRouting(t *testing.T) {
 	ui := &app.UserInfo{TokenModels: []string{"gpt-4o"}}
 	got := runListModelsDetailed(t, store, ui)
 
-	var hasGPT, hasRouting bool
+	var hasGPT bool
 	for _, m := range got {
 		if m.ID == "gpt-4o" && m.OwnedBy == "ai-gateway" {
 			hasGPT = true
 		}
-		if m.ID == "claude-router" && m.OwnedBy == "ai-gateway-routing" {
-			hasRouting = true
-		}
-		if m.ID == "claude-3-opus" {
-			t.Errorf("claude-3-opus should be filtered by TokenModels, but appeared: %v", got)
+		if m.ID == "claude-3-opus" || m.ID == "claude-router" {
+			t.Errorf("model and routing aliases outside TokenModels must be filtered: %v", got)
 		}
 	}
 	if !hasGPT {
 		t.Errorf("gpt-4o missing: %v", got)
-	}
-	if !hasRouting {
-		t.Errorf("claude-router missing despite TokenModels=[gpt-4o]: %v", got)
 	}
 }
 

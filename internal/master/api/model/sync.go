@@ -14,7 +14,7 @@ import (
 )
 
 func (h *Handler) Sync(c *app.Context, _ api.EmptyRequest) (SyncResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

@@ -123,7 +123,7 @@ type passthroughScriptAgent struct {
 }
 
 func (a passthroughScriptAgent) GetCache() app.AgentCache              { return a.cache }
-func (a passthroughScriptAgent) GetRouteForwarder() app.RouteForwarder { return nil }
+func (a passthroughScriptAgent) GetBodyStore() app.BodyStore           { return nil }
 func (a passthroughScriptAgent) GetLogger() *zap.Logger                { return zap.NewNop() }
 func (a passthroughScriptAgent) GetConfig() *config.AgentRuntimeConfig { return nil }
 func (a passthroughScriptAgent) GetTransportPool() app.TransportPool   { return nil }
@@ -421,6 +421,58 @@ func TestBackend_NonStreamResponse_ExtractsUsage(t *testing.T) {
 	}
 	if got.ResponseText != "answer here" {
 		t.Errorf("ResponseText = %q, want \"answer here\" (used by FinalizeTokenCounts fallback)", got.ResponseText)
+	}
+}
+
+// Claude 的 cache_read_input_tokens 是和 input_tokens 分离的独立桶(input 本就不含
+// 缓存),即使 input_tokens > cache_read 也绝不能从 prompt 里减掉。
+// behavior change: 旧 passthrough.go:141 盲减在 input>cache 时会误减(500→200)。
+func TestBackend_NonStreamResponse_ClaudeSeparateCacheNotSubtracted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","content":[{"type":"text","text":"hi"}],
+			"usage":{"input_tokens":500,"output_tokens":50,"cache_read_input_tokens":300}}`))
+	}))
+	defer upstream.Close()
+
+	ch := makeChannel(upstream.URL)
+	rctx, _ := newPassthroughTestCtx(t, []byte(`{"model":"claude","messages":[]}`), false)
+	backend := &Backend{Agent: nil}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "claude"})
+	if got.Err != nil {
+		t.Fatalf("unexpected Err: %v", got.Err)
+	}
+	if got.PromptTokens != 500 || got.CompletionTokens != 50 || got.CacheReadTokens != 300 {
+		t.Errorf("usage = (p=%d,c=%d,cr=%d), want (500,50,300) — separate cache must not be subtracted",
+			got.PromptTokens, got.CompletionTokens, got.CacheReadTokens)
+	}
+}
+
+// llama.cpp 的 prompt_n(非缓存)和 cache_n(命中缓存)互斥,cache_n 是独立桶,
+// prompt_n>=cache_n 时也绝不能减。behavior change: 旧盲减在 1478>=500 时误减到 978。
+func TestBackend_StreamResponse_LlamaTimingsCacheNotSubtracted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(
+			"data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"object\":\"chat.completion.chunk\",\"timings\":{\"cache_n\":500,\"prompt_n\":1478,\"predicted_n\":32}}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	ch := makeChannel(upstream.URL)
+	rctx, _ := newPassthroughTestCtx(t, []byte(`{"model":"qwen","messages":[],"stream":true}`), true)
+	backend := &Backend{Agent: nil}
+
+	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "qwen"})
+	if got.Err != nil {
+		t.Fatalf("unexpected Err: %v", got.Err)
+	}
+	if got.PromptTokens != 1478 || got.CompletionTokens != 32 || got.CacheReadTokens != 500 {
+		t.Errorf("usage = (p=%d,c=%d,cr=%d), want (1478,32,500) — mutually-exclusive cache must not be subtracted",
+			got.PromptTokens, got.CompletionTokens, got.CacheReadTokens)
 	}
 }
 

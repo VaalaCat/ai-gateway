@@ -14,7 +14,7 @@ type TraceRequest struct {
 
 func (h *Handler) GetTrace(c *app.Context, req TraceRequest) ([]*models.UsageLogTrace, error) {
 	scope := middleware.GetScope(c.Context)
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	// For normal users, verify ownership via usage_log

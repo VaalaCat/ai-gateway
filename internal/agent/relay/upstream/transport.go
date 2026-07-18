@@ -119,6 +119,29 @@ func (p *transportPool) build(ch *models.Channel) *http.Transport {
 func (p *transportPool) Invalidate(channelID uint, oldProxyURL string) {
 	k := transportKey(channelID, oldProxyURL)
 	p.mu.Lock()
+	transport := p.transports[k]
 	delete(p.transports, k)
 	p.mu.Unlock()
+	if transport != nil {
+		transport.CloseIdleConnections()
+	}
+}
+
+func (p *transportPool) CloseIdleConnections() {
+	p.mu.Lock()
+	transports := make([]*http.Transport, 0, len(p.transports))
+	for key, transport := range p.transports {
+		transports = append(transports, transport)
+		delete(p.transports, key)
+	}
+	p.mu.Unlock()
+	for _, transport := range transports {
+		transport.CloseIdleConnections()
+	}
+}
+
+func (p *transportPool) ResourceCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.transports)
 }

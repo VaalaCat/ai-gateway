@@ -19,7 +19,7 @@ type PublicConfigResponse struct {
 
 // PublicConfig 暴露登录前/登录后前端都需要的平台开关。公开端点,无鉴权。
 func (h *Handler) PublicConfig(c *app.Context, _ api.EmptyRequest) (PublicConfigResponse, error) {
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	return PublicConfigResponse{
 		RegistrationEnabled: q.Setting().LookupBool("registration_enabled", false),
 		InviteEnabled:       q.Setting().LookupBool(consts.SettingKeyInviteEnabled, false),

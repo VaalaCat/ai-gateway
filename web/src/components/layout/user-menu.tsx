@@ -84,6 +84,7 @@ export function UserMenu() {
 
       {profile && (
         <ProfileFormDialog
+          key={`menu-profile-${profile.id}-${editOpen}`}
           mode="self"
           open={editOpen}
           onOpenChange={setEditOpen}

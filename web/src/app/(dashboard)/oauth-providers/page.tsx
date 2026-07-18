@@ -163,11 +163,13 @@ export default function OAuthProvidersPage() {
         }
       />
       <ProviderFormDialog
+        key={`create-${createOpen}`}
         mode="create"
         open={createOpen}
         onOpenChange={setCreateOpen}
       />
       <ProviderFormDialog
+        key={`edit-${editing?.id ?? "none"}`}
         mode="edit"
         open={!!editing}
         onOpenChange={(o) => !o && setEditing(null)}

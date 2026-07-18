@@ -53,7 +53,7 @@ function AdminBYOKPageInner() {
   const [confirmDisableId, setConfirmDisableId] = useState<number | null>(null);
 
   const { data: typesData } = useBYOKSupportedTypes();
-  const byokTypes = typesData?.types ?? [];
+  const byokTypes = useMemo(() => typesData?.types ?? [], [typesData?.types]);
 
   const filterSpec = useMemo(() => ({
     search: { kind: "text", placeholder: tByok("searchNameOrModel") },

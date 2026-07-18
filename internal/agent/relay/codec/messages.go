@@ -129,3 +129,18 @@ func NormalizeAssistantToolCallSequence(messages []Message) []Message {
 	}
 	return out
 }
+
+// DropEmptyTextBlocks 返回去掉「空文本块」后的新 slice。空文本块指 Type==Text、非 RawJSON
+// 且 Text=="" 的结构化块——OpenAI 兼容上游(如 SGLang)会拒绝 {"type":"text"} 这种缺/空
+// text 字段的块。RawJSON 透传块(Type 为空)、图片/工具等非文本块一律原样保留。
+// 不原地修改入参。
+func DropEmptyTextBlocks(blocks []ContentBlock) []ContentBlock {
+	out := make([]ContentBlock, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type == ContentTypeText && b.RawJSON == nil && b.Text == "" {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}

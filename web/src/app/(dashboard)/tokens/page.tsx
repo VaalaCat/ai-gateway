@@ -52,6 +52,7 @@ import {
 import { DateTimePicker } from "@/components/business/date-picker/date-time-picker";
 
 import { useBillingOverview, useTokenBilling } from "@/lib/api/billing";
+import { useCapabilities } from "@/lib/api/capabilities";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { buildQuery } from "@/lib/api/client";
 import { useTokens, useCreateToken, useUpdateToken, useDeleteToken } from "@/lib/api/tokens";
@@ -101,6 +102,9 @@ function TokensPageContent() {
   const tTpl = useTranslations("tokenTemplates");
 
   const { user, isAdmin, loading } = useAuth();
+  const capabilities = useCapabilities();
+  const canEditModelWhitelist =
+    capabilities.data?.token.can_edit_model_whitelist === true;
 
   const searchParams = useSearchParams();
 
@@ -285,6 +289,7 @@ function TokensPageContent() {
           status: Number(editForm.status),
           trace_enabled: editForm.trace_enabled,
           byok_only: editForm.byok_only,
+          ...(canEditModelWhitelist ? { models: editForm.models } : {}),
         });
       }
       toast.success(tc("success"));
@@ -752,25 +757,29 @@ function TokensPageContent() {
               />
             </div>
             <StatusSelect value={editForm.status} onChange={(v) => setEditForm({ ...editForm, status: v })} />
-            {isAdmin && (
+            {(isAdmin || canEditModelWhitelist) && (
               <>
-                <div className="space-y-2">
-                  <Label>{t("user")} ID</Label>
-                  <EntityPicker
-                    entity="user"
-                    value={editForm.user_id}
-                    onChange={(v) => setEditForm({ ...editForm, user_id: v })}
-                  />
-                  <p className="text-meta text-muted-foreground">{t("ownerChangeHint")}</p>
-                </div>
-                <div className="space-y-2">
-                  <Label>{t("expiredAt")}</Label>
-                  <DateTimePicker
-                    value={editForm.expired_at ? Number(editForm.expired_at) : null}
-                    onChange={(v) => setEditForm({ ...editForm, expired_at: v ? String(v) : "" })}
-                    placeholder={t("expiredAt")}
-                  />
-                </div>
+                {isAdmin && (
+                  <>
+                    <div className="space-y-2">
+                      <Label>{t("user")} ID</Label>
+                      <EntityPicker
+                        entity="user"
+                        value={editForm.user_id}
+                        onChange={(v) => setEditForm({ ...editForm, user_id: v })}
+                      />
+                      <p className="text-meta text-muted-foreground">{t("ownerChangeHint")}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>{t("expiredAt")}</Label>
+                      <DateTimePicker
+                        value={editForm.expired_at ? Number(editForm.expired_at) : null}
+                        onChange={(v) => setEditForm({ ...editForm, expired_at: v ? String(v) : "" })}
+                        placeholder={t("expiredAt")}
+                      />
+                    </div>
+                  </>
+                )}
                 <div className="space-y-2">
                   <Label>{t("models")}</Label>
                   <TagInput
@@ -779,16 +788,18 @@ function TokensPageContent() {
                     placeholder={t("allModels")}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label>{tTpl("allowedChannels")}</Label>
-                  <EntityMultiPicker
-                    entity="channel"
-                    value={editForm.allowed_channel_ids.map(String)}
-                    onChange={(vals) => setEditForm({ ...editForm, allowed_channel_ids: vals.map(Number) })}
-                    placeholder={tTpl("allowedChannelsPlaceholder")}
-                  />
-                  <p className="text-meta text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>
-                </div>
+                {isAdmin && (
+                  <div className="space-y-2">
+                    <Label>{tTpl("allowedChannels")}</Label>
+                    <EntityMultiPicker
+                      entity="channel"
+                      value={editForm.allowed_channel_ids.map(String)}
+                      onChange={(vals) => setEditForm({ ...editForm, allowed_channel_ids: vals.map(Number) })}
+                      placeholder={tTpl("allowedChannelsPlaceholder")}
+                    />
+                    <p className="text-meta text-muted-foreground">{tTpl("allowedChannelsEmptyHint")}</p>
+                  </div>
+                )}
               </>
             )}
             <div className="flex items-center justify-between">

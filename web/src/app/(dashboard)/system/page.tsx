@@ -49,7 +49,13 @@ import {
 import { RefreshCw, Trash2, Database, Server, Activity, Settings } from "lucide-react";
 import { toast } from "sonner";
 import { BYOKSettingsCard } from "@/components/system/byok-settings";
+import { AgentRelaySettings } from "@/components/system/agent-relay-settings";
+import { SettingNumberInput } from "@/components/system/setting-number-input";
 import { formatFileSize, formatUptime } from "@/lib/utils/format";
+import {
+  humanizeSettingNumber,
+  type SettingNumberKind,
+} from "@/lib/utils/system-setting-number";
 
 // SettingsGroup 是设置卡内的一个语义小节:小标题 + 内容。
 function SettingsGroup({
@@ -97,6 +103,9 @@ function NumField({
   value,
   min,
   max,
+  step,
+  unit,
+  humanizeAs,
   onChange,
 }: {
   label: string;
@@ -104,19 +113,27 @@ function NumField({
   value: string;
   min: number;
   max: number;
+  step?: number;
+  unit?: string;
+  humanizeAs?: SettingNumberKind;
   onChange: (v: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
       <Label>{label}</Label>
       <p className="text-label text-muted-foreground">{desc}</p>
-      <Input
+      <SettingNumberInput
         type="number"
         min={min}
         max={max}
+        step={step}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="w-full sm:w-[160px]"
+        unit={unit}
+        humanReadable={
+          humanizeAs ? humanizeSettingNumber(value, humanizeAs) : undefined
+        }
       />
     </div>
   );
@@ -143,6 +160,8 @@ export default function SystemMaintenancePage() {
   const [rateLimiterEnabledInput, setRateLimiterEnabledInput] = useState<boolean | null>(null);
   const [sseKeepaliveInput, setSseKeepaliveInput] = useState<string | null>(null);
   const [queueTimeInput, setQueueTimeInput] = useState<string | null>(null);
+  const [tokenModelWhitelistSelfServiceInput, setTokenModelWhitelistSelfServiceInput] =
+    useState<boolean | null>(null);
   const [cleanupTarget, setCleanupTarget] = useState("traces");
   const [retainDays, setRetainDays] = useState(30);
   const [showPreview, setShowPreview] = useState(false);
@@ -268,6 +287,13 @@ export default function SystemMaintenancePage() {
   const displayQueueTime = queueTimeInput ?? String(currentQueueTime);
   const queueTimeHasChanges = displayQueueTime !== String(currentQueueTime);
 
+  const currentTokenModelWhitelistSelfService =
+    settings?.settings?.token_model_whitelist_self_service === "true";
+  const displayTokenModelWhitelistSelfService =
+    tokenModelWhitelistSelfServiceInput ?? currentTokenModelWhitelistSelfService;
+  const tokenModelWhitelistSelfServiceHasChanges =
+    displayTokenModelWhitelistSelfService !== currentTokenModelWhitelistSelfService;
+
   const currentAutoCreate = settings?.settings?.oauth_auto_create === "true";
   const [autoCreateInput, setAutoCreateInput] = useState<boolean | null>(null);
   const displayAutoCreate = autoCreateInput ?? currentAutoCreate;
@@ -287,6 +313,42 @@ export default function SystemMaintenancePage() {
   const [inviteMaxUsesInput, setInviteMaxUsesInput] = useState<string | null>(null);
   const displayInviteMaxUses = inviteMaxUsesInput ?? currentInviteMaxUses;
   const inviteMaxUsesHasChanges = displayInviteMaxUses !== currentInviteMaxUses;
+
+  // 图片内联抓取(image inline fetch)设置。ssrf guard 默认开启("1"),存 "1"/"0" 字符串。
+  const [imageInlineFetchTimeoutSecInput, setImageInlineFetchTimeoutSecInput] = useState<string | null>(null);
+  const [imageInlineMaxBytesInput, setImageInlineMaxBytesInput] = useState<string | null>(null);
+  const [imageInlineConcurrencyInput, setImageInlineConcurrencyInput] = useState<string | null>(null);
+  const [imageInlineSsrfGuardInput, setImageInlineSsrfGuardInput] = useState<boolean | null>(null);
+  const [imageInlineHostAllowlistInput, setImageInlineHostAllowlistInput] = useState<string | null>(null);
+
+  const currentImageInlineFetchTimeoutSec = settings?.settings?.image_inline_fetch_timeout_sec
+    ? Number(settings.settings.image_inline_fetch_timeout_sec)
+    : 10;
+  const displayImageInlineFetchTimeoutSec =
+    imageInlineFetchTimeoutSecInput ?? String(currentImageInlineFetchTimeoutSec);
+  const imageInlineFetchTimeoutSecHasChanges =
+    displayImageInlineFetchTimeoutSec !== String(currentImageInlineFetchTimeoutSec);
+
+  const currentImageInlineMaxBytes = settings?.settings?.image_inline_max_bytes
+    ? Number(settings.settings.image_inline_max_bytes)
+    : 10485760;
+  const displayImageInlineMaxBytes = imageInlineMaxBytesInput ?? String(currentImageInlineMaxBytes);
+  const imageInlineMaxBytesHasChanges = displayImageInlineMaxBytes !== String(currentImageInlineMaxBytes);
+
+  const currentImageInlineConcurrency = settings?.settings?.image_inline_concurrency
+    ? Number(settings.settings.image_inline_concurrency)
+    : 4;
+  const displayImageInlineConcurrency = imageInlineConcurrencyInput ?? String(currentImageInlineConcurrency);
+  const imageInlineConcurrencyHasChanges = displayImageInlineConcurrency !== String(currentImageInlineConcurrency);
+
+  const currentImageInlineSsrfGuard = settings?.settings?.image_inline_ssrf_guard !== "0";
+  const displayImageInlineSsrfGuard = imageInlineSsrfGuardInput ?? currentImageInlineSsrfGuard;
+  const imageInlineSsrfGuardHasChanges = displayImageInlineSsrfGuard !== currentImageInlineSsrfGuard;
+
+  const currentImageInlineHostAllowlist = settings?.settings?.image_inline_host_allowlist ?? "";
+  const displayImageInlineHostAllowlist = imageInlineHostAllowlistInput ?? currentImageInlineHostAllowlist;
+  const imageInlineHostAllowlistHasChanges =
+    displayImageInlineHostAllowlist !== currentImageInlineHostAllowlist;
 
   const hasChanges =
     traceHasChanges ||
@@ -309,8 +371,14 @@ export default function SystemMaintenancePage() {
     rateLimiterEnabledHasChanges ||
     sseKeepaliveHasChanges ||
     queueTimeHasChanges ||
+    tokenModelWhitelistSelfServiceHasChanges ||
     pricingPriorityHasChanges ||
-    pricingThresholdHasChanges;
+    pricingThresholdHasChanges ||
+    imageInlineFetchTimeoutSecHasChanges ||
+    imageInlineMaxBytesHasChanges ||
+    imageInlineConcurrencyHasChanges ||
+    imageInlineSsrfGuardHasChanges ||
+    imageInlineHostAllowlistHasChanges;
 
   const handleSaveSettings = () => {
     const updates: Record<string, string> = {};
@@ -426,6 +494,11 @@ export default function SystemMaintenancePage() {
       }
       updates.queue_time_ms = String(n);
     }
+    if (tokenModelWhitelistSelfServiceHasChanges) {
+      updates.token_model_whitelist_self_service = String(
+        displayTokenModelWhitelistSelfService,
+      );
+    }
     if (affinityHasChanges) {
       updates.affinity_enabled = displayAffinityEnabled ? "1" : "0";
       updates.affinity_ttl_sec = String(parseInt(displayAffinityTTL, 10) || 300);
@@ -435,6 +508,21 @@ export default function SystemMaintenancePage() {
     }
     if (pricingThresholdHasChanges) {
       updates.pricing_disagreement_threshold = displayPricingThreshold;
+    }
+    if (imageInlineFetchTimeoutSecHasChanges) {
+      updates.image_inline_fetch_timeout_sec = String(displayImageInlineFetchTimeoutSec);
+    }
+    if (imageInlineMaxBytesHasChanges) {
+      updates.image_inline_max_bytes = String(displayImageInlineMaxBytes);
+    }
+    if (imageInlineConcurrencyHasChanges) {
+      updates.image_inline_concurrency = String(displayImageInlineConcurrency);
+    }
+    if (imageInlineSsrfGuardHasChanges) {
+      updates.image_inline_ssrf_guard = displayImageInlineSsrfGuard ? "1" : "0";
+    }
+    if (imageInlineHostAllowlistHasChanges) {
+      updates.image_inline_host_allowlist = displayImageInlineHostAllowlist;
     }
     if (Object.keys(updates).length === 0) return;
 
@@ -464,8 +552,14 @@ export default function SystemMaintenancePage() {
           setRateLimiterEnabledInput(null);
           setSseKeepaliveInput(null);
           setQueueTimeInput(null);
+          setTokenModelWhitelistSelfServiceInput(null);
           setPricingPriorityInput(null);
           setPricingThresholdInput(null);
+          setImageInlineFetchTimeoutSecInput(null);
+          setImageInlineMaxBytesInput(null);
+          setImageInlineConcurrencyInput(null);
+          setImageInlineSsrfGuardInput(null);
+          setImageInlineHostAllowlistInput(null);
         },
         onError: () => {
           toast.error(t("settingsSaveFailed"));
@@ -581,6 +675,10 @@ export default function SystemMaintenancePage() {
           <CardDescription>{t("settingsDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          <AgentRelaySettings />
+
+          <Separator />
+
           {/* 渠道重试与熔断 */}
           <SettingsGroup title={t("resilienceDefaults")}>
             <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
@@ -590,6 +688,8 @@ export default function SystemMaintenancePage() {
                 value={displayFallbackSleep}
                 min={0}
                 max={60000}
+                unit="ms"
+                humanizeAs="milliseconds"
                 onChange={setFallbackSleepInput}
               />
               <NumField
@@ -614,6 +714,8 @@ export default function SystemMaintenancePage() {
                 value={displayRetryBackoffBase}
                 min={0}
                 max={60000}
+                unit="ms"
+                humanizeAs="milliseconds"
                 onChange={setRetryBackoffBaseInput}
               />
               <NumField
@@ -622,6 +724,8 @@ export default function SystemMaintenancePage() {
                 value={displayRetryBackoffMax}
                 min={0}
                 max={60000}
+                unit="ms"
+                humanizeAs="milliseconds"
                 onChange={setRetryBackoffMaxInput}
               />
               <div className="sm:col-span-2">
@@ -646,6 +750,8 @@ export default function SystemMaintenancePage() {
                 value={displayBreakerCooldown}
                 min={0}
                 max={3600000}
+                unit="ms"
+                humanizeAs="milliseconds"
                 onChange={setBreakerCooldownInput}
               />
             </div>
@@ -662,6 +768,8 @@ export default function SystemMaintenancePage() {
                 value={displayMinQuotaReserve}
                 min={0}
                 max={1000000000}
+                unit="quota"
+                humanizeAs="quota"
                 onChange={setMinQuotaReserveInput}
               />
             </div>
@@ -685,6 +793,8 @@ export default function SystemMaintenancePage() {
                   value={displaySseKeepalive}
                   min={1000}
                   max={60000}
+                  unit="ms"
+                  humanizeAs="milliseconds"
                   onChange={setSseKeepaliveInput}
                 />
                 <NumField
@@ -693,6 +803,8 @@ export default function SystemMaintenancePage() {
                   value={displayQueueTime}
                   min={0}
                   max={600000}
+                  unit="ms"
+                  humanizeAs="milliseconds"
                   onChange={setQueueTimeInput}
                 />
               </div>
@@ -712,18 +824,16 @@ export default function SystemMaintenancePage() {
                 className="w-full max-w-md"
               />
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">{t("pricingDisagreementThreshold")}</Label>
-              <Input
-                type="number"
-                step="0.05"
-                min="0"
-                max="1"
-                value={displayPricingThreshold}
-                onChange={(e) => setPricingThresholdInput(e.target.value)}
-                className="w-full sm:w-[160px]"
-              />
-            </div>
+            <NumField
+              label={t("pricingDisagreementThreshold")}
+              desc={t("pricingDisagreementThresholdDesc")}
+              value={displayPricingThreshold}
+              min={0}
+              max={1}
+              step={0.05}
+              humanizeAs="ratio"
+              onChange={setPricingThresholdInput}
+            />
           </SettingsGroup>
 
           <Separator />
@@ -743,6 +853,8 @@ export default function SystemMaintenancePage() {
                 value={displayAffinityTTL}
                 min={0}
                 max={86400}
+                unit="s"
+                humanizeAs="seconds"
                 onChange={setAffinityTTLInput}
               />
             )}
@@ -753,23 +865,16 @@ export default function SystemMaintenancePage() {
           {/* 诊断 Trace */}
           <SettingsGroup title={t("secTrace")}>
             <div className="space-y-1.5">
-              <Label>{t("traceMaxBodySize")}</Label>
-              <p className="text-label text-muted-foreground">
-                {t("traceMaxBodySizeDesc")}
-              </p>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  min={4}
-                  max={16384}
-                  value={displayKB}
-                  onChange={(e) => setTraceMaxBodyKB(Number(e.target.value))}
-                  className="w-full sm:w-[160px]"
-                />
-                <span className="text-label text-muted-foreground">
-                  {t("traceMaxBodySizeUnit")}
-                </span>
-              </div>
+              <NumField
+                label={t("traceMaxBodySize")}
+                desc={t("traceMaxBodySizeDesc")}
+                value={String(displayKB)}
+                min={4}
+                max={16384}
+                unit={t("traceMaxBodySizeUnit")}
+                humanizeAs="kilobytes"
+                onChange={(value) => setTraceMaxBodyKB(Number(value))}
+              />
               <p className="text-meta text-muted-foreground">
                 {t("traceMaxBodySizeRange")}
               </p>
@@ -791,6 +896,17 @@ export default function SystemMaintenancePage() {
               desc={t("oauthAutoCreateDesc")}
               checked={displayAutoCreate}
               onChange={setAutoCreateInput}
+            />
+          </SettingsGroup>
+
+          <Separator />
+
+          <SettingsGroup title={t("secTokenPermissions")}>
+            <SwitchRow
+              label={t("tokenModelWhitelistSelfService")}
+              desc={t("tokenModelWhitelistSelfServiceDesc")}
+              checked={displayTokenModelWhitelistSelfService}
+              onChange={setTokenModelWhitelistSelfServiceInput}
             />
           </SettingsGroup>
 
@@ -840,6 +956,61 @@ export default function SystemMaintenancePage() {
                 placeholder={t("proxyUrlPlaceholder")}
                 value={displayProxyUrl}
                 onChange={(e) => setProxyUrlInput(e.target.value)}
+                className="w-full max-w-md"
+              />
+            </div>
+          </SettingsGroup>
+
+          <Separator />
+
+          {/* 图片内联抓取 */}
+          <SettingsGroup title={t("secImageInline")}>
+            <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+              <NumField
+                label={t("imageInlineFetchTimeoutSec")}
+                desc={t("imageInlineFetchTimeoutSecDesc")}
+                value={displayImageInlineFetchTimeoutSec}
+                min={1}
+                max={300}
+                unit="s"
+                humanizeAs="seconds"
+                onChange={setImageInlineFetchTimeoutSecInput}
+              />
+              <NumField
+                label={t("imageInlineMaxBytes")}
+                desc={t("imageInlineMaxBytesDesc")}
+                value={displayImageInlineMaxBytes}
+                min={1024}
+                max={104857600}
+                unit="bytes"
+                humanizeAs="bytes"
+                onChange={setImageInlineMaxBytesInput}
+              />
+              <NumField
+                label={t("imageInlineConcurrency")}
+                desc={t("imageInlineConcurrencyDesc")}
+                value={displayImageInlineConcurrency}
+                min={1}
+                max={32}
+                onChange={setImageInlineConcurrencyInput}
+              />
+            </div>
+            <SwitchRow
+              label={t("imageInlineSsrfGuard")}
+              desc={t("imageInlineSsrfGuardDesc")}
+              checked={displayImageInlineSsrfGuard}
+              onChange={setImageInlineSsrfGuardInput}
+            />
+            <div className="space-y-1.5">
+              <Label>{t("imageInlineHostAllowlist")}</Label>
+              <p className="text-label text-muted-foreground">
+                {t("imageInlineHostAllowlistDesc")}
+              </p>
+              <Input
+                type="text"
+                placeholder="example.com,*.internal.com"
+                value={displayImageInlineHostAllowlist}
+                onChange={(e) => setImageInlineHostAllowlistInput(e.target.value)}
                 className="w-full max-w-md"
               />
             </div>

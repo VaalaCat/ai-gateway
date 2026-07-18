@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/google/uuid"
+	"github.com/sourcegraph/conc"
 	"go.uber.org/zap"
 )
 
@@ -63,6 +65,7 @@ func (j *RebuildJob) Snapshot() RebuildJob {
 // dao.RebuildHourSlice via RebuildRunner.SetSliceFn (T3.4 default fallback
 // uses dao.RebuildHourSlice when app is non-nil).
 type SliceFn func(date string, hour int, targets []string, resetDailyForDate bool) (*dao.BillingRebuildResult, error)
+type SliceContextFn func(context.Context, string, int, []string, bool) (*dao.BillingRebuildResult, error)
 
 // RebuildRunner schedules per-(date,hour) rebuild calls in the background.
 // Status lives in memory only — master restart drops all jobs (clients re-poll
@@ -75,9 +78,18 @@ type RebuildRunner struct {
 	logger *zap.Logger
 	retain time.Duration
 
-	sliceFn  SliceFn
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	sliceFn       SliceContextFn
+	stopCh        chan struct{}
+	closeOnce     sync.Once
+	rootCtx       context.Context
+	cancel        context.CancelCauseFunc
+	started       bool
+	closing       bool
+	workers       conc.WaitGroup
+	done          chan struct{}
+	activeWorkers atomic.Int64
+	activeTimers  atomic.Int64
+	inflight      atomic.Int64
 }
 
 // NewRebuildRunner constructs the runner and spawns a gc goroutine for
@@ -85,23 +97,49 @@ type RebuildRunner struct {
 // SetSliceFn must be called before any Submit that should actually persist).
 // retain controls how long terminal jobs stay visible via Get/List.
 func NewRebuildRunner(app dao.AppProvider, logger *zap.Logger, retain time.Duration) *RebuildRunner {
-	r := &RebuildRunner{
+	return &RebuildRunner{
 		jobs:   make(map[string]*RebuildJob),
 		app:    app,
 		logger: logger,
 		retain: retain,
 		stopCh: make(chan struct{}),
+		done:   make(chan struct{}),
 	}
-	go r.gcLoop()
-	return r
 }
 
 // SetSliceFn overrides the per-slice executor. Used by tests; production
 // passes nil and lets run() fall back to dao.RebuildHourSlice (see T3.4).
 func (r *RebuildRunner) SetSliceFn(fn SliceFn) {
+	if fn == nil {
+		r.SetSliceContextFn(nil)
+		return
+	}
+	r.SetSliceContextFn(func(_ context.Context, date string, hour int, targets []string, reset bool) (*dao.BillingRebuildResult, error) {
+		return fn(date, hour, targets, reset)
+	})
+}
+
+func (r *RebuildRunner) SetSliceContextFn(fn SliceContextFn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sliceFn = fn
+}
+
+func (r *RebuildRunner) Start(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started || r.closing || ctx == nil {
+		return
+	}
+	r.started = true
+	r.rootCtx, r.cancel = context.WithCancelCause(ctx)
+	r.activeWorkers.Add(1)
+	r.activeTimers.Add(1)
+	r.workers.Go(func() {
+		defer r.activeWorkers.Add(-1)
+		defer r.activeTimers.Add(-1)
+		r.gcLoop()
+	})
 }
 
 // Submit registers a new job and starts its goroutine. Returns immediately
@@ -122,7 +160,12 @@ func (r *RebuildRunner) Submit(filter dao.BillingRebuildFilter) (*RebuildJob, er
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	r.mu.Lock()
+	if r.closing || !r.started {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("rebuild runner not accepting jobs")
+	}
+	ctx, cancel := context.WithCancel(r.rootCtx)
 	job := &RebuildJob{
 		ID:          uuid.NewString(),
 		Filter:      filter,
@@ -131,11 +174,13 @@ func (r *RebuildRunner) Submit(filter dao.BillingRebuildFilter) (*RebuildJob, er
 		StartedAt:   time.Now().Unix(),
 		cancel:      cancel,
 	}
-	r.mu.Lock()
 	r.jobs[job.ID] = job
+	r.activeWorkers.Add(1)
+	r.workers.Go(func() {
+		defer r.activeWorkers.Add(-1)
+		r.run(ctx, job, days)
+	})
 	r.mu.Unlock()
-
-	go r.run(ctx, job, days)
 	return job, nil
 }
 
@@ -217,8 +262,8 @@ func (r *RebuildRunner) run(ctx context.Context, job *RebuildJob, days []string)
 		}
 		// Default production path: dao.RebuildHourSlice on a fresh per-call
 		// context, so each slice gets its own transaction.
-		fn = func(date string, hour int, targets []string, resetDaily bool) (*dao.BillingRebuildResult, error) {
-			return dao.NewAdminMutation(dao.NewContext(r.app)).Billing().RebuildHourSlice(date, hour, targets, resetDaily)
+		fn = func(ctx context.Context, date string, hour int, targets []string, resetDaily bool) (*dao.BillingRebuildResult, error) {
+			return dao.NewAdminMutation(dao.NewContextWithContext(r.app, ctx)).Billing().RebuildHourSlice(date, hour, targets, resetDaily)
 		}
 	}
 
@@ -233,7 +278,9 @@ func (r *RebuildRunner) run(ctx context.Context, job *RebuildJob, days []string)
 				job.mu.Unlock()
 				return
 			}
-			res, err := fn(d, h, job.Filter.Targets, h == 0)
+			r.inflight.Add(1)
+			res, err := fn(ctx, d, h, job.Filter.Targets, h == 0)
+			r.inflight.Add(-1)
 			if err != nil {
 				job.mu.Lock()
 				job.Status = JobStatusFailed
@@ -271,7 +318,7 @@ func (r *RebuildRunner) gcLoop() {
 		select {
 		case <-ticker.C:
 			r.gc()
-		case <-r.stopCh:
+		case <-r.rootCtx.Done():
 			return
 		}
 	}
@@ -299,17 +346,42 @@ func (r *RebuildRunner) gc() {
 // and stops the gc loop. Idempotent + concurrent-safe via sync.Once.
 // Returns after issuing cancel signals; in-flight goroutines mark themselves
 // canceled at their next ctx check.
-func (r *RebuildRunner) Stop() {
-	r.stopOnce.Do(func() {
-		close(r.stopCh)
-	})
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, j := range r.jobs {
-		j.mu.Lock()
-		if j.Status == JobStatusRunning && j.cancel != nil {
-			j.cancel()
-		}
-		j.mu.Unlock()
+func (r *RebuildRunner) Close(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("rebuild runner: nil close context")
 	}
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closing = true
+		close(r.stopCh)
+		if r.cancel != nil {
+			r.cancel(context.Cause(ctx))
+		}
+		for _, j := range r.jobs {
+			j.mu.Lock()
+			if j.Status == JobStatusRunning && j.cancel != nil {
+				j.cancel()
+			}
+			j.mu.Unlock()
+		}
+		r.mu.Unlock()
+		go func() {
+			r.workers.Wait()
+			close(r.done)
+		}()
+	})
+	select {
+	case <-r.done:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (r *RebuildRunner) Stop(ctx context.Context) error { return r.Close(ctx) }
+
+func (r *RebuildRunner) Done() <-chan struct{} { return r.done }
+
+func (r *RebuildRunner) ResourceCounts() app.ResourceCounts {
+	return app.ResourceCounts{LifecycleWorkers: r.activeWorkers.Load(), Timers: r.activeTimers.Load(), Inflight: r.inflight.Load()}
 }

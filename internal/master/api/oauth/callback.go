@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"net/http"
@@ -43,7 +44,7 @@ func (h *Handler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	p, err := h.lookupEnabledProvider(providerName)
+	p, err := h.lookupEnabledProvider(c.Request.Context(), providerName)
 	if err != nil || p.ID != entry.ProviderID {
 		h.redirectLoginError(c, ErrUnknownProvider)
 		return
@@ -83,7 +84,7 @@ func (h *Handler) HandleCallback(c *gin.Context) {
 }
 
 func (h *Handler) handleLoginCallback(c *gin.Context, p *models.OAuthProvider, info *UserinfoPayload, entry *StateEntry) {
-	q := dao.NewAdminQuery(dao.NewContext(h.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(h.App, c.Request.Context()))
 	ident, found, err := q.OAuthIdentity().GetByProviderSubject(p.ID, info.Sub)
 	if err != nil {
 		h.redirectLoginError(c, ErrUserinfoFailed)
@@ -96,7 +97,7 @@ func (h *Handler) handleLoginCallback(c *gin.Context, p *models.OAuthProvider, i
 		}
 		// orphan: 关联 user 已被删，静默清掉该 user_id 下全部 identities，
 		// fallthrough 走未绑定分支让用户重新创建或绑定本地账号。
-		m := dao.NewAdminMutation(dao.NewContext(h.App))
+		m := dao.NewAdminMutation(dao.NewContextWithContext(h.App, c.Request.Context()))
 		_ = m.OAuthIdentity().DeleteByUserID(ident.UserID)
 	}
 
@@ -119,14 +120,14 @@ func (h *Handler) handleLoginCallback(c *gin.Context, p *models.OAuthProvider, i
 	}
 
 	dest := "/oauth/bind"
-	if h.readAutoCreateSetting() {
+	if h.readAutoCreateSetting(c.Request.Context()) {
 		dest = "/oauth/choose"
 	}
 	c.Redirect(http.StatusFound, dest+"?ticket="+url.QueryEscape(tk))
 }
 
 func (h *Handler) completeLogin(c *gin.Context, userID uint, returnTo string) {
-	q := dao.NewAdminQuery(dao.NewContext(h.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(h.App, c.Request.Context()))
 	user, err := q.User().GetByID(userID)
 	if err != nil {
 		h.redirectLoginError(c, ErrUserinfoFailed)
@@ -148,15 +149,15 @@ func (h *Handler) completeLogin(c *gin.Context, userID uint, returnTo string) {
 	c.Redirect(http.StatusFound, loc)
 }
 
-func (h *Handler) readAutoCreateSetting() bool {
-	q := dao.NewAdminQuery(dao.NewContext(h.App))
+func (h *Handler) readAutoCreateSetting(ctx context.Context) bool {
+	q := dao.NewAdminQuery(dao.NewContextWithContext(h.App, ctx))
 	s, found, err := q.Setting().Lookup("oauth_auto_create")
 	return err == nil && found && s.Value == "true"
 }
 
-func (h *Handler) createUserFromClaims(claims BindTicketClaims) (uint, error) {
+func (h *Handler) createUserFromClaims(requestCtx context.Context, claims BindTicketClaims) (uint, error) {
 	var newID uint
-	err := dao.RunInTx[dao.Context](dao.NewContext(h.App), func(ctx dao.Context) error {
+	err := dao.RunInTx[dao.Context](dao.NewContextWithContext(h.App, requestCtx), func(ctx dao.Context) error {
 		q := dao.NewAdminQuery(ctx)
 		info := UserinfoPayload{
 			Sub:               claims.Subject,
@@ -216,7 +217,7 @@ func (h *Handler) createUserFromClaims(claims BindTicketClaims) (uint, error) {
 }
 
 func (h *Handler) handleLinkCallback(c *gin.Context, p *models.OAuthProvider, info *UserinfoPayload, entry *StateEntry) {
-	q := dao.NewAdminQuery(dao.NewContext(h.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(h.App, c.Request.Context()))
 	ident, found, err := q.OAuthIdentity().GetByProviderSubject(p.ID, info.Sub)
 	if err != nil {
 		h.redirectError(c, "/profile", ErrUserinfoFailed)
@@ -230,7 +231,7 @@ func (h *Handler) handleLinkCallback(c *gin.Context, p *models.OAuthProvider, in
 		h.redirectError(c, "/profile", ErrAlreadyLinked)
 		return
 	}
-	m := dao.NewAdminMutation(dao.NewContext(h.App))
+	m := dao.NewAdminMutation(dao.NewContextWithContext(h.App, c.Request.Context()))
 	newIdent := &models.OAuthIdentity{
 		UserID: entry.UserID, ProviderID: p.ID, Subject: info.Sub,
 		Email: info.Email, DisplayName: info.Name,

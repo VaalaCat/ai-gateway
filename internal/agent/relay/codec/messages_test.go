@@ -1,6 +1,7 @@
 package codec_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -366,4 +367,49 @@ func extractText(m codec.Message) string {
 		}
 	}
 	return sb.String()
+}
+
+func TestDropEmptyTextBlocks_RemovesEmptyKeepsReal(t *testing.T) {
+	in := []codec.ContentBlock{
+		{Type: codec.ContentTypeText, Text: ""},
+		{Type: codec.ContentTypeText, Text: "Hello!"},
+	}
+	got := codec.DropEmptyTextBlocks(in)
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Text != "Hello!" {
+		t.Errorf("kept block text = %q, want %q", got[0].Text, "Hello!")
+	}
+}
+
+func TestDropEmptyTextBlocks_KeepsNonTextAndRawJSON(t *testing.T) {
+	in := []codec.ContentBlock{
+		{Type: codec.ContentTypeText, Text: ""},                                // dropped
+		{Type: codec.ContentTypeImage, MediaB64: "abc", MimeType: "image/png"}, // kept: non-text
+		{RawJSON: json.RawMessage(`{"type":"text"}`)},                          // kept: RawJSON passthrough
+	}
+	got := codec.DropEmptyTextBlocks(in)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Type != codec.ContentTypeImage {
+		t.Errorf("block[0] type = %q, want image", got[0].Type)
+	}
+	if got[1].RawJSON == nil {
+		t.Errorf("block[1] RawJSON should be preserved")
+	}
+}
+
+func TestDropEmptyTextBlocks_AllEmptyAndNil(t *testing.T) {
+	allEmpty := []codec.ContentBlock{
+		{Type: codec.ContentTypeText, Text: ""},
+		{Type: codec.ContentTypeText, Text: ""},
+	}
+	if got := codec.DropEmptyTextBlocks(allEmpty); len(got) != 0 {
+		t.Errorf("all-empty: len = %d, want 0", len(got))
+	}
+	if got := codec.DropEmptyTextBlocks(nil); len(got) != 0 {
+		t.Errorf("nil input: len = %d, want 0", len(got))
+	}
 }

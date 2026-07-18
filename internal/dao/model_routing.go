@@ -9,18 +9,20 @@ import (
 
 // ModelRoutingListFilter 定义列表筛选条件。
 type ModelRoutingListFilter struct {
-	Scope  string // "" | "global" | "user"
-	UserID *uint
-	Q      string // 名称模糊搜索
+	Scope   string // "" | "global" | "user" | "token"
+	UserID  *uint
+	TokenID *uint
+	Q       string // 名称模糊搜索
 }
 
 // AdminModelRoutingQuery 定义查询接口。
 type AdminModelRoutingQuery interface {
 	GetByID(id uint) (*models.ModelRouting, error)
-	GetByName(scope string, userID uint, name string) (*models.ModelRouting, error)
+	GetByName(scope string, userID, tokenID uint, name string) (*models.ModelRouting, error)
 	List(opts ListOptions, filter ModelRoutingListFilter) ([]models.ModelRouting, int64, error)
 	ListAllGlobal() ([]models.ModelRouting, error)
 	ListByUser(userID uint) ([]models.ModelRouting, error)
+	ListByToken(tokenID uint) ([]models.ModelRouting, error)
 }
 
 // AdminModelRoutingMutation 定义写入接口。
@@ -28,6 +30,7 @@ type AdminModelRoutingMutation interface {
 	Create(r *models.ModelRouting) *ValidateError
 	Update(id uint, updates map[string]any) *ValidateError
 	Delete(id uint) *ValidateError
+	DeleteByToken(tokenID uint) error
 }
 
 type adminModelRoutingQuery struct{ ctx *baseContext }
@@ -38,10 +41,10 @@ func (q *adminModelRoutingQuery) GetByID(id uint) (*models.ModelRouting, error) 
 	return &r, err
 }
 
-func (q *adminModelRoutingQuery) GetByName(scope string, userID uint, name string) (*models.ModelRouting, error) {
+func (q *adminModelRoutingQuery) GetByName(scope string, userID, tokenID uint, name string) (*models.ModelRouting, error) {
 	var r models.ModelRouting
 	err := q.ctx.GetDB().
-		Where("scope = ? AND user_id = ? AND name = ?", scope, userID, name).
+		Where("scope = ? AND user_id = ? AND token_id = ? AND name = ?", scope, userID, tokenID, name).
 		First(&r).Error
 	return &r, err
 }
@@ -54,6 +57,9 @@ func (q *adminModelRoutingQuery) List(opts ListOptions, filter ModelRoutingListF
 	}
 	if filter.UserID != nil {
 		db = db.Where("user_id = ?", *filter.UserID)
+	}
+	if filter.TokenID != nil {
+		db = db.Where("token_id = ?", *filter.TokenID)
 	}
 	if filter.Q != "" {
 		db = db.Where("name LIKE ?", "%"+filter.Q+"%")
@@ -84,6 +90,15 @@ func (q *adminModelRoutingQuery) ListByUser(userID uint) ([]models.ModelRouting,
 	var rows []models.ModelRouting
 	err := q.ctx.GetDB().
 		Where("scope = ? AND user_id = ?", models.RoutingScopeUser, userID).
+		Order("id DESC").
+		Find(&rows).Error
+	return rows, err
+}
+
+func (q *adminModelRoutingQuery) ListByToken(tokenID uint) ([]models.ModelRouting, error) {
+	var rows []models.ModelRouting
+	err := q.ctx.GetDB().
+		Where("scope = ? AND token_id = ?", models.RoutingScopeToken, tokenID).
 		Order("id DESC").
 		Find(&rows).Error
 	return rows, err
@@ -140,7 +155,7 @@ func (m *adminModelRoutingMutation) Update(id uint, updates map[string]any) *Val
 				next.Remark = s
 				allowed[k] = s
 			}
-		// scope / user_id 不允许 update，此处拦截；handler 层也会过滤。
+			// scope / user_id 不允许 update，此处拦截；handler 层也会过滤。
 		}
 	}
 	if e := ValidateRouting(&next, &daoNameProvider{ctx: m.ctx}); e != nil {
@@ -169,6 +184,12 @@ func (m *adminModelRoutingMutation) Delete(id uint) *ValidateError {
 	return nil
 }
 
+func (m *adminModelRoutingMutation) DeleteByToken(tokenID uint) error {
+	return m.ctx.GetDB().
+		Where("scope = ? AND token_id = ?", models.RoutingScopeToken, tokenID).
+		Delete(&models.ModelRouting{}).Error
+}
+
 // daoNameProvider 实现 NameProvider，通过数据库查询全局命名空间。
 // routingCache / allCache 为请求级缓存，减少 DFS 期间重复查询。
 type daoNameProvider struct {
@@ -186,6 +207,12 @@ func (p *daoNameProvider) HasModel(name string) bool {
 		Where("status = ? AND ',' || models || ',' LIKE ? ESCAPE '\\'",
 			consts.StatusEnabled, "%,"+escaped+",%").
 		Limit(1).Count(&count)
+	return count > 0
+}
+
+func (p *daoNameProvider) HasToken(tokenID uint) bool {
+	var count int64
+	p.ctx.GetDB().Model(&models.Token{}).Where("id = ?", tokenID).Limit(1).Count(&count)
 	return count > 0
 }
 
@@ -217,4 +244,3 @@ func (p *daoNameProvider) AllGlobalRoutings() []*models.ModelRouting {
 	p.allCacheLoaded = true
 	return rs
 }
-

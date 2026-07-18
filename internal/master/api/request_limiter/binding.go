@@ -19,7 +19,7 @@ func (h *Handler) ListBindings(c *app.Context, req ListBindingsRequest) ([]model
 		return nil, api.BadRequestError("invalid limiter_id", err)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	bindings, err := q.LimiterBinding().ListByLimiter(uint(limiterID))
@@ -33,7 +33,7 @@ func (h *Handler) ListBindings(c *app.Context, req ListBindingsRequest) ([]model
 }
 
 func (h *Handler) CreateBinding(c *app.Context, req CreateBindingRequest) (api.Created[models.LimiterBinding], error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -76,7 +76,7 @@ func (h *Handler) DeleteBinding(c *app.Context, req api.IDPathRequest) (api.Stat
 		return api.StatusResponse{}, api.BadRequestError(consts.ErrNotFound, err)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	m := dao.NewAdminMutation(daoCtx)
 
 	if err := m.LimiterBinding().Delete(uint(id)); err != nil {

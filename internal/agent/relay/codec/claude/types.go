@@ -8,18 +8,20 @@ import "encoding/json"
 
 // claudeRequest is the Claude Messages API request JSON structure.
 type claudeRequest struct {
-	Model       string            `json:"model"`
-	MaxTokens   int               `json:"max_tokens"`
-	System      json.RawMessage   `json:"system,omitempty"`
-	Messages    []claudeMessage   `json:"messages"`
-	Stream      bool              `json:"stream,omitempty"`
-	Tools       []any             `json:"tools,omitempty"`
-	ToolChoice  *claudeToolChoice `json:"tool_choice,omitempty"`
-	Temperature *float64          `json:"temperature,omitempty"`
-	TopP        *float64          `json:"top_p,omitempty"`
-	TopK        *int              `json:"top_k,omitempty"`
-	StopSeqs    []string          `json:"stop_sequences,omitempty"`
-	Thinking    *claudeThinking   `json:"thinking,omitempty"`
+	Model        string            `json:"model"`
+	MaxTokens    int               `json:"max_tokens"`
+	System       json.RawMessage   `json:"system,omitempty"`
+	Messages     []claudeMessage   `json:"messages"`
+	Stream       bool              `json:"stream,omitempty"`
+	Tools        []any             `json:"tools,omitempty"`
+	ToolChoice   *claudeToolChoice `json:"tool_choice,omitempty"`
+	Temperature  *float64          `json:"temperature,omitempty"`
+	TopP         *float64          `json:"top_p,omitempty"`
+	TopK         *int              `json:"top_k,omitempty"`
+	StopSeqs     []string          `json:"stop_sequences,omitempty"`
+	ServiceTier  string            `json:"service_tier,omitempty"`
+	InferenceGeo string            `json:"inference_geo,omitempty"`
+	Thinking     *claudeThinking   `json:"thinking,omitempty"`
 }
 
 // claudeToolChoice represents the tool_choice field in Claude's API.

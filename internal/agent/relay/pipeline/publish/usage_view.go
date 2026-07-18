@@ -21,6 +21,7 @@ func ProjectUsageEntry(rctx *state.RelayContext) protocol.UsageLogEntry {
 		return protocol.UsageLogEntry{}
 	}
 	e := projectBase(rctx)
+	projectAgentRoute(&e, rctx)
 	projectByPhase(&e, rctx)
 	attachTraceData(&e, rctx.State.Recorder)
 	if rl := rctx.State.RateLimit; rl != nil {
@@ -30,6 +31,18 @@ func ProjectUsageEntry(rctx *state.RelayContext) protocol.UsageLogEntry {
 		e.RateLimitHits = rl.Hits
 	}
 	return e
+}
+
+func projectAgentRoute(e *protocol.UsageLogEntry, rctx *state.RelayContext) {
+	execution := rctx.State.Execution
+	executionAgentID := ""
+	if execution.ProviderDispatched {
+		executionAgentID = execution.ExecutionAgentID
+	}
+	e.ExecutionAgentID = &executionAgentID
+	e.RouteSourceAgentID = execution.RouteSourceAgentID
+	e.AgentRouteID = execution.AgentRouteID
+	e.AgentRoutePath = string(execution.AgentRoutePath)
 }
 
 // projectBase 装好与 FailPhase 无关的请求级字段：身份 / 模型名 / 时长 / 客户端 IP / inbound 协议。

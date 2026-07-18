@@ -1,6 +1,7 @@
 package insights
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -59,6 +60,22 @@ func agentProviderCtx(application app.Application, isAdmin bool, uid uint) *prov
 		q:  q,
 		s:  dao.Scope{IsAdmin: isAdmin, UserID: uid},
 		db: application.GetDB(),
+	}
+}
+
+func TestNewProviderCtxBindsRequestContextToRawDB(t *testing.T) {
+	_, _, application := newInsightsTestCtx(t)
+	type requestContextKey struct{}
+	key := requestContextKey{}
+	requestCtx := context.WithValue(context.Background(), key, "request")
+
+	ctx := newProviderCtx(requestCtx, application, nil)
+	provider, ok := ctx.(*providerCtx)
+	if !ok {
+		t.Fatalf("newProviderCtx returned %T, want *providerCtx", ctx)
+	}
+	if got := provider.rawDB().Statement.Context.Value(key); got != "request" {
+		t.Fatalf("raw DB context marker = %v, want request", got)
 	}
 }
 

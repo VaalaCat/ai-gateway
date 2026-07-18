@@ -77,3 +77,47 @@ func TestUserRoutingsLoader_RPCError(t *testing.T) {
 		t.Fatalf("err = %v, want %v", err, want)
 	}
 }
+
+func TestTokenRoutingsLoader_FoundEmptyAndPopulated(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		routings map[string]*protocol.SyncedRouting
+	}{
+		{name: "empty", routings: map[string]*protocol.SyncedRouting{}},
+		{name: "populated", routings: map[string]*protocol.SyncedRouting{
+			"smart": {ID: 3, Name: "smart", Scope: "token", TokenID: 9, Enabled: true},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, _ := json.Marshal(protocol.TokenRoutingMap{Routings: tc.routings})
+			cli := &stubWSClient{respond: func(_ string, _ any) (json.RawMessage, error) {
+				return json.Marshal(protocol.FetchEntityResponse{Found: true, Data: payload})
+			}}
+			got, err := (&TokenRoutingsLoader{Client: cli}).Load(context.Background(), 9)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Routings) != len(tc.routings) {
+				t.Fatalf("routings = %+v", got.Routings)
+			}
+			req, _ := cli.lastParams.(protocol.FetchEntityRequest)
+			if req.Entity != "token_routings" || req.Key != "9" {
+				t.Fatalf("params = %+v", req)
+			}
+		})
+	}
+}
+
+func TestTokenRoutingsLoader_NotFoundAndRPCError(t *testing.T) {
+	notFound := &stubWSClient{respond: func(_ string, _ any) (json.RawMessage, error) {
+		return json.Marshal(protocol.FetchEntityResponse{Found: false})
+	}}
+	if _, err := (&TokenRoutingsLoader{Client: notFound}).Load(context.Background(), 1); !errors.Is(err, entitycache.ErrNotFound) {
+		t.Fatalf("not found err = %v", err)
+	}
+	want := errors.New("control closed")
+	failed := &stubWSClient{respond: func(_ string, _ any) (json.RawMessage, error) { return nil, want }}
+	if _, err := (&TokenRoutingsLoader{Client: failed}).Load(context.Background(), 1); !errors.Is(err, want) {
+		t.Fatalf("rpc err = %v", err)
+	}
+}

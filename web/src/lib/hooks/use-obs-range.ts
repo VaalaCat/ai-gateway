@@ -34,7 +34,7 @@ export function useObsRange(defaults?: Partial<ObsRange>): UseObsRange {
   // 派生 — URL 变(浏览器后退/外链跳转)立即同步,不再用 useState 镜像
   const range = useMemo(
     () => resolveRange(sp, defaults),
-    [sp, defaults?.start, defaults?.end, defaults?.gran],
+    [sp, defaults],
   );
 
   const setRange = useCallback(

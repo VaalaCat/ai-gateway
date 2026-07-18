@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { RefreshCw } from "lucide-react";
 
@@ -28,18 +28,6 @@ export default function AgentsCachePage() {
     () => (data?.agents ?? []).filter((a) => a.online).map((a) => a.agent_id),
     [data],
   );
-  const [expanded, setExpanded] = useState<string[]>([]);
-
-  // 首次拿到数据时把 online agent 全部展开；之后由用户交互控制，
-  // 不再随轮询变更覆盖（避免与 user toggle 打架）。
-  const [didInit, setDidInit] = useState(false);
-  useEffect(() => {
-    if (!didInit && data) {
-      setExpanded(defaultExpanded);
-      setDidInit(true);
-    }
-  }, [data, didInit, defaultExpanded]);
-
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -95,8 +83,7 @@ export default function AgentsCachePage() {
             ) : (
               <Accordion
                 type="multiple"
-                value={expanded}
-                onValueChange={setExpanded}
+                defaultValue={defaultExpanded}
                 className="px-2"
               >
                 {data.agents.map((a) => (

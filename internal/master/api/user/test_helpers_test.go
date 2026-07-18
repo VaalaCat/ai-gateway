@@ -23,13 +23,14 @@ func setupUserTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func newUserTestContext(db *gorm.DB) *app.Context {
+func newUserTestContext(t *testing.T, db *gorm.DB) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	testApp := app.NewApplication()
 	testApp.SetDB(db)
 	return &app.Context{
-		Context: ginCtx,
-		App:     testApp,
+		Context:      ginCtx,
+		App:          testApp,
+		OwnerContext: t.Context(),
 	}
 }

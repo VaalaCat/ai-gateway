@@ -44,7 +44,7 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 
 	scope := middleware.GetScope(c.Context)
 	s := toDaoScope(scope)
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 
 	totals, err := q.Stats().LogsTotals(r, s)
 	if err != nil {

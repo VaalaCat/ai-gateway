@@ -152,6 +152,8 @@ func (c *ResponsesCodec) DecodeRequest(r *http.Request) (*codec.Request, error) 
 	req.ToolChoice = parseToolChoiceResponses(raw.ToolChoice)
 	req.ParallelToolCalls = raw.ParallelToolCalls
 	req.Store = raw.Store
+	req.SafetyIdentifier = raw.SafetyIdentifier
+	req.StreamOptions = raw.StreamOptions
 
 	if raw.Reasoning != nil {
 		req.ReasoningEffort = raw.Reasoning.Effort
@@ -188,7 +190,8 @@ func (c *ResponsesCodec) DecodeRequest(r *http.Request) (*codec.Request, error) 
 			"model": true, "input": true, "instructions": true, "stream": true,
 			"max_output_tokens": true, "temperature": true, "top_p": true,
 			"tools": true, "tool_choice": true, "parallel_tool_calls": true,
-			"store": true, "reasoning": true, "include": true,
+			"store": true, "safety_identifier": true, "stream_options": true,
+			"reasoning": true, "include": true,
 			"prompt_cache_key": true, "text": true,
 			"frequency_penalty": true, "presence_penalty": true, "seed": true,
 			"user": true, "service_tier": true, "top_logprobs": true,

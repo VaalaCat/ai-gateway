@@ -16,6 +16,7 @@ type AdminTokenMutation interface {
 	Create(token *models.Token) error
 	Update(id uint, updates map[string]any) error
 	Delete(id uint) error
+	DeleteWithRoutings(id uint) ([]models.ModelRouting, error)
 	DisableAllForUser(userID uint) error
 	BulkSyncFromTemplate(templateID uint, tpl *models.TokenTemplate, f models.SyncFields) (changedIDs []uint, total int, err error)
 }
@@ -66,6 +67,23 @@ func (m *adminTokenMutation) Update(id uint, updates map[string]any) error {
 
 func (m *adminTokenMutation) Delete(id uint) error {
 	return m.ctx.GetDB().Delete(&models.Token{}, id).Error
+}
+
+func (m *adminTokenMutation) DeleteWithRoutings(id uint) (deleted []models.ModelRouting, err error) {
+	err = RunInTx[Context](m.ctx, func(txCtx Context) error {
+		q := NewAdminQuery(txCtx)
+		var listErr error
+		deleted, listErr = q.ModelRouting().ListByToken(id)
+		if listErr != nil {
+			return listErr
+		}
+		m := NewAdminMutation(txCtx)
+		if deleteErr := m.ModelRouting().DeleteByToken(id); deleteErr != nil {
+			return deleteErr
+		}
+		return m.Token().Delete(id)
+	})
+	return deleted, err
 }
 
 func (m *adminTokenMutation) DisableAllForUser(userID uint) error {

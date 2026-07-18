@@ -11,7 +11,7 @@ import (
 )
 
 func (h *Handler) Candidates(c *app.Context, _ struct{}) (CandidatesResponse, error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	// 收集 model 名：遍历 status=enabled 的 channel，解析 models CSV 字段

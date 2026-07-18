@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
@@ -169,7 +169,10 @@ export function BindingEditor({
   const [targetType, setTargetType] = useState<LimiterTargetType>(
     allowedTypes[0] ?? "global",
   );
-  const [targetValues, setTargetValues] = useState<string[]>([]);
+  const [targetSelection, setTargetSelection] = useState<{ type: LimiterTargetType; values: string[] }>({
+    type: allowedTypes[0] ?? "global",
+    values: [],
+  });
   const [isBatching, setIsBatching] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
@@ -178,10 +181,8 @@ export function BindingEditor({
     ? targetType
     : allowedTypes[0] ?? "global";
 
-  // effectiveType 变化（含 key_by 改变导致的回退）时清空选择，避免把旧类型的 id 当新类型提交。
-  useEffect(() => {
-    setTargetValues([]);
-  }, [effectiveType]);
+  const targetValues = targetSelection.type === effectiveType ? targetSelection.values : [];
+  const setTargetValues = (values: string[]) => setTargetSelection({ type: effectiveType, values });
 
   const entity = entityNameOf(effectiveType);
   const needsObject = entity !== null;

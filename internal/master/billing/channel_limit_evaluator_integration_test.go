@@ -1,11 +1,15 @@
 package billing
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"go.uber.org/zap"
 	"gorm.io/datatypes"
 )
@@ -52,5 +56,41 @@ func TestLimitEvaluator_Tick(t *testing.T) {
 	got2, _ := q.GetByID(ch.ID)
 	if got2.Status != 1 || got2.LimitState.Data().Tripped {
 		t.Fatalf("Status=%d tripped=%v want 1/false (auto-recovered)", got2.Status, got2.LimitState.Data().Tripped)
+	}
+}
+
+func TestLimitEvaluatorCloseDeadlineCancelsTickAndRejectsRestart(t *testing.T) {
+	ev := NewLimitEvaluator(nil, nil, zap.NewNop(), time.Nanosecond)
+	entered := make(chan struct{})
+	canceled := make(chan error, 1)
+	var enteredOnce sync.Once
+	ev.tick = func(ctx context.Context, _ time.Time) error {
+		enteredOnce.Do(func() { close(entered) })
+		<-ctx.Done()
+		cause := context.Cause(ctx)
+		canceled <- cause
+		return cause
+	}
+	ev.Start()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := ev.Close(ctx); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+	if cause := <-canceled; !errors.Is(cause, context.Canceled) {
+		t.Fatalf("Tick cancel cause = %v, want canceled", cause)
+	}
+	select {
+	case <-ev.Done():
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("LimitEvaluator Done did not close after deadline")
+	}
+	if got := ev.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("resources after Close = %+v", got)
+	}
+	ev.Start()
+	if got := ev.ResourceCounts(); got != (app.ResourceCounts{}) {
+		t.Fatalf("Start after Close created resources: %+v", got)
 	}
 }

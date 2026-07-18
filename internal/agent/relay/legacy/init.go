@@ -7,6 +7,7 @@ import (
 
 func init() {
 	service.InitHttpClient()
+	bindLegacyClientTransport(service.GetHttpClient())
 	// Initialize new-api constants required for streaming and file handling.
 	// These are normally set by common.InitEnv() which reads env vars,
 	// but we set sensible defaults directly to avoid depending on env config.

@@ -17,7 +17,7 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[I
 		statusFilter = &s
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	groups, total, err := q.UserGroup().List(

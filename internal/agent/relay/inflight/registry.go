@@ -195,6 +195,7 @@ func (r *Registry) StartWatchdog(interval time.Duration) (stop func()) {
 		return func() {}
 	}
 	done := make(chan struct{})
+	var stopOnce sync.Once
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -220,5 +221,5 @@ func (r *Registry) StartWatchdog(interval time.Duration) (stop func()) {
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() { stopOnce.Do(func() { close(done) }) }
 }

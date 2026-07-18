@@ -1,8 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
+import { SettingNumberInput } from '@/components/system/setting-number-input';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -29,20 +30,55 @@ import { Plus, X, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSettings, useUpdateSettings } from '@/lib/api/system';
 import { useBYOKSystemBaseURLs, useBaseURLUsage } from '@/lib/api/byok-system-baseurls';
+import { humanizeSettingNumber } from '@/lib/utils/system-setting-number';
 import { useTranslations } from 'next-intl';
 
+type BYOKSettings = Record<string, string>;
+
+function byokBaselineKey(settings: BYOKSettings | undefined) {
+  return JSON.stringify([
+    settings?.byok_enabled,
+    settings?.byok_max_channels_per_user,
+    settings?.byok_billing_mode,
+    settings?.byok_service_fee_ratio,
+    settings?.byok_base_url_allowlist,
+  ]);
+}
+
+function readExtraURLs(settings: BYOKSettings | undefined) {
+  try {
+    const parsed = JSON.parse(settings?.byok_base_url_allowlist ?? '[]');
+    return Array.isArray(parsed) ? parsed as string[] : [];
+  } catch {
+    return [];
+  }
+}
+
 export function BYOKSettingsCard() {
+  const { data: settingsResp } = useSettings();
+  const settings = settingsResp?.settings;
+  return <BYOKSettingsEditor key={byokBaselineKey(settings)} settings={settings} />;
+}
+
+function BYOKSettingsEditor({ settings }: { settings: BYOKSettings | undefined }) {
   const t = useTranslations('byok.settings');
   const tCommon = useTranslations('common');
-  const { data: settingsResp } = useSettings();
   const { data: systemBaseURLsResp } = useBYOKSystemBaseURLs();
   const updateMut = useUpdateSettings();
 
-  const [enabled, setEnabled] = useState(true);
-  const [maxChannels, setMaxChannels] = useState<number>(20);
-  const [billingMode, setBillingMode] = useState<'free' | 'service_fee'>('free');
-  const [feeRatio, setFeeRatio] = useState<number>(0.1);
-  const [extraURLs, setExtraURLs] = useState<string[]>([]);
+  const [enabled, setEnabled] = useState(() => (settings?.byok_enabled ?? 'true') === 'true');
+  const [maxChannels, setMaxChannels] = useState(() => {
+    const parsed = parseInt(settings?.byok_max_channels_per_user ?? '20', 10);
+    return isNaN(parsed) ? 20 : parsed;
+  });
+  const [billingMode, setBillingMode] = useState<'free' | 'service_fee'>(() =>
+    settings?.byok_billing_mode === 'service_fee' ? 'service_fee' : 'free',
+  );
+  const [feeRatio, setFeeRatio] = useState(() => {
+    const parsed = parseFloat(settings?.byok_service_fee_ratio ?? '0.1');
+    return isNaN(parsed) ? 0.1 : parsed;
+  });
+  const [extraURLs, setExtraURLs] = useState<string[]>(() => readExtraURLs(settings));
   const [draftURL, setDraftURL] = useState('');
 
   // pendingDeleteURL drives the AlertDialog: setting it non-null opens the
@@ -52,25 +88,6 @@ export function BYOKSettingsCard() {
   // requires clicking the outer "Save BYOK Settings" button) or Cancel.
   const [pendingDeleteURL, setPendingDeleteURL] = useState<string | null>(null);
   const usage = useBaseURLUsage(pendingDeleteURL);
-
-  // Hydrate from server once
-  useEffect(() => {
-    if (!settingsResp) return;
-    const s = settingsResp.settings;
-    setEnabled((s.byok_enabled ?? 'true') === 'true');
-    const mc = parseInt(s.byok_max_channels_per_user ?? '20', 10);
-    setMaxChannels(isNaN(mc) ? 20 : mc);
-    const mode = (s.byok_billing_mode ?? 'free') as 'free' | 'service_fee';
-    setBillingMode(mode === 'service_fee' ? 'service_fee' : 'free');
-    const fr = parseFloat(s.byok_service_fee_ratio ?? '0.1');
-    setFeeRatio(isNaN(fr) ? 0.1 : fr);
-    try {
-      const parsed = JSON.parse(s.byok_base_url_allowlist ?? '[]');
-      setExtraURLs(Array.isArray(parsed) ? parsed : []);
-    } catch {
-      setExtraURLs([]);
-    }
-  }, [settingsResp]);
 
   const systemURLs = systemBaseURLsResp?.urls ?? [];
 
@@ -152,7 +169,7 @@ export function BYOKSettingsCard() {
         {billingMode === 'service_fee' && (
           <div className="space-y-1">
             <Label>{t('feeRatio')}</Label>
-            <Input
+            <SettingNumberInput
               type="number"
               step="0.01"
               min={0}
@@ -160,6 +177,7 @@ export function BYOKSettingsCard() {
               value={feeRatio}
               onChange={(e) => setFeeRatio(Number(e.target.value))}
               className="w-40"
+              humanReadable={humanizeSettingNumber(feeRatio, "ratio")}
             />
             <div className="text-xs text-muted-foreground">
               {t('feeRatioDesc')}

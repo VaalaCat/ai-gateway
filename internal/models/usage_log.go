@@ -3,19 +3,22 @@ package models
 import "gorm.io/datatypes"
 
 type UsageLog struct {
-	ID               uint    `gorm:"primaryKey" json:"id"`
-	UserID           uint    `gorm:"index" json:"user_id"`
-	TokenID          uint    `gorm:"index" json:"token_id"`
-	ChannelID        uint    `gorm:"index" json:"channel_id"`
-	PrivateChannelID uint    `gorm:"index;default:0" json:"private_channel_id"` // 0 = 非 BYOK 请求
-	OwnerType        string  `gorm:"size:8;default:'admin'" json:"owner_type"`  // "admin" | "private"
-	AgentID          string  `gorm:"index;size:64" json:"agent_id"`
-	ModelName        string  `gorm:"size:128;index" json:"model_name"`
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	InputCost        int64   `json:"input_cost"`
-	OutputCost       int64   `json:"output_cost"`
-	TotalCost        int64   `json:"total_cost"`
+	ID                 uint   `gorm:"primaryKey" json:"id"`
+	UserID             uint   `gorm:"index" json:"user_id"`
+	TokenID            uint   `gorm:"index" json:"token_id"`
+	ChannelID          uint   `gorm:"index" json:"channel_id"`
+	PrivateChannelID   uint   `gorm:"index;default:0" json:"private_channel_id"` // 0 = 非 BYOK 请求
+	OwnerType          string `gorm:"size:8;default:'admin'" json:"owner_type"`  // "admin" | "private"
+	AgentID            string `gorm:"index;size:64" json:"agent_id"`
+	RouteSourceAgentID string `gorm:"size:64;index" json:"route_source_agent_id"`
+	AgentRouteID       uint   `gorm:"index" json:"agent_route_id"`
+	AgentRoutePath     string `gorm:"size:16;index" json:"agent_route_path"`
+	ModelName          string `gorm:"size:128;index" json:"model_name"`
+	PromptTokens       int    `json:"prompt_tokens"`
+	CompletionTokens   int    `json:"completion_tokens"`
+	InputCost          int64  `json:"input_cost"`
+	OutputCost         int64  `json:"output_cost"`
+	TotalCost          int64  `json:"total_cost"`
 	// CacheReadCost / CacheWriteCost 是 cache 两桶的实付成本(此前只并进 TotalCost,未单列)。
 	CacheReadCost  int64 `json:"cache_read_cost"`
 	CacheWriteCost int64 `json:"cache_write_cost"`
@@ -30,11 +33,11 @@ type UsageLog struct {
 	// Free 标记这行是否走了免费渠道,供前端展示模式标签;技术上可由 owner_type+factor 推导,显式更稳。
 	Free       bool    `json:"free"`
 	PriceRatio float64 `gorm:"default:1" json:"price_ratio"`
-	IsStream         bool    `json:"is_stream"`
-	Duration         int     `json:"duration"`
-	RequestID        string  `gorm:"size:64;uniqueIndex" json:"request_id"`
-	ClientIP         string  `gorm:"size:64" json:"client_ip"`
-	CreatedAt        int64   `gorm:"autoCreateTime;index" json:"created_at"`
+	IsStream   bool    `json:"is_stream"`
+	Duration   int     `json:"duration"`
+	RequestID  string  `gorm:"size:64;uniqueIndex" json:"request_id"`
+	ClientIP   string  `gorm:"size:64" json:"client_ip"`
+	CreatedAt  int64   `gorm:"autoCreateTime;index" json:"created_at"`
 
 	// Enhanced logging fields
 	TokenName          string                             `gorm:"size:64" json:"token_name"`

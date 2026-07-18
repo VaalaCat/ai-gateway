@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -61,15 +62,37 @@ func Adapt[Req any, Resp any](adapter *Adapter, mode BindMode, handler HandlerFu
 		}
 
 		status := http.StatusOK
-		if statusResp, ok := any(resp).(StatusCoder); ok {
-			status = statusResp.StatusCode()
-		}
-
 		body := any(resp)
-		if bodyResp, ok := any(resp).(BodyProvider); ok {
-			body = bodyResp.Body()
+		// behavior change: typed nil responses serialize as null without invoking interface methods.
+		if isNilLikeResponse(body) {
+			adapter.Writer.WriteJSON(c, status, nil)
+			return
+		}
+		if response, ok := any(resp).(HTTPResponse); ok {
+			status = response.HTTPStatus()
+			body = response.ResponseBody()
+		} else {
+			if statusResp, ok := any(resp).(StatusCoder); ok {
+				status = statusResp.StatusCode()
+			}
+			if bodyResp, ok := any(resp).(BodyProvider); ok {
+				body = bodyResp.Body()
+			}
 		}
 
 		adapter.Writer.WriteJSON(c, status, body)
+	}
+}
+
+func isNilLikeResponse(response any) bool {
+	if response == nil {
+		return true
+	}
+	value := reflect.ValueOf(response)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }

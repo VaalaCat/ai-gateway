@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"sort"
 	"strings"
 
@@ -19,7 +20,7 @@ type StepParamOverride struct {
 
 func (s *StepParamOverride) Key() string { return "param_override" }
 
-func (s *StepParamOverride) Apply(p *Pass) error {
+func (s *StepParamOverride) Apply(_ context.Context, p *Pass) error {
 	newBody, err := upstream.ApplyOverrides(p.HTTPReq, p.Body, s.params, nil)
 	if err != nil {
 		if s.logger != nil {
@@ -44,7 +45,7 @@ type StepHeaderOverride struct {
 
 func (s *StepHeaderOverride) Key() string { return "header_override" }
 
-func (s *StepHeaderOverride) Apply(p *Pass) error {
+func (s *StepHeaderOverride) Apply(_ context.Context, p *Pass) error {
 	upstream.ApplyOverrides(p.HTTPReq, p.Body, nil, s.headers) //nolint:errcheck // header 分支不返回错误
 	return nil
 }

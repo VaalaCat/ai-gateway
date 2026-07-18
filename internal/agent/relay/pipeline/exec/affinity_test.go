@@ -25,7 +25,7 @@ func (failDispatcher) Dispatch(*state.RelayContext, state.Attempt) state.Attempt
 	return state.AttemptResult{Err: errors.New("upstream 500")}
 }
 
-func TestExecutor_ForgetsAffinityOnHardFailure(t *testing.T) {
+func TestExecutor_ForgetsAffinityWhenFailureAdvancesPlan(t *testing.T) {
 	eng := affinity.New(affStubCfg{})
 	key := affinity.Key{UserID: 1, RealModel: "m"}
 	eng.Remember(key, state.SourceAdmin, 5, nil)
@@ -36,18 +36,19 @@ func TestExecutor_ForgetsAffinityOnHardFailure(t *testing.T) {
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5, ByAffinity: true},
+		{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 6},
 	}}
-	// newTestExecutorRctx 提供完整 Agent 使 maybeForward 不 panic；
 	// 覆写 UserInfo 设置真实 UserID，覆写 Plan 为粘性 attempt。
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	rctx.Context = c
 	rctx.Input.UserInfo = &app.UserInfo{UserID: 1}
 
-	ex := &Executor{Dispatcher: failDispatcher{}, Affinity: eng}
+	ex := newLocalTestExecutor(failDispatcher{}, nil, nil)
+	ex.Affinity = eng
 	ex.Run(rctx)
 
 	if _, ok := eng.Lookup(key); ok {
-		t.Fatal("hard failure of affinity attempt should Forget the sticky entry")
+		t.Fatal("retryable affinity failure should Forget before advancing the plan")
 	}
 }
 
@@ -64,7 +65,8 @@ func TestExecutor_AffinityNotForgottenOnSuccess(t *testing.T) {
 	rctx.Input.UserInfo = &app.UserInfo{UserID: 2}
 
 	successDisp := &recordingDispatcher{results: []state.AttemptResult{{PromptTokens: 5}}}
-	ex := &Executor{Dispatcher: successDisp, Affinity: eng}
+	ex := newLocalTestExecutor(successDisp, nil, nil)
+	ex.Affinity = eng
 	ex.Run(rctx)
 
 	if _, ok := eng.Lookup(key); !ok {
@@ -80,7 +82,7 @@ func TestExecutor_AffinityNilSafe(t *testing.T) {
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
 	rctx.Input.UserInfo = &app.UserInfo{UserID: 3}
 
-	ex := &Executor{Dispatcher: failDispatcher{}} // Affinity == nil
+	ex := newLocalTestExecutor(failDispatcher{}, nil, nil) // Affinity == nil
 	// 不 panic 即通过
 	ex.Run(rctx)
 }

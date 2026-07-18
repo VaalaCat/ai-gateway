@@ -1,7 +1,7 @@
 "use client";
 
 import { NextIntlClientProvider } from "next-intl";
-import { useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { defaultLocale, locales, type Locale } from "@/i18n/config";
 import zhMessages from "@/i18n/zh.json";
 import enMessages from "@/i18n/en.json";
@@ -28,27 +28,16 @@ export function I18nProvider({
   initialLocale: string;
   initialMessages: Record<string, unknown>;
 }) {
-  const [locale, setLocale] = useState<Locale>(initialLocale as Locale);
-  const [messages, setMessages] =
-    useState<Record<string, unknown>>(initialMessages);
-
-  useEffect(() => {
-    const cookieLocale = getLocaleFromCookie();
-    if (cookieLocale !== locale) {
-      setLocale(cookieLocale);
-      setMessages(allMessages[cookieLocale]);
-    }
+  const serverLocale = locales.includes(initialLocale as Locale)
+    ? (initialLocale as Locale)
+    : defaultLocale;
+  const subscribe = useCallback((notify: () => void) => {
+    window.addEventListener("locale-change", notify);
+    return () => window.removeEventListener("locale-change", notify);
   }, []);
-
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const locale = (e as CustomEvent<Locale>).detail;
-      setLocale(locale);
-      setMessages(allMessages[locale]);
-    };
-    window.addEventListener("locale-change", handler);
-    return () => window.removeEventListener("locale-change", handler);
-  }, []);
+  const getServerLocale = useCallback(() => serverLocale, [serverLocale]);
+  const locale = useSyncExternalStore(subscribe, getLocaleFromCookie, getServerLocale);
+  const messages = locale === serverLocale ? initialMessages : allMessages[locale];
 
   return (
     <NextIntlClientProvider locale={locale} messages={messages}>

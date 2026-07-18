@@ -69,7 +69,7 @@ function RequestsChart({ items, loading }: ChartProps) {
   );
 }
 
-function useToggleSet<K extends string>(_initial: readonly K[]) {
+function useToggleSet<K extends string>() {
   const [hidden, setHidden] = useState<Set<K>>(new Set());
   const toggle = useCallback((k: K) => {
     setHidden((prev) => {
@@ -93,7 +93,7 @@ type TokenKey = (typeof TOKEN_KEYS)[number];
 
 function TokensChart({ items, loading }: ChartProps) {
   const t = useTranslations("byok.stats");
-  const series = useToggleSet(TOKEN_KEYS);
+  const series = useToggleSet<TokenKey>();
   const config = {
     prompt_tokens: { label: t("breakdownPromptTokens"), color: "var(--chart-1)" },
     completion_tokens: { label: t("breakdownCompletionTokens"), color: "var(--chart-2)" },
@@ -163,7 +163,7 @@ type CostKey = (typeof COST_KEYS)[number];
 
 function CostChart({ items, loading }: ChartProps) {
   const t = useTranslations("byok.stats");
-  const series = useToggleSet(COST_KEYS);
+  const series = useToggleSet<CostKey>();
   const config = {
     input_cost: { label: t("chartInputCost"), color: "var(--chart-1)" },
     output_cost: { label: t("chartOutputCost"), color: "var(--chart-2)" },

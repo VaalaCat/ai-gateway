@@ -54,7 +54,7 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 
 	scope := middleware.GetScope(c.Context)
 	s := toDaoScope(scope)
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 
 	filter := dao.ObsFilter{ModelName: req.Model, UserID: req.UserID}
 	if !s.IsAdmin {

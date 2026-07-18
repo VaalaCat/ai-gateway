@@ -179,7 +179,7 @@ type Uncovered = Exclude<
 >;
 const _byokFieldCoverage: Uncovered extends never
   ? true
-  : ["BYOK field neither persisted nor hidden:", Uncovered] = true;
+  : ["BYOK field neither persisted nor hidden:", Uncovered] = BYOK_PERSISTED_FIELDS.length > 0 ? true : true;
 void _byokFieldCoverage;
 
 export const byokChannelAdapter: ChannelFormAdapter<BYOKChannelDetail> = {

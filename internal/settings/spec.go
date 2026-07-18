@@ -59,4 +59,43 @@ type AgentSettings struct {
 	CacheRefreshMaxRetries    int `setting:"cache_refresh_max_retries,3,0,10"`             // 单次触发内重试次数
 	CacheRefreshBackoffBaseMs int `setting:"cache_refresh_backoff_base_ms,200,0,60000"`    // 退避初始
 	CacheRefreshBackoffMaxMs  int `setting:"cache_refresh_backoff_max_ms,5000,0,60000"`    // 退避上限
+
+	// 用量上传重试退避上限(数据面,spec §4.2)。v2 默认收紧到 15s:失败恢复更快,
+	// 对挂掉的 master 多打几次无害请求是可接受代价(delivery-v2 §4.5)。
+	UsageUploadBackoffMaxSec int `setting:"usage_upload_backoff_max_sec,15,1,3600"`
+
+	// 用量上传管线(delivery-v2 §4/§5)
+	UsageUploadConcurrency        int `setting:"usage_upload_concurrency,2,1,8"`           // 发送 worker 池并发度
+	UsageSlimBodyAfterAttempts    int `setting:"usage_slim_body_after_attempts,3,1,20"`    // L1:剥 body(还需单条 >2MiB)
+	UsageStripTraceAfterAttempts  int `setting:"usage_strip_trace_after_attempts,6,1,30"`  // L2:剥整个 trace
+	UsageBillingOnlyAfterAttempts int `setting:"usage_billing_only_after_attempts,9,1,50"` // L3:只留计费标量
+
+	// 心跳 RPC 超时(仅统计上报,失败非致命;判活靠 ws Ping/Pong)
+	HeartbeatCallTimeoutSec int `setting:"heartbeat_call_timeout_sec,30,5,300"`
+
+	// 连续心跳失败达到 N 次强制断连重连(应用层恢复兜底,补 ws Ping/Pong 240s 假死窗口的洞);
+	// 0=禁用,退回纯 Ping/Pong 判活。
+	HeartbeatReconnectFailures   int `setting:"heartbeat_reconnect_failures,3,0,20"`
+	ControlHeartbeatDegradedSec  int `setting:"agent.control_heartbeat_degraded_seconds,90,10,3600"`
+	ControlHealthRecoverySamples int `setting:"agent.control_health_recovery_samples,2,1,10"`
+
+	// 图片内联(渠道 inline_image_url 开时,StepInlineImages 抓取图片 URL 用)
+	ImageInlineFetchTimeoutSec int    `setting:"image_inline_fetch_timeout_sec,10,1,300"`        // 单张抓取超时
+	ImageInlineMaxBytes        int    `setting:"image_inline_max_bytes,10485760,1024,104857600"` // 单张最大字节(10MiB,上限 100MiB)
+	ImageInlineConcurrency     int    `setting:"image_inline_concurrency,4,1,32"`                // 单请求内并发抓取数
+	ImageInlineSSRFGuard       int    `setting:"image_inline_ssrf_guard,1,0,1"`                  // 1=拦私网/环回/link-local/元数据 IP
+	ImageInlineHostAllowlist   string `setting:"image_inline_host_allowlist,"`                   // host 白名单(逗号/换行分隔;空=不限)
+
+	RelayDefaultURI             string `setting:"agent.relay_default_uri,"`
+	RelayFallbackEnabled        int    `setting:"agent.relay_fallback_enabled,0,0,1"`
+	BodyMemoryThresholdBytes    int64  `setting:"agent.body_memory_threshold_bytes,1048576,65536,16777216"`
+	BodyHardLimitBytes          int64  `setting:"agent.body_hard_limit_bytes,67108864,1048576,268435456"`
+	TunnelMaxMetadataBytes      int64  `setting:"agent.tunnel_max_metadata_bytes,65536,4096,262144"`
+	TunnelMaxDataBytes          int64  `setting:"agent.tunnel_max_data_bytes,65536,4096,262144"`
+	TunnelInitialWindowBytes    int64  `setting:"agent.tunnel_initial_window_bytes,524288,65536,8388608"`
+	TunnelMaxSessionQueueBytes  int64  `setting:"agent.tunnel_max_session_queue_bytes,8388608,524288,67108864"`
+	TunnelMaxStreams            int    `setting:"agent.tunnel_max_streams,256,1,4096"`
+	TunnelOpenToCommitTimeoutMS int    `setting:"agent.tunnel_open_to_commit_timeout_ms,30000,1000,120000"`
+	TunnelWindowStallTimeoutMS  int    `setting:"agent.tunnel_window_stall_timeout_ms,60000,1000,300000"`
+	TunnelDrainTimeoutSec       int    `setting:"agent.tunnel_drain_timeout_seconds,300,1,1800"`
 }

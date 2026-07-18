@@ -4,6 +4,13 @@ import { useTranslations } from "next-intl";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Switch } from "@/components/ui/switch";
 import { JsonField } from "@/components/business/json-field";
 import { FieldTip } from "@/components/business/field-tip";
 import { ModelMappingInput } from "@/components/ui/model-mapping-input";
@@ -21,6 +28,7 @@ import { EncodeConfigSection } from "./encode-config";
 const STEP_ORDER = [
   "model_mapping", "inject_system_prompt", "role_mapping",
   "thinking_passthrough", "thinking_strip",
+  "inline_image",
   "encode", "forward_client_headers", "param_override", "header_override", "upstream_script",
 ] as const;
 
@@ -74,6 +82,8 @@ export function ProcessingSection({ form, setForm, channelId, scriptsHref, hidde
         return <ThinkingRulesEditor form={form} setForm={setForm} />;
       case "thinking_strip":
         return <p className="text-xs text-muted-foreground">{t("thinkingStripFollowsRules")}</p>;
+      case "inline_image":
+        return <InlineImageSettings form={form} setForm={setForm} />;
       case "forward_client_headers":
         return <p className="text-xs text-muted-foreground">{t("forwardClientHeadersInfo")}</p>;
       case "encode":
@@ -101,7 +111,7 @@ export function ProcessingSection({ form, setForm, channelId, scriptsHref, hidde
         );
         const title = (
           <span className={cn("text-sm font-medium", !s.active && "text-muted-foreground")}>
-            {t(`dataflowStep.${s.key}`)}
+            {dataflowStepLabel(s.key, t)}
             {isEncode && <span className="ml-0.5 text-destructive">*</span>}
           </span>
         );
@@ -135,6 +145,53 @@ export function ProcessingSection({ form, setForm, channelId, scriptsHref, hidde
       })}
     </div>
   );
+}
+
+function InlineImageSettings({ form, setForm }: { form: ChannelForm; setForm: (n: ChannelForm) => void }) {
+  const t = useTranslations("channels");
+  const otherSettings = parseOtherSettings(form.other_settings);
+  return (
+    <Field orientation="horizontal">
+      <FieldContent>
+        <FieldLabel htmlFor="inline_image_url">
+          {t("inlineImageUrl")}
+        </FieldLabel>
+        <FieldDescription>{t("inlineImageUrlTip")}</FieldDescription>
+      </FieldContent>
+      <Switch
+        id="inline_image_url"
+        aria-label={t("inlineImageUrl")}
+        checked={!!otherSettings.inline_image_url}
+        onCheckedChange={(inlineImageURL) => setForm({
+          ...form,
+          other_settings: stringifyOtherSettings({
+            ...otherSettings,
+            inline_image_url: inlineImageURL,
+          }),
+        })}
+      />
+    </Field>
+  );
+}
+
+type ChannelsTranslator = ReturnType<typeof useTranslations<"channels">>;
+
+const DATAFLOW_STEP_LABELS: Record<string, (t: ChannelsTranslator) => string> = {
+  model_mapping: (t) => t("dataflowStep.model_mapping"),
+  inject_system_prompt: (t) => t("dataflowStep.inject_system_prompt"),
+  role_mapping: (t) => t("dataflowStep.role_mapping"),
+  thinking_passthrough: (t) => t("dataflowStep.thinking_passthrough"),
+  thinking_strip: (t) => t("dataflowStep.thinking_strip"),
+  inline_image: (t) => t("dataflowStep.inline_image"),
+  encode: (t) => t("dataflowStep.encode"),
+  forward_client_headers: (t) => t("dataflowStep.forward_client_headers"),
+  param_override: (t) => t("dataflowStep.param_override"),
+  header_override: (t) => t("dataflowStep.header_override"),
+  upstream_script: (t) => t("dataflowStep.upstream_script"),
+};
+
+function dataflowStepLabel(key: string, t: ChannelsTranslator): string {
+  return DATAFLOW_STEP_LABELS[key]?.(t) ?? key;
 }
 
 function stepDetailLabel(key: string, detail: string, t: ReturnType<typeof useTranslations<"channels">>): string {

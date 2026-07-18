@@ -846,6 +846,73 @@ func TestClaudeEncodeRequest_CustomEndpointPath(t *testing.T) {
 	}
 }
 
+func TestClaudeEncodeRequest_BetaQuery(t *testing.T) {
+	tests := []struct {
+		name         string
+		endpointPath string
+		beta         bool
+		want         string
+	}{
+		{name: "disabled", beta: false, want: "https://api.anthropic.com/v1/messages"},
+		{name: "enabled", beta: true, want: "https://api.anthropic.com/v1/messages?beta=true"},
+		{name: "preserves existing query", endpointPath: "/custom/messages?region=us", beta: true, want: "https://api.anthropic.com/custom/messages?beta=true&region=us"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &ClaudeCodec{}
+			req := &codec.Request{Model: "claude", Messages: []codec.Message{codec.TextMessage(codec.RoleUser, "hello")}}
+			cfg := &codec.ChannelConfig{
+				BaseURL:         "https://api.anthropic.com",
+				APIKey:          "sk-test",
+				Model:           "claude",
+				EndpointPath:    tt.endpointPath,
+				ClaudeBetaQuery: tt.beta,
+			}
+			httpReq, err := c.EncodeRequest(req, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := httpReq.URL.String(); got != tt.want {
+				t.Fatalf("URL = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeRequestFieldsRoundTrip(t *testing.T) {
+	inbound, err := http.NewRequest(http.MethodPost, "http://client/v1/messages", strings.NewReader(`{
+		"model":"claude","max_tokens":128,"messages":[],
+		"service_tier":"auto","inference_geo":"us"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &ClaudeCodec{}
+	req, err := c.DecodeRequest(inbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.ServiceTier != "auto" || req.InferenceGeo != "us" {
+		t.Fatalf("request fields were not decoded: %#v", req)
+	}
+
+	outbound, err := c.EncodeRequest(req, &codec.ChannelConfig{BaseURL: "https://api.anthropic.com", APIKey: "k", Model: req.Model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(outbound.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["service_tier"] != "auto" || decoded["inference_geo"] != "us" {
+		t.Fatalf("request fields were not encoded: %#v", decoded)
+	}
+}
+
 // Suppress unused import warnings
 var _ = bytes.NewReader
 var _ = fmt.Sprintf

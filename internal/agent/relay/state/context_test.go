@@ -23,9 +23,6 @@ func TestRelayContextZeroValueOK(t *testing.T) {
 	if rctx.State.FailPhase != PhaseNone {
 		t.Fatalf("zero State.FailPhase should be PhaseNone, got %d", rctx.State.FailPhase)
 	}
-	if rctx.State.Forwarded {
-		t.Fatal("zero State.Forwarded should be false")
-	}
 	if rctx.State.Err != nil {
 		t.Fatal("zero State.Err should be nil")
 	}

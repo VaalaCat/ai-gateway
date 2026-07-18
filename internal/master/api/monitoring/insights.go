@@ -37,7 +37,7 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 	}
 
 	s := dao.Scope{IsAdmin: true, UserID: scope.UserID}
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 
 	channels, _ := q.Stats().ChannelMetrics(r)
 	agents, _ := q.Stats().AgentMetrics(r)

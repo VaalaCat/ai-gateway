@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -23,7 +24,7 @@ func TestHandleSyncEvent_ModelRoutingGlobalCreate(t *testing.T) {
 	data, _ := json.Marshal(r)
 	s.HandleSyncEvent(events.EntityModelRouting, events.ActionCreate, data)
 
-	cached := s.GetGlobalRouting("smart")
+	cached := s.GetGlobalRouting(context.Background(), "smart")
 	if cached == nil {
 		t.Fatal("global routing should be in cache after create event")
 	}
@@ -46,7 +47,7 @@ func TestHandleSyncEvent_ModelRoutingGlobalUpdate(t *testing.T) {
 	data, _ := json.Marshal(r)
 	s.HandleSyncEvent(events.EntityModelRouting, events.ActionUpdate, data)
 
-	cached := s.GetGlobalRouting("smart")
+	cached := s.GetGlobalRouting(context.Background(), "smart")
 	if cached == nil || cached.Members[0].Ref != "new" {
 		t.Errorf("cache should reflect updated members: %+v", cached)
 	}
@@ -60,7 +61,7 @@ func TestHandleSyncEvent_ModelRoutingGlobalDelete(t *testing.T) {
 	data, _ := json.Marshal(r)
 	s.HandleSyncEvent(events.EntityModelRouting, events.ActionDelete, data)
 
-	if s.GetGlobalRouting("smart") != nil {
+	if s.GetGlobalRouting(context.Background(), "smart") != nil {
 		t.Error("routing should be deleted")
 	}
 }
@@ -80,10 +81,29 @@ func TestHandleSyncEvent_ModelRoutingUserInvalidates(t *testing.T) {
 	s.HandleSyncEvent(events.EntityModelRouting, events.ActionUpdate, data)
 
 	// user 42 的 cache 应被 invalidate（再次 ResolveRouting 会 miss 走 Loader）
-	if r2 := s.ResolveRouting("my", 42); r2 != nil {
+	if r2 := s.ResolveRouting(context.Background(), "my", protocol.RoutingOwner{UserID: 42}); r2 != nil {
 		// nil Loader 配置下 miss 应返回 nil
 		// 如果还能查到，说明 invalidate 没生效
 		t.Errorf("user routing cache should be invalidated, got %+v", r2)
+	}
+}
+
+func TestHandleSyncEvent_ModelRoutingTokenInvalidatesOnlyItsBlock(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetTokenRoutings(7, map[string]*protocol.SyncedRouting{
+		"mine": {ID: 1, Name: "mine", Scope: models.RoutingScopeToken, TokenID: 7, Enabled: true},
+	})
+	s.SetTokenRoutings(8, map[string]*protocol.SyncedRouting{
+		"kept": {ID: 2, Name: "kept", Scope: models.RoutingScopeToken, TokenID: 8, Enabled: true},
+	})
+	payload, _ := json.Marshal(models.ModelRouting{ID: 1, Name: "mine", Scope: models.RoutingScopeToken, TokenID: 7})
+	s.HandleSyncEvent(events.EntityModelRouting, events.ActionUpdate, payload)
+
+	if got := s.ResolveRouting(context.Background(), "mine", protocol.RoutingOwner{TokenID: 7}); got != nil {
+		t.Fatalf("token 7 block was not invalidated: %+v", got)
+	}
+	if got := s.ResolveRouting(context.Background(), "kept", protocol.RoutingOwner{TokenID: 8}); got == nil {
+		t.Fatal("token 8 block must remain cached")
 	}
 }
 

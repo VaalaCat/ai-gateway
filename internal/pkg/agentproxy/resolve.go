@@ -7,12 +7,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
-type Address struct {
-	URL string `json:"url"`
-	Tag string `json:"tag"`
-}
+type Address = app.AgentAddress
 
 // ParseAddresses parses the JSON http_addresses field.
 func ParseAddresses(raw string) []Address {

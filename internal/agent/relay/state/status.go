@@ -7,7 +7,80 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
+
+type RouteFailureError struct {
+	Code  string
+	Cause error
+}
+
+func (e *RouteFailureError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
+func (e *RouteFailureError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func NewRouteFailureError(code string, cause error) error {
+	if code == "" {
+		return cause
+	}
+	return &RouteFailureError{Code: code, Cause: cause}
+}
+
+func PublicRouteErrorFromState(rctx *RelayContext) (protocol.PublicRouteError, bool) {
+	if rctx == nil || rctx.State == nil {
+		return protocol.PublicRouteError{}, false
+	}
+	var routeErr *RouteFailureError
+	if errors.As(rctx.State.Err, &routeErr) && routeErr != nil {
+		return protocol.NewPublicRouteError(routeErr.Code, publicRouteStage(routeErr.Code), rctx.Input.RequestID), true
+	}
+	var bodyErr interface{ BodyErrorCode() string }
+	if !errors.As(rctx.State.Err, &bodyErr) {
+		return protocol.PublicRouteError{}, false
+	}
+	code := bodyErr.BodyErrorCode()
+	if code != "body_too_large" && code != "body_store_failed" {
+		return protocol.PublicRouteError{}, false
+	}
+	return protocol.NewPublicRouteError(code, "body", rctx.Input.RequestID), true
+}
+
+func publicRouteStage(code string) string {
+	switch code {
+	case "direct_dns", "direct_connect", "relay_not_ready":
+		return "dial"
+	case "direct_tls":
+		return "tls"
+	case "direct_auth_unavailable", "relay_auth":
+		return "auth"
+	case "direct_identity_mismatch", "direct_probe_invalid_response":
+		return "identity"
+	case "direct_commit_uncertain", "relay_commit_uncertain", "stream_window_timeout", "session_closed":
+		return "commit"
+	case "direct_response_interrupted", "relay_response_interrupted":
+		return "response"
+	case "relay_protocol":
+		return "protocol"
+	case "body_too_large", "body_store_failed":
+		return "body"
+	case "request_cancelled", "request_deadline":
+		return "request"
+	case "drain_timeout":
+		return "drain"
+	default:
+		return "select"
+	}
+}
 
 // StatusFromState 把当前 FailPhase + Err 映射到 (HTTP status, error message)。
 // 行为对齐 legacy handler.go 主流程：
@@ -23,11 +96,21 @@ func StatusFromState(rctx *RelayContext) (int, string) {
 	if err == nil {
 		return http.StatusInternalServerError, ""
 	}
+	var bodyErr interface{ BodyErrorCode() string }
+	if errors.As(err, &bodyErr) {
+		switch bodyErr.BodyErrorCode() {
+		case "body_too_large":
+			return http.StatusRequestEntityTooLarge, "body_too_large"
+		case "body_store_failed":
+			return http.StatusInternalServerError, "body_store_failed"
+		}
+	}
 
 	switch {
 	case errors.Is(err, ErrReadBody),
 		errors.Is(err, ErrInvalidBody),
-		errors.Is(err, ErrModelRequired):
+		errors.Is(err, ErrModelRequired),
+		errors.Is(err, ErrInvalidAgentSelector):
 		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, ErrInvalidForcedChannelID):
 		// 老行为：malformed X-Channel-ID 也走 "no channel available for model <name>" 文案。

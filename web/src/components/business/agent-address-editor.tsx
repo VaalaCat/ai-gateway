@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { useTranslations } from "next-intl";
 import { Plus, X } from "lucide-react";
 
@@ -31,18 +31,15 @@ function parseAddresses(raw: string): AgentAddress[] {
 
 export function AgentAddressEditor({ value, onChange }: AgentAddressEditorProps) {
   const t = useTranslations("agents");
-  const [addresses, setAddresses] = useState<AgentAddress[]>(() => parseAddresses(value));
-
-  useEffect(() => {
-    setAddresses(parseAddresses(value));
-  }, [value]);
+  const [draft, setDraft] = useState(() => ({ baseline: value, addresses: parseAddresses(value) }));
+  const addresses = draft.baseline === value ? draft.addresses : parseAddresses(value);
 
   const emit = useCallback(
     (next: AgentAddress[]) => {
-      setAddresses(next);
+      setDraft({ baseline: value, addresses: next });
       onChange(next.length > 0 ? JSON.stringify(next) : "");
     },
-    [onChange]
+    [onChange, value]
   );
 
   const addAddress = () => {

@@ -9,7 +9,7 @@ import (
 
 func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[models.AdminScript], error) {
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	items, total, err := dao.NewAdminQuery(daoCtx).AdminScript().List(
 		dao.ListOptions{Page: page, PageSize: pageSize}, req.Search,
 	)

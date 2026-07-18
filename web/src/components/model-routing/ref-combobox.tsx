@@ -25,6 +25,7 @@ export interface RefComboboxProps {
   hideRoutings?: boolean;
   apiMode?: "admin" | "user";
   tokenKey?: string | null;
+  limitCandidatesToToken?: boolean;
 }
 
 export function RefCombobox({
@@ -35,16 +36,18 @@ export function RefCombobox({
   hideRoutings = false,
   apiMode = "admin",
   tokenKey,
+  limitCandidatesToToken = false,
 }: RefComboboxProps) {
   const t = useTranslations("modelRoutings.members");
   const [open, setOpen] = useState(false);
   // 两个 hook 必须无条件调用——admin 模式下 useRoutingCandidates 启用，
   // user 模式下 useRoutingCandidatesByToken 启用，反之则各自 disabled。
-  const adminQuery = useRoutingCandidates({ enabled: apiMode === "admin" });
+  const useTokenCandidates = apiMode === "user" || limitCandidatesToToken;
+  const adminQuery = useRoutingCandidates({ enabled: !useTokenCandidates });
   const userQuery = useRoutingCandidatesByToken(
-    apiMode === "user" ? tokenKey ?? null : null,
+    useTokenCandidates ? tokenKey ?? null : null,
   );
-  const data = apiMode === "user" ? userQuery.data : adminQuery.data;
+  const data = useTokenCandidates ? userQuery.data : adminQuery.data;
 
   const routings = (data?.global_routings ?? []).filter((n) => n !== excludeSelf);
   // 非自身路由名不混进 Models 组：同名时 off-path 解析为路由（见后端规则）。

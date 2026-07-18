@@ -80,7 +80,11 @@ function UsersPageContent() {
     },
   } satisfies FilterSpec), [t, tc]);
 
-  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
+  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
+    setPage(1);
+    setFilterValuesRaw(next);
+  };
 
   const { data, isLoading } = useUsers({
     page,
@@ -94,20 +98,8 @@ function UsersPageContent() {
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
 
-  useEffect(() => { setPage(1); }, [filterValues]);
-
   const searchParams = useSearchParams();
   const targetId = searchParams.get("id");
-  useEffect(() => {
-    if (!targetId || !data?.data) return;
-    const target = data.data.find((u) => String(u.id) === targetId);
-    if (target) {
-      setEditItem(target);
-    } else {
-      toast.message(t("targetUserNotInPage"));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetId, data]);
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -124,6 +116,7 @@ function UsersPageContent() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editItem, setEditItem] = useState<User | null>(null);
+  const [dismissedTargetId, setDismissedTargetId] = useState<string | null>(null);
   const [deleteItem, setDeleteItem] = useState<User | null>(null);
   const [quotaItem, setQuotaItem] = useState<User | null>(null);
 
@@ -133,6 +126,16 @@ function UsersPageContent() {
   }>({ username: "", password: "", role: "1", group_id: undefined });
   // Quota form state
   const [quotaDelta, setQuotaDelta] = useState("");
+  const linkedEditItem = targetId && targetId !== dismissedTargetId
+    ? users.find((user) => String(user.id) === targetId) ?? null
+    : null;
+  const activeEditItem = editItem ?? linkedEditItem;
+
+  useEffect(() => {
+    if (targetId && data?.data && !linkedEditItem && targetId !== dismissedTargetId) {
+      toast.message(t("targetUserNotInPage"));
+    }
+  }, [data?.data, dismissedTargetId, linkedEditItem, t, targetId]);
 
   const handleCreate = async () => {
     try {
@@ -372,12 +375,17 @@ function UsersPageContent() {
       </Dialog>
 
       {/* Edit Dialog */}
-      {editItem && (
+      {activeEditItem && (
         <ProfileFormDialog
+          key={`admin-profile-${activeEditItem.id}-${Boolean(activeEditItem)}`}
           mode="admin"
-          open={!!editItem}
-          onOpenChange={(o) => !o && setEditItem(null)}
-          user={editItem}
+          open={!!activeEditItem}
+          onOpenChange={(open) => {
+            if (open) return;
+            setEditItem(null);
+            if (linkedEditItem && targetId) setDismissedTargetId(targetId);
+          }}
+          user={activeEditItem}
         />
       )}
 

@@ -9,6 +9,7 @@ var baseStepInfos = map[string]StepInfo{
 	"role_mapping":           {Key: "role_mapping", Title: "角色映射", ConfigRef: "channel:role_mapping"},
 	"thinking_passthrough":   {Key: "thinking_passthrough", Title: "思考回填", ConfigRef: "channel:model_thinking_passthrough"},
 	"thinking_strip":         {Key: "thinking_strip", Title: "思考剥离", ConfigRef: "channel:model_thinking_passthrough"},
+	"inline_image":           {Key: "inline_image", Title: "图片内联", ConfigRef: "channel:endpoints"},
 	"encode":                 {Key: "encode", Title: "翻译为上游格式", ConfigRef: "channel:endpoints"},
 	"forward_client_headers": {Key: "forward_client_headers", Title: "转发客户端请求头", ConfigRef: ""},
 	"param_override":         {Key: "param_override", Title: "参数覆盖", ConfigRef: "channel:param_override"},
@@ -17,7 +18,7 @@ var baseStepInfos = map[string]StepInfo{
 }
 
 // AllStepInfos 按 defaultStepOrder 返回全部工序的静态 StepInfo(与配置无关)。
-// 给前端画"全 10 道含跳过灰节点"的链路图用。
+// 给前端画"全 11 道含跳过灰节点"的链路图用。
 func AllStepInfos() []StepInfo {
 	out := make([]StepInfo, 0, len(defaultStepOrder))
 	for _, key := range defaultStepOrder {

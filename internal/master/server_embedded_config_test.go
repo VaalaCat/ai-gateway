@@ -11,7 +11,10 @@ func TestBuildEmbeddedAgentConfig_PropagatesCache(t *testing.T) {
 		LogLevel: "info",
 		Runtime:  config.RuntimeConfig{RelayTimeout: 300},
 		Relay:    config.RelayConfig{Timeout: 300},
-		Agent:    config.AgentConfig{Cache: config.AgentCacheConfig{NegativeTTLSeconds: 120}},
+		Agent: config.AgentConfig{
+			CredentialsFile: "/var/lib/ai-gateway/embedded-agent.json",
+			Cache:           config.AgentCacheConfig{NegativeTTLSeconds: 120},
+		},
 	}
 	got := buildEmbeddedAgentConfig(mc, ":8140", "127.0.0.1:8140")
 	if got.Agent.Cache.NegativeTTLSeconds != 120 {
@@ -19,6 +22,9 @@ func TestBuildEmbeddedAgentConfig_PropagatesCache(t *testing.T) {
 	}
 	if got.Agent.MasterURL == "" || got.Agent.Listen == "" {
 		t.Fatal("bootstrap fields must be set")
+	}
+	if got.Agent.CredentialsFile != mc.Agent.CredentialsFile {
+		t.Fatalf("embedded credentials file = %q, want %q", got.Agent.CredentialsFile, mc.Agent.CredentialsFile)
 	}
 }
 

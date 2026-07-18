@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"context"
 	"math/rand"
 	"sort"
 
@@ -13,8 +14,8 @@ const routingMaxDepth = 5
 // *cache.Store 自然满足；测试和 BYOK 扩展可以用 stub 替换，
 // 避免 relay 包对 cache 具体类型的硬依赖。
 type RoutingStore interface {
-	ResolveRouting(name string, userID uint) *protocol.SyncedRouting
-	GetGlobalRouting(name string) *protocol.SyncedRouting
+	ResolveRouting(ctx context.Context, name string, owner protocol.RoutingOwner) *protocol.SyncedRouting
+	GetGlobalRouting(ctx context.Context, name string) *protocol.SyncedRouting
 	// HasRealModel 判断 name 是否有 channel 支撑的真实模型（不含 routing）。
 	// 用于：路由展开重遇自身/同名路由时，若存在同名真实模型则终结于它。
 	HasRealModel(name string) bool
@@ -61,64 +62,63 @@ func (c *ResolveCtx) MarkMemberExhausted(realModel string) {
 
 // ResolveToRealModel 把入参 ref 解析为真实 model 名；空串表示该次解析整链失败。
 // 见 spec §3.2-3.4。
-func ResolveToRealModel(store RoutingStore, ref string, userID uint, ctx *ResolveCtx) string {
-	ctx.lastChain = ctx.lastChain[:0] // 清空上轮路径，保留 cap
-	return resolveStep(store, ref, userID, ctx, true /* topLevel */)
+func ResolveToRealModel(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx) string {
+	walk.lastChain = walk.lastChain[:0] // 清空上轮路径，保留 cap
+	return resolveStep(requestCtx, store, ref, owner, walk, true /* topLevel */)
 }
 
-func resolveStep(store RoutingStore, ref string, userID uint, ctx *ResolveCtx, topLevel bool) string {
-	if ctx.depth >= routingMaxDepth {
-		ctx.trace = append(ctx.trace, ref+":depth_exceeded")
+func resolveStep(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx, topLevel bool) string {
+	if walk.depth >= routingMaxDepth {
+		walk.trace = append(walk.trace, ref+":depth_exceeded")
 		return ""
 	}
 
 	var r *protocol.SyncedRouting
 	if topLevel {
-		// 顶层允许命中 user routing
-		r = store.ResolveRouting(ref, userID)
+		r = store.ResolveRouting(requestCtx, ref, owner)
 	} else {
 		// 递归：成员只能引用全局 routing
-		r = store.GetGlobalRouting(ref)
+		r = store.GetGlobalRouting(requestCtx, ref)
 	}
 	if r == nil {
 		// 不是 routing 名 → 当真实 model 名返回（让上层走 channel 选择）
 		return ref
 	}
-	if ctx.visited[r.ID] {
+	if walk.visited[r.ID] {
 		// 重遇已展开路由：若存在同名真实模型则终结于它（如路由 gpt-5.5 引用真实模型 gpt-5.5），
 		// 否则才是真环。
 		if store.HasRealModel(ref) {
-			ctx.trace = append(ctx.trace, ref+":model")
+			walk.trace = append(walk.trace, ref+":model")
 			return ref
 		}
-		ctx.trace = append(ctx.trace, ref+":cycle")
+		walk.trace = append(walk.trace, ref+":cycle")
 		return ""
 	}
 
-	ctx.visited[r.ID] = true
-	if ctx.excluded[r.ID] == nil {
-		ctx.excluded[r.ID] = make(map[string]bool)
+	walk.visited[r.ID] = true
+	if walk.excluded[r.ID] == nil {
+		walk.excluded[r.ID] = make(map[string]bool)
 	}
-	ctx.depth++
-	ctx.trace = append(ctx.trace, r.Scope+":"+r.Name)
+	walk.depth++
+	walk.trace = append(walk.trace, r.Scope+":"+r.Name)
 
 	defer func() {
-		delete(ctx.visited, r.ID)
-		ctx.depth--
+		delete(walk.visited, r.ID)
+		walk.depth--
 	}()
 
 	for {
-		member := selectRoutingMember(r.Members, ctx.excluded[r.ID])
+		member := selectRoutingMember(r.Members, walk.excluded[r.ID])
 		if member == "" {
 			return ""
 		}
-		result := resolveStep(store, member, userID, ctx, false)
+		result := resolveStep(requestCtx, store, member, owner, walk, false)
 		if result != "" {
-			ctx.lastChain = append(ctx.lastChain, r.ID)
+			walk.lastChain = append(walk.lastChain, r.ID)
 			return result
 		}
 		// 递归失败：才把这个 member 加 excluded，成功路径不 mark
-		ctx.excluded[r.ID][member] = true
+		walk.excluded[r.ID][member] = true
 	}
 }
 

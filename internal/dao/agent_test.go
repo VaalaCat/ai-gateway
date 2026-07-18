@@ -126,6 +126,13 @@ func TestAgentDAO(t *testing.T) {
 		if a.LastSeen != 123456 {
 			t.Fatalf("expected 123456, got %d", a.LastSeen)
 		}
+		if err := m.UpdateLastSeen("agent-1", 123455); err != nil {
+			t.Fatalf("UpdateLastSeen older value: %v", err)
+		}
+		a, _ = q.GetByAgentID("agent-1")
+		if a.LastSeen != 123456 {
+			t.Fatalf("older last_seen moved value backward to %d", a.LastSeen)
+		}
 	})
 
 	t.Run("UpdateHTTPAddresses", func(t *testing.T) {
@@ -147,6 +154,44 @@ func TestAgentDAO(t *testing.T) {
 			t.Fatalf("expected ErrRecordNotFound, got %v", err)
 		}
 	})
+}
+
+func TestAgentUpdateIfRelayConfigMatches(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	mutation := NewAdminMutation(ctx).Agent()
+	agent := models.Agent{
+		AgentID:   "agent-relay-cas",
+		Name:      "before",
+		RelayMode: "inherit",
+	}
+	require.NoError(t, db.Create(&agent).Error)
+	require.NoError(t, db.Model(&models.Agent{}).Where("id = ?", agent.ID).Update("relay_uri", nil).Error)
+
+	updated, err := mutation.UpdateIfRelayConfigMatches(agent.ID, "inherit", "", map[string]any{
+		"name":       "matched",
+		"relay_mode": "custom",
+		"relay_uri":  "wss://relay.example/cas",
+	})
+	require.NoError(t, err)
+	require.True(t, updated, "legacy NULL relay_uri must match expected empty URI")
+
+	updated, err = mutation.UpdateIfRelayConfigMatches(agent.ID, "inherit", "", map[string]any{
+		"name": "stale write",
+	})
+	require.NoError(t, err)
+	require.False(t, updated)
+
+	updated, err = mutation.UpdateIfRelayConfigMatches(999999, "inherit", "", map[string]any{
+		"name": "missing write",
+	})
+	require.NoError(t, err)
+	require.False(t, updated)
+
+	var stored models.Agent
+	require.NoError(t, db.First(&stored, agent.ID).Error)
+	require.Equal(t, "matched", stored.Name)
+	require.Equal(t, "custom", stored.RelayMode)
+	require.Equal(t, "wss://relay.example/cas", stored.RelayURI)
 }
 
 func TestBatchUpdateLastSeen(t *testing.T) {
@@ -180,4 +225,11 @@ func TestBatchUpdateLastSeen(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Where("agent_id = ?", "a1").First(&a1).Error)
 	require.Equal(t, int64(3000), a1.LastSeen)
+
+	err = m.Agent().BatchUpdateLastSeen(map[string]int64{"a1": 2500, "a2": 1500, "ghost": 5000})
+	require.NoError(t, err)
+	require.NoError(t, db.Where("agent_id = ?", "a1").First(&a1).Error)
+	require.NoError(t, db.Where("agent_id = ?", "a2").First(&a2).Error)
+	require.Equal(t, int64(3000), a1.LastSeen)
+	require.Equal(t, int64(2000), a2.LastSeen)
 }

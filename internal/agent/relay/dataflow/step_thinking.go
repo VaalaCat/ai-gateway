@@ -1,6 +1,8 @@
 package dataflow
 
 import (
+	"context"
+
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/transform"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 )
@@ -13,7 +15,7 @@ type StepThinkingPassthrough struct {
 
 func (s *StepThinkingPassthrough) Key() string { return "thinking_passthrough" }
 
-func (s *StepThinkingPassthrough) Apply(p *Pass) error {
+func (s *StepThinkingPassthrough) Apply(_ context.Context, p *Pass) error {
 	if s.rules.SendBack(p.Working.Model) {
 		transform.ApplyThinkingPassthrough(p.Working.Messages)
 	}
@@ -30,7 +32,7 @@ type StepThinkingStrip struct {
 
 func (s *StepThinkingStrip) Key() string { return "thinking_strip" }
 
-func (s *StepThinkingStrip) Apply(p *Pass) error {
+func (s *StepThinkingStrip) Apply(_ context.Context, p *Pass) error {
 	if !s.rules.SendBack(p.Working.Model) {
 		transform.ApplyThinkingStrip(p.Working.Messages)
 	}

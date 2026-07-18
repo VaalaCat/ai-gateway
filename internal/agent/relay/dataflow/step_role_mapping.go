@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/transform"
@@ -14,7 +15,7 @@ type StepRoleMapping struct {
 
 func (s *StepRoleMapping) Key() string { return "role_mapping" }
 
-func (s *StepRoleMapping) Apply(p *Pass) error {
+func (s *StepRoleMapping) Apply(_ context.Context, p *Pass) error {
 	if s.rules == nil {
 		return nil
 	}

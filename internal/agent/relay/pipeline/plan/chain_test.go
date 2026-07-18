@@ -92,6 +92,28 @@ func TestBuildChainFromStore_UserScopeWinsOverGlobal(t *testing.T) {
 	}
 }
 
+func TestBuildChainFromStore_TokenScopeWinsOverUserAndGlobal(t *testing.T) {
+	rs := &stubRoutingStore{
+		token: map[string]*protocol.SyncedRouting{
+			"smart": {ID: 30, Name: "smart", Scope: "token", TokenID: 7, Enabled: true, Members: []protocol.RoutingMember{{Ref: "token-model", Weight: 1}}},
+		},
+		user: map[string]*protocol.SyncedRouting{
+			"smart": {ID: 20, Name: "smart", Scope: "user", UserID: 42, Enabled: true, Members: []protocol.RoutingMember{{Ref: "user-model", Weight: 1}}},
+		},
+		global: map[string]*protocol.SyncedRouting{
+			"smart": {ID: 10, Name: "smart", Scope: "global", Enabled: true, Members: []protocol.RoutingMember{{Ref: "global-model", Weight: 1}}},
+		},
+	}
+	rctx := newTestRelayContext(nil, "smart", &app.UserInfo{UserID: 42, TokenID: 7}, 0)
+	chain := buildChainFromStore(rs, rctx)
+	if len(chain.Models) != 1 || chain.Models[0] != "token-model" {
+		t.Fatalf("chain = %+v", chain)
+	}
+	if len(chain.Trace) != 1 || chain.Trace[0] != "token:smart" {
+		t.Fatalf("trace = %v", chain.Trace)
+	}
+}
+
 // TestRoutingChainBuilder_Build_ThroughStubAgentCache: wire-up smoke。
 // routingChainBuilder.Build → routingStoreFromContext → stubAgentCache（满足 RoutingStore）。
 func TestRoutingChainBuilder_Build_ThroughStubAgentCache(t *testing.T) {

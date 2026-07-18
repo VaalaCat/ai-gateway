@@ -20,8 +20,9 @@ import (
 
 // TokenLoader 通过 sync.fetchEntity 拉取 token，同时 warm 关联的 user。
 type TokenLoader struct {
-	Client app.WSClient                                        // RPC 通道
-	Users  entitycache.EntityCache[uint, *protocol.SyncedUser] // 关联 user 缓存（用于 warm）
+	Client        app.WSClient                                        // RPC 通道
+	Users         entitycache.EntityCache[uint, *protocol.SyncedUser] // 关联 user 缓存（用于 warm）
+	TokenRoutings entitycache.EntityCache[uint, *protocol.TokenRoutingMap]
 }
 
 // Load 实现 entitycache.Loader[string, *models.Token]。
@@ -37,14 +38,27 @@ func (l *TokenLoader) Load(ctx context.Context, key string) (*models.Token, erro
 	if err := json.Unmarshal(resp.Data, &token); err != nil {
 		return nil, err
 	}
-	l.warmSideUser(resp.Side)
+	l.warmSide(token.ID, resp.Side)
 	return &token, nil
 }
 
 // warmSideUser 解析 Side 字段并把 SyncedUser 写入关联缓存。
 // Side 为空或解析失败时静默跳过——loader 主流程不受影响。
-func (l *TokenLoader) warmSideUser(side json.RawMessage) {
-	if len(side) == 0 || l.Users == nil {
+func (l *TokenLoader) warmSide(tokenID uint, side json.RawMessage) {
+	if len(side) == 0 {
+		return
+	}
+	var versioned protocol.TokenFetchSide
+	if err := json.Unmarshal(side, &versioned); err == nil && versioned.SchemaVersion == protocol.TokenFetchSideSchemaV1 {
+		if l.Users != nil && versioned.User != nil && versioned.User.ID > 0 {
+			l.Users.Set(versioned.User.ID, versioned.User)
+		}
+		if l.TokenRoutings != nil && versioned.TokenRoutings != nil && tokenID > 0 {
+			l.TokenRoutings.Set(tokenID, versioned.TokenRoutings)
+		}
+		return
+	}
+	if l.Users == nil {
 		return
 	}
 	var u protocol.SyncedUser

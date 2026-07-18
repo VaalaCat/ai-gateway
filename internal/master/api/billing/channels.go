@@ -34,7 +34,7 @@ func (h *Handler) ListChannels(c *app.Context, req ListChannelsRequest) (api.Pag
 	}
 
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	items, total, err := q.Billing().ListChannelBilling(dao.ListOptions{Page: page, PageSize: pageSize}, dao.ChannelBillingListFilter{
 		ChannelID: channelID,
 		StartDate: startDate,
@@ -62,7 +62,7 @@ func (h *Handler) ChannelDaily(c *app.Context, req ChannelDailyRequest) (Channel
 		return ChannelDailyResponse{}, api.BadRequestError("invalid date range", err)
 	}
 
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	items, err := q.Billing().GetChannelDaily(channelID, dao.ChannelBillingListFilter{
 		StartDate: startDate,
 		EndDate:   endDate,

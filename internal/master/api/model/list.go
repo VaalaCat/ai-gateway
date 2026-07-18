@@ -10,7 +10,7 @@ import (
 func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[models.ModelConfig], error) {
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	configs, total, err := q.ModelConfig().List(

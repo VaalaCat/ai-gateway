@@ -1,20 +1,29 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -39,6 +48,44 @@ type recordingDispatcher struct {
 	results   []state.AttemptResult
 }
 
+type injectedProvider struct {
+	calls  int
+	result attemptexec.ProviderResult
+}
+
+func newLocalTestExecutor(
+	dispatcher state.Dispatcher,
+	runner ResilientRunner,
+	gate state.RateGate,
+) *Executor {
+	provider := attemptexec.NewProviderExecutor(dispatcher, runner, gate)
+	return &Executor{
+		SourceAgentID: "source",
+		Routes:        NewAttemptRouteBuilder(nil),
+		Local:         NewLocalAttemptExecutor("source", provider),
+		RequestGate:   gate,
+	}
+}
+
+func (p *injectedProvider) Execute(*state.RelayContext, state.Attempt) attemptexec.ProviderResult {
+	p.calls++
+	return p.result
+}
+
+type bodyRecordingDispatcher struct {
+	bodies  [][]byte
+	results []state.AttemptResult
+}
+
+func (d *bodyRecordingDispatcher) Dispatch(rctx *state.RelayContext, _ state.Attempt) state.AttemptResult {
+	body, err := io.ReadAll(rctx.Context.Request.Body)
+	if err != nil {
+		return state.AttemptResult{Err: err}
+	}
+	d.bodies = append(d.bodies, body)
+	return d.results[len(d.bodies)-1]
+}
+
 func (r *recordingDispatcher) Dispatch(rctx *state.RelayContext, a state.Attempt) state.AttemptResult {
 	if r.callCount >= len(r.results) {
 		r.callCount++
@@ -52,8 +99,10 @@ func (r *recordingDispatcher) Dispatch(rctx *state.RelayContext, a state.Attempt
 // newTestExecutorRctx 构造一个最小可用的 state.RelayContext：Plan 已落到 State，
 // Recorder 是 disabled（避免 trace 落盘）；Agent 由调用方按需注入。
 func newTestExecutorRctx(plan state.AttemptPlan, agent app.AgentApplication) *state.RelayContext {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	return &state.RelayContext{
-		Context: &gin.Context{},
+		Context: c,
 		Agent:   agent,
 		Input: state.RelayInput{
 			Body:     []byte(`{"model":"x"}`),
@@ -68,13 +117,11 @@ func newTestExecutorRctx(plan state.AttemptPlan, agent app.AgentApplication) *st
 // logger 非 nil 时 GetLogger 返回它（log emit 用例用 observer.New 注入）。
 type stubExecAgent struct {
 	app.AgentApplication
-	forwarder app.RouteForwarder
-	cache     app.AgentCache
-	logger    *zap.Logger
+	logger *zap.Logger
 }
 
-func (s *stubExecAgent) GetRouteForwarder() app.RouteForwarder { return s.forwarder }
-func (s *stubExecAgent) GetCache() app.AgentCache              { return s.cache }
+func (s *stubExecAgent) GetCache() app.AgentCache    { return nil }
+func (s *stubExecAgent) GetBodyStore() app.BodyStore { return nil }
 func (s *stubExecAgent) GetLogger() *zap.Logger {
 	if s.logger != nil {
 		return s.logger
@@ -89,33 +136,63 @@ type stubExecTransportPool struct{}
 
 func (stubExecTransportPool) Get(*models.Channel) *http.Transport { return nil }
 func (stubExecTransportPool) Invalidate(uint, string)             {}
+func (stubExecTransportPool) CloseIdleConnections()               {}
 
-// stubExecCache 嵌套 app.AgentCache 仅覆盖 MatchRoute（forward 决策用），
-// 其它方法（Store 的 GetXxx）测试不触达。
-type stubExecCache struct {
-	app.AgentCache
-	route *models.AgentRoute
+type execBodyStore struct {
+	body app.ReplayBody
 }
 
-func (c *stubExecCache) MatchRoute(uint, string, []uint) *models.AgentRoute { return c.route }
-
-// stubForwarder 可控 ForwardByRoute 的返回值，方便覆盖 forward 命中 / 失败两条路径。
-type stubForwarder struct {
-	forwarded bool
-	err       error
-	calls     int
+func (s execBodyStore) Capture(context.Context, io.Reader, app.BodyLimits) (app.ReplayBody, error) {
+	return s.body, nil
 }
 
-func (f *stubForwarder) ForwardByRoute(*gin.Context, *models.AgentRoute) (bool, error) {
-	f.calls++
-	return f.forwarded, f.err
+type execReplayBody struct {
+	data         []byte
+	openErr      error
+	opens        atomic.Int32
+	readerCloses atomic.Int32
+	closeOnce    sync.Once
+}
+
+func (b *execReplayBody) Size() int64 { return int64(len(b.data)) }
+func (b *execReplayBody) Open() (io.ReadCloser, error) {
+	if b.openErr != nil {
+		return nil, b.openErr
+	}
+	b.opens.Add(1)
+	return &execTrackedReader{Reader: bytes.NewReader(b.data), closes: &b.readerCloses}, nil
+}
+func (b *execReplayBody) Bytes(limit int64) ([]byte, error) {
+	if int64(len(b.data)) > limit {
+		return nil, io.ErrShortBuffer
+	}
+	return append([]byte(nil), b.data...), nil
+}
+func (b *execReplayBody) Close() error {
+	b.closeOnce.Do(func() {})
+	return nil
+}
+
+type execTrackedReader struct {
+	io.Reader
+	closes *atomic.Int32
+	once   sync.Once
+}
+
+func (r *execTrackedReader) Close() error {
+	r.once.Do(func() {
+		if r.closes != nil {
+			r.closes.Add(1)
+		}
+	})
+	return nil
 }
 
 // TestExecutorSuccessFirstAttempt 成功路径：第一次 attempt 成功 → 不再 retry。
 func TestExecutorSuccessFirstAttempt(t *testing.T) {
 	backend := &recordingDispatcher{results: []state.AttemptResult{{PromptTokens: 5}}}
 	d := backend
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -130,6 +207,9 @@ func TestExecutorSuccessFirstAttempt(t *testing.T) {
 	if backend.callCount != 1 {
 		t.Errorf("backend called %d times, want 1", backend.callCount)
 	}
+	if !rctx.State.Execution.ProviderDispatched {
+		t.Error("ProviderDispatched should be true after Dispatcher.Dispatch")
+	}
 	if rctx.State.Execution.Used.Channel == nil || rctx.State.Execution.Used.Channel.ID != 1 {
 		t.Errorf("Used.Channel should be ch=1, got %#v", rctx.State.Execution.Used.Channel)
 	}
@@ -142,7 +222,7 @@ func TestExecutorRetryOnFail(t *testing.T) {
 		{PromptTokens: 7},
 	}}
 	d := backend
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -163,6 +243,86 @@ func TestExecutorRetryOnFail(t *testing.T) {
 	}
 }
 
+func TestExecutorReopensReplayBodyForEveryDispatch(t *testing.T) {
+	want := []byte("multipart-or-json-payload")
+	replay := &execReplayBody{data: want}
+	resources := &state.RequestResources{}
+	if err := resources.Replace(context.Background(), execBodyStore{body: replay}, strings.NewReader("ignored"), app.BodyLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resources.Close() })
+
+	dispatcher := &bodyRecordingDispatcher{results: []state.AttemptResult{
+		{Err: errors.New("retry")},
+		{},
+	}}
+	e := newLocalTestExecutor(dispatcher, nil, nil)
+	rctx := newTestExecutorRctx(state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}},
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}},
+	}}, &stubExecAgent{})
+	var originalCloses atomic.Int32
+	original := &execTrackedReader{Reader: strings.NewReader("stale"), closes: &originalCloses}
+	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", nil)
+	rctx.Context.Request.Body = original
+	rctx.Resources = resources
+	rctx.Input.Body = []byte("bounded-json-compatibility-view")
+
+	// behavior change: attempts reopen the owned replay body instead of rebuilding from RelayInput.Body.
+	e.Run(rctx)
+	if len(dispatcher.bodies) != 2 {
+		t.Fatalf("dispatch bodies = %d, want 2", len(dispatcher.bodies))
+	}
+	for i, got := range dispatcher.bodies {
+		if !bytes.Equal(got, want) {
+			t.Fatalf("dispatch #%d body = %q, want %q", i+1, got, want)
+		}
+	}
+	if originalCloses.Load() != 1 {
+		t.Fatalf("original request reader closes = %d, want 1", originalCloses.Load())
+	}
+	if replay.opens.Load() != 2 {
+		t.Fatalf("ReplayBody.Open calls = %d, want 2", replay.opens.Load())
+	}
+	if replay.readerCloses.Load() != 1 {
+		t.Fatalf("replay reader closes before request cleanup = %d, want 1", replay.readerCloses.Load())
+	}
+	if err := rctx.Context.Request.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if replay.readerCloses.Load() != 2 {
+		t.Fatalf("replay reader closes after request cleanup = %d, want 2", replay.readerCloses.Load())
+	}
+}
+
+func TestExecutorReplayOpenFailureSkipsDispatch(t *testing.T) {
+	wantErr := errors.New("replay open failed")
+	resources := &state.RequestResources{}
+	if err := resources.Replace(context.Background(), execBodyStore{
+		body: &execReplayBody{openErr: wantErr},
+	}, strings.NewReader("ignored"), app.BodyLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resources.Close() })
+	dispatcher := &recordingDispatcher{}
+	rctx := newTestExecutorRctx(state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}},
+	}}, &stubExecAgent{})
+	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rctx.Resources = resources
+
+	(newLocalTestExecutor(dispatcher, nil, nil)).Run(rctx)
+	if !errors.Is(rctx.State.Execution.Err, wantErr) {
+		t.Fatalf("Execution.Err = %v, want replay open failure", rctx.State.Execution.Err)
+	}
+	if dispatcher.callCount != 0 {
+		t.Fatalf("dispatcher calls = %d, want 0", dispatcher.callCount)
+	}
+	if rctx.State.Execution.ProviderDispatched {
+		t.Fatal("ProviderDispatched should remain false when replay body open fails")
+	}
+}
+
 // TestExecutorStopsOnWritten 失败 + Written=true（流已写出客户端）→ 不可 retry，立即 return。
 func TestExecutorStopsOnWritten(t *testing.T) {
 	backend := &recordingDispatcher{results: []state.AttemptResult{
@@ -170,7 +330,7 @@ func TestExecutorStopsOnWritten(t *testing.T) {
 		{PromptTokens: 99}, // should NOT be called
 	}}
 	d := backend
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, Mode: state.ModeNative},
@@ -190,7 +350,7 @@ func TestExecutorStopsOnWritten(t *testing.T) {
 // TestExecutorEmptyPlan 边界：空 Plan.Attempts 不应迭代，不应 panic，不应 err。
 func TestExecutorEmptyPlan(t *testing.T) {
 	d := &recordingDispatcher{}
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 	rctx := newTestExecutorRctx(state.AttemptPlan{}, &stubExecAgent{})
 	e.Run(rctx)
 	if rctx.State.Execution.Err != nil {
@@ -202,289 +362,6 @@ func TestExecutorEmptyPlan(t *testing.T) {
 	}
 }
 
-// TestExecutorMaybeForwardCommits 转发命中：forwarder.ForwardByRoute 返 true → backend 不应被调用。
-func TestExecutorMaybeForwardCommits(t *testing.T) {
-	backend := &recordingDispatcher{}
-	d := backend
-	e := &Executor{Dispatcher: d}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	cache := &stubExecCache{route: &models.AgentRoute{ID: 1, AgentID: "other-agent"}}
-	fwd := &stubForwarder{forwarded: true}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: cache})
-	e.Run(rctx)
-
-	if !rctx.State.Forwarded {
-		t.Error("State.Forwarded should be true")
-	}
-	if backend.callCount != 0 {
-		t.Errorf("backend should NOT be called when forwarded, called %d", backend.callCount)
-	}
-	if fwd.calls != 1 {
-		t.Errorf("forwarder should be called once, got %d", fwd.calls)
-	}
-}
-
-// TestExecutorMaybeForwardFailsToBackend 转发失败：forwarder 返 (false, err) → 降级到 backend。
-func TestExecutorMaybeForwardFailsToBackend(t *testing.T) {
-	backend := &recordingDispatcher{results: []state.AttemptResult{{PromptTokens: 5}}}
-	d := backend
-	e := &Executor{Dispatcher: d}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	cache := &stubExecCache{route: &models.AgentRoute{ID: 1}}
-	fwd := &stubForwarder{forwarded: false, err: errors.New("network")}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: cache})
-	e.Run(rctx)
-
-	if rctx.State.Forwarded {
-		t.Error("Forwarded=false when ForwardByRoute returns false")
-	}
-	if backend.callCount != 1 {
-		t.Errorf("backend should run when forward fails: called %d", backend.callCount)
-	}
-}
-
-// TestExecutorNoForwarderSkipsForwardCheck 边界：GetRouteForwarder=nil 时 maybeForward 直接 false，
-// 不应 panic 在 GetCache() 取 nil 上。
-func TestExecutorNoForwarderSkipsForwardCheck(t *testing.T) {
-	backend := &recordingDispatcher{results: []state.AttemptResult{{PromptTokens: 1}}}
-	d := backend
-	e := &Executor{Dispatcher: d}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: nil, cache: nil})
-	e.Run(rctx)
-
-	if rctx.State.Forwarded {
-		t.Error("Forwarded should be false when no forwarder")
-	}
-	if backend.callCount != 1 {
-		t.Errorf("backend should run, got %d", backend.callCount)
-	}
-}
-
-// TestMaybeForward_ForwarderPresentButCacheNil_SkipsForward 锁定 forward.go 的
-// cache==nil 早返分支（审计 D-I4 / spec §5.2 #27）。
-//
-// 既有 TestExecutorNoForwarderSkipsForwardCheck 把 forwarder=nil 与 cache=nil
-// 同时设了 nil，未独立覆盖"forwarder!=nil 但 cache==nil"的边界：
-// 若 forward.go 的 `if cache == nil { return false }` 被误删，
-// 后续 cache.MatchRoute 会 nil deref panic。
-//
-// 直接 call package-private maybeForward 而非走 Executor.Run，
-// 验证 forward 决策本身的早返语义，避开 dispatch 路径噪声。
-func TestMaybeForward_ForwarderPresentButCacheNil_SkipsForward(t *testing.T) {
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	// forwarder 非 nil（任何 stub 即可），cache 显式 nil。
-	fwd := &stubForwarder{forwarded: true}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: nil})
-
-	got := maybeForward(rctx, 0, &rctx.State.Plan)
-
-	if got {
-		t.Fatalf("maybeForward should return false when cache is nil, got %v", got)
-	}
-	if fwd.calls != 0 {
-		t.Errorf("forwarder should NOT be called when cache is nil, calls=%d", fwd.calls)
-	}
-	// 抵达此处即说明没 panic — 早返保护生效。
-}
-
-// perChannelCache 让 MatchRoute 按调用顺序返回不同 route，模拟"只有部分 attempt 命中"。
-// MatchRoute 入参 channelIDs 复制后落进 captured，供测试断言"传入的是当前 attempt 的 channel"。
-type perChannelCache struct {
-	app.AgentCache
-	routes   []*models.AgentRoute // 按调用顺序消费
-	captured [][]uint             // 每次 MatchRoute 传入的 channelIDs 副本
-	calls    int
-}
-
-func (c *perChannelCache) MatchRoute(_ uint, _ string, channelIDs []uint) *models.AgentRoute {
-	idsCopy := append([]uint(nil), channelIDs...)
-	c.captured = append(c.captured, idsCopy)
-	idx := c.calls
-	c.calls++
-	if idx >= len(c.routes) {
-		return nil
-	}
-	return c.routes[idx]
-}
-
-// perCallForwarder 按调用顺序返回 (forwarded, err) 队列，并捕获每次传入的 route。
-// 队列耗尽后均返回零值——便于测试"应仅被调 N 次"的契约。
-type perCallForwarder struct {
-	results []forwardResult
-	routes  []*models.AgentRoute
-	calls   int
-}
-
-type forwardResult struct {
-	forwarded bool
-	err       error
-}
-
-func (f *perCallForwarder) ForwardByRoute(_ *gin.Context, route *models.AgentRoute) (bool, error) {
-	f.routes = append(f.routes, route)
-	idx := f.calls
-	f.calls++
-	if idx >= len(f.results) {
-		return false, nil
-	}
-	return f.results[idx].forwarded, f.results[idx].err
-}
-
-// TestExecutorPerAttemptForwardLateHit
-// behavior change vs main: per-attempt forward decision (spec §1 exception)
-//
-// 三 attempt：前 2 attempt 没匹配 route（cache.MatchRoute=nil）→ 直接走 backend，
-// 第 3 attempt 才匹配到 route 并 ForwardByRoute=(true, nil) → forwarded=true 终止。
-// 验证 forward 决策按 attempt 评估，**不是** Plan 开局一次性决定。
-func TestExecutorPerAttemptForwardLateHit(t *testing.T) {
-	// 前 2 attempts 没有匹配 route → 直接 backend；让 backend 返回 retry-able 错误推进循环。
-	backend := &recordingDispatcher{results: []state.AttemptResult{
-		{Err: errors.New("ch1 fail"), Written: false},
-		{Err: errors.New("ch2 fail"), Written: false},
-	}}
-	d := backend
-	e := &Executor{Dispatcher: d}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 3}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	cache := &perChannelCache{routes: []*models.AgentRoute{nil, nil, {ID: 42}}}
-	// ForwardByRoute 仅在 MatchRoute 命中（第 3 attempt）时被调用 → 队列首项即对应第 3 attempt。
-	fwd := &perCallForwarder{results: []forwardResult{{forwarded: true}}}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: cache})
-	e.Run(rctx)
-
-	if !rctx.State.Forwarded {
-		t.Fatal("Forwarded should be true on 3rd attempt forward hit")
-	}
-	// backend 仅前 2 attempts 走（第 3 attempt 被 forward 接管，不走 backend）。
-	if backend.callCount != 2 {
-		t.Errorf("backend should be called 2 times (only attempts 1 & 2), got %d", backend.callCount)
-	}
-	// MatchRoute 必须每个 attempt 都问一次——证明决策是 per-attempt。
-	if cache.calls != 3 {
-		t.Errorf("MatchRoute should be evaluated per attempt (3 times), got %d", cache.calls)
-	}
-	// 只有命中 attempt 才会触发 ForwardByRoute。
-	if fwd.calls != 1 {
-		t.Errorf("ForwardByRoute should fire only on matched attempt, got %d calls", fwd.calls)
-	}
-}
-
-// TestExecutorPerAttemptForwardAfterBackendFailures
-// behavior change vs main: per-attempt forward decision (spec §1 exception)
-//
-// 三 attempt：前 2 attempt backend 失败（retry-able），第 3 attempt 才匹配 route + forward 命中。
-// 验证 backend 失败链路下 forward 仍可在中途接管，最终 Forwarded=true 且 backend 调 2 次。
-func TestExecutorPerAttemptForwardAfterBackendFailures(t *testing.T) {
-	backend := &recordingDispatcher{results: []state.AttemptResult{
-		{Err: errors.New("upstream 500"), Written: false},
-		{Err: errors.New("upstream 502"), Written: false},
-	}}
-	d := backend
-	e := &Executor{Dispatcher: d}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 11}}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 22}}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 33}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	// 前 2 不匹配 route → 走 backend；第 3 匹配 → 走 forward。
-	cache := &perChannelCache{routes: []*models.AgentRoute{nil, nil, {ID: 7}}}
-	fwd := &perCallForwarder{results: []forwardResult{{forwarded: true}}}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: cache})
-	e.Run(rctx)
-
-	if !rctx.State.Forwarded {
-		t.Fatal("Forwarded should be true after backend failures, when 3rd attempt forwards")
-	}
-	if backend.callCount != 2 {
-		t.Errorf("backend should run 2 times (attempts 1 & 2 failed), got %d", backend.callCount)
-	}
-	if fwd.calls != 1 {
-		t.Errorf("ForwardByRoute should fire once (3rd attempt), got %d", fwd.calls)
-	}
-	// 最终终态是 forwarded，Err 不应当作"backend 最后一次错"暴露 —— Forwarded 后 Run 直接 return。
-	if rctx.State.Execution.Err != nil {
-		// History 中确有失败项但终态由 forward 接管，Err 字段不会设置
-		// （Run 在 Forwarded 分支直接 return，不进入末尾 out.Err 赋值）。
-		t.Errorf("Execution.Err should remain nil when forwarded, got %v", rctx.State.Execution.Err)
-	}
-}
-
-// TestExecutorForwardDecisionUsesRemainingChannelBatch
-// behavior change vs main: per-attempt forward decision (spec §1) +
-// batch channelIDs aligned with main:handler.go:357-360 (审计 #12 修复)
-//
-// 验证 maybeForward 传给 cache.MatchRoute 的 channelIDs 是 **当前 attempt 起的
-// 剩余 batch**（plan.Attempts[idx:] 的 channel ID，去重保序），而不是单个 channel.ID。
-// per-attempt 时机评估 + batch 集合查询，是修复后的契约。
-func TestExecutorForwardDecisionUsesRemainingChannelBatch(t *testing.T) {
-	// 让 backend 也返回 retry-able 错误，确保 3 个 attempts 都被迭代 → 3 次 MatchRoute 调用。
-	backend := &recordingDispatcher{results: []state.AttemptResult{
-		{Err: errors.New("ch101 fail"), Written: false},
-		{Err: errors.New("ch202 fail"), Written: false},
-		{Err: errors.New("ch303 fail"), Written: false},
-	}}
-	d := backend
-	e := &Executor{Dispatcher: d}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 101}}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 202}}, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 303}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	// MatchRoute 全部返 nil → 不进入 ForwardByRoute，但 captured 仍记录每次传入的 channelIDs。
-	cache := &perChannelCache{routes: []*models.AgentRoute{nil, nil, nil}}
-	fwd := &perCallForwarder{}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: cache})
-	e.Run(rctx)
-
-	if cache.calls != 3 {
-		t.Fatalf("expected MatchRoute called 3 times (per attempt), got %d", cache.calls)
-	}
-	// 每个 attempt 应传入"当前及后续"全部 channelID（去重保序）。
-	wantBatches := [][]uint{
-		{101, 202, 303}, // attempt 0: remaining = [101,202,303]
-		{202, 303},      // attempt 1: remaining = [202,303]
-		{303},           // attempt 2: remaining = [303]
-	}
-	for i, ids := range cache.captured {
-		want := wantBatches[i]
-		if len(ids) != len(want) {
-			t.Errorf("attempt %d: MatchRoute batch len = %d (%v), want %d (%v)", i, len(ids), ids, len(want), want)
-			continue
-		}
-		for j := range want {
-			if ids[j] != want[j] {
-				t.Errorf("attempt %d: MatchRoute batch[%d] = %d, want %d (full batch=%v)", i, j, ids[j], want[j], ids)
-			}
-		}
-	}
-	if fwd.calls != 0 {
-		t.Errorf("ForwardByRoute should not fire when MatchRoute returns nil, got %d", fwd.calls)
-	}
-}
-
-// TestExecutor_RelayAttemptFailedLogEmitted: 每次 backend.Relay 返 Err != nil 时
-// 必须 emit 一条 Warn "relay attempt failed"（main:handler.go 老主循环 attempt 失败分支 老行为；refactor 之前
-// 漏写，本测试钉死）。字段对齐 main parity：channel_id / attempts_left / path / error。
-//
-// 用例配置：2 个 attempt，第 1 个失败（retry-able）+ 第 2 个成功 → 仅 1 条失败日志。
 func TestExecutor_RelayAttemptFailedLogEmitted(t *testing.T) {
 	core, recorded := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
@@ -494,7 +371,7 @@ func TestExecutor_RelayAttemptFailedLogEmitted(t *testing.T) {
 		{PromptTokens: 7},
 	}}
 	d := backend
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 101}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -538,7 +415,7 @@ func TestExecutor_RelayAttemptFailedLogEmittedOnWritten(t *testing.T) {
 		{Err: errors.New("stream broke"), Written: true},
 	}}
 	d := backend
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 7}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -557,126 +434,6 @@ func TestExecutor_RelayAttemptFailedLogEmittedOnWritten(t *testing.T) {
 // "route forwarding failed, processing locally" 是 main:handler.go 老主循环的完整 warn 文案，
 // ops 可能 grep 完整 message 触发告警，必须 byte-equal 不能漂移。
 // 构造 forwarder 返回 (false, err) → 不命中 + 带 err 触发 warn 分支。
-func TestExecutor_RouteForwardingFailedLogMessage(t *testing.T) {
-	core, recorded := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-
-	backend := &recordingDispatcher{results: []state.AttemptResult{{PromptTokens: 5}}}
-	d := backend
-	e := &Executor{Dispatcher: d}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	cache := &stubExecCache{route: &models.AgentRoute{ID: 42}}
-	fwd := &stubForwarder{forwarded: false, err: errors.New("upstream agent unreachable")}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: cache, logger: logger})
-
-	e.Run(rctx)
-
-	entries := recorded.FilterMessage("route forwarding failed, processing locally").All()
-	if len(entries) != 1 {
-		t.Fatalf("want exactly 1 warn %q, got %d entries; all=%v",
-			"route forwarding failed, processing locally", len(entries), recorded.All())
-	}
-	fields := entries[0].ContextMap()
-	if fields["route_id"] != uint64(42) {
-		t.Errorf("route_id = %v, want 42", fields["route_id"])
-	}
-	if fields["error"] != "upstream agent unreachable" {
-		t.Errorf("error = %v, want 'upstream agent unreachable'", fields["error"])
-	}
-}
-
-// TestRun_ForwardBatch_MatchesLaterChannel 钉死审计 #12 修复：
-// 当 AgentRoute 配在 Plan 后面的 channel（非首个）时，maybeForward 必须用
-// 剩余 attempts 的全部 channelIDs batch 查 route，第一轮就命中并 forward，
-// 绝不会先 dispatch 头部 channel。
-//
-// 对照 main:handler.go:357-360：
-//
-//	channelIDs := make([]uint, len(channels))
-//	for i, ch := range channels { channelIDs[i] = ch.ID }
-//	if route := h.Store.RouteIndex.Match(userInfo.TokenID, realModel, channelIDs); route != nil { ... }
-//
-// 旧 HEAD 行为：attempt 0 查 [A] 不命中 → dispatch A → 失败 → attempt 1 查 [B] 命中
-// 新 HEAD 行为：attempt 0 查 [A,B,C] 命中 B → forward（dispatcher 永远不被调用）
-func TestRun_ForwardBatch_MatchesLaterChannel(t *testing.T) {
-	chA := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Name: "A"}}
-	chB := &models.Channel{ChannelCore: models.ChannelCore{ID: 2, Name: "B"}}
-	chC := &models.Channel{ChannelCore: models.ChannelCore{ID: 3, Name: "C"}}
-
-	route := &models.AgentRoute{ID: 42}
-	// idChannelCache：当传入的 channelIDs 包含 chB.ID 时返回 route，否则 nil。
-	// 用真实"按 ID 命中"的语义模拟 RouteIndex.Match。
-	cache := &idChannelCache{routeByID: map[uint]*models.AgentRoute{chB.ID: route}}
-	fwd := &perCallForwarder{results: []forwardResult{{forwarded: true}}}
-
-	backend := &recordingDispatcher{}
-	e := &Executor{Dispatcher: backend}
-
-	plan := state.AttemptPlan{Attempts: []state.Attempt{
-		{Channel: chA, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: chB, RealModel: "gpt-4", Mode: state.ModeNative},
-		{Channel: chC, RealModel: "gpt-4", Mode: state.ModeNative},
-	}}
-	rctx := newTestExecutorRctx(plan, &stubExecAgent{forwarder: fwd, cache: cache})
-
-	e.Run(rctx)
-
-	if !rctx.State.Forwarded {
-		t.Fatal("expected Forwarded=true (batch query should hit ChB at attempt 0)")
-	}
-	if fwd.calls != 1 {
-		t.Fatalf("expected 1 ForwardByRoute call, got %d", fwd.calls)
-	}
-	if len(fwd.routes) != 1 || fwd.routes[0].ID != route.ID {
-		t.Fatalf("expected ForwardByRoute called with route ID %d, got routes=%v", route.ID, fwd.routes)
-	}
-	// 关键断言：batch 命中后绝不 dispatch 头部 channel —— 这是审计 #12 修复的本质。
-	if backend.callCount != 0 {
-		t.Fatalf("expected 0 dispatcher calls (forward should fire before any dispatch), got %d", backend.callCount)
-	}
-	// 还要验证第一次 MatchRoute 传入的是完整 batch（[A,B,C]）。
-	if len(cache.captured) < 1 {
-		t.Fatal("MatchRoute should have been called at least once")
-	}
-	firstCall := cache.captured[0]
-	if len(firstCall) != 3 || firstCall[0] != chA.ID || firstCall[1] != chB.ID || firstCall[2] != chC.ID {
-		t.Errorf("first MatchRoute should receive batch [A=1,B=2,C=3], got %v", firstCall)
-	}
-}
-
-// idChannelCache 按 channelIDs 中是否含特定 ID 决定返回 route，更贴近 main 的
-// Store.RouteIndex.Match 行为（id-in-set 判定）。每次调用捕获入参 channelIDs。
-type idChannelCache struct {
-	app.AgentCache
-	routeByID map[uint]*models.AgentRoute
-	captured  [][]uint
-}
-
-func (c *idChannelCache) MatchRoute(_ uint, _ string, channelIDs []uint) *models.AgentRoute {
-	idsCopy := append([]uint(nil), channelIDs...)
-	c.captured = append(c.captured, idsCopy)
-	for _, id := range channelIDs {
-		if r, ok := c.routeByID[id]; ok {
-			return r
-		}
-	}
-	return nil
-}
-
-// TestLogAttemptFailed_AttemptsLeftReflectsPlanRemaining
-// 钉死新语义：attempts_left 是 Plan 内剩余 attempt 数（Planner truncate 后真实剩余），
-// 不是 main 老主循环的 RetryMax 全局累减。
-//
-// 场景：Plan.Attempts 有 3 个 attempt，全部失败（retry-able）。
-//   - 第 1 次失败（idx=0）→ attempts_left = 3-0-1 = 2
-//   - 第 2 次失败（idx=1）→ attempts_left = 3-1-1 = 1
-//   - 第 3 次失败（idx=2）→ attempts_left = 3-2-1 = 0
-//
-// 与 main 对比：若全局 RetryMax=5 而 Planner truncate 后 Plan 只有 3 个 attempt，main
-// 第 1 次会打 attempts_left=4，新流程打 2 —— 新值更准确反映真实剩余尝试机会。
 func TestLogAttemptFailed_AttemptsLeftReflectsPlanRemaining(t *testing.T) {
 	core, recorded := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
@@ -687,7 +444,7 @@ func TestLogAttemptFailed_AttemptsLeftReflectsPlanRemaining(t *testing.T) {
 		{Err: errors.New("ch3 fail"), Written: false},
 	}}
 	d := backend
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -727,10 +484,8 @@ func TestExecutor_ContextCanceled_NoSleep(t *testing.T) {
 		{Err: context.Canceled, Written: false},
 		{PromptTokens: 99}, // 不应被调
 	}}
-	e := &Executor{
-		Dispatcher: backend,
-		Sleep:      stubSleep{ms: 1000},
-	}
+	e := newLocalTestExecutor(backend, nil, nil)
+	e.Sleep = stubSleep{ms: 1000}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -768,10 +523,8 @@ func TestExecutor_InvalidRequest_NoSleep(t *testing.T) {
 		{Err: invReqErr, Written: false},
 		{PromptTokens: 99}, // 不应被调
 	}}
-	e := &Executor{
-		Dispatcher: backend,
-		Sleep:      stubSleep{ms: 1000},
-	}
+	e := newLocalTestExecutor(backend, nil, nil)
+	e.Sleep = stubSleep{ms: 1000}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -806,10 +559,8 @@ func TestExecutor_DefaultFallback_SleepsBetween(t *testing.T) {
 		{Err: &common.UpstreamError{Status: 503, Body: []byte("overloaded")}, Written: false},
 		{PromptTokens: 7}, // 成功
 	}}
-	e := &Executor{
-		Dispatcher: backend,
-		Sleep:      stubSleep{ms: 50},
-	}
+	e := newLocalTestExecutor(backend, nil, nil)
+	e.Sleep = stubSleep{ms: 50}
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
@@ -862,7 +613,7 @@ func TestRun_ResilienceRunnerRetriesSameChannel(t *testing.T) {
 	}
 	// 用自定义 dispatcher 计数，但让 stubRunner 驱动重试。
 	var countingD state.Dispatcher = dispatchCounterDispatcher{inner: d, counter: &calls}
-	e := &Executor{Dispatcher: countingD, Resilience: stubRunner{retries: 2}}
+	e := newLocalTestExecutor(countingD, stubRunner{retries: 2}, nil)
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
@@ -895,7 +646,7 @@ func TestRun_NilResilienceFallsBackToPlainDispatch(t *testing.T) {
 		inner:   &recordingDispatcher{results: []state.AttemptResult{{}}},
 		counter: &calls,
 	}
-	e := &Executor{Dispatcher: countingD} // Resilience nil
+	e := newLocalTestExecutor(countingD, nil, nil) // Resilience nil
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
@@ -903,6 +654,31 @@ func TestRun_NilResilienceFallsBackToPlainDispatch(t *testing.T) {
 	e.Run(rctx)
 	if calls != 1 {
 		t.Fatalf("nil runner should dispatch exactly once, calls=%d want 1", calls)
+	}
+}
+
+func TestExecutorUsesInjectedLocalProviderExecutor(t *testing.T) {
+	want := state.AttemptResult{UpstreamModel: "shared-provider"}
+	provider := &injectedProvider{result: attemptexec.ProviderResult{
+		Outcome: want, Dispatches: 2, ProviderDispatched: true,
+	}}
+	executor := &Executor{
+		SourceAgentID: "source", Routes: NewAttemptRouteBuilder(nil),
+		Local: NewLocalAttemptExecutor("source", provider),
+	}
+	attempt := state.Attempt{Channel: &models.Channel{}, Source: state.SourceAdmin, SourceID: 1, RealModel: "model"}
+	rctx := newTestExecutorRctx(state.AttemptPlan{Attempts: []state.Attempt{attempt}}, &stubExecAgent{})
+
+	executor.Run(rctx)
+
+	if rctx.State.Execution.Outcome != want {
+		t.Fatalf("execution result = %#v, want %#v", rctx.State.Execution.Outcome, want)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", provider.calls)
+	}
+	if !rctx.State.Execution.ProviderDispatched {
+		t.Fatal("injected provider dispatch must update relay execution state")
 	}
 }
 
@@ -916,7 +692,7 @@ func TestRun_HistoryRecordsEachCandidate(t *testing.T) {
 		{Err: &common.UpstreamError{Status: 503, ProviderErrorType: "server_error"}, Written: false},
 		{}, // 第 2 个候选成功
 	}}
-	e := &Executor{Dispatcher: d}
+	e := newLocalTestExecutor(d, nil, nil)
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
@@ -945,10 +721,7 @@ func TestRun_HistoryCountsInnerRetries(t *testing.T) {
 		{Err: &common.UpstreamError{Status: 503}, Written: false},
 		{}, // 第 3 次成功
 	}}
-	e := &Executor{
-		Dispatcher: d,
-		Resilience: stubRunner{retries: 2}, // 最多 3 次 dispatch(0..2)
-	}
+	e := newLocalTestExecutor(d, stubRunner{retries: 2}, nil)
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
 	}}
@@ -972,7 +745,7 @@ func TestRun_AttemptRecordHasTrace(t *testing.T) {
 	// case 1: 关 trace + 单次成功 → 非 verbose → HasTrace=false
 	{
 		d := &recorderMutatingDispatcher{results: []state.AttemptResult{{}}}
-		e := &Executor{Dispatcher: d}
+		e := newLocalTestExecutor(d, nil, nil)
 		plan := state.AttemptPlan{Attempts: []state.Attempt{
 			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
 		}}
@@ -992,7 +765,7 @@ func TestRun_AttemptRecordHasTrace(t *testing.T) {
 			{Err: &common.UpstreamError{Status: 500}},
 			{}, // 第 2 候选成功
 		}}
-		e := &Executor{Dispatcher: d}
+		e := newLocalTestExecutor(d, nil, nil)
 		plan := state.AttemptPlan{Attempts: []state.Attempt{
 			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
 			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
@@ -1013,7 +786,7 @@ func TestRun_AttemptRecordHasTrace(t *testing.T) {
 	// case 3: 开 trace + 成功 → verbose → HasTrace=true
 	{
 		d := &recorderMutatingDispatcher{results: []state.AttemptResult{{}}}
-		e := &Executor{Dispatcher: d}
+		e := newLocalTestExecutor(d, nil, nil)
 		plan := state.AttemptPlan{Attempts: []state.Attempt{
 			{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
 		}}
@@ -1041,7 +814,7 @@ func TestRun_AttemptFailLog_LegacyModePath(t *testing.T) {
 	backend := &recordingDispatcher{results: []state.AttemptResult{
 		{Err: errors.New("legacy upstream 500"), Written: false},
 	}}
-	e := &Executor{Dispatcher: backend}
+	e := newLocalTestExecutor(backend, nil, nil)
 
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 7}}, RealModel: "claude", Mode: state.ModeLegacy},
@@ -1063,4 +836,493 @@ func TestRun_AttemptFailLog_LegacyModePath(t *testing.T) {
 	if fields["channel_id"] != uint64(7) {
 		t.Errorf("channel_id = %v, want 7", fields["channel_id"])
 	}
+}
+
+type recordingRouteBuilder struct {
+	routes []AttemptRoute
+	errs   []error
+	inputs []AttemptRouteInput
+}
+
+func (b *recordingRouteBuilder) Build(input AttemptRouteInput) (AttemptRoute, error) {
+	b.inputs = append(b.inputs, input)
+	idx := len(b.inputs) - 1
+	if idx < len(b.errs) && b.errs[idx] != nil {
+		return AttemptRoute{}, b.errs[idx]
+	}
+	if idx >= len(b.routes) {
+		return AttemptRoute{}, errors.New("unexpected route build")
+	}
+	return b.routes[idx], nil
+}
+
+type recordingLocalExecutor struct {
+	outcomes []AttemptOutcome
+	attempts []state.Attempt
+}
+
+func (e *recordingLocalExecutor) Execute(_ *state.RelayContext, attempt state.Attempt) AttemptOutcome {
+	e.attempts = append(e.attempts, attempt)
+	return e.outcomes[len(e.attempts)-1]
+}
+
+type recordingRemoteExecutor struct {
+	outcomes []AttemptOutcome
+	targets  []AttemptTarget
+	bound    []attemptwire.BoundAttempt
+	routeIDs []uint
+}
+
+func (e *recordingRemoteExecutor) Execute(_ *state.RelayContext, target AttemptTarget, routeID uint, bound attemptwire.BoundAttempt) AttemptOutcome {
+	e.targets = append(e.targets, target)
+	e.bound = append(e.bound, bound)
+	e.routeIDs = append(e.routeIDs, routeID)
+	return e.outcomes[len(e.targets)-1]
+}
+
+func portAttempt(id uint) state.Attempt {
+	return portAttemptWithIdentity(state.SourceAdmin, id, "gpt-4o")
+}
+
+func portAttemptWithIdentity(source state.ChannelSource, id uint, realModel string) state.Attempt {
+	return state.Attempt{
+		Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: id, Name: "channel"}},
+		Source:  source, SourceID: id, RealModel: realModel, Mode: state.ModeNative,
+	}
+}
+
+func portExecutorContext(attempts ...state.Attempt) *state.RelayContext {
+	rctx := newTestExecutorRctx(state.AttemptPlan{Attempts: attempts}, &stubExecAgent{})
+	rctx.Input.RequestID = "request-1"
+	rctx.Input.HardSelector = app.AgentSelector{}
+	return rctx
+}
+
+func localPortRoute() AttemptRoute {
+	return AttemptRoute{Kind: AgentRouteNone, Targets: []AttemptTarget{{AgentID: "source", Kind: AttemptTargetLocal}}}
+}
+
+func remotePortRoute(hard bool, agentIDs ...string) AttemptRoute {
+	targets := make([]AttemptTarget, 0, len(agentIDs))
+	for _, agentID := range agentIDs {
+		targets = append(targets, AttemptTarget{AgentID: agentID, Kind: AttemptTargetRemote})
+	}
+	return AttemptRoute{Kind: AgentRouteToken, Hard: hard, Targets: targets}
+}
+
+func successfulPortOutcome(agentID string) AttemptOutcome {
+	return AttemptOutcome{
+		Kind: AttemptSucceeded, ExecutionAgentID: agentID, Path: app.RoutePathDirect,
+		Commit: tunnel.Committed, ProviderResultKnown: true, ProviderDispatched: true,
+		Result: state.AttemptResult{PromptTokens: 7, CompletionTokens: 3},
+	}
+}
+
+func retryablePortOutcome(agentID string) AttemptOutcome {
+	return AttemptOutcome{
+		Kind: AttemptProviderFailed, ExecutionAgentID: agentID, Path: app.RoutePathDirect,
+		Commit: tunnel.Committed, ProviderResultKnown: true, ProviderDispatched: true,
+		PlanAdvanceAllowed: true, Result: state.AttemptResult{Err: errors.New("provider 500")},
+	}
+}
+
+func retryableLocalPortOutcome(agentID string) AttemptOutcome {
+	outcome := retryablePortOutcome(agentID)
+	outcome.Path = app.RoutePathLocal
+	return outcome
+}
+
+func unavailablePortOutcome(agentID string) AttemptOutcome {
+	return AttemptOutcome{
+		Kind: AttemptTransportUnavailable, ExecutionAgentID: agentID, Path: app.RoutePathRelay,
+		Commit: tunnel.PreCommit, Result: state.AttemptResult{Err: errors.New("transport unavailable")},
+	}
+}
+
+func unavailableTargetPaths(agentID string) AttemptOutcome {
+	outcome := unavailablePortOutcome(agentID)
+	outcome.AgentPaths = []models.AgentPathRecord{
+		{AgentID: agentID, Path: models.AgentPathDirect, Result: models.AgentPathUnavailable, Stage: models.AgentPathConnect, CommitState: models.AgentPathNotCommitted},
+		{AgentID: agentID, Path: models.AgentPathRelay, Result: models.AgentPathUnavailable, Stage: models.AgentPathConnect, CommitState: models.AgentPathNotCommitted},
+	}
+	return outcome
+}
+
+func selectedRelayTargetPaths(agentID string) AttemptOutcome {
+	outcome := successfulPortOutcome(agentID)
+	outcome.Path = app.RoutePathRelay
+	outcome.AgentPaths = []models.AgentPathRecord{
+		{AgentID: agentID, Path: models.AgentPathDirect, Result: models.AgentPathUnavailable, Stage: models.AgentPathConnect, CommitState: models.AgentPathNotCommitted},
+		{AgentID: agentID, Path: models.AgentPathRelay, Result: models.AgentPathSelected, Stage: models.AgentPathResponse, CommitState: models.AgentPathCommitted},
+	}
+	return outcome
+}
+
+func selectedLocalTargetPath(agentID string) AttemptOutcome {
+	outcome := successfulPortOutcome(agentID)
+	outcome.Path = app.RoutePathLocal
+	outcome.AgentPaths = []models.AgentPathRecord{{
+		AgentID: agentID, Path: models.AgentPathLocal, Result: models.AgentPathSelected,
+		Stage: models.AgentPathDispatch, CommitState: models.AgentPathCommitted,
+	}}
+	return outcome
+}
+
+// behavior change: target switching stays inside one business/channel attempt
+// and preserves each target's direct/relay path sequence.
+func TestExecutorAccumulatesPathsAcrossRemoteTargets(t *testing.T) {
+	route := remotePortRoute(false, "member-a", "member-b")
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{route}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{
+		unavailableTargetPaths("member-a"), selectedRelayTargetPaths("member-b"),
+	}}
+	rctx := portExecutorContext(portAttempt(1))
+
+	(&Executor{SourceAgentID: "source", Routes: routes, Remote: remote}).Run(rctx)
+
+	require.Len(t, rctx.State.Execution.History, 1)
+	require.Equal(t, []models.AgentPathRecord{
+		{AgentID: "member-a", Path: models.AgentPathDirect, Result: models.AgentPathUnavailable, Stage: models.AgentPathConnect, CommitState: models.AgentPathNotCommitted},
+		{AgentID: "member-a", Path: models.AgentPathRelay, Result: models.AgentPathUnavailable, Stage: models.AgentPathConnect, CommitState: models.AgentPathNotCommitted},
+		{AgentID: "member-b", Path: models.AgentPathDirect, Result: models.AgentPathUnavailable, Stage: models.AgentPathConnect, CommitState: models.AgentPathNotCommitted},
+		{AgentID: "member-b", Path: models.AgentPathRelay, Result: models.AgentPathSelected, Stage: models.AgentPathResponse, CommitState: models.AgentPathCommitted},
+	}, rctx.State.Execution.History[0].AgentPaths)
+}
+
+// behavior change: exhausting remote targets before local fallback still emits
+// one fallback-chain record with every path in actual execution order.
+func TestExecutorAccumulatesRemotePathsBeforeLocalFallback(t *testing.T) {
+	route := remotePortRoute(false, "member-a", "member-b")
+	route.Targets = append(route.Targets, AttemptTarget{AgentID: "source", Kind: AttemptTargetLocal})
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{route}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{
+		unavailableTargetPaths("member-a"), unavailableTargetPaths("member-b"),
+	}}
+	local := &recordingLocalExecutor{outcomes: []AttemptOutcome{selectedLocalTargetPath("source")}}
+	rctx := portExecutorContext(portAttempt(1))
+
+	(&Executor{SourceAgentID: "source", Routes: routes, Remote: remote, Local: local}).Run(rctx)
+
+	require.Len(t, rctx.State.Execution.History, 1)
+	require.Equal(t, []models.AgentPathKind{
+		models.AgentPathDirect, models.AgentPathRelay,
+		models.AgentPathDirect, models.AgentPathRelay,
+		models.AgentPathLocal,
+	}, agentPathKinds(rctx.State.Execution.History[0].AgentPaths))
+	require.Equal(t, []string{"member-a", "member-a", "member-b", "member-b", "source"},
+		agentPathIDs(rctx.State.Execution.History[0].AgentPaths))
+}
+
+func TestExecutorPathAccumulatorResetsForNextBusinessAttempt(t *testing.T) {
+	first := remotePortRoute(false, "member-a")
+	second := remotePortRoute(false, "member-b")
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{first, second}}
+	failed := retryablePortOutcome("member-a")
+	failed.AgentPaths = []models.AgentPathRecord{{
+		AgentID: "member-a", Path: models.AgentPathDirect, Result: models.AgentPathSelected,
+		Stage: models.AgentPathResponse, CommitState: models.AgentPathCommitted,
+	}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{failed, selectedRelayTargetPaths("member-b")}}
+	rctx := portExecutorContext(portAttempt(1), portAttempt(2))
+
+	(&Executor{SourceAgentID: "source", Routes: routes, Remote: remote}).Run(rctx)
+
+	require.Len(t, rctx.State.Execution.History, 2)
+	require.Equal(t, []string{"member-a"}, agentPathIDs(rctx.State.Execution.History[0].AgentPaths))
+	require.Equal(t, []string{"member-b", "member-b"}, agentPathIDs(rctx.State.Execution.History[1].AgentPaths))
+}
+
+func agentPathIDs(paths []models.AgentPathRecord) []string {
+	ids := make([]string, 0, len(paths))
+	for _, path := range paths {
+		ids = append(ids, path.AgentID)
+	}
+	return ids
+}
+
+func TestExecutorRemoteWireDispatchesFoldIntoSingleAttemptRetries(t *testing.T) {
+	raw, err := attemptwire.EncodeResult(attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true,
+		Dispatches: 3,
+	})
+	require.NoError(t, err)
+	wireResult, err := attemptwire.DecodeResult(raw)
+	require.NoError(t, err)
+	outcome := outcomeFromAttemptResult("target-a", app.RoutePathDirect, tunnel.Committed, wireResult)
+	outcome.AgentPaths = []models.AgentPathRecord{{
+		AgentID: "target-a", Path: models.AgentPathDirect, Result: models.AgentPathSelected,
+		Stage: models.AgentPathResponse, CommitState: models.AgentPathCommitted,
+	}}
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{remotePortRoute(false, "target-a")}}
+	rctx := portExecutorContext(portAttempt(1))
+
+	(&Executor{SourceAgentID: "source", Routes: routes, Remote: &recordingRemoteExecutor{outcomes: []AttemptOutcome{outcome}}}).Run(rctx)
+
+	require.Len(t, rctx.State.Execution.History, 1)
+	require.Equal(t, 2, rctx.State.Execution.History[0].Retries)
+}
+
+// behavior change: direct-to-relay path fallback remains one channel attempt
+// and the final execution identity/route is copied to ExecutionResult.
+func TestExecutorRecordsAgentPathsInSingleChannelAttempt(t *testing.T) {
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{{
+		Kind: AgentRouteToken, AgentRouteID: 77,
+		Targets: []AttemptTarget{{AgentID: "target-a", Kind: AttemptTargetRemote}},
+	}}}
+	outcome := successfulPortOutcome("target-a")
+	outcome.Path = app.RoutePathRelay
+	outcome.AgentPaths = []models.AgentPathRecord{
+		{AgentID: "target-a", Path: models.AgentPathDirect, Result: models.AgentPathUnavailable, Stage: models.AgentPathConnect, CommitState: models.AgentPathNotCommitted},
+		{AgentID: "target-a", Path: models.AgentPathRelay, Result: models.AgentPathSelected, Stage: models.AgentPathResponse, CommitState: models.AgentPathCommitted},
+	}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{outcome}}
+	rctx := portExecutorContext(portAttempt(1))
+
+	(&Executor{SourceAgentID: "source", Routes: routes, Remote: remote}).Run(rctx)
+
+	require.Len(t, rctx.State.Execution.History, 1)
+	record := rctx.State.Execution.History[0]
+	require.Equal(t, uint(77), record.AgentRouteID)
+	require.Equal(t, string(AgentRouteToken), record.AgentRouteKind)
+	require.Equal(t, outcome.AgentPaths, record.AgentPaths)
+	require.Equal(t, "target-a", rctx.State.Execution.ExecutionAgentID)
+	require.Equal(t, "source", rctx.State.Execution.RouteSourceAgentID)
+	require.Equal(t, uint(77), rctx.State.Execution.AgentRouteID)
+	require.Equal(t, string(AgentRouteToken), rctx.State.Execution.AgentRouteKind)
+	require.Equal(t, app.RoutePathRelay, rctx.State.Execution.AgentRoutePath)
+}
+
+func TestExecutorRemoteAttemptTracesFollowFallbackSequence(t *testing.T) {
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{
+		{Kind: AgentRouteToken, AgentRouteID: 1, Targets: []AttemptTarget{{AgentID: "target-a", Kind: AttemptTargetRemote}}},
+		{Kind: AgentRouteChannel, AgentRouteID: 2, Targets: []AttemptTarget{{AgentID: "target-b", Kind: AttemptTargetRemote}}},
+	}}
+	failed := retryablePortOutcome("target-a")
+	failed.Trace = &trace.TraceRecord{InboundPath: "/first", FailStage: trace.StageUpstreamStatus, Verbose: true}
+	succeeded := successfulPortOutcome("target-b")
+	succeeded.Trace = &trace.TraceRecord{InboundPath: "/second", Verbose: true}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{failed, succeeded}}
+	rctx := portExecutorContext(portAttempt(1), portAttempt(2))
+	rctx.State.Recorder = trace.NewRecorder(false, 0)
+
+	(&Executor{SourceAgentID: "source", Routes: routes, Remote: remote}).Run(rctx)
+
+	require.Equal(t, []int{1, 2}, []int{rctx.State.Execution.History[0].Seq, rctx.State.Execution.History[1].Seq})
+	attempts := rctx.State.Recorder.Attempts()
+	require.Len(t, attempts, 2)
+	require.Equal(t, "/first", attempts[0].InboundPath)
+	require.Equal(t, "/second", attempts[1].InboundPath)
+}
+
+// behavior change: cumulative ProviderDispatched cannot prove that the final
+// adopted attempt reached a provider.
+func TestExecutorExecutionAgentIDClearsWhenFinalAttemptFailsBeforeDispatch(t *testing.T) {
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{
+		{Kind: AgentRouteToken, AgentRouteID: 1, Targets: []AttemptTarget{{AgentID: "target-a", Kind: AttemptTargetRemote}}},
+		{Kind: AgentRouteChannel, AgentRouteID: 2, Targets: []AttemptTarget{{AgentID: "source", Kind: AttemptTargetLocal}}},
+	}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{retryablePortOutcome("target-a")}}
+	local := &recordingLocalExecutor{outcomes: []AttemptOutcome{{
+		Kind: AttemptExecutionRejected, ExecutionAgentID: "source", Path: app.RoutePathLocal,
+		ProviderResultKnown: true, Result: state.AttemptResult{Err: errors.New("attempt gate rejected")},
+	}}}
+	rctx := portExecutorContext(portAttempt(1), portAttempt(2))
+
+	(&Executor{SourceAgentID: "source", Routes: routes, Remote: remote, Local: local}).Run(rctx)
+
+	require.True(t, rctx.State.Execution.ProviderDispatched, "historical dispatch remains observable")
+	require.Empty(t, rctx.State.Execution.ExecutionAgentID, "final pre-dispatch failure cannot claim source")
+}
+
+// behavior change: route lookup is scoped to the current business attempt.
+func TestExecutorCurrentAttemptRouteRunsLocalBeforeLaterRemote(t *testing.T) {
+	attempts := []state.Attempt{
+		portAttemptWithIdentity(state.SourceAdmin, 1, "model-a"),
+		portAttemptWithIdentity(state.SourcePrivate, 2, "model-b"),
+		portAttemptWithIdentity(state.SourceAdmin, 3, "model-c"),
+	}
+	firstRoute := remotePortRoute(false, "target-a")
+	firstRoute.Targets = append(firstRoute.Targets, AttemptTarget{AgentID: "source", Kind: AttemptTargetLocal})
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{firstRoute, remotePortRoute(false, "target-b")}}
+	local := &recordingLocalExecutor{outcomes: []AttemptOutcome{retryableLocalPortOutcome("source")}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{
+		unavailablePortOutcome("target-a"), successfulPortOutcome("target-b"),
+	}}
+	executor := &Executor{SourceAgentID: "source", Routes: routes, Local: local, Remote: remote}
+	rctx := portExecutorContext(attempts...)
+
+	executor.Run(rctx)
+
+	require.Equal(t, attempts[:2], []state.Attempt{routes.inputs[0].Attempt, routes.inputs[1].Attempt})
+	require.Equal(t, []state.Attempt{attempts[0]}, local.attempts)
+	require.Equal(t, []AttemptTarget{
+		{AgentID: "target-a", Kind: AttemptTargetRemote},
+		{AgentID: "target-b", Kind: AttemptTargetRemote},
+	}, remote.targets)
+	require.Equal(t, []attemptwire.BoundAttempt{
+		{Channel: attemptwire.ChannelRef{Source: state.SourceAdmin, ID: 1}, RealModel: "model-a", Mode: state.ModeNative},
+		{Channel: attemptwire.ChannelRef{Source: state.SourcePrivate, ID: 2}, RealModel: "model-b", Mode: state.ModeNative},
+	}, remote.bound)
+	require.Len(t, routes.inputs, 2, "successful B must stop before route C is built")
+}
+
+func TestExecutorBindsCurrentRouteIDToEachRemoteAttempt(t *testing.T) {
+	first := remotePortRoute(false, "target-a")
+	first.AgentRouteID = 41
+	second := remotePortRoute(false, "target-b")
+	second.AgentRouteID = 42
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{first, second}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{
+		retryablePortOutcome("target-a"), successfulPortOutcome("target-b"),
+	}}
+	executor := &Executor{SourceAgentID: "source", Routes: routes, Local: &recordingLocalExecutor{}, Remote: remote}
+
+	executor.Run(portExecutorContext(portAttempt(1), portAttempt(2)))
+
+	require.Equal(t, []uint{41, 42}, remote.routeIDs)
+}
+
+func TestExecutorHardAgentIDFreezesAcrossBusinessAttempts(t *testing.T) {
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{remotePortRoute(true, "hard-a"), remotePortRoute(true, "hard-a")}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{retryablePortOutcome("hard-a"), successfulPortOutcome("hard-a")}}
+	executor := &Executor{SourceAgentID: "source", Routes: routes, Local: &recordingLocalExecutor{}, Remote: remote}
+	rctx := portExecutorContext(portAttempt(1), portAttempt(2))
+	rctx.Input.HardSelector = app.AgentSelector{AgentID: "hard-a"}
+
+	executor.Run(rctx)
+
+	require.Equal(t, []string{"hard-a", "hard-a"}, []string{remote.targets[0].AgentID, remote.targets[1].AgentID})
+	require.Empty(t, routes.inputs[0].FrozenHardAgentID)
+	require.Equal(t, "hard-a", routes.inputs[1].FrozenHardAgentID)
+}
+
+func TestExecutorHardTagFreezesFirstNonTransportUnavailableTarget(t *testing.T) {
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{
+		remotePortRoute(true, "member-a", "member-b"),
+		remotePortRoute(true, "member-b"),
+	}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{
+		unavailablePortOutcome("member-a"), retryablePortOutcome("member-b"), successfulPortOutcome("member-b"),
+	}}
+	executor := &Executor{SourceAgentID: "source", Routes: routes, Local: &recordingLocalExecutor{}, Remote: remote}
+	rctx := portExecutorContext(portAttempt(1), portAttempt(2))
+	rctx.Input.HardSelector = app.AgentSelector{AgentTag: "gpu"}
+
+	executor.Run(rctx)
+
+	require.Equal(t, []string{"member-a", "member-b", "member-b"}, []string{
+		remote.targets[0].AgentID, remote.targets[1].AgentID, remote.targets[2].AgentID,
+	})
+	require.Equal(t, "member-b", routes.inputs[1].FrozenHardAgentID)
+}
+
+func TestExecutorSoftRemoteTransportExhaustionFallsBackToSourceLocal(t *testing.T) {
+	route := remotePortRoute(false, "member-a", "member-b")
+	route.Targets = append(route.Targets, AttemptTarget{AgentID: "source", Kind: AttemptTargetLocal})
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{route}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{unavailablePortOutcome("member-a"), unavailablePortOutcome("member-b")}}
+	local := &recordingLocalExecutor{outcomes: []AttemptOutcome{successfulPortOutcome("source")}}
+	executor := &Executor{SourceAgentID: "source", Routes: routes, Local: local, Remote: remote}
+
+	executor.Run(portExecutorContext(portAttempt(1)))
+
+	require.Equal(t, []string{"member-a", "member-b"}, []string{remote.targets[0].AgentID, remote.targets[1].AgentID})
+	require.Len(t, local.attempts, 1)
+}
+
+func TestExecutorRemoteProviderFailureAdvancesPlanWithoutChangingAgent(t *testing.T) {
+	first := remotePortRoute(false, "member-a", "member-b")
+	first.Targets = append(first.Targets, AttemptTarget{AgentID: "source", Kind: AttemptTargetLocal})
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{first, localPortRoute()}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{retryablePortOutcome("member-a")}}
+	local := &recordingLocalExecutor{outcomes: []AttemptOutcome{successfulPortOutcome("source")}}
+	executor := &Executor{SourceAgentID: "source", Routes: routes, Local: local, Remote: remote}
+
+	executor.Run(portExecutorContext(portAttempt(1), portAttempt(2)))
+
+	require.Equal(t, []AttemptTarget{{AgentID: "member-a", Kind: AttemptTargetRemote}}, remote.targets)
+	require.Len(t, local.attempts, 1)
+	require.Equal(t, uint(2), local.attempts[0].SourceID)
+}
+
+func TestExecutorHardTransportExhaustionStopsWithoutLocalFallback(t *testing.T) {
+	routes := &recordingRouteBuilder{routes: []AttemptRoute{remotePortRoute(true, "member-a", "member-b"), localPortRoute()}}
+	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{unavailablePortOutcome("member-a"), unavailablePortOutcome("member-b")}}
+	local := &recordingLocalExecutor{}
+	executor := &Executor{SourceAgentID: "source", Routes: routes, Local: local, Remote: remote}
+	rctx := portExecutorContext(portAttempt(1), portAttempt(2))
+	rctx.Input.HardSelector = app.AgentSelector{AgentTag: "gpu"}
+
+	executor.Run(rctx)
+
+	require.Len(t, routes.inputs, 1)
+	require.Empty(t, local.attempts)
+	require.Error(t, rctx.State.Execution.Err)
+}
+
+// behavior change: terminal no-replay outcomes stop before every same-attempt
+// target/local fallback and before the next business attempt is built.
+func TestExecutorNoReplayOutcomesStopImmediately(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome AttemptOutcome
+	}{
+		{name: "response started", outcome: AttemptOutcome{
+			Kind: AttemptProviderFailed, ExecutionAgentID: "member-a", Path: app.RoutePathDirect, Commit: tunnel.Committed,
+			ProviderResultKnown: true, ProviderDispatched: true, PlanAdvanceAllowed: true, ResponseStarted: true,
+			Result: state.AttemptResult{Err: errors.New("stream broke"), Written: true},
+		}},
+		{name: "direct uncertain", outcome: AttemptOutcome{
+			Kind: AttemptCommitUncertain, ExecutionAgentID: "member-a", Path: app.RoutePathDirect, Commit: tunnel.CommitUncertain,
+			ProviderResultKnown: true, Result: state.AttemptResult{Err: errors.New("direct ack lost")},
+		}},
+		{name: "relay uncertain", outcome: AttemptOutcome{
+			Kind: AttemptCommitUncertain, ExecutionAgentID: "member-a", Path: app.RoutePathRelay, Commit: tunnel.CommitUncertain,
+			ProviderResultKnown: true, Result: state.AttemptResult{Err: errors.New("relay ack lost")},
+		}},
+		{name: "cancel", outcome: AttemptOutcome{
+			Kind: AttemptCanceled, ExecutionAgentID: "member-a", Path: app.RoutePathDirect,
+			ProviderResultKnown: true, Result: state.AttemptResult{Err: context.Canceled},
+		}},
+		{name: "deadline", outcome: AttemptOutcome{
+			Kind: AttemptCanceled, ExecutionAgentID: "member-a", Path: app.RoutePathRelay,
+			ProviderResultKnown: true, Result: state.AttemptResult{Err: context.DeadlineExceeded},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			firstRoute := remotePortRoute(false, "member-a", "member-b")
+			firstRoute.Targets = append(firstRoute.Targets, AttemptTarget{AgentID: "source", Kind: AttemptTargetLocal})
+			routes := &recordingRouteBuilder{routes: []AttemptRoute{firstRoute, localPortRoute()}}
+			remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{tt.outcome}}
+			local := &recordingLocalExecutor{}
+			executor := &Executor{SourceAgentID: "source", Routes: routes, Local: local, Remote: remote}
+			rctx := portExecutorContext(portAttempt(1), portAttempt(2))
+
+			executor.Run(rctx)
+
+			require.Equal(t, []AttemptTarget{{AgentID: "member-a", Kind: AttemptTargetRemote}}, remote.targets)
+			require.Empty(t, local.attempts)
+			require.Len(t, routes.inputs, 1)
+			require.Equal(t, uint(1), routes.inputs[0].Attempt.SourceID)
+			require.Error(t, rctx.State.Execution.Err)
+		})
+	}
+}
+
+func TestExecutorNilEmptyPlanAndRouteBuildErrorAreTerminalSafe(t *testing.T) {
+	require.NotPanics(t, func() { (&Executor{}).Run(nil) })
+
+	routes := &recordingRouteBuilder{}
+	empty := portExecutorContext()
+	require.NotPanics(t, func() { (&Executor{Routes: routes}).Run(empty) })
+	require.Empty(t, routes.inputs)
+	require.NoError(t, empty.State.Execution.Err)
+
+	buildErr := errors.New("route build unavailable")
+	routes = &recordingRouteBuilder{routes: []AttemptRoute{{}}, errs: []error{buildErr}}
+	rctx := portExecutorContext(portAttempt(1))
+	require.NotPanics(t, func() { (&Executor{SourceAgentID: "source", Routes: routes}).Run(rctx) })
+	require.ErrorIs(t, rctx.State.Execution.Err, buildErr)
+	require.Len(t, rctx.State.Execution.History, 1)
 }

@@ -26,7 +26,7 @@ func (h *Handler) PortalList(c *app.Context, req ListRequest) (api.PaginatedResp
 		}
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	rows, total, err := q.PrivateChannel().ListOwnedBy(
 		c.UserInfo.UserID,

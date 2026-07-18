@@ -16,7 +16,7 @@ import (
 func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[models.RequestLimiter], error) {
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	limiters, total, err := q.RequestLimiter().List(dao.ListOptions{Page: page, PageSize: pageSize})
@@ -60,7 +60,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		Priority:     req.Priority,
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	m := dao.NewAdminMutation(daoCtx)
 	if err := m.RequestLimiter().Create(&limiter); err != nil {
 		return api.Created[models.RequestLimiter]{}, api.ConflictError("create request limiter failed: "+err.Error(), err)
@@ -73,7 +73,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.RequestLimiter, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -109,7 +109,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.RequestLimit
 func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusResponse, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

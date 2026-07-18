@@ -28,6 +28,14 @@ jobs:
         run: pnpm install
         working-directory: web
 
+      - name: Lint frontend
+        run: pnpm lint
+        working-directory: web
+
+      - name: Run frontend unit tests
+        run: pnpm test:unit
+        working-directory: web
+
       - name: Build frontend
         run: pnpm build
         working-directory: web
@@ -36,3 +44,13 @@ jobs:
         run: go test ./... -count=1 -timeout=120s
         env:
           CGO_ENABLED: '0'
+
+      - name: Run agent relay race tests
+        run: go test -race ./internal/pkg/tunnel/... ./internal/agent/tunnel/... ./internal/master/tunnel/... ./internal/agent/body/... ./internal/master/connectivity/... -count=1 -timeout=180s
+        env:
+          CGO_ENABLED: '1'
+
+      - name: Run agent relay rollout race tests
+        run: go test -race ./internal/master -run AgentRelayRollout -count=1 -timeout=180s
+        env:
+          CGO_ENABLED: '1'

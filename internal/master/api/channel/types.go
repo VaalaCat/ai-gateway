@@ -42,36 +42,39 @@ type ListRequest struct {
 }
 
 type CreateRequest struct {
-	Name               string                    `json:"name" binding:"required"`
-	Type               int                       `json:"type"`
-	Key                string                    `json:"key"`
-	BaseURL            string                    `json:"base_url"`
-	Models             string                    `json:"models"`
-	ModelMapping       string                    `json:"model_mapping"`
-	Weight             uint                      `json:"weight"`
-	Priority           int                       `json:"priority"`
-	UseLegacyAdaptor   bool                      `json:"use_legacy_adaptor"`
-	SupportedAPITypes  string                    `json:"supported_api_types"`
-	Endpoints          string                    `json:"endpoints"`
-	PassthroughEnabled bool                      `json:"passthrough_enabled"`
-	SystemPrompt       string                    `json:"system_prompt"`
-	ProxyURL           string                    `json:"proxy_url"`
-	ParamOverride      string                    `json:"param_override"`
-	HeaderOverride     string                    `json:"header_override"`
-	Tag                string                    `json:"tag"`
-	Remark             string                    `json:"remark"`
-	Setting            string                    `json:"setting"`
-	Organization       string                    `json:"organization"`
-	ApiVersion         string                    `json:"api_version"`
-	TestModel          string                    `json:"test_model"`
-	AutoBan            int                       `json:"auto_ban"`
-	StatusCodeMapping  string                    `json:"status_code_mapping"`
-	OtherSettings      string                    `json:"other_settings"`
-	Resilience         *models.ChannelResilience `json:"resilience,omitempty"`
-	PriceRatio         *float64                  `json:"price_ratio,omitempty"`
-	Free               *bool                     `json:"free,omitempty"`
-	Limit              *models.ChannelLimit      `json:"limit,omitempty"`
-	Affinity           *models.ChannelAffinity   `json:"affinity,omitempty"`
+	Name                string                    `json:"name" binding:"required"`
+	Type                int                       `json:"type"`
+	Key                 string                    `json:"key"`
+	BaseURL             string                    `json:"base_url"`
+	Models              string                    `json:"models"`
+	ModelMapping        string                    `json:"model_mapping"`
+	Weight              uint                      `json:"weight"`
+	Priority            int                       `json:"priority"`
+	UseLegacyAdaptor    bool                      `json:"use_legacy_adaptor"`
+	SupportedAPITypes   string                    `json:"supported_api_types"`
+	Endpoints           string                    `json:"endpoints"`
+	PassthroughEnabled  bool                      `json:"passthrough_enabled"`
+	SystemPrompt        string                    `json:"system_prompt"`
+	SystemPromptInInput bool                      `json:"system_prompt_in_input"`
+	RoleMapping         string                    `json:"role_mapping"`
+	ProxyURL            string                    `json:"proxy_url"`
+	ParamOverride       string                    `json:"param_override"`
+	HeaderOverride      string                    `json:"header_override"`
+	Tag                 string                    `json:"tag"`
+	Remark              string                    `json:"remark"`
+	Setting             string                    `json:"setting"`
+	Organization        string                    `json:"organization"`
+	ApiVersion          string                    `json:"api_version"`
+	TestModel           string                    `json:"test_model"`
+	AutoBan             int                       `json:"auto_ban"`
+	StatusCodeMapping   string                    `json:"status_code_mapping"`
+	OtherSettings       string                    `json:"other_settings"`
+	Resilience          *models.ChannelResilience `json:"resilience,omitempty"`
+	PriceRatio          *float64                  `json:"price_ratio,omitempty"`
+	Free                *bool                     `json:"free,omitempty"`
+	Limit               *models.ChannelLimit      `json:"limit,omitempty"`
+	Affinity            *models.ChannelAffinity   `json:"affinity,omitempty"`
+	DisableKeepalive    bool                      `json:"disable_keepalive"`
 }
 
 type UpdateRequest struct {

@@ -2,21 +2,29 @@ package api_test
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/config"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 func setupTestMaster(t *testing.T) *master.Server {
@@ -28,11 +36,36 @@ func setupTestMaster(t *testing.T) *master.Server {
 			DBPath:    ":memory:",
 			JWTSecret: strings.Repeat("x", 32),
 		},
+		Agent: config.AgentConfig{
+			CredentialsFile: filepath.Join(t.TempDir(), "embedded-agent.json"),
+		},
 		Runtime: config.RuntimeConfig{RelayTimeout: 30},
 	}
 	srv, err := master.New(cfg, logger)
 	if err != nil {
 		t.Fatalf("new master: %v", err)
+	}
+	var sqlDB *sql.DB
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown test master: %v", err)
+		}
+		if srv.Bus != nil {
+			if err := srv.Bus.Close(); err != nil {
+				t.Errorf("close test master event bus: %v", err)
+			}
+		}
+		if sqlDB != nil {
+			if err := sqlDB.Close(); err != nil {
+				t.Errorf("close test master database: %v", err)
+			}
+		}
+	})
+	sqlDB, err = srv.DB.DB()
+	if err != nil {
+		t.Fatalf("get test master database: %v", err)
 	}
 	return srv
 }
@@ -818,6 +851,198 @@ func jsonBody(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	return m
 }
 
+func testCallbackTableName(tx *gorm.DB) string {
+	if tx.Statement == nil {
+		return ""
+	}
+	if tx.Statement.Schema != nil {
+		return tx.Statement.Schema.Table
+	}
+	return tx.Statement.Table
+}
+
+func TestAdminUpdateQuotaValidatesExactInt64JSON(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminToken := loginHelper(t, srv, "admin", "admin123")
+
+	user := models.User{Username: "quota-input-user", Password: "password", Role: 1}
+	require.NoError(t, srv.DB.Create(&user).Error)
+	path := fmt.Sprintf("/api/admin/users/%d/quota", user.ID)
+
+	doRawRequest := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+		srv.Router.ServeHTTP(w, req)
+		return w
+	}
+
+	w := doRawRequest(`{"delta":0}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	for _, body := range []string{
+		`{}`,
+		`{"delta":null}`,
+		`{"delta":1.5}`,
+		`{"delta":"1"}`,
+		`{"delta":9223372036854775808}`,
+		`{"delta":-9223372036854775809}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			w := doRawRequest(body)
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		})
+	}
+}
+
+func TestAdminUpdateQuotaOverflowDoesNotBreakLogin(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminToken := loginHelper(t, srv, "admin", "admin123")
+
+	w := reqHelper(srv, adminToken, http.MethodPost, "/api/admin/users", map[string]any{
+		"username": "quota-login",
+		"password": "pass1234",
+		"role":     1,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var user models.User
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &user))
+	require.NotZero(t, user.ID)
+
+	require.NoError(t, srv.DB.Model(&models.User{}).Where("id = ?", user.ID).
+		Update("quota", int64(math.MaxInt64-1)).Error)
+
+	w = reqHelper(srv, adminToken, http.MethodPut,
+		fmt.Sprintf("/api/admin/users/%d/quota", user.ID), map[string]any{"delta": 2})
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Equal(t, "quota out of range", jsonBody(t, w)["error"])
+
+	var quota int64
+	var storageType string
+	row := srv.DB.Raw("SELECT quota, typeof(quota) FROM users WHERE id = ?", user.ID).Row()
+	require.NoError(t, row.Scan(&quota, &storageType))
+	require.Equal(t, int64(math.MaxInt64-1), quota)
+	require.Equal(t, "integer", storageType)
+
+	require.NotEmpty(t, loginHelper(t, srv, "quota-login", "pass1234"))
+}
+
+func TestAdminUpdateQuotaClassifiesDatabaseErrors(t *testing.T) {
+	setup := func(t *testing.T) (*master.Server, string) {
+		t.Helper()
+		srv := setupTestMaster(t)
+		require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+		return srv, loginHelper(t, srv, "admin", "admin123")
+	}
+
+	t.Run("not found remains 404", func(t *testing.T) {
+		srv, adminToken := setup(t)
+		w := reqHelper(srv, adminToken, http.MethodPut,
+			"/api/admin/users/999999/quota", map[string]any{"delta": 0})
+
+		require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+		require.Equal(t, consts.ErrNotFound, jsonBody(t, w)["error"])
+	})
+
+	t.Run("lookup failure is 500", func(t *testing.T) {
+		srv, adminToken := setup(t)
+		user := models.User{Username: "quota-lookup-failure", Password: "hash", Role: 1}
+		require.NoError(t, srv.DB.Create(&user).Error)
+
+		failure := errors.New("query failed secret-database-detail")
+		processor := srv.DB.Callback().Query()
+		fired := false
+		const callbackName = "test:quota_lookup_failure"
+		require.NoError(t, processor.Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+			if fired || testCallbackTableName(tx) != "users" {
+				return
+			}
+			fired = true
+			_ = tx.AddError(failure)
+		}))
+		t.Cleanup(func() { require.NoError(t, processor.Remove(callbackName)) })
+
+		w := reqHelper(srv, adminToken, http.MethodPut,
+			fmt.Sprintf("/api/admin/users/%d/quota", user.ID), map[string]any{"delta": 0})
+
+		require.True(t, fired)
+		require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+		require.Equal(t, "get user failed", jsonBody(t, w)["error"])
+		require.NotContains(t, w.Body.String(), "secret-database-detail")
+	})
+
+	t.Run("mutation failure is 500", func(t *testing.T) {
+		srv, adminToken := setup(t)
+		user := models.User{Username: "quota-mutation-failure", Password: "hash", Role: 1, Quota: 7}
+		require.NoError(t, srv.DB.Create(&user).Error)
+
+		failure := errors.New("update failed secret-database-detail")
+		processor := srv.DB.Callback().Update()
+		fired := false
+		const callbackName = "test:quota_mutation_failure"
+		require.NoError(t, processor.Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+			if fired || testCallbackTableName(tx) != "users" {
+				return
+			}
+			fired = true
+			_ = tx.AddError(failure)
+		}))
+		t.Cleanup(func() { require.NoError(t, processor.Remove(callbackName)) })
+
+		w := reqHelper(srv, adminToken, http.MethodPut,
+			fmt.Sprintf("/api/admin/users/%d/quota", user.ID), map[string]any{"delta": 1})
+
+		require.True(t, fired)
+		require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+		require.Equal(t, "update quota failed", jsonBody(t, w)["error"])
+		require.NotContains(t, w.Body.String(), "secret-database-detail")
+
+		var quota int64
+		require.NoError(t, srv.DB.Model(&models.User{}).Select("quota").Where("id = ?", user.ID).Scan(&quota).Error)
+		require.Equal(t, int64(7), quota)
+	})
+}
+
+func TestAdminUserUpdateRejectsQuotaFields(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminToken := loginHelper(t, srv, "admin", "admin123")
+
+	for i, field := range []string{
+		"quota",
+		"Quota",
+		"QUOTA",
+		"used_quota",
+		"UsedQuota",
+		"usedQuota",
+		"USED_QUOTA",
+	} {
+		t.Run(field, func(t *testing.T) {
+			user := models.User{
+				Username:  fmt.Sprintf("protected-quota-%d", i),
+				Password:  "password",
+				Role:      1,
+				Quota:     7,
+				UsedQuota: 3,
+			}
+			require.NoError(t, srv.DB.Create(&user).Error)
+
+			path := fmt.Sprintf("/api/admin/users/%d", user.ID)
+			w := reqHelper(srv, adminToken, http.MethodPut, path, map[string]any{field: 99})
+
+			var saved models.User
+			require.NoError(t, srv.DB.First(&saved, user.ID).Error)
+			assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			assert.Equal(t, int64(7), saved.Quota, w.Body.String())
+			assert.Equal(t, int64(3), saved.UsedQuota, w.Body.String())
+		})
+	}
+}
+
 func TestTokenTemplateCRUD(t *testing.T) {
 	srv := setupTestMaster(t)
 	srv.InitAdminUser("admin", "admin123")
@@ -1209,10 +1434,15 @@ func TestTokenEditRestrictions(t *testing.T) {
 		t.Fatalf("expected trace_enabled=true, got %v", updated["trace_enabled"])
 	}
 
-	// Normal user attempts to update models (should be ignored)
+	// behavior change: disabled self-service now rejects model whitelist edits
+	// explicitly instead of silently ignoring them.
 	w = doUser("PUT", tokPath, map[string]any{"models": `["hacked"]`})
-	if w.Code != 200 {
-		t.Fatalf("user update models: %d %s", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("user update models with self-service disabled: %d %s", w.Code, w.Body.String())
+	}
+	denied := jsonBody(t, w)
+	if denied["code"] != "model_whitelist_edit_forbidden" {
+		t.Fatalf("expected model_whitelist_edit_forbidden, got %v", denied["code"])
 	}
 	w = doUser("GET", tokPath, nil)
 	if w.Code != 200 {
@@ -1221,6 +1451,21 @@ func TestTokenEditRestrictions(t *testing.T) {
 	got := jsonBody(t, w)
 	if got["models"].(string) != origModels {
 		t.Fatalf("models should be unchanged: expected %q, got %q", origModels, got["models"])
+	}
+
+	if err := srv.DB.Create(&models.Setting{
+		Key:   consts.SettingKeyTokenModelWhitelistSelfService,
+		Value: "true",
+	}).Error; err != nil {
+		t.Fatalf("enable token model whitelist self-service: %v", err)
+	}
+	w = doUser("PUT", tokPath, map[string]any{"models": `["user-managed"]`})
+	if w.Code != http.StatusOK {
+		t.Fatalf("user update models with self-service enabled: %d %s", w.Code, w.Body.String())
+	}
+	updated = jsonBody(t, w)
+	if updated["models"] != `["user-managed"]` {
+		t.Fatalf("expected user-managed models, got %v", updated["models"])
 	}
 
 	// Normal user can self-disable their token (status -> 0 is always allowed)
@@ -1745,6 +1990,13 @@ func TestChannelTest_E2EHitsRelayNotSPA(t *testing.T) {
 	defer upstream.Close()
 
 	srv := setupTestMaster(t)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown test master: %v", err)
+		}
+	})
 	srv.InitAdminUser("admin", "admin123")
 
 	// Start the master router on a real loopback listener and update the channel

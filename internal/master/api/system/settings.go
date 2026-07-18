@@ -1,10 +1,11 @@
 package system
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
+	"go.uber.org/zap"
 )
 
 // settingDefs 注册 master-only setting(不需要同步到 agent)。
@@ -25,6 +28,12 @@ var settingDefs = map[string]struct {
 	Validate func(string) bool
 }{
 	"registration_enabled": {
+		Default: "false",
+		Validate: func(v string) bool {
+			return v == "true" || v == "false"
+		},
+	},
+	consts.SettingKeyTokenModelWhitelistSelfService: {
 		Default: "false",
 		Validate: func(v string) bool {
 			return v == "true" || v == "false"
@@ -127,6 +136,27 @@ var settingDefs = map[string]struct {
 			return json.Unmarshal([]byte(v), &arr) == nil
 		},
 	},
+	consts.SettingAgentConnectivityProbeSuccessTTLSeconds: {
+		Default: "300",
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 30 && n <= 3600
+		},
+	},
+	consts.SettingAgentConnectivityProbeFailureRetryMinSeconds: {
+		Default: "30",
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 5 && n <= 300
+		},
+	},
+	consts.SettingAgentConnectivityProbeFailureRetryMaxSeconds: {
+		Default: "300",
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 5 && n <= 3600
+		},
+	},
 }
 
 type SettingsResponse struct {
@@ -136,7 +166,7 @@ type SettingsResponse struct {
 type GetSettingsRequest struct{}
 
 func (h *Handler) GetSettings(c *app.Context, _ GetSettingsRequest) (SettingsResponse, error) {
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	records, err := q.Setting().GetAll()
 	if err != nil {
 		return SettingsResponse{}, api.InternalError("get settings failed", err)
@@ -166,6 +196,13 @@ type UpdateSettingsRequest struct {
 }
 
 func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (SettingsResponse, error) {
+	requestContext := c.RequestContext()
+	release, err := h.acquireSettingsUpdate(requestContext)
+	if err != nil {
+		return SettingsResponse{}, err
+	}
+	defer release()
+
 	agentKeys := settings.Defaults()
 	for key, value := range req.Settings {
 		_, isAgent := agentKeys[key]
@@ -178,21 +215,90 @@ func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (Set
 				return SettingsResponse{}, api.BadRequestError(err.Error(), nil)
 			}
 		}
+		if key == consts.SettingAgentRelayDefaultURI {
+			if value == "" {
+				req.Settings[key] = ""
+			} else {
+				parsed, err := tunnel.ParseRelayURI(value)
+				if err != nil {
+					return SettingsResponse{}, api.BadRequestError("invalid value for "+key, nil)
+				}
+				req.Settings[key] = parsed.URI.String()
+			}
+		}
 		if isDef && !def.Validate(value) {
 			return SettingsResponse{}, api.BadRequestError("invalid value for "+key, nil)
 		}
 	}
-
-	m := dao.NewAdminMutation(dao.NewContext(c.App))
-	for key, value := range req.Settings {
-		if err := m.Setting().Set(key, value); err != nil {
-			return SettingsResponse{}, api.InternalError("save setting failed", err)
+	minRaw, minUpdated := req.Settings[consts.SettingAgentConnectivityProbeFailureRetryMinSeconds]
+	maxRaw, maxUpdated := req.Settings[consts.SettingAgentConnectivityProbeFailureRetryMaxSeconds]
+	if minUpdated || maxUpdated {
+		q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, requestContext)).Setting()
+		if !minUpdated {
+			minRaw = strconv.Itoa(q.LookupInt(consts.SettingAgentConnectivityProbeFailureRetryMinSeconds, 30))
 		}
-
-		if err := events.PublishSettingUpdate(context.Background(), c.GetBus(), models.Setting{Key: key, Value: value}); err != nil {
-			return SettingsResponse{}, api.InternalError("publish setting.update failed", err)
+		if !maxUpdated {
+			maxRaw = strconv.Itoa(q.LookupInt(consts.SettingAgentConnectivityProbeFailureRetryMaxSeconds, 300))
+		}
+		minimum, _ := strconv.Atoi(minRaw)
+		maximum, _ := strconv.Atoi(maxRaw)
+		if maximum < minimum {
+			return SettingsResponse{}, api.BadRequestError("connectivity probe failure retry max must be greater than or equal to min", nil)
 		}
 	}
 
+	keys := make([]string, 0, len(req.Settings))
+	for key := range req.Settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	daoContext := dao.NewContextWithContext(c.App, requestContext)
+	if err := dao.RunInTx(daoContext, func(txContext dao.Context) error {
+		m := dao.NewAdminMutation(txContext)
+		for _, key := range keys {
+			if err := m.Setting().Set(key, req.Settings[key]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return SettingsResponse{}, api.InternalError("save setting failed", err)
+	}
+
+	if value, ok := req.Settings[consts.SettingAgentRelayFallbackEnabled]; ok && h.RelayAdmission != nil {
+		h.RelayAdmission.Set(value == "1")
+	}
+	if h.RefreshProbeTimings != nil && containsProbeTimingSetting(req.Settings) {
+		h.RefreshProbeTimings(requestContext)
+	}
+
+	publishErrors := make([]error, 0)
+	for _, key := range keys {
+		if err := events.PublishSettingUpdate(requestContext, c.GetBus(), models.Setting{Key: key, Value: req.Settings[key]}); err != nil {
+			publishErrors = append(publishErrors, err)
+		}
+	}
+	if publishErr := errors.Join(publishErrors...); publishErr != nil && c.Logger != nil {
+		c.Logger.Warn("settings committed with publish failures",
+			zap.String("code", "settings_publish_after_commit_failed"),
+			zap.Int("failed", len(publishErrors)),
+			zap.Int("attempted", len(keys)),
+		)
+	}
+
 	return h.GetSettings(c, GetSettingsRequest{})
+}
+
+func containsProbeTimingSetting(values map[string]string) bool {
+	for _, key := range []string{
+		consts.SettingAgentConnectivityProbeSuccessTTLSeconds,
+		consts.SettingAgentConnectivityProbeFailureRetryMinSeconds,
+		consts.SettingAgentConnectivityProbeFailureRetryMaxSeconds,
+	} {
+		if _, ok := values[key]; ok {
+			return true
+		}
+	}
+	return false
 }

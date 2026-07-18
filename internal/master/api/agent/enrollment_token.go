@@ -20,7 +20,7 @@ func (h *Handler) GenerateEnrollmentToken(c *app.Context, req GenerateEnrollment
 		ExpiresAt: time.Now().Unix() + req.TTL,
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	m := dao.NewAdminMutation(daoCtx)
 
 	if err := m.EnrollmentToken().Create(&et); err != nil {

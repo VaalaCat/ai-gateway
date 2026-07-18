@@ -18,7 +18,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		Status:      1,
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	m := dao.NewAdminMutation(daoCtx)
 
 	if err := m.ModelConfig().Create(&mc); err != nil {

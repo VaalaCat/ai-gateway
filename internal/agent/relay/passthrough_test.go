@@ -189,8 +189,10 @@ func TestRelayPassthrough_HeaderOverrideCanRestoreFilteredHeader(t *testing.T) {
 func TestExtractUsageFromPassthroughBody_NonStream(t *testing.T) {
 	body := []byte(`{"id":"resp_1","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"input_tokens_details":{"cached_tokens":30}}}`)
 	prompt, completion, cacheRead, _ := relayupstream.ExtractUsageFromPassthroughBody(body, false)
-	if prompt != 100 {
-		t.Errorf("prompt = %d, want 100", prompt)
+	// OpenAI within-prompt cache is normalized out here: input_tokens=100 includes
+	// cached=30 → non-cached prompt=70.
+	if prompt != 70 {
+		t.Errorf("prompt = %d, want 70 (100 - 30 cached)", prompt)
 	}
 	if completion != 50 {
 		t.Errorf("completion = %d, want 50", completion)
@@ -216,8 +218,9 @@ func TestExtractUsageFromPassthroughBody_SSEStream(t *testing.T) {
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":200,\"output_tokens\":80,\"total_tokens\":280,\"input_tokens_details\":{\"cached_tokens\":50}}}}\n\n")
 	prompt, completion, cacheRead, _ := relayupstream.ExtractUsageFromPassthroughBody(sseBody, true)
-	if prompt != 200 {
-		t.Errorf("prompt = %d, want 200", prompt)
+	// input_tokens=200 includes cached=50 → non-cached prompt=150.
+	if prompt != 150 {
+		t.Errorf("prompt = %d, want 150 (200 - 50 cached)", prompt)
 	}
 	if completion != 80 {
 		t.Errorf("completion = %d, want 80", completion)
@@ -296,8 +299,9 @@ func TestParseUsageJSON_ClaudeFormat(t *testing.T) {
 func TestParseUsageJSON_OpenAICachedTokens(t *testing.T) {
 	data := []byte(`{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":800}}`)
 	prompt, completion, cacheRead, _ := relayupstream.ParseUsageJSON(data)
-	if prompt != 1000 {
-		t.Errorf("prompt = %d, want 1000", prompt)
+	// prompt_tokens=1000 includes cached=800 → non-cached prompt=200.
+	if prompt != 200 {
+		t.Errorf("prompt = %d, want 200 (1000 - 800 cached)", prompt)
 	}
 	if completion != 50 {
 		t.Errorf("completion = %d, want 50", completion)
@@ -370,6 +374,100 @@ func TestExtractUsageFromPassthroughBody_ClaudeNonStream(t *testing.T) {
 	}
 	if cacheWrite != 40 {
 		t.Errorf("cacheWrite = %d, want 40", cacheWrite)
+	}
+}
+
+// llama.cpp 系上游只发非标准 `timings`(没有标准 `usage`),passthrough 路径必须
+// 和 native codec 的 usageFromWire 同口径回退:prompt_n/predicted_n/cache_n 互斥
+// 直映 prompt/completion/cacheRead。这是用户实测漏计的 body 形状。
+func TestExtractUsageFromPassthroughBody_LlamaCppTimingsSSE(t *testing.T) {
+	sseBody := []byte(
+		"data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"细化\"}}],\"model\":\"qwen3.6-35b-a3b\",\"object\":\"chat.completion.chunk\"}\n\n" +
+			"data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"created\":1783614918,\"id\":\"chatcmpl-x\",\"model\":\"qwen3.6-35b-a3b\",\"system_fingerprint\":\"b0-unknown\",\"object\":\"chat.completion.chunk\",\"timings\":{\"cache_n\":0,\"prompt_n\":1245,\"prompt_ms\":3958.773,\"predicted_n\":644,\"predicted_ms\":20370.878}}\n\n" +
+			"data: [DONE]\n\n")
+	prompt, completion, cacheRead, _ := relayupstream.ExtractUsageFromPassthroughBody(sseBody, true)
+	if prompt != 1245 {
+		t.Errorf("prompt = %d, want 1245", prompt)
+	}
+	if completion != 644 {
+		t.Errorf("completion = %d, want 644", completion)
+	}
+	if cacheRead != 0 {
+		t.Errorf("cacheRead = %d, want 0", cacheRead)
+	}
+}
+
+// cache_n>0:命中 KV cache 的前缀走 cacheRead,和 prompt_n 互斥(不相加)。
+func TestExtractUsageFromPassthroughBody_LlamaCppTimingsSSE_WithCache(t *testing.T) {
+	sseBody := []byte(
+		"data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"model\":\"qwen3.6-35b\",\"object\":\"chat.completion.chunk\",\"timings\":{\"cache_n\":11660,\"prompt_n\":1478,\"predicted_n\":32}}\n\n" +
+			"data: [DONE]\n\n")
+	prompt, completion, cacheRead, _ := relayupstream.ExtractUsageFromPassthroughBody(sseBody, true)
+	if prompt != 1478 {
+		t.Errorf("prompt = %d, want 1478", prompt)
+	}
+	if completion != 32 {
+		t.Errorf("completion = %d, want 32", completion)
+	}
+	if cacheRead != 11660 {
+		t.Errorf("cacheRead = %d, want 11660", cacheRead)
+	}
+}
+
+// 标准 usage 优先于 timings:同一 chunk 两者都在时,采信 usage,忽略 timings。
+func TestExtractUsageFromPassthroughBody_UsageWinsOverTimings(t *testing.T) {
+	sseBody := []byte(
+		"data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"object\":\"chat.completion.chunk\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5},\"timings\":{\"prompt_n\":1478,\"predicted_n\":32,\"cache_n\":11660}}\n\n" +
+			"data: [DONE]\n\n")
+	prompt, completion, cacheRead, _ := relayupstream.ExtractUsageFromPassthroughBody(sseBody, true)
+	if prompt != 10 || completion != 5 {
+		t.Errorf("usage must win: prompt/completion = %d/%d, want 10/5", prompt, completion)
+	}
+	if cacheRead != 0 {
+		t.Errorf("timings cache_n must be ignored when usage present, cacheRead = %d, want 0", cacheRead)
+	}
+}
+
+// 非流式 llama.cpp 同样顶层 timings,usage 缺失时回退。
+func TestExtractUsageFromPassthroughBody_LlamaCppTimingsNonStream(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-x","model":"qwen3.6-35b","choices":[{"message":{"content":"hi"}}],"timings":{"cache_n":0,"prompt_n":1245,"predicted_n":644}}`)
+	prompt, completion, cacheRead, _ := relayupstream.ExtractUsageFromPassthroughBody(body, false)
+	if prompt != 1245 {
+		t.Errorf("prompt = %d, want 1245", prompt)
+	}
+	if completion != 644 {
+		t.Errorf("completion = %d, want 644", completion)
+	}
+	if cacheRead != 0 {
+		t.Errorf("cacheRead = %d, want 0", cacheRead)
+	}
+}
+
+// 归一化后 prompt 可能为 0(prompt 全命中缓存 + 无输出),但 cacheRead>0 仍是"找到了
+// 真实用量"。backward 扫描必须就地返回,不能因 prompt/completion 都为 0 而继续往前扫、
+// 被更早 chunk 的 "usage":null 覆盖掉 cacheRead。
+func TestExtractUsageFromPassthroughBody_FullyCachedPromptNotLost(t *testing.T) {
+	sseBody := []byte(
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"}}],\"usage\":null}\n\n" +
+			"data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"usage\":{\"prompt_tokens\":800,\"completion_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":800}}}\n\n" +
+			"data: [DONE]\n\n")
+	prompt, completion, cacheRead, _ := relayupstream.ExtractUsageFromPassthroughBody(sseBody, true)
+	if prompt != 0 || completion != 0 {
+		t.Errorf("prompt/completion = %d/%d, want 0/0", prompt, completion)
+	}
+	if cacheRead != 800 {
+		t.Errorf("cacheRead = %d, want 800 (must not be lost to earlier usage:null chunk)", cacheRead)
+	}
+}
+
+// 全零 timings(别的上游偶发字段/无意义)→ 不采信,落文本估算。
+func TestExtractUsageFromPassthroughBody_AllZeroTimingsIgnored(t *testing.T) {
+	sseBody := []byte(
+		"data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"object\":\"chat.completion.chunk\",\"timings\":{\"prompt_n\":0,\"predicted_n\":0,\"cache_n\":0}}\n\n" +
+			"data: [DONE]\n\n")
+	prompt, completion, _, _ := relayupstream.ExtractUsageFromPassthroughBody(sseBody, true)
+	if prompt != 0 || completion != 0 {
+		t.Errorf("all-zero timings must not produce usage, got %d/%d", prompt, completion)
 	}
 }
 

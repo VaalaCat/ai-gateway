@@ -4,18 +4,23 @@ import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
+  type ModelRoutingOwner,
   useModelRouting,
   useCreateModelRouting,
   useUpdateModelRouting,
 } from "@/lib/api/model-routings";
 import { routingFormSchema, RoutingFormValues, FormMode } from "./types";
 
-export function useRoutingForm(mode: FormMode, apiMode: "admin" | "user" = "admin") {
+export function useRoutingForm(
+  mode: FormMode,
+  apiMode: "admin" | "user" = "admin",
+  owner: ModelRoutingOwner = { kind: "scope" },
+) {
   const form = useForm<RoutingFormValues>({
     resolver: zodResolver(routingFormSchema),
     defaultValues: {
       name: "",
-      scope: apiMode === "user" ? "user" : "global",
+      scope: owner.kind === "token" ? "token" : apiMode === "user" ? "user" : "global",
       user_id: 0,
       members: [],
       enabled: true,
@@ -24,7 +29,7 @@ export function useRoutingForm(mode: FormMode, apiMode: "admin" | "user" = "admi
   });
 
   const id = mode.kind === "edit" ? mode.id : null;
-  const { data: existing, isLoading } = useModelRouting(id, apiMode);
+  const { data: existing, isLoading } = useModelRouting(id, apiMode, owner);
 
   useEffect(() => {
     if (existing) {
@@ -48,8 +53,8 @@ export function useRoutingForm(mode: FormMode, apiMode: "admin" | "user" = "admi
     }
   }, [existing, form]);
 
-  const createMut = useCreateModelRouting(apiMode);
-  const updateMut = useUpdateModelRouting(apiMode);
+  const createMut = useCreateModelRouting(apiMode, owner);
+  const updateMut = useUpdateModelRouting(apiMode, owner);
 
   return { form, isLoading, createMut, updateMut, existing };
 }

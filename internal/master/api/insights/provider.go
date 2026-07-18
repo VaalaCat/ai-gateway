@@ -1,6 +1,7 @@
 package insights
 
 import (
+	"context"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -65,13 +66,14 @@ func (p *providerCtx) rawDB() *gorm.DB                        { return p.db }
 
 // newProviderCtx 由 handler 构造 providerCtx;
 // admin/user scope 都转成 dao.Scope (Phase 1 主要 admin 用,user scope 检查放在 handler 里)。
-func newProviderCtx(application app.Application, scope *middleware.RequestScope) Context {
-	q := dao.NewAdminQuery(dao.NewContext(application))
+func newProviderCtx(ctx context.Context, application app.Application, scope *middleware.RequestScope) Context {
+	daoCtx := dao.NewContextWithContext(application, ctx)
+	q := dao.NewAdminQuery(daoCtx)
 	s := dao.Scope{}
 	if scope != nil {
 		s = dao.Scope{IsAdmin: scope.IsAdmin, UserID: scope.UserID}
 	}
-	return &providerCtx{q: q, s: s, scope: scope, db: application.GetDB()}
+	return &providerCtx{q: q, s: s, scope: scope, db: daoCtx.GetDB()}
 }
 
 // parseObsRange 是 insights 端点的统一 query 缺省值解析。

@@ -24,7 +24,7 @@ func (h *Handler) Dashboard(c *app.Context, req DashboardRequest) (DashboardResp
 
 	scope := middleware.GetScope(c.Context)
 	s := toDaoScope(scope)
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 
 	// 越权防护:非 admin 不能按别人 user_id 筛(DAO 的 EffectiveUserID 也会兜底)。
 	filter := dao.ObsFilter{ModelName: req.Model, UserID: req.UserID}

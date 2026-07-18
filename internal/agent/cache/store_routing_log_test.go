@@ -48,6 +48,16 @@ func newUserRoutingsLRU(loaderFn entitycache.LoaderFunc[uint, *protocol.UserRout
 	return c
 }
 
+func newTokenRoutingsLRU(loaderFn entitycache.LoaderFunc[uint, *protocol.TokenRoutingMap]) entitycache.EntityCache[uint, *protocol.TokenRoutingMap] {
+	c, err := entitycache.NewLRUCache(entitycache.Config[uint, *protocol.TokenRoutingMap]{
+		Capacity: 100, Loader: loaderFn, NegativeTTL: 30 * time.Second,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
 // TestGetGlobalRouting_LogsWarnOnConnClosed 验证 ws.ErrConnClosed 时触发 Warn 日志，返回仍为 nil。
 func TestGetGlobalRouting_LogsWarnOnConnClosed(t *testing.T) {
 	logger, logs := newObserverLogger()
@@ -58,7 +68,7 @@ func TestGetGlobalRouting_LogsWarnOnConnClosed(t *testing.T) {
 		return nil, ws.ErrConnClosed
 	})
 
-	result := s.GetGlobalRouting("gpt-4o")
+	result := s.GetGlobalRouting(context.Background(), "gpt-4o")
 	if result != nil {
 		t.Errorf("expected nil, got %+v", result)
 	}
@@ -89,7 +99,7 @@ func TestGetGlobalRouting_LogsWarnOnTimeout(t *testing.T) {
 		return nil, context.DeadlineExceeded
 	})
 
-	result := s.GetGlobalRouting("gpt-4o")
+	result := s.GetGlobalRouting(context.Background(), "gpt-4o")
 	if result != nil {
 		t.Errorf("expected nil, got %+v", result)
 	}
@@ -113,7 +123,7 @@ func TestGetGlobalRouting_NotFoundNoWarn(t *testing.T) {
 		return nil, entitycache.ErrNotFound
 	})
 
-	result := s.GetGlobalRouting("gpt-4o")
+	result := s.GetGlobalRouting(context.Background(), "gpt-4o")
 	if result != nil {
 		t.Errorf("expected nil, got %+v", result)
 	}
@@ -138,7 +148,7 @@ func TestListUserRoutingNames_LogsWarnOnConnClosed(t *testing.T) {
 		return nil, ws.ErrConnClosed
 	})
 
-	result := s.ListUserRoutingNames(42)
+	result := s.ListUserRoutingNames(context.Background(), 42)
 	if result != nil {
 		t.Errorf("expected nil, got %+v", result)
 	}
@@ -166,7 +176,7 @@ func TestListUserRoutingNames_NotFoundNoWarn(t *testing.T) {
 		return nil, entitycache.ErrNotFound
 	})
 
-	s.ListUserRoutingNames(42)
+	s.ListUserRoutingNames(context.Background(), 42)
 
 	warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
 	if len(warns) != 0 {
@@ -189,7 +199,7 @@ func TestResolveRouting_LogsWarnOnUserRoutingConnClosed(t *testing.T) {
 		return nil, ws.ErrConnClosed
 	})
 
-	if got := s.ResolveRouting("smart", 42); got != nil {
+	if got := s.ResolveRouting(context.Background(), "smart", protocol.RoutingOwner{UserID: 42}); got != nil {
 		t.Errorf("expected nil, got %+v", got)
 	}
 
@@ -209,5 +219,32 @@ func TestResolveRouting_LogsWarnOnUserRoutingConnClosed(t *testing.T) {
 	}
 	if userWarn["user_id"] != uint64(42) {
 		t.Errorf("user_id want 42, got %v", userWarn["user_id"])
+	}
+}
+
+func TestResolveRouting_TokenFailureLogsAreSuppressedAndCancellationIsDebug(t *testing.T) {
+	logger, logs := newObserverLogger()
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetLogger(logger)
+	s.tokenRoutings = newTokenRoutingsLRU(func(_ context.Context, _ uint) (*protocol.TokenRoutingMap, error) {
+		return nil, ws.ErrConnClosed
+	})
+	owner := protocol.RoutingOwner{TokenID: 7}
+	s.ResolveRouting(context.Background(), "one", owner)
+	s.ResolveRouting(context.Background(), "two", owner)
+	warns := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage("relay entity resolve degraded").All()
+	if len(warns) != 1 {
+		t.Fatalf("same token failure should emit one warn per window, got %d", len(warns))
+	}
+
+	s.tokenRoutings = newTokenRoutingsLRU(func(_ context.Context, _ uint) (*protocol.TokenRoutingMap, error) {
+		return nil, context.Canceled
+	})
+	s.ResolveRouting(context.Background(), "canceled", protocol.RoutingOwner{TokenID: 8})
+	if got := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage("relay entity resolve degraded").Len(); got != 1 {
+		t.Fatalf("client cancellation must not add warn entries, got %d", got)
+	}
+	if got := logs.FilterLevelExact(zapcore.DebugLevel).FilterMessage("relay entity resolve degraded").Len(); got == 0 {
+		t.Fatal("client cancellation should be observable at debug level")
 	}
 }

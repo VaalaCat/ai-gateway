@@ -47,10 +47,6 @@ type ChangePasswordRequest struct {
 }
 
 type UpdateQuotaRequest struct {
-	ID     string         `uri:"id" binding:"required"`
-	Fields map[string]any `json:"-"`
-}
-
-func (r *UpdateQuotaRequest) SetBodyMap(fields map[string]any) {
-	r.Fields = fields
+	ID    string `uri:"id" binding:"required"`
+	Delta *int64 `json:"delta" binding:"required"`
 }

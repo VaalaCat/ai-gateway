@@ -18,6 +18,7 @@ import (
 // 每次 dispatch 按预设结果把状态写进 rctx.State.Recorder——
 //   - 上游错误状态(UpstreamError): WithUpstreamStatus(该码) + WithFail(StageUpstreamStatus)
 //   - 成功: WithUpstreamStatus(200)
+//
 // recordingDispatcher(exec_test.go 里)是纯 stub 不碰 recorder,无法复现状态泄漏,故单列。
 type recorderMutatingDispatcher struct {
 	results []state.AttemptResult
@@ -58,10 +59,11 @@ func (reproSettings) Settings() settings.AgentSettings {
 // runResetRepro 用真实 resilience.Runner 跑单候选 + recorder-mutating dispatcher。
 func runResetRepro(results []state.AttemptResult) *state.RelayContext {
 	d := &recorderMutatingDispatcher{results: results}
-	e := &Executor{
-		Dispatcher: d,
-		Resilience: &resilience.Runner{Settings: reproSettings{}, Breakers: resilience.NewRegistry()},
-	}
+	e := newLocalTestExecutor(
+		d,
+		&resilience.Runner{Settings: reproSettings{}, Breakers: resilience.NewRegistry()},
+		nil,
+	)
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Source: state.SourceAdmin, Mode: state.ModeNative},
 	}}

@@ -27,7 +27,7 @@ type DataFlowResponse struct {
 }
 
 // buildDataFlowResponse 纯逻辑:按 channel 主出站协议装配 dataflow,
-// 把 AllStepInfos()(全 10 道)与 flow.Describe()(实跑工序+Detail)合并成有序 DTO。
+// 把 AllStepInfos()(全 11 道)与 flow.Describe()(实跑工序+Detail)合并成有序 DTO。
 func buildDataFlowResponse(ch *models.Channel) DataFlowResponse {
 	proto := codec.PrimaryOutboundProtocol(ch.Endpoints, ch.SupportedAPITypes)
 	flow := dataflow.BuildChannelDataFlow(ch, proto, codec.GetOutbound(proto), dataflow.StepDeps{})
@@ -50,7 +50,7 @@ func buildDataFlowResponse(ch *models.Channel) DataFlowResponse {
 // DataFlow 返回某 channel 的请求处理链路自描述(只读,不计费,不落 usage_log)。
 func (h *Handler) DataFlow(c *app.Context, req api.IDPathRequest) (DataFlowResponse, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
-	ch, err := dao.NewAdminQuery(dao.NewContext(c.App)).Channel().GetByID(uint(id))
+	ch, err := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Channel().GetByID(uint(id))
 	if err != nil || ch == nil {
 		return DataFlowResponse{}, api.NotFoundError(consts.ErrNotFound)
 	}

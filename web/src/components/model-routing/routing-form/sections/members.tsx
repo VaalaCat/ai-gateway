@@ -10,9 +10,15 @@ export interface MembersSectionProps {
   form: UseFormReturn<RoutingFormValues>;
   apiMode?: "admin" | "user";
   tokenKey?: string | null;
+  limitCandidatesToToken?: boolean;
 }
 
-export function MembersSection({ form, apiMode = "admin", tokenKey }: MembersSectionProps) {
+export function MembersSection({
+  form,
+  apiMode = "admin",
+  tokenKey,
+  limitCandidatesToToken = false,
+}: MembersSectionProps) {
   const t = useTranslations("modelRoutings");
 
   const { fields, append, remove } = useFieldArray<RoutingFormValues>({
@@ -59,6 +65,7 @@ export function MembersSection({ form, apiMode = "admin", tokenKey }: MembersSec
             onRemove={() => remove(index)}
             apiMode={apiMode}
             tokenKey={tokenKey}
+            limitCandidatesToToken={limitCandidatesToToken}
           />
         ))}
       </div>

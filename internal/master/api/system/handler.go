@@ -1,7 +1,9 @@
 package system
 
 import (
+	"context"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -11,7 +13,29 @@ import (
 var startTime = time.Now()
 
 type Handler struct {
-	ConnectedCount func() int
+	ConnectedCount      func() int
+	RelayAdmission      interface{ Set(bool) }
+	RefreshProbeTimings func(context.Context)
+
+	settingsUpdateOnce   sync.Once
+	settingsUpdatePermit chan struct{}
+}
+
+func (h *Handler) acquireSettingsUpdate(ctx context.Context) (func(), error) {
+	h.settingsUpdateOnce.Do(func() {
+		h.settingsUpdatePermit = make(chan struct{}, 1)
+		h.settingsUpdatePermit <- struct{}{}
+	})
+	select {
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	case <-h.settingsUpdatePermit:
+		if err := context.Cause(ctx); err != nil {
+			h.settingsUpdatePermit <- struct{}{}
+			return nil, err
+		}
+		return func() { h.settingsUpdatePermit <- struct{}{} }, nil
+	}
 }
 
 type TableStats struct {
@@ -42,7 +66,7 @@ func (h *Handler) Stats(c *app.Context, _ StatsRequest) (StatsResponse, error) {
 	tables := []string{"users", "tokens", "channels", "model_configs", "agents", "usage_logs", "usage_log_traces", "settings"}
 	var tableStats []TableStats
 
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	stats := q.Stats()
 	for _, name := range tables {
 		count, err := stats.GetTableCount(dao.KnownTable(name))
@@ -91,7 +115,7 @@ func (h *Handler) CleanupPreview(c *app.Context, req CleanupPreviewRequest) (Cle
 	cutoff := time.Now().AddDate(0, 0, -req.RetainDays).Unix()
 	tableName := targetTable(req.Target)
 
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	stats := q.Stats()
 	total, err := stats.GetTableCount(dao.KnownTable(tableName))
 	if err != nil {
@@ -99,7 +123,7 @@ func (h *Handler) CleanupPreview(c *app.Context, req CleanupPreviewRequest) (Cle
 	}
 
 	var toDelete int64
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q2 := daoCtx.GetDB().Table(tableName)
 	if req.Target == "hourly_buckets" {
 		// hourly bucket 按 date 字符串比较 (与 DeleteHourlyBucketsBefore 一致)
@@ -130,7 +154,7 @@ type CleanupResponse struct {
 func (h *Handler) Cleanup(c *app.Context, req CleanupRequest) (CleanupResponse, error) {
 	cutoff := time.Now().AddDate(0, 0, -req.RetainDays)
 
-	mut := dao.NewAdminMutation(dao.NewContext(c.App))
+	mut := dao.NewAdminMutation(dao.NewContextWithContext(c.App, c.RequestContext()))
 	var deleted int64
 	var cleanupErr error
 	switch req.Target {

@@ -9,7 +9,7 @@ import (
 
 func (h *Handler) Overview(c *app.Context, _ api.EmptyRequest) (OverviewResponse, error) {
 	scope := middleware.GetScope(c.Context)
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	if scope != nil && !scope.IsAdmin {

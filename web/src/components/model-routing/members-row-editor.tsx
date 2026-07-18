@@ -26,6 +26,7 @@ export interface MembersRowEditorProps {
   onRemove: () => void;
   apiMode?: "admin" | "user";
   tokenKey?: string | null;
+  limitCandidatesToToken?: boolean;
 }
 
 // 响应式行编辑器：
@@ -39,25 +40,30 @@ export function MembersRowEditor({
   onRemove,
   apiMode = "admin",
   tokenKey,
+  limitCandidatesToToken = false,
 }: MembersRowEditorProps) {
   const t = useTranslations("modelRoutings.members");
   const allMembers = form.watch("members");
   const alreadyAdded = (allMembers ?? []).map((m) => m.ref).filter(Boolean);
   const selfName = form.watch("name");
 
-  const adminQuery = useRoutingCandidates({ enabled: apiMode === "admin" });
+  const useTokenCandidates = apiMode === "user" || limitCandidatesToToken;
+  const adminQuery = useRoutingCandidates({ enabled: !useTokenCandidates });
   const userQuery = useRoutingCandidatesByToken(
-    apiMode === "user" ? tokenKey ?? null : null,
+    useTokenCandidates ? tokenKey ?? null : null,
   );
-  const candidates = apiMode === "user" ? userQuery.data : adminQuery.data;
+  const candidates = useTokenCandidates ? userQuery.data : adminQuery.data;
 
   const refValue = form.watch(`members.${index}.ref` as const);
   const isStale =
-    apiMode === "user" &&
+    useTokenCandidates &&
     !!tokenKey &&
     !!refValue &&
     !!candidates &&
-    ![...candidates.models, ...candidates.global_routings].includes(refValue);
+    !(candidates.visible_refs ?? [
+      ...candidates.models,
+      ...candidates.global_routings,
+    ]).includes(refValue);
 
   return (
     <div
@@ -88,6 +94,7 @@ export function MembersRowEditor({
                   excludeSelf={selfName}
                   apiMode={apiMode}
                   tokenKey={tokenKey}
+                  limitCandidatesToToken={limitCandidatesToToken}
                 />
                 {isStale && (
                   <Badge variant="secondary" className="self-start text-xs">

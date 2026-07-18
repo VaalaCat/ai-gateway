@@ -16,7 +16,7 @@ func (h *Handler) PortalGet(c *app.Context, req api.IDPathRequest) (DetailRespon
 	if err != nil {
 		return DetailResponse{}, api.NotFoundError("private channel not found")
 	}
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	pc, err := q.PrivateChannel().GetByID(uint(id))
 	// 404 (not 403) for cross-owner access — don't leak existence

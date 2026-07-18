@@ -21,7 +21,7 @@ func (h *Handler) GetProfile(c *app.Context, _ api.EmptyRequest) (ProfileRespons
 		return ProfileResponse{}, api.UnauthorizedError(consts.ErrInvalidToken)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	user, err := q.User().GetByID(c.UserInfo.UserID)
@@ -44,7 +44,7 @@ func (h *Handler) ChangePassword(c *app.Context, req ChangePasswordRequest) (api
 		return api.StatusResponse{}, api.UnauthorizedError(consts.ErrInvalidToken)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -78,7 +78,7 @@ func (h *Handler) UpdateProfile(c *app.Context, req UpdateProfileRequest) (Profi
 		return ProfileResponse{}, api.UnauthorizedError(consts.ErrInvalidToken)
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	updates, err := h.buildProfileUpdates(req, q, c.UserInfo.UserID)
@@ -86,7 +86,7 @@ func (h *Handler) UpdateProfile(c *app.Context, req UpdateProfileRequest) (Profi
 		return ProfileResponse{}, err
 	}
 
-	userCtx := dao.NewUserContext(c.App, c.UserInfo)
+	userCtx := dao.NewUserContextWithContext(c.App, c.RequestContext(), c.UserInfo)
 	m := dao.NewMutation(userCtx)
 	if err := m.User().UpdateProfile(updates); err != nil {
 		return ProfileResponse{}, api.InternalError("update profile failed", err)

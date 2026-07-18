@@ -13,6 +13,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/legacy"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewRecorder_FieldsInitialized(t *testing.T) {
@@ -633,6 +634,55 @@ func TestRecorder_SnapshotAttemptAccumulates(t *testing.T) {
 	if got[0] == got[1] {
 		t.Fatalf("snapshots must be independent records, got same pointer")
 	}
+}
+
+func TestRecorderAppendAttemptDefensivelyCopiesRecord(t *testing.T) {
+	original := &TraceRecord{
+		InboundPath:        "/v1/chat/completions",
+		InboundHeaders:     http.Header{"X-Inbound": {"one"}},
+		InboundBody:        string([]byte("inbound")),
+		OutboundHeaders:    http.Header{"X-Outbound": {"two"}},
+		OutboundBody:       string([]byte("outbound")),
+		ResponseHeaders:    http.Header{"X-Response": {"three"}},
+		UpstreamBody:       string([]byte("response")),
+		ClientResponseBody: string([]byte("client")),
+		FailStage:          StageUpstreamStatus,
+		Timings:            map[Stage]time.Duration{StageInboundDecode: time.Millisecond},
+		Verbose:            true,
+	}
+	r := NewRecorder(false, 0)
+	r.AppendAttempt(original)
+
+	original.InboundHeaders["X-Inbound"][0] = "mutated"
+	original.OutboundHeaders.Set("X-Outbound", "mutated")
+	original.ResponseHeaders.Set("X-Response", "mutated")
+	original.Timings[StageInboundDecode] = 99 * time.Millisecond
+	original.InboundBody = "mutated"
+
+	got := r.Attempts()
+	require.Len(t, got, 1)
+	require.Equal(t, "one", got[0].InboundHeaders.Get("X-Inbound"))
+	require.Equal(t, "two", got[0].OutboundHeaders.Get("X-Outbound"))
+	require.Equal(t, "three", got[0].ResponseHeaders.Get("X-Response"))
+	require.Equal(t, time.Millisecond, got[0].Timings[StageInboundDecode])
+	require.Equal(t, "inbound", got[0].InboundBody)
+
+	got[0].InboundHeaders.Set("X-Inbound", "returned-mutation")
+	got[0].Timings[StageInboundDecode] = 100 * time.Millisecond
+	again := r.Attempts()
+	require.Equal(t, "one", again[0].InboundHeaders.Get("X-Inbound"))
+	require.Equal(t, time.Millisecond, again[0].Timings[StageInboundDecode])
+}
+
+func TestRecorderAppendAttemptNilPreservesAttemptIndex(t *testing.T) {
+	r := NewRecorder(false, 0)
+	r.AppendAttempt(nil)
+
+	got := r.Attempts()
+	require.Len(t, got, 1)
+	require.NotNil(t, got[0])
+	require.False(t, got[0].Verbose)
+	require.False(t, r.LastSnapshotVerbose())
 }
 
 func TestRecorder_LastSnapshotVerbose(t *testing.T) {

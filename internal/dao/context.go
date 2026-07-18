@@ -1,6 +1,8 @@
 package dao
 
 import (
+	"context"
+
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"gorm.io/gorm"
 )
@@ -71,10 +73,27 @@ func NewContext(application AppProvider) Context {
 	return &baseContext{app: application}
 }
 
+func NewContextWithContext(application AppProvider, ctx context.Context) Context {
+	if ctx == nil {
+		panic("dao.NewContextWithContext: nil context")
+	}
+	return (&baseContext{app: application}).WithTx(application.GetDB().WithContext(ctx))
+}
+
 // NewUserContext creates a user-scoped DAO context.
 func NewUserContext(application AppProvider, userInfo *app.UserInfo) UserContext {
 	return &userContextImpl{
 		baseContext: baseContext{app: application},
+		userInfo:    userInfo,
+	}
+}
+
+func NewUserContextWithContext(application AppProvider, ctx context.Context, userInfo *app.UserInfo) UserContext {
+	if ctx == nil {
+		panic("dao.NewUserContextWithContext: nil context")
+	}
+	return &userContextImpl{
+		baseContext: baseContext{app: application, tx: application.GetDB().WithContext(ctx)},
 		userInfo:    userInfo,
 	}
 }

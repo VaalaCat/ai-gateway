@@ -8,10 +8,12 @@ import { toast } from "sonner";
 import {
   BarChart3,
   ChevronRight,
+  Download,
   Loader2,
   MoreHorizontal,
   Plus,
   Settings2,
+  Upload,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -32,10 +34,12 @@ import {
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { createSelectionColumn } from "@/components/data-table/selection-column";
 import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { StatusBadge } from "@/components/business/status-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
+import { ChannelExportDialog, ChannelImportDialog } from "@/components/business/channel-transfer-dialogs";
 import { DateCell } from "@/components/business/date-cell";
 import { ExpandedModelsView } from "@/components/business/expanded-models-view";
 import { InlineEdit } from "@/components/business/inline-edit";
@@ -58,6 +62,7 @@ import { parseEndpoints } from "@/components/channel/channel-form/utils";
 function BYOKPageInner() {
   const t = useTranslations("byok");
   const tc = useTranslations("common");
+  const tt = useTranslations("channelTransfer");
   const router = useRouter();
 
   const [page, setPage] = useState(1);
@@ -65,9 +70,12 @@ function BYOKPageInner() {
   const [deleteTarget, setDeleteTarget] = useState<BYOKChannelDetail | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testDialogChannel, setTestDialogChannel] = useState<BYOKChannelDetail | null>(null);
+  const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   const { data: typesData } = useBYOKSupportedTypes();
-  const byokTypes = typesData?.types ?? [];
+  const byokTypes = useMemo(() => typesData?.types ?? [], [typesData?.types]);
 
   const filterSpec = useMemo(() => ({
     search: { kind: "text", placeholder: t("searchNameOrModel") },
@@ -90,10 +98,11 @@ function BYOKPageInner() {
 
   const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
     setPage(1);
+    setRowSelection({});
     setFilterValuesRaw(next);
   };
 
-  const { data, isLoading } = useBYOKChannels({
+  const { data, isLoading, refetch } = useBYOKChannels({
     page,
     page_size: pageSize,
     search: filterValues.search ? String(filterValues.search) : undefined,
@@ -104,6 +113,9 @@ function BYOKPageInner() {
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
   const rows = data?.data ?? [];
+  const selectedIds = Object.entries(rowSelection)
+    .filter(([, selected]) => selected)
+    .map(([id]) => Number(id));
 
   const deleteMut = useDeleteBYOKChannel();
   const testMut = useTestBYOKChannel();
@@ -116,6 +128,7 @@ function BYOKPageInner() {
     } else {
       setPage(nextPage);
     }
+    setRowSelection({});
   };
 
   const handleDeleteConfirm = async () => {
@@ -234,6 +247,7 @@ function BYOKPageInner() {
   };
 
   const columns: ColumnDef<BYOKChannelDetail>[] = [
+    createSelectionColumn<BYOKChannelDetail>({ selectAll: tt("selectPage"), selectRow: tt("selectRow") }),
     {
       id: "expand",
       header: "",
@@ -448,6 +462,9 @@ function BYOKPageInner() {
         pageSize={pageSize}
         pageCount={pageCount}
         onPaginationChange={handlePaginationChange}
+        rowSelection={rowSelection}
+        onRowSelectionChange={setRowSelection}
+        getRowId={(row) => String(row.id)}
         renderExpandedRow={renderExpandedRow}
         defaultColumnVisibility={{ id: false, key_last4: false }}
         storageKey="byok-user-columns"
@@ -458,20 +475,51 @@ function BYOKPageInner() {
             onChange={setFilterValues}
             secondaryActions={[
               {
+                label: tt("importAction"),
+                icon: <Upload data-icon="inline-start" />,
+                onClick: () => setImportOpen(true),
+              },
+              {
+                label: tt("exportAction"),
+                icon: <Download data-icon="inline-start" />,
+                onClick: () => setExportOpen(true),
+              },
+              {
                 label: t("usageStats"),
-                icon: <BarChart3 className="size-4" />,
+                icon: <BarChart3 data-icon="inline-start" />,
                 href: "/byok/stats",
                 variant: "outline",
               },
             ]}
             primaryAction={
               <Button size="sm" onClick={() => router.push("/byok/new")}>
-                <Plus className="mr-2 size-4" />
+                <Plus data-icon="inline-start" />
                 {t("create")}
               </Button>
             }
           />
         }
+      />
+
+      <ChannelImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        path="/private-channels/import"
+        onImported={async () => {
+          setRowSelection({});
+          await refetch();
+        }}
+      />
+      <ChannelExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        path="/private-channels/export"
+        selectedIds={selectedIds}
+        filter={{
+          search: filterValues.search ? String(filterValues.search) : undefined,
+          type: filterValues.type ? String(filterValues.type) : undefined,
+          status: filterValues.status ? String(filterValues.status) : undefined,
+        }}
       />
 
       {testDialogChannel && (

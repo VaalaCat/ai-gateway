@@ -5,11 +5,12 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { toast } from "sonner";
-import { MoreHorizontal, Plus, ChevronRight, Settings2, Loader2 } from "lucide-react";
+import { MoreHorizontal, Plus, ChevronRight, Settings2, Loader2, Download, Upload } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import { createSelectionColumn } from "@/components/data-table/selection-column";
 import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ import { StatusBadge } from "@/components/business/status-badge";
 import { ChannelLimitBadge } from "@/components/business/channel-limit-badge";
 import { ChannelBillingBadge } from "@/components/business/channel-billing-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
+import { ChannelExportDialog, ChannelImportDialog } from "@/components/business/channel-transfer-dialogs";
 
 import { ExpandedModelsView } from "@/components/business/expanded-models-view";
 import { ModelName } from "@/components/business/model-name";
@@ -40,6 +42,7 @@ import { parseEndpoints } from "@/components/channel/channel-form/utils";
 export default function ChannelsPage() {
   const t = useTranslations("channels");
   const tc = useTranslations("common");
+  const tt = useTranslations("channelTransfer");
   const router = useRouter();
 
   const [page, setPage] = useState(1);
@@ -79,9 +82,18 @@ export default function ChannelsPage() {
     },
   } satisfies FilterSpec), [t, channelTypes]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
+  const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
-  const { data, isLoading } = useChannels({
+  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
+    setPage(1);
+    setRowSelection({});
+    setFilterValuesRaw(next);
+  };
+
+  const { data, isLoading, refetch } = useChannels({
     page,
     page_size: pageSize,
     ...(filterValues.search ? { search: String(filterValues.search) } : {}),
@@ -92,6 +104,9 @@ export default function ChannelsPage() {
   const channels = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
+  const selectedIds = Object.entries(rowSelection)
+    .filter(([, selected]) => selected)
+    .map(([id]) => Number(id));
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     if (newPageSize !== pageSize) {
@@ -100,6 +115,7 @@ export default function ChannelsPage() {
     } else {
       setPage(newPage);
     }
+    setRowSelection({});
   };
 
   const updateMutation = useUpdateChannel();
@@ -238,6 +254,7 @@ export default function ChannelsPage() {
   };
 
   const columns: ColumnDef<Channel>[] = [
+    createSelectionColumn<Channel>({ selectAll: tt("selectPage"), selectRow: tt("selectRow") }),
     {
       id: "expand",
       header: "",
@@ -490,20 +507,56 @@ export default function ChannelsPage() {
         pageSize={pageSize}
         pageCount={pageCount}
         onPaginationChange={handlePaginationChange}
+        rowSelection={rowSelection}
+        onRowSelectionChange={setRowSelection}
+        getRowId={(row) => String(row.id)}
         renderExpandedRow={renderExpandedRow}
         toolbar={
           <FilterableToolbar
             spec={filterSpec}
             value={filterValues}
             onChange={setFilterValues}
+            secondaryActions={[
+              {
+                label: tt("importAction"),
+                icon: <Upload data-icon="inline-start" />,
+                onClick: () => setImportOpen(true),
+              },
+              {
+                label: tt("exportAction"),
+                icon: <Download data-icon="inline-start" />,
+                onClick: () => setExportOpen(true),
+              },
+            ]}
             primaryAction={
               <Button size="sm" onClick={() => router.push("/channels/new")}>
-                <Plus className="mr-2 size-4" />
+                <Plus data-icon="inline-start" />
                 {t("createChannel")}
               </Button>
             }
           />
         }
+      />
+
+      <ChannelImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        path="/admin/channels/import"
+        onImported={async () => {
+          setRowSelection({});
+          await refetch();
+        }}
+      />
+      <ChannelExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        path="/admin/channels/export"
+        selectedIds={selectedIds}
+        filter={{
+          search: filterValues.search ? String(filterValues.search) : undefined,
+          type: filterValues.type ? String(filterValues.type) : undefined,
+          status: filterValues.status ? String(filterValues.status) : undefined,
+        }}
       />
 
       {/* Delete Confirm */}

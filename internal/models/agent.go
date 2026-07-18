@@ -13,4 +13,7 @@ type Agent struct {
 	HTTPAddresses string `gorm:"type:text" json:"http_addresses"` // JSON: [{"url":"...","tag":"..."}]
 	Tags          string `gorm:"type:text" json:"tags"`           // comma-separated
 	ProxyURL      string `gorm:"size:256" json:"proxy_url"`
+	RelayMode     string `gorm:"size:16;not null;default:inherit" json:"relay_mode"`
+	RelayURI      string `gorm:"size:2048" json:"relay_uri"`
+	PeerRouteMode string `gorm:"size:16;not null;default:direct_first" json:"peer_route_mode"`
 }

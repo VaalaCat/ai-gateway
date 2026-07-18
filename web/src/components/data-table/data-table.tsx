@@ -10,8 +10,13 @@ import {
   getCoreRowModel,
   getSortedRowModel,
   getExpandedRowModel,
-  useReactTable,
+  createTable,
   Row,
+  type Table as TanStackTable,
+  type TableOptions,
+  type TableOptionsResolved,
+  type RowSelectionState,
+  type Updater,
 } from "@tanstack/react-table";
 import { useTranslations } from "next-intl";
 
@@ -28,6 +33,28 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { DataTablePagination } from "./pagination";
 import { ColumnVisibility } from "./column-visibility";
+
+function useDataTableInstance<TData>(options: TableOptions<TData>): TanStackTable<TData> {
+  const resolvedOptions: TableOptionsResolved<TData> = {
+    state: {},
+    onStateChange: () => {},
+    renderFallbackValue: null,
+    ...options,
+  };
+  const [table] = useState(() => createTable(resolvedOptions));
+  const [state, setState] = useState(() => table.initialState);
+
+  table.setOptions((previous) => ({
+    ...previous,
+    ...options,
+    state: { ...state, ...options.state },
+    onStateChange: (updater) => {
+      setState(updater);
+      options.onStateChange?.(updater);
+    },
+  }));
+  return table;
+}
 
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
@@ -49,6 +76,7 @@ interface DataTableProps<TData, TValue> {
   expandedState?: ExpandedState;
   onExpandedStateChange?: (state: ExpandedState) => void;
   getRowId?: (row: TData, index: number) => string;
+  tableLayout?: "auto" | "fixed";
 }
 
 export function DataTable<TData, TValue>({
@@ -71,6 +99,7 @@ export function DataTable<TData, TValue>({
   columnVisibilityState,
   onColumnVisibilityChange,
   getRowId,
+  tableLayout = "auto",
 }: DataTableProps<TData, TValue>) {
   const t = useTranslations("common");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -135,7 +164,14 @@ export function DataTable<TData, TValue>({
     }
   };
 
-  const table = useReactTable({
+  if (process.env.NODE_ENV !== "production" && renderExpandedRow && !getRowId) {
+    // 展开态若按数组下标存,数据 reorder 后会展开到别的记录(logs 表曾踩坑)
+    console.warn(
+      "DataTable: renderExpandedRow provided without getRowId — expanded rows will misalign when data reorders. Pass getRowId with a stable record id.",
+    );
+  }
+
+  const table = useDataTableInstance({
     data,
     columns,
     state: { sorting, columnVisibility, expanded, ...(onRowSelectionChange ? { rowSelection: rowSelection ?? {} } : {}) },
@@ -144,7 +180,7 @@ export function DataTable<TData, TValue>({
     onExpandedChange: handleExpandedChange,
     enableRowSelection: !!onRowSelectionChange,
     onRowSelectionChange: onRowSelectionChange
-      ? (updater: any) => {
+      ? (updater: Updater<RowSelectionState>) => {
           const next = typeof updater === "function" ? updater(rowSelection ?? {}) : updater;
           onRowSelectionChange(next);
         }
@@ -165,7 +201,18 @@ export function DataTable<TData, TValue>({
           </div>
         )}
         <div className="rounded-md border overflow-x-auto">
-          <Table>
+          <Table className={cn(tableLayout === "fixed" && "table-fixed")}>
+            {tableLayout === "fixed" ? (
+              <colgroup>
+                {table.getVisibleLeafColumns().map((column) => (
+                  <col
+                    key={column.id}
+                    data-column-id={column.id}
+                    style={column.columnDef.size ? { width: column.columnDef.size } : undefined}
+                  />
+                ))}
+              </colgroup>
+            ) : null}
             <TableHeader>
               {table.getHeaderGroups().map((headerGroup) => (
                 <TableRow key={headerGroup.id}>

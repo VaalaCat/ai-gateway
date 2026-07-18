@@ -24,7 +24,7 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[m
 		statusFilter = &s
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	templates, total, err := q.TokenTemplate().List(
@@ -42,7 +42,7 @@ func (h *Handler) ListEnabled(c *app.Context, req ListRequest) (api.PaginatedRes
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 
 	status := consts.StatusEnabled
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	templates, total, err := q.TokenTemplate().List(
@@ -114,7 +114,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		tpl.Status = consts.StatusEnabled
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	m := dao.NewAdminMutation(daoCtx)
 
 	if err := m.TokenTemplate().Create(&tpl); err != nil {
@@ -127,7 +127,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.TokenTemplate, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 
@@ -197,7 +197,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.TokenTemplat
 func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusResponse, error) {
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

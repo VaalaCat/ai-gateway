@@ -40,14 +40,15 @@ func newInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	return &Handler{}, db, application
 }
 
-func makeInsightsCtx(application app.Application, userID uint, isAdmin bool) *app.Context {
+func makeInsightsCtx(t *testing.T, application app.Application, userID uint, isAdmin bool) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	ginCtx.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: userID})
 	return &app.Context{
-		Context:  ginCtx,
-		App:      application,
-		UserInfo: &app.UserInfo{UserID: userID, GroupID: 1},
+		Context:      ginCtx,
+		App:          application,
+		UserInfo:     &app.UserInfo{UserID: userID, GroupID: 1},
+		OwnerContext: t.Context(),
 	}
 }
 
@@ -89,7 +90,7 @@ func TestInsights_Admin_PopulatesStackAndSaving(t *testing.T) {
 	seedInsightsBucket(t, db, date, 10, "gpt-4o", 500, 100, 30, 200)
 	seedInsightsBucket(t, db, date, 11, "claude-3", 300, 100, 10, 150)
 
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day", Stack: "model"})
 	if err != nil {
 		t.Fatalf("Insights admin: %v", err)
@@ -128,7 +129,7 @@ func TestInsights_User_ReadsUsageLogPath_NoBucketLeak(t *testing.T) {
 	date := time.Unix(start, 0).UTC().Format("2006-01-02")
 	seedInsightsBucket(t, db, date, 10, "gpt-4o", 500, 100, 30, 200)
 
-	ctx := makeInsightsCtx(application, 1, false)
+	ctx := makeInsightsCtx(t, application, 1, false)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Insights user: %v", err)
@@ -156,7 +157,7 @@ func TestInsights_RangeOutOfBounds_Returns400(t *testing.T) {
 	now := time.Now().UTC().Unix()
 	// gran=day max 365 天; 400 天必越界。
 	start := now - 400*86400
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	_, err := h.Insights(ctx, InsightsRequest{Start: start, End: now, Gran: "day"})
 	if err == nil {
 		t.Fatalf("expected 400 RangeOutOfBounds, got nil")
@@ -184,7 +185,7 @@ func TestInsights_ModelFilter_CacheSavingIsModelAgnostic(t *testing.T) {
 	seedInsightsBucket(t, db, date, 11, "claude-3", 300, 100, 10, 150)
 
 	// 请求带 model=gpt-4o 筛选
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day", Model: "gpt-4o"})
 	if err != nil {
 		t.Fatalf("Insights with model filter: %v", err)
@@ -218,7 +219,7 @@ func TestInsights_Trend_IncludesCacheTokens(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("seed bucket: %v", err)
 	}
-	ctx := makeInsightsCtx(application, 1, true)
+	ctx := makeInsightsCtx(t, application, 1, true)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Insights: %v", err)

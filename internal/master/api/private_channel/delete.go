@@ -21,7 +21,7 @@ func (h *Handler) PortalDelete(c *app.Context, req api.IDPathRequest) (api.Statu
 		return api.StatusResponse{}, api.NotFoundError("private channel not found")
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	pc, err := q.PrivateChannel().GetByID(uint(id))
 	if err != nil || pc == nil || pc.OwnerID != c.UserInfo.UserID {

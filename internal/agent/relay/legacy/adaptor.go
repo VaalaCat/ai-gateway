@@ -2,7 +2,9 @@ package legacy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	newAPICommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	newAPIRelay "github.com/QuantumNous/new-api/relay"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/types"
@@ -117,7 +120,14 @@ func (tc *traceCollector) buildWithBody(respBody []byte) *TraceData {
 
 // Relay executes a single relay attempt using the new-api adaptor.
 func Relay(c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName string, isStream bool, relayMode int, traceEnabled bool, logger *zap.Logger) RelayResult {
+	return RelayWithOwner(nil, c, ch, bodyBytes, modelName, isStream, relayMode, traceEnabled, logger)
+}
+
+func RelayWithOwner(owner *TransportOwner, c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName string, isStream bool, relayMode int, traceEnabled bool, logger *zap.Logger) RelayResult {
 	tc := newTraceCollector(traceEnabled)
+	if isMultipartAudioMode(relayMode) {
+		return relayMultipartAudio(owner, c, ch, modelName, relayMode, tc)
+	}
 
 	// Parse request body as GeneralOpenAIRequest
 	var openAIReq dto.GeneralOpenAIRequest
@@ -148,8 +158,9 @@ func Relay(c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName strin
 	// Init adaptor
 	adaptor.Init(info)
 
-	// Restore body for this attempt
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	// Restore body for this attempt. Executor may have installed a tracked replay
+	// reader, so release it before handing ownership to the legacy adaptor.
+	installLegacyRequestBody(c.Request, bodyBytes)
 
 	// Convert request via adaptor
 	convertedReq, convertErr := convertRequest(c, info, adaptor, &openAIReq, relayMode)
@@ -168,12 +179,57 @@ func Relay(c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName strin
 	} else {
 		outboundBody = bodyBytes
 	}
-	requestBody := bytes.NewReader(outboundBody)
+	return relayPreparedRequest(owner, c, adaptor, info, bytes.NewReader(outboundBody), outboundBody, upstreamModel, tc)
+}
+
+func relayMultipartAudio(
+	owner *TransportOwner,
+	c *gin.Context,
+	ch *models.Channel,
+	modelName string,
+	relayMode int,
+	tc *traceCollector,
+) RelayResult {
+	if c == nil || c.Request == nil || c.Request.Body == nil {
+		return RelayResult{Err: errors.New("request body unavailable")}
+	}
+	upstreamModel := applyModelMapping(ch, modelName)
+	apiType, _ := newAPICommon.ChannelType2APIType(ch.Type)
+	adaptor := newAPIRelay.GetAdaptor(apiType)
+	if adaptor == nil {
+		return RelayResult{Err: fmt.Errorf("no adaptor for api type %d", apiType)}
+	}
+	info := buildRelayInfo(c, ch, apiType, modelName, upstreamModel, false, relayMode)
+	info.RelayFormat = types.RelayFormatOpenAIAudio
+	adaptor.Init(info)
+	return relayPreparedRequest(owner, c, adaptor, info, c.Request.Body, nil, upstreamModel, tc)
+}
+
+func relayPreparedRequest(
+	owner *TransportOwner,
+	c *gin.Context,
+	adaptor relaychannel.Adaptor,
+	info *relaycommon.RelayInfo,
+	requestBody io.Reader,
+	traceBody []byte,
+	upstreamModel string,
+	tc *traceCollector,
+) RelayResult {
+	if c == nil || c.Request == nil {
+		return RelayResult{Err: errors.New("legacy relay: request context unavailable")}
+	}
+	if err := context.Cause(c.Request.Context()); err != nil {
+		return RelayResult{Err: err}
+	}
+	if err := bindLegacyProxyTransport(owner, info.ChannelSetting.Proxy); err != nil {
+		return RelayResult{Err: fmt.Errorf("legacy relay proxy transport: %w", err)}
+	}
+	requestBody = &contextReadCloser{Reader: requestBody, ctx: c.Request.Context()}
 
 	// Resolve outbound URL and record outbound data for trace
-	if traceEnabled {
+	if tc.enabled {
 		url, _ := adaptor.GetRequestURL(info)
-		tc.setOutbound(url, outboundBody)
+		tc.setOutbound(url, traceBody)
 	}
 
 	// DoRequest
@@ -225,6 +281,19 @@ func Relay(c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName strin
 		UpstreamModel:    upstreamModel,
 		Written:          true,
 		Trace:            tc.build(),
+	}
+}
+
+func isMultipartAudioMode(relayMode int) bool {
+	return relayMode == relayconstant.RelayModeAudioTranscription ||
+		relayMode == relayconstant.RelayModeAudioTranslation
+}
+
+func installLegacyRequestBody(req *http.Request, body []byte) {
+	previous := req.Body
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	if previous != nil {
+		_ = previous.Close()
 	}
 }
 

@@ -24,7 +24,7 @@ func TestNewHandler_WiresStageFields(t *testing.T) {
 		Runtime: config.RuntimeConfig{RelayTimeout: 30},
 		Relay:   config.RelayConfig{Timeout: 30},
 	}
-	agentApp := agentappkg.NewDefaultAgentApplication(store, nil, logger, cfg, pool)
+	agentApp := agentappkg.NewDefaultAgentApplication(store, relayTestBodyStore{}, logger, cfg, pool)
 	bus := eventbus.NewMemoryBus()
 
 	h := NewHandler(bus, agentApp, TestDispatcherFactory(agentApp), nil, nil, nil)
@@ -43,6 +43,13 @@ func TestNewHandler_WiresStageFields(t *testing.T) {
 	}
 	if h.publisher == nil {
 		t.Error("publisher not constructed")
+	}
+	provider := h.ProviderAttemptExecutor()
+	if provider == nil {
+		t.Fatal("shared provider attempt executor not constructed")
+	}
+	if h.executor.Local == nil {
+		t.Fatal("relay executor local port not constructed from shared provider")
 	}
 	// 间接验证：Agent 的 config / transport pool 仍能从 GetXxx 接口拿到，
 	// 且构造器把传入的 Runtime 配置原样接上。

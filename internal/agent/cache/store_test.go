@@ -3,8 +3,16 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/cache/entitycache"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -12,6 +20,128 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
+
+func TestStoreAgentCapabilitiesAreBoundedDefensiveAndSeparateFromAgentModel(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetAgent(&models.Agent{AgentID: "agent-a", Name: "Agent A"})
+
+	input := []string{
+		" future.short ",
+		protocol.AgentCapabilityTunnelV1,
+		"",
+		protocol.AgentCapabilityTunnelV1,
+		strings.Repeat("x", protocol.AgentCapabilityMaxLength+1),
+		protocol.AgentCapabilityForwardV1,
+	}
+	s.SetAgentCapabilities("agent-a", input)
+	input[0] = "mutated-input"
+	want := []string{protocol.AgentCapabilityForwardV1, protocol.AgentCapabilityTunnelV1, "future.short"}
+	if got := s.GetAgentCapabilities("agent-a"); !slices.Equal(got, want) {
+		t.Fatalf("capabilities = %#v, want %#v", got, want)
+	}
+	borrowed := s.GetAgentCapabilities("agent-a")
+	borrowed[0] = "mutated-output"
+	if got := s.GetAgentCapabilities("agent-a"); !slices.Equal(got, want) {
+		t.Fatalf("mutating returned slice changed Store: %#v", got)
+	}
+
+	agentJSON, err := json.Marshal(s.GetAgent("agent-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(agentJSON), "capabilities") || strings.Contains(string(agentJSON), "future.short") {
+		t.Fatalf("runtime capabilities leaked into models.Agent JSON: %s", agentJSON)
+	}
+
+	overLimit := make([]string, 0, protocol.AgentCapabilitiesMaxCount+5)
+	for i := protocol.AgentCapabilitiesMaxCount + 4; i >= 0; i-- {
+		overLimit = append(overLimit, fmt.Sprintf("cap-%02d", i))
+	}
+	s.SetAgentCapabilities("agent-a", overLimit)
+	sort.Strings(overLimit)
+	if got, wantBounded := s.GetAgentCapabilities("agent-a"), overLimit[:protocol.AgentCapabilitiesMaxCount]; !slices.Equal(got, wantBounded) {
+		t.Fatalf("bounded capabilities = %#v, want %#v", got, wantBounded)
+	}
+
+	s.SetAgentCapabilities("", []string{"must-not-exist"})
+	if got := s.GetAgentCapabilities(""); got != nil {
+		t.Fatalf("empty agent ID polluted capability map: %#v", got)
+	}
+	s.SetAgentCapabilities("agent-a", nil)
+	if got := s.GetAgentCapabilities("agent-a"); got != nil {
+		t.Fatalf("empty update did not clear capabilities: %#v", got)
+	}
+}
+
+func TestStoreAgentCapabilitiesSurviveAgentFullSyncAndClearOnEveryAgentDelete(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetAgent(&models.Agent{AgentID: "agent-a", Name: "before"})
+	s.SetAgentCapabilities("agent-a", []string{"future.short"})
+	s.LoadAgents([]models.Agent{{AgentID: "agent-a", Name: "after-full-sync"}})
+	if got := s.GetAgentCapabilities("agent-a"); !slices.Equal(got, []string{"future.short"}) {
+		t.Fatalf("full sync overwrote runtime capabilities: %#v", got)
+	}
+	s.DeleteAgent("agent-a")
+	if got := s.GetAgentCapabilities("agent-a"); got != nil {
+		t.Fatalf("DeleteAgent retained capabilities: %#v", got)
+	}
+
+	s.SetAgent(&models.Agent{AgentID: "agent-b"})
+	s.SetAgentCapabilities("agent-b", []string{"future.short"})
+	s.HandleSyncEvent(events.EntityAgent, events.ActionDelete, []byte(`{"agent_id":"agent-b"}`))
+	if got := s.GetAgentCapabilities("agent-b"); got != nil {
+		t.Fatalf("agent sync delete retained capabilities: %#v", got)
+	}
+}
+
+func TestStoreAgentCapabilitiesConcurrentSetGetDeleteIsRaceSafe(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	const workers = 96
+	start := make(chan struct{})
+	done := make(chan struct{}, workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			<-start
+			agentID := fmt.Sprintf("agent-%d", i%4)
+			switch i % 3 {
+			case 0:
+				s.SetAgentCapabilities(agentID, []string{"future.short", fmt.Sprintf("cap-%d", i)})
+			case 1:
+				_ = s.GetAgentCapabilities(agentID)
+			case 2:
+				s.DeleteAgentCapabilities(agentID)
+			}
+			done <- struct{}{}
+		}(i)
+	}
+	close(start)
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+	s.SetAgentCapabilities("agent-final", []string{"future.short"})
+	if got := s.GetAgentCapabilities("agent-final"); !slices.Equal(got, []string{"future.short"}) {
+		t.Fatalf("final capabilities = %#v", got)
+	}
+}
+
+func TestStoreClearAgentCapabilitiesDropsWholeRuntimeSnapshot(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetAgentCapabilities("agent-a", []string{"a-capability"})
+	s.SetAgentCapabilities("agent-b", []string{"b-capability"})
+	s.ClearAgentCapabilities()
+	if got := s.GetAgentCapabilities("agent-a"); got != nil {
+		t.Fatalf("agent-a capabilities survived clear: %#v", got)
+	}
+	if got := s.GetAgentCapabilities("agent-b"); got != nil {
+		t.Fatalf("agent-b capabilities survived clear: %#v", got)
+	}
+
+	s.ClearAgentCapabilities()
+	s.SetAgentCapabilities("agent-c", []string{"c-capability"})
+	if got := s.GetAgentCapabilities("agent-c"); !slices.Equal(got, []string{"c-capability"}) {
+		t.Fatalf("store unusable after repeated clear: %#v", got)
+	}
+}
 
 func TestStoreTokenCRUD(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
@@ -269,9 +399,9 @@ func TestStore_HandleSyncEvent_ModelConfig(t *testing.T) {
 
 func TestStoreUpdateAgentAutoAddresses_ReplacesAutoDetected(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
-	s.SetAgent(&models.Agent{
-		AgentID:       "agent-a",
-		HTTPAddresses: `[{"url":"http://10.0.0.1:8139","tag":"auto-detected"}]`,
+	s.SetAgent(&models.Agent{AgentID: "agent-a"})
+	s.UpdateAgentAutoAddresses("agent-a", []agentproxy.Address{
+		{URL: "http://10.0.0.1:8139", Tag: "auto-detected"},
 	})
 
 	s.UpdateAgentAutoAddresses("agent-a", []agentproxy.Address{
@@ -313,6 +443,209 @@ func TestStoreUpdateAgentAutoAddresses_DoesNotOverrideManual(t *testing.T) {
 	}
 }
 
+func TestStoreLoadAgentsPreservesRelayConfiguration(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.LoadAgents([]models.Agent{{
+		AgentID:   "relay-load-agent",
+		RelayMode: consts.RelayModeCustom,
+		RelayURI:  "wss://relay.example/load?token=secret",
+	}})
+
+	agent := s.GetAgent("relay-load-agent")
+	if agent == nil {
+		t.Fatal("expected loaded agent")
+	}
+	if agent.RelayMode != consts.RelayModeCustom || agent.RelayURI != "wss://relay.example/load?token=secret" {
+		t.Fatalf("relay configuration lost during LoadAgents: %+v", agent)
+	}
+}
+
+func TestStoreHandleSyncEventAgentUpdateCarriesRelayConfiguration(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetAgent(&models.Agent{
+		AgentID:   "relay-push-agent",
+		Name:      "before",
+		RelayMode: consts.RelayModeInherit,
+	})
+	updated := models.Agent{
+		AgentID:   "relay-push-agent",
+		Name:      "after",
+		RelayMode: consts.RelayModeCustom,
+		RelayURI:  "wss://relay.example/push?token=secret",
+	}
+	data, err := json.Marshal(updated)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.HandleSyncEvent(events.EntityAgent, events.ActionUpdate, data)
+
+	agent := s.GetAgent("relay-push-agent")
+	if agent == nil {
+		t.Fatal("expected pushed agent")
+	}
+	if agent.Name != "after" || agent.RelayMode != consts.RelayModeCustom || agent.RelayURI != updated.RelayURI {
+		t.Fatalf("full agent push did not carry relay configuration: %+v", agent)
+	}
+}
+
+func TestStoreUpdateAgentAutoAddressesCopyOnWritePreservesRelayConfiguration(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.SetAgent(&models.Agent{
+		AgentID:   "relay-copy-agent",
+		RelayMode: consts.RelayModeCustom,
+		RelayURI:  "wss://relay.example/copy?token=secret",
+	})
+	s.UpdateAgentAutoAddresses("relay-copy-agent", []agentproxy.Address{
+		{URL: "http://10.0.0.1:8139", Tag: "auto-detected"},
+	})
+	before := s.GetAgent("relay-copy-agent")
+
+	s.UpdateAgentAutoAddresses("relay-copy-agent", []agentproxy.Address{
+		{URL: "http://10.0.0.2:8139", Tag: "auto-detected"},
+	})
+
+	after := s.GetAgent("relay-copy-agent")
+	if after == nil || before == nil {
+		t.Fatal("expected cached agent before and after update")
+	}
+	if before == after {
+		t.Fatal("auto-address update must publish a copied Agent value")
+	}
+	if after.RelayMode != consts.RelayModeCustom || after.RelayURI != before.RelayURI {
+		t.Fatalf("copy-on-write lost relay configuration: before=%+v after=%+v", before, after)
+	}
+	if !strings.Contains(after.HTTPAddresses, "http://10.0.0.2:8139") {
+		t.Fatalf("auto-address update did not replace the runtime overlay: %s", after.HTTPAddresses)
+	}
+}
+
+type blockingAgentSetCache struct {
+	entitycache.EntityCache[string, *models.Agent]
+	blockNext atomic.Bool
+	reached   chan struct{}
+	release   chan struct{}
+	deadline  context.Context
+}
+
+func (c *blockingAgentSetCache) Set(key string, value *models.Agent) {
+	if c.blockNext.CompareAndSwap(true, false) {
+		close(c.reached)
+		select {
+		case <-c.release:
+		case <-c.deadline.Done():
+		}
+	}
+	c.EntityCache.Set(key, value)
+}
+
+func TestStoreUpdateAgentAutoAddressesCannotOverwriteAuthoritativeSync(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+	}{
+		{name: "update", action: events.ActionUpdate},
+		{name: "delete", action: events.ActionDelete},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewStore(nil, config.AgentCacheConfig{})
+			const agentID = "relay-authoritative-agent"
+			s.SetAgent(&models.Agent{
+				AgentID:       agentID,
+				HTTPAddresses: `[{"url":"http://10.0.0.1:8139","tag":"auto-detected"}]`,
+				RelayMode:     consts.RelayModeInherit,
+				RelayURI:      "wss://relay.example/stale",
+			})
+
+			deadline, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			t.Cleanup(cancel)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseAuto := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseAuto)
+			blocking := &blockingAgentSetCache{
+				EntityCache: s.agents,
+				reached:     make(chan struct{}),
+				release:     release,
+				deadline:    deadline,
+			}
+			blocking.blockNext.Store(true)
+			s.agents = blocking
+
+			autoDone := make(chan struct{})
+			go func() {
+				s.UpdateAgentAutoAddresses(agentID, []agentproxy.Address{{
+					URL: "http://10.0.0.2:8139",
+					Tag: "auto-detected",
+				}})
+				close(autoDone)
+			}()
+			select {
+			case <-blocking.reached:
+			case <-deadline.Done():
+				t.Fatalf("auto-address update did not reach final Set: %v", deadline.Err())
+			}
+
+			authoritative := models.Agent{
+				AgentID:   agentID,
+				RelayMode: consts.RelayModeCustom,
+				RelayURI:  "wss://relay.example/authoritative",
+			}
+			data, err := json.Marshal(authoritative)
+			if err != nil {
+				t.Fatal(err)
+			}
+			syncStarted := make(chan struct{})
+			syncDone := make(chan struct{})
+			go func() {
+				close(syncStarted)
+				s.HandleSyncEvent(events.EntityAgent, tt.action, data)
+				close(syncDone)
+			}()
+			select {
+			case <-syncStarted:
+			case <-deadline.Done():
+				t.Fatalf("authoritative sync did not start: %v", deadline.Err())
+			}
+
+			if s.agentsMu.TryLock() {
+				s.agentsMu.Unlock()
+				select {
+				case <-syncDone:
+				case <-deadline.Done():
+					t.Fatalf("unserialized authoritative sync did not finish: %v", deadline.Err())
+				}
+			}
+			releaseAuto()
+
+			for name, done := range map[string]<-chan struct{}{
+				"auto-address update": autoDone,
+				"authoritative sync":  syncDone,
+			} {
+				select {
+				case <-done:
+				case <-deadline.Done():
+					t.Fatalf("%s did not finish: %v", name, deadline.Err())
+				}
+			}
+
+			got := s.GetAgent(agentID)
+			if tt.action == events.ActionDelete {
+				if got != nil {
+					t.Fatalf("authoritative delete was overwritten by stale auto-address update: %+v", got)
+				}
+				return
+			}
+			if got == nil || got.RelayMode != authoritative.RelayMode || got.RelayURI != authoritative.RelayURI {
+				t.Fatalf("authoritative relay configuration was overwritten: got=%+v want=%+v", got, authoritative)
+			}
+		})
+	}
+}
+
 func TestStore_UserGroup_RoundTrip(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 	g := &models.UserGroup{ID: 5, Name: "x", Status: 1}
@@ -335,6 +668,30 @@ func TestStore_User_RoundTrip(t *testing.T) {
 	got := s.GetUser(context.Background(), 42)
 	if got == nil || got.GroupID != 7 {
 		t.Fatalf("user mismatch: %+v", got)
+	}
+}
+
+func TestStoreAdvanceVersionUsesCASMax(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	s.AdvanceVersion(100)
+	s.AdvanceVersion(90)
+	if got := s.Version(); got != 100 {
+		t.Fatalf("Version after older update = %d, want 100", got)
+	}
+
+	versions := []int64{250, 125, 900, 899, 400, 1000, 999, 17}
+	var wg sync.WaitGroup
+	wg.Add(len(versions))
+	for _, version := range versions {
+		version := version
+		go func() {
+			defer wg.Done()
+			s.AdvanceVersion(version)
+		}()
+	}
+	wg.Wait()
+	if got := s.Version(); got != 1000 {
+		t.Fatalf("concurrent Version = %d, want max 1000", got)
 	}
 }
 

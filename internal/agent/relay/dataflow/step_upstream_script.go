@@ -1,6 +1,8 @@
 package dataflow
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/scripthook"
@@ -23,7 +25,7 @@ type StepUpstreamScript struct {
 
 func (s *StepUpstreamScript) Key() string { return "upstream_script" }
 
-func (s *StepUpstreamScript) Apply(p *Pass) error {
+func (s *StepUpstreamScript) Apply(_ context.Context, p *Pass) error {
 	newBody, rejected, rejRes := scripthook.RunUpstreamScripts(
 		s.agent, s.c, s.rctx, s.ch, s.proto, p.Original.Model, p.HTTPReq, p.Body,
 	)

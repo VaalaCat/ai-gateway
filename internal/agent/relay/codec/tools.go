@@ -12,13 +12,14 @@ const (
 	BuiltinToolFallbackDrop        BuiltinToolFallbackPolicy = "drop"
 	BuiltinToolFallbackError       BuiltinToolFallbackPolicy = "error"
 	BuiltinToolFallbackPassthrough BuiltinToolFallbackPolicy = "passthrough"
+	BuiltinToolFallbackFunction    BuiltinToolFallbackPolicy = "function"
 )
 
 // NormalizeBuiltinToolFallback 把配置里的字符串归一到合法策略。
 // 未知值（含空串）一律回落到 BuiltinToolFallbackDrop。
 func NormalizeBuiltinToolFallback(s string) BuiltinToolFallbackPolicy {
 	switch BuiltinToolFallbackPolicy(s) {
-	case BuiltinToolFallbackDrop, BuiltinToolFallbackError, BuiltinToolFallbackPassthrough:
+	case BuiltinToolFallbackDrop, BuiltinToolFallbackError, BuiltinToolFallbackPassthrough, BuiltinToolFallbackFunction:
 		return BuiltinToolFallbackPolicy(s)
 	default:
 		return BuiltinToolFallbackDrop
@@ -39,13 +40,24 @@ type DroppedTool struct {
 	Reason string `json:"reason"`
 }
 
-// DroppedToolReasonCrossProtocolIncompatible 是目前唯一的丢弃原因。
-const DroppedToolReasonCrossProtocolIncompatible = "cross_protocol_incompatible"
+const (
+	DroppedToolReasonCrossProtocolIncompatible   = "cross_protocol_incompatible"
+	DroppedToolReasonFunctionFallbackUnsupported = "function_fallback_unsupported"
+)
+
+// FunctionFallbackTool records a custom tool exposed to a limited upstream as
+// a function tool. The response path uses this mapping to restore the original
+// custom_tool_call shape expected by the client.
+type FunctionFallbackTool struct {
+	Name         string `json:"name"`
+	ArgumentName string `json:"argument_name"`
+}
 
 // ResolvedTool 是 ResolveTool 的返回值。Emit 与 Dropped 恰有一个被填充。
 type ResolvedTool struct {
-	Emit    any
-	Dropped *DroppedTool
+	Emit             any
+	Dropped          *DroppedTool
+	FunctionFallback *FunctionFallbackTool
 }
 
 // TargetEmitFuncs 由调用方（编码器）提供，集中目标协议特有的 wire shape 构造。
@@ -61,10 +73,12 @@ type TargetEmitFuncs struct {
 //
 //	A. Type == "function"（含空）且 Name != "" → Emit = targetEmit.Function(t)
 //	B. Type == "function"（含空）且 Name == "" → ErrFunctionToolMissingName（policy 无关）
-//	C. 内置 && source == target && RawConfig != nil → Emit = RawConfig（同协议透传）
-//	D. 内置 && 跨协议 && policy = drop → Dropped
-//	E. 内置 && 跨协议 && policy = error → ErrBuiltinToolUnsupported
-//	F. 内置 && 跨协议 && policy = passthrough → Emit = RawConfig（运维自担）
+//	C. Responses 目标 && policy = function && named custom tool → 作为 function 发出并记录反向映射
+//	D. policy = function && 其它非 function 工具 → Dropped
+//	E. 内置 && source == target && RawConfig != nil → Emit = RawConfig（同协议透传）
+//	F. 内置 && 跨协议 && policy = drop → Dropped
+//	G. 内置 && 跨协议 && policy = error → ErrBuiltinToolUnsupported
+//	H. 内置 && 跨协议 && policy = passthrough → Emit = RawConfig（运维自担）
 //
 // 说明：source 为零值 Protocol("") 被视作"未知入站"，等同于"源 != 目标"。
 func ResolveTool(
@@ -81,6 +95,23 @@ func ResolveTool(
 			return ResolvedTool{}, ErrFunctionToolMissingName
 		}
 		return ResolvedTool{Emit: targetEmit.Function(t)}, nil
+	}
+	if policy == BuiltinToolFallbackFunction {
+		if target == ProtocolOpenAIResponses && t.Type == "custom" && t.Name != "" {
+			functionTool := functionFallbackTool(t)
+			return ResolvedTool{
+				Emit: targetEmit.Function(functionTool),
+				FunctionFallback: &FunctionFallbackTool{
+					Name:         t.Name,
+					ArgumentName: "input",
+				},
+			}, nil
+		}
+		return ResolvedTool{Dropped: &DroppedTool{
+			Type:   t.Type,
+			Name:   t.Name,
+			Reason: DroppedToolReasonFunctionFallbackUnsupported,
+		}}, nil
 	}
 
 	// 内置工具分支
@@ -108,6 +139,30 @@ func ResolveTool(
 			},
 		}, nil
 	}
+}
+
+func functionFallbackTool(t Tool) Tool {
+	t.Type = "function"
+	if t.InputSchema == nil {
+		if raw, ok := t.RawConfig.(map[string]any); ok {
+			t.InputSchema = raw["parameters"]
+		}
+	}
+	t.RawConfig = nil
+	if t.InputSchema == nil {
+		t.InputSchema = map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{
+					"type":        "string",
+					"description": "Raw input for the original custom tool.",
+				},
+			},
+			"required":             []string{"input"},
+			"additionalProperties": false,
+		}
+	}
+	return t
 }
 
 // AssertToolsInvariant 扫描已构造好的出站 tools 数组，若任何 function 形状的
@@ -181,4 +236,31 @@ func RecordDroppedTools(req *Request, dropped []DroppedTool) {
 		req.Metadata = make(map[string]any)
 	}
 	req.Metadata["dropped_tools"] = dropped
+}
+
+const functionFallbackToolsMetadataKey = "function_fallback_tools"
+
+func RecordFunctionFallbackTools(req *Request, tools []FunctionFallbackTool) {
+	if len(tools) == 0 {
+		return
+	}
+	if req.Metadata == nil {
+		req.Metadata = make(map[string]any)
+	}
+	req.Metadata[functionFallbackToolsMetadataKey] = tools
+}
+
+func FunctionFallbackTools(req *Request) map[string]FunctionFallbackTool {
+	if req == nil || req.Metadata == nil {
+		return nil
+	}
+	tools, ok := req.Metadata[functionFallbackToolsMetadataKey].([]FunctionFallbackTool)
+	if !ok || len(tools) == 0 {
+		return nil
+	}
+	out := make(map[string]FunctionFallbackTool, len(tools))
+	for _, tool := range tools {
+		out[tool.Name] = tool
+	}
+	return out
 }

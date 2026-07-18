@@ -20,6 +20,7 @@ type ListRequest struct {
 	ModelName        string `form:"model_name"`
 	Status           string `form:"status"`
 	PrivateChannelID string `form:"private_channel_id"`
+	RequestID        string `form:"request_id"`
 }
 
 // InsightsRequest 是 /v1/logs/insights 入参。

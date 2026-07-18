@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -105,20 +103,6 @@ func register(cfg *config.AgentConfig) (*Credentials, error) {
 	return &creds, nil
 }
 
-// enrollTarget builds the HTTP client and full enroll URL for the master.
-// A unix: master_url dials the socket (base "http://unix"); otherwise the
-// ws(s):// scheme is normalized to http(s):// and the path is set to the
-// enroll endpoint (preserving the original scheme://host).
 func enrollTarget(masterURL string) (*http.Client, string, error) {
-	if strings.HasPrefix(masterURL, "unix:") {
-		return netaddr.UnixHTTPClient(masterURL), "http://unix/api/agents/enroll", nil
-	}
-	raw := strings.Replace(masterURL, "ws://", "http://", 1)
-	raw = strings.Replace(raw, "wss://", "https://", 1)
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, "", err
-	}
-	u.Path = "/api/agents/enroll"
-	return &http.Client{}, u.String(), nil
+	return netaddr.MasterHTTPTarget(masterURL, "/api/agents/enroll")
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
@@ -37,34 +37,41 @@ export function RebuildDialog({
   onOpenChange,
   initialJobId,
 }: RebuildDialogProps) {
+  const sessionKey = open ? `open:${initialJobId ?? ""}` : "closed";
+
+  return (
+    <RebuildDialogSession
+      key={sessionKey}
+      open={open}
+      onOpenChange={onOpenChange}
+      initialJobId={initialJobId}
+    />
+  );
+}
+
+function RebuildDialogSession({
+  open,
+  onOpenChange,
+  initialJobId,
+}: RebuildDialogProps) {
   const t = useTranslations("billing");
   const tc = useTranslations("common");
 
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [jobOwnership, setJobOwnership] = useState(() => ({
+    jobId: open ? initialJobId ?? null : null,
+    ignoredAutomaticJobId: null as string | null,
+  }));
+  const jobId = jobOwnership.jobId;
   // When the picker is open and user clicks "new run", we override the
   // running-jobs gate to show the date form even though running jobs exist.
   const [forceForm, setForceForm] = useState(false);
 
   const submit = useRebuildBillingSubmit();
-  const job = useRebuildBillingJob(jobId);
   // Only poll the list while dialog is open AND we're not already bound to a job.
   const jobsList = useRebuildBillingJobs({ enabled: open && !jobId });
   const invalidateBilling = useInvalidateBillingCaches();
-
-  // Bind to initialJobId when dialog opens with one supplied.
-  useEffect(() => {
-    if (open && initialJobId && !jobId) {
-      setJobId(initialJobId);
-    }
-    if (!open) {
-      // closed → reset overrides; jobId is preserved only if still running
-      // (handleClose decides; effect just clears the picker override).
-      setForceForm(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, initialJobId]);
 
   const runningJobs = useMemo(
     () =>
@@ -74,15 +81,19 @@ export function RebuildDialog({
     [jobsList.data?.jobs],
   );
 
-  // Single running job shortcut: when dialog opens and exactly one job is
-  // running, auto-bind to it so the user lands directly on the progress view
-  // (skips the picker). Multi-running keeps the picker for selection.
-  useEffect(() => {
-    if (open && !jobId && !forceForm && runningJobs.length === 1) {
-      setJobId(runningJobs[0].id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, runningJobs.length]);
+  const automaticJobId =
+    open &&
+    !jobId &&
+    !forceForm &&
+    runningJobs.length === 1 &&
+    runningJobs[0].id !== jobOwnership.ignoredAutomaticJobId
+      ? runningJobs[0].id
+      : null;
+  if (automaticJobId) {
+    setJobOwnership((current) => ({ ...current, jobId: automaticJobId }));
+  }
+  const trackedJobId = jobId ?? automaticJobId;
+  const job = useRebuildBillingJob(trackedJobId);
 
   const hasDate = !!(startDate || endDate);
   const validRange = isDateRangeValid(startDate, endDate);
@@ -90,7 +101,7 @@ export function RebuildDialog({
 
   // View resolution: 1) bound to a specific job → progress; 2) running jobs
   // exist and user didn't ask for form → picker; 3) form.
-  const showProgress = !!jobId;
+  const showProgress = !!trackedJobId;
   const showPicker = !showProgress && !forceForm && runningJobs.length > 0;
   const showForm = !showProgress && !showPicker;
 
@@ -99,7 +110,7 @@ export function RebuildDialog({
   const reset = () => {
     setStartDate("");
     setEndDate("");
-    setJobId(null);
+    setJobOwnership({ jobId: null, ignoredAutomaticJobId: null });
     setForceForm(false);
   };
 
@@ -117,41 +128,57 @@ export function RebuildDialog({
         ...(utc.from ? { start_date: utc.from } : {}),
         ...(utc.to ? { end_date: utc.to } : {}),
       });
-      setJobId(result.job_id);
+      setJobOwnership((current) => ({ ...current, jobId: result.job_id }));
       setForceForm(false);
     } catch (e) {
       toast.error(formatErrorToast(e, t("rebuildFailed")));
     }
   };
 
-  // Terminal state handling: fire toast + invalidate caches + clear jobId.
-  useEffect(() => {
-    if (!jobId || !job.data) return;
-    if (job.data.status === "succeeded") {
+  const handledTransition = useRef<string | null>(null);
+  const clearTrackedJob = () => {
+    setJobOwnership((current) => ({
+      jobId: null,
+      ignoredAutomaticJobId: current.jobId ?? trackedJobId,
+    }));
+  };
+  const handleTerminalTransition = useEffectEvent(() => {
+    if (job.data?.status === "succeeded") {
       toast.success(t("rebuildSuccess", { count: job.data.replayed_logs }));
       invalidateBilling();
-      setJobId(null);
+      clearTrackedJob();
       onOpenChange(false);
       setStartDate("");
       setEndDate("");
-    } else if (job.data.status === "failed") {
+    } else if (job.data?.status === "failed") {
       toast.error(`${t("rebuildFailed")}: ${job.data.error ?? ""}`);
-      setJobId(null);
-    } else if (job.data.status === "canceled") {
+      clearTrackedJob();
+    } else if (job.data?.status === "canceled") {
       toast.warning(t("rebuildCanceled"));
-      setJobId(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job.data?.status]);
-
-  // Job-not-found (e.g., master restarted between submit and poll).
-  useEffect(() => {
-    if (jobId && job.isError) {
+      clearTrackedJob();
+    } else if (job.isError) {
       toast.warning(t("rebuildJobLost"));
-      setJobId(null);
+      clearTrackedJob();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job.isError]);
+  });
+
+  useEffect(() => {
+    if (!trackedJobId) return;
+
+    const status = job.data?.status;
+    const terminalStatus =
+      status === "succeeded" || status === "failed" || status === "canceled"
+        ? status
+        : job.isError
+          ? "lost"
+          : null;
+    if (!terminalStatus) return;
+
+    const transitionKey = `${trackedJobId}:${terminalStatus}`;
+    if (handledTransition.current === transitionKey) return;
+    handledTransition.current = transitionKey;
+    handleTerminalTransition();
+  }, [job.data?.status, job.isError, trackedJobId]);
 
   const progress = job.data
     ? Math.round(
@@ -201,7 +228,9 @@ export function RebuildDialog({
                   <li key={rj.id}>
                     <button
                       type="button"
-                      onClick={() => setJobId(rj.id)}
+                      onClick={() =>
+                        setJobOwnership((current) => ({ ...current, jobId: rj.id }))
+                      }
                       className={cn(
                         "group flex w-full items-center gap-3 px-3 py-2 text-left",
                         "transition-colors hover:bg-accent/60 focus:bg-accent/60 focus:outline-none",

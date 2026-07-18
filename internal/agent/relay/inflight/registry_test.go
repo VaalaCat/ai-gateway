@@ -49,6 +49,50 @@ func TestRegistry_WatchdogWarnsStuck(t *testing.T) {
 	}
 }
 
+func TestRegistry_WatchdogStopIsIdempotentAndConcurrentSafe(t *testing.T) {
+	invokeStop := func(stop func()) (panicValue any) {
+		defer func() { panicValue = recover() }()
+		stop()
+		return nil
+	}
+
+	t.Run("sequential", func(t *testing.T) {
+		stop := NewRegistry(nil, time.Hour).StartWatchdog(time.Hour)
+		if panicValue := invokeStop(stop); panicValue != nil {
+			t.Fatalf("first stop panicked: %v", panicValue)
+		}
+		if panicValue := invokeStop(stop); panicValue != nil {
+			t.Fatalf("second stop panicked: %v", panicValue)
+		}
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		stop := NewRegistry(nil, time.Hour).StartWatchdog(time.Hour)
+		start := make(chan struct{})
+		results := make(chan any, 2)
+		for range 2 {
+			go func() {
+				<-start
+				results <- invokeStop(stop)
+			}()
+		}
+		close(start)
+
+		deadline := time.NewTimer(time.Second)
+		defer deadline.Stop()
+		for range 2 {
+			select {
+			case panicValue := <-results:
+				if panicValue != nil {
+					t.Fatalf("concurrent stop panicked: %v", panicValue)
+				}
+			case <-deadline.C:
+				t.Fatal("concurrent watchdog stops did not return")
+			}
+		}
+	})
+}
+
 func TestEntry_UpdateAndQueuedSnapshot(t *testing.T) {
 	r := NewRegistry(nil, 0)
 	e := r.Track(Meta{ReqID: "r1", StartTime: time.Now().Add(-time.Second)})

@@ -29,6 +29,9 @@ const (
 // LRUCache 据此触发负缓存。
 var ErrNotFound = errors.New("entity not found")
 
+// ErrLoadLimitReached 表示已有过多不同 key 正在加载；同 key follower 不受影响。
+var ErrLoadLimitReached = errors.New("entitycache: concurrent load limit reached")
+
 // RefreshOutcome 是一次后台刷新的三态结果。
 type RefreshOutcome int
 

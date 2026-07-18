@@ -6,9 +6,9 @@ import { useRouter } from "next/navigation";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import type { ChannelFormAdapter } from "./adapter";
-import type { ChannelForm as ChannelFormShape } from "./types";
 import { useChannelForm, ChannelFormMode } from "./use-channel-form";
 import { isSectionAllHidden, type SectionId } from "./section-visibility";
+import { isStageConfigured } from "./stage-configured";
 import { LifecycleStepper, LifecycleStepperMobile, type StageNavItem } from "./lifecycle-stepper";
 import { SaveBar } from "./save-bar";
 import { parseEndpoints } from "./utils";
@@ -36,23 +36,6 @@ const STAGES: ReadonlyArray<{ id: SectionId; titleKey: string; descKey: string }
   { id: "resilience", titleKey: "stageResilience", descKey: "stageResilienceDesc" },
   { id: "response", titleKey: "stageResponse", descKey: "stageResponseDesc" },
 ];
-
-function stageConfigured(id: SectionId, form: ChannelFormShape): boolean {
-  switch (id) {
-    case "meta":
-    case "routing":
-    case "processing":
-      return true;
-    case "affinity":
-      return form.affinity !== "";
-    case "connection":
-      return !!(form.organization || form.api_version || form.proxy_url || form.disable_keepalive);
-    case "resilience":
-      return form.resilience !== "";
-    case "response":
-      return form.status_code_mapping !== "" || form.free || (form.price_ratio !== "" && form.price_ratio !== "1");
-  }
-}
 
 export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps<Entity>) {
   const t = useTranslations("channels");
@@ -115,7 +98,7 @@ export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps
     }
   };
 
-  const stages: StageNavItem[] = visibleStages.map((s) => ({ id: s.id, titleKey: s.titleKey, configured: stageConfigured(s.id, state.form) }));
+  const stages: StageNavItem[] = visibleStages.map((s) => ({ id: s.id, titleKey: s.titleKey, configured: isStageConfigured(s.id, state.form) }));
   const activeStage = STAGES.find((s) => s.id === activeId) ?? STAGES[0];
   // 上游协议必填:至少配置一个端点,否则禁止保存。
   const endpointMissing = Object.keys(parseEndpoints(state.form.endpoints)).length === 0;

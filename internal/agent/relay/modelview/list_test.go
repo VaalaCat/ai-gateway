@@ -1,6 +1,7 @@
 package modelview
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -14,6 +15,7 @@ type stubStore struct {
 	channelsByMdl map[string][]*models.Channel
 	globalRouting []string
 	userRouting   map[uint][]string
+	tokenRouting  map[uint][]string
 	byokByUser    map[uint][]string
 }
 
@@ -21,8 +23,13 @@ func (s *stubStore) GetAllModelNames() []string { return s.adminModels }
 func (s *stubStore) GetChannelsForModel(name string) []*models.Channel {
 	return s.channelsByMdl[name]
 }
-func (s *stubStore) ListGlobalRoutingNames() []string       { return s.globalRouting }
-func (s *stubStore) ListUserRoutingNames(uid uint) []string { return s.userRouting[uid] }
+func (s *stubStore) ListGlobalRoutingNames() []string { return s.globalRouting }
+func (s *stubStore) ListUserRoutingNames(_ context.Context, uid uint) []string {
+	return s.userRouting[uid]
+}
+func (s *stubStore) ListTokenRoutingNames(_ context.Context, tokenID uint) []string {
+	return s.tokenRouting[tokenID]
+}
 func (s *stubStore) ListVisibleBYOKModelNamesForUser(uid uint) []string {
 	return s.byokByUser[uid]
 }
@@ -57,7 +64,7 @@ func TestListVisibleModels_AdminBlockedButBYOKHas(t *testing.T) {
 		byokByUser: map[uint][]string{42: {"gpt-5"}},
 	}
 	ui := &app.UserInfo{UserID: 42, AllowedChannelIDs: []uint{1}} // 1 != 99 故 admin gpt-5 被滤掉
-	got := ListVisibleModels(store, ui)
+	got := ListVisibleModels(context.Background(), store, ui)
 	mustEqual(t, asNamesAndOwners(got), [][2]string{
 		{"gpt-5", "ai-gateway-byok"},
 	})
@@ -66,14 +73,14 @@ func TestListVisibleModels_AdminBlockedButBYOKHas(t *testing.T) {
 // Case 1：仅 admin，无 BYOK。
 func TestListVisibleModels_OnlyAdmin(t *testing.T) {
 	store := &stubStore{adminModels: []string{"gpt-4"}}
-	got := ListVisibleModels(store, &app.UserInfo{UserID: 42})
+	got := ListVisibleModels(context.Background(), store, &app.UserInfo{UserID: 42})
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"gpt-4", "ai-gateway"}})
 }
 
 // Case 2：仅 BYOK，admin 无。
 func TestListVisibleModels_OnlyBYOK(t *testing.T) {
 	store := &stubStore{byokByUser: map[uint][]string{42: {"gpt-5"}}}
-	got := ListVisibleModels(store, &app.UserInfo{UserID: 42})
+	got := ListVisibleModels(context.Background(), store, &app.UserInfo{UserID: 42})
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"gpt-5", "ai-gateway-byok"}})
 }
 
@@ -84,7 +91,7 @@ func TestListVisibleModels_BYOKOverridesAdmin(t *testing.T) {
 		channelsByMdl: map[string][]*models.Channel{"gpt-4": {{ChannelCore: models.ChannelCore{ID: 1, Status: 1}}}},
 		byokByUser:    map[uint][]string{42: {"gpt-4"}},
 	}
-	got := ListVisibleModels(store, &app.UserInfo{UserID: 42})
+	got := ListVisibleModels(context.Background(), store, &app.UserInfo{UserID: 42})
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"gpt-4", "ai-gateway-byok"}})
 }
 
@@ -96,7 +103,7 @@ func TestListVisibleModels_TokenModelsAppliesToBYOK(t *testing.T) {
 		byokByUser:    map[uint][]string{42: {"gpt-5"}},
 	}
 	ui := &app.UserInfo{UserID: 42, TokenModels: []string{"gpt-4"}}
-	got := ListVisibleModels(store, ui)
+	got := ListVisibleModels(context.Background(), store, ui)
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"gpt-4", "ai-gateway"}})
 }
 
@@ -108,7 +115,7 @@ func TestListVisibleModels_GroupModelsAppliesToBYOK(t *testing.T) {
 		byokByUser:    map[uint][]string{42: {"gpt-5"}},
 	}
 	ui := &app.UserInfo{UserID: 42, GroupModels: []string{"gpt-4"}}
-	got := ListVisibleModels(store, ui)
+	got := ListVisibleModels(context.Background(), store, ui)
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"gpt-4", "ai-gateway"}})
 }
 
@@ -118,7 +125,7 @@ func TestListVisibleModels_BYOKDefersToRouting(t *testing.T) {
 		globalRouting: []string{"foo"},
 		byokByUser:    map[uint][]string{42: {"foo"}},
 	}
-	got := ListVisibleModels(store, &app.UserInfo{UserID: 42})
+	got := ListVisibleModels(context.Background(), store, &app.UserInfo{UserID: 42})
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"foo", "ai-gateway-routing"}})
 }
 
@@ -128,7 +135,7 @@ func TestListVisibleModels_NilUserInfo(t *testing.T) {
 		adminModels: []string{"gpt-4"},
 		byokByUser:  map[uint][]string{42: {"gpt-5"}},
 	}
-	got := ListVisibleModels(store, nil)
+	got := ListVisibleModels(context.Background(), store, nil)
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"gpt-4", "ai-gateway"}})
 }
 
@@ -138,7 +145,7 @@ func TestListVisibleModels_ZeroUserID(t *testing.T) {
 		adminModels: []string{"gpt-4"},
 		byokByUser:  map[uint][]string{42: {"gpt-5"}},
 	}
-	got := ListVisibleModels(store, &app.UserInfo{UserID: 0})
+	got := ListVisibleModels(context.Background(), store, &app.UserInfo{UserID: 0})
 	mustEqual(t, asNamesAndOwners(got), [][2]string{{"gpt-4", "ai-gateway"}})
 }
 
@@ -151,7 +158,7 @@ func TestListVisibleModels_RoutingOrderPreserved(t *testing.T) {
 		globalRouting: []string{"r1"},
 		userRouting:   map[uint][]string{42: {"r2"}},
 	}
-	got := ListVisibleModels(store, &app.UserInfo{UserID: 42})
+	got := ListVisibleModels(context.Background(), store, &app.UserInfo{UserID: 42})
 	mustEqual(t, asNamesAndOwners(got), [][2]string{
 		{"gpt-4", "ai-gateway"},
 		{"gpt-5", "ai-gateway-byok"},
@@ -160,10 +167,29 @@ func TestListVisibleModels_RoutingOrderPreserved(t *testing.T) {
 	})
 }
 
+func TestListVisibleModels_TokenRoutingIsScopedAndFiltered(t *testing.T) {
+	store := &stubStore{
+		globalRouting: []string{"global"},
+		userRouting:   map[uint][]string{42: {"user"}},
+		tokenRouting:  map[uint][]string{7: {"token", "blocked"}, 8: {"other-token"}},
+	}
+	ui := &app.UserInfo{
+		UserID: 42, TokenID: 7,
+		GroupModels: []string{"global|user|token|blocked"},
+		TokenModels: []string{"global|user|token"},
+	}
+	got := ListVisibleModels(context.Background(), store, ui)
+	mustEqual(t, asNamesAndOwners(got), [][2]string{
+		{"global", "ai-gateway-routing"},
+		{"user", "ai-gateway-routing"},
+		{"token", "ai-gateway-routing"},
+	})
+}
+
 // Case 11：三段全空 → 空切片。
 func TestListVisibleModels_AllEmpty(t *testing.T) {
 	store := &stubStore{}
-	got := ListVisibleModels(store, &app.UserInfo{UserID: 42})
+	got := ListVisibleModels(context.Background(), store, &app.UserInfo{UserID: 42})
 	if len(got) != 0 {
 		t.Fatalf("expected empty, got=%v", got)
 	}
@@ -180,7 +206,7 @@ func TestListVisibleModels_ChannelWhitelistSkipsBYOK(t *testing.T) {
 		byokByUser: map[uint][]string{42: {"gpt-7"}},
 	}
 	ui := &app.UserInfo{UserID: 42, AllowedChannelIDs: []uint{10}}
-	got := ListVisibleModels(store, ui)
+	got := ListVisibleModels(context.Background(), store, ui)
 	mustEqual(t, asNamesAndOwners(got), [][2]string{
 		{"gpt-4", "ai-gateway"},
 		{"gpt-7", "ai-gateway-byok"},

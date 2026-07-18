@@ -1,20 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useAuth } from "@/lib/auth";
 
 const KEY_PREFIX = "aigw:pref";
+const USER_PREF_EVENT = "aigw-user-pref-change";
 
 function storageKey(userID: number | undefined, name: string): string | null {
   if (typeof userID !== "number" || !Number.isFinite(userID)) return null;
   return `${KEY_PREFIX}:${userID}:${name}`;
 }
 
-function readPref<T>(key: string, fallback: T): T {
-  if (typeof window === "undefined") return fallback;
+function readPref<T>(raw: string | null, fallback: T): T {
+  if (raw === null) return fallback;
   try {
-    const raw = window.localStorage.getItem(key);
-    if (raw === null) return fallback;
     return JSON.parse(raw) as T;
   } catch {
     return fallback;
@@ -39,21 +38,32 @@ export function useUserPref<T>(name: string, fallback: T): [T, (v: T) => void] {
   const { user } = useAuth();
   const userID = user?.user_id;
   const key = storageKey(userID, name);
-
-  const [value, setValue] = useState<T>(fallback);
-
-  // user 就绪后从 localStorage 读一次（不写：避免无意义覆盖）
-  useEffect(() => {
-    if (!key) return;
-    setValue(readPref(key, fallback));
-    // fallback 故意不进依赖：fallback 通常是稳定字面量；若动态变化也不重读
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const subscribe = useCallback((notify: () => void) => {
+    if (!key) return () => {};
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === key) notify();
+    };
+    const onLocalChange = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === key) notify();
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(USER_PREF_EVENT, onLocalChange);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(USER_PREF_EVENT, onLocalChange);
+    };
   }, [key]);
+  const getSnapshot = useCallback(() => key ? window.localStorage.getItem(key) : null, [key]);
+  const getServerSnapshot = useCallback(() => null, []);
+  const raw = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const value = useMemo(() => readPref(raw, fallback), [fallback, raw]);
 
   const update = useCallback(
     (next: T) => {
-      setValue(next);
-      if (key) writePref(key, next);
+      if (key) {
+        writePref(key, next);
+        window.dispatchEvent(new CustomEvent(USER_PREF_EVENT, { detail: key }));
+      }
     },
     [key],
   );

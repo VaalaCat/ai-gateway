@@ -24,7 +24,7 @@ type RegisterRequest struct {
 }
 
 func (h *Handler) Register(c *app.Context, req RegisterRequest) (api.Created[models.User], error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	setting, found, err := q.Setting().Lookup("registration_enabled")

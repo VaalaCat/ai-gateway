@@ -26,6 +26,18 @@ func (c Created[T]) Body() any {
 	return c.Value
 }
 
+type Accepted[T any] struct {
+	Body T
+}
+
+func (Accepted[T]) HTTPStatus() int {
+	return http.StatusAccepted
+}
+
+func (a Accepted[T]) ResponseBody() any {
+	return a.Body
+}
+
 type StatusResponse struct {
 	Status string `json:"status"`
 }

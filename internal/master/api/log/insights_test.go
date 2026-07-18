@@ -15,15 +15,15 @@ import (
 func seedInsightsLog(t *testing.T, db *gorm.DB, userID uint, ts int64, status, duration int, stage, reqID string) {
 	t.Helper()
 	if err := db.Select("*").Create(&models.UsageLog{
-		UserID:    userID,
-		ChannelID: 5,
-		ModelName: "gpt-4o",
-		AgentID:   "ag-1",
-		Status:    status,
-		Duration:  duration,
+		UserID:     userID,
+		ChannelID:  5,
+		ModelName:  "gpt-4o",
+		AgentID:    "ag-1",
+		Status:     status,
+		Duration:   duration,
 		ErrorStage: stage,
-		RequestID: reqID,
-		CreatedAt: ts,
+		RequestID:  reqID,
+		CreatedAt:  ts,
 	}).Error; err != nil {
 		t.Fatalf("seed usage log: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestLogsInsights_Admin_PopulatesTotalsAndStages(t *testing.T) {
 	seedInsightsLog(t, db, 2, start+3900, 0, 0, "upstream_dispatch", "fail-1")
 	seedInsightsLog(t, db, 2, start+4000, 0, 0, "outbound_encode", "fail-2")
 
-	ctx := makeCtx(application, 1, true)
+	ctx := makeCtx(t, application, 1, true)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end})
 	if err != nil {
 		t.Fatalf("Insights admin: %v", err)
@@ -94,7 +94,7 @@ func TestLogsInsights_User_OnlyOwnLogs_NoErrorByStage(t *testing.T) {
 	seedInsightsLog(t, db, 1, start+3600, 1, 200, "", "u1-ok")
 	seedInsightsLog(t, db, 2, start+3700, 0, 0, "upstream_dispatch", "u2-fail")
 
-	ctx := makeCtx(application, 1, false)
+	ctx := makeCtx(t, application, 1, false)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end})
 	if err != nil {
 		t.Fatalf("Insights user: %v", err)
@@ -123,7 +123,7 @@ func TestLogsInsights_RangeOutOfBounds_Returns400(t *testing.T) {
 	now := time.Now().UTC().Unix()
 	// logs/insights gran 固定 hour,max 7 天;给 10 天必越界。
 	start := now - 10*86400
-	ctx := makeCtx(application, 1, true)
+	ctx := makeCtx(t, application, 1, true)
 	_, err := h.Insights(ctx, InsightsRequest{Start: start, End: now})
 	if err == nil {
 		t.Fatalf("expected 400 RangeOutOfBounds, got nil")

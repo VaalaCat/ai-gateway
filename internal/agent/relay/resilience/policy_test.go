@@ -176,7 +176,7 @@ func TestRunner_BreakerDisabledStillRetries(t *testing.T) {
 	}
 }
 
-func TestRunner_WrittenNoRetry(t *testing.T) {
+func TestRunner_WrittenNoReplay(t *testing.T) {
 	r := &Runner{Settings: settingsFromCfg(testCfg()), Breakers: NewRegistry()}
 	n := 0
 	res := r.Run(nil, chAttempt(5), func() state.AttemptResult {

@@ -25,7 +25,7 @@ func (h *Handler) Bind(c *app.Context, req BindRequest) (BindResponse, error) {
 	if err != nil {
 		return BindResponse{}, api.UnauthorizedError("ticket_invalid")
 	}
-	q := dao.NewAdminQuery(dao.NewContext(c.App))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	u, err := q.User().GetByUsername(req.Username)
 	if err != nil {
 		return BindResponse{}, api.UnauthorizedError("invalid_credentials")
@@ -41,7 +41,7 @@ func (h *Handler) Bind(c *app.Context, req BindRequest) (BindResponse, error) {
 	} else if found {
 		return BindResponse{}, api.ConflictError("already_bound", nil)
 	}
-	m := dao.NewAdminMutation(dao.NewContext(c.App))
+	m := dao.NewAdminMutation(dao.NewContextWithContext(c.App, c.RequestContext()))
 	if err := m.OAuthIdentity().Create(&models.OAuthIdentity{
 		UserID:      u.ID,
 		ProviderID:  claims.ProviderID,

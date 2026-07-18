@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -36,7 +35,7 @@ type Hub interface {
 	// IsOnline 检查指定 Agent 是否在线
 	IsOnline(agentID string) bool
 	// GetAgentAddresses 获取 Agent 的合并地址列表（配置地址 + 自动探测地址）
-	GetAgentAddresses(agentID string, dbHTTPAddrs string) []agentproxy.Address
+	GetAgentAddresses(agentID string, dbHTTPAddrs string) []AgentAddress
 	// ConnectedAgents 返回当前在线的 Agent 数量
 	ConnectedAgents() int
 }

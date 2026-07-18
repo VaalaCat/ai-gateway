@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -447,6 +448,137 @@ func TestResponsesEncodeCrossProtocolFromChat(t *testing.T) {
 	}
 }
 
+func TestEncodeFunctionFallbackInputItem(t *testing.T) {
+	t.Run("custom tool call", func(t *testing.T) {
+		got := encodeFunctionFallbackInputItem(json.RawMessage(
+			`{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch"}`,
+		))
+		var item struct {
+			Type      string `json:"type"`
+			ID        string `json:"id"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}
+		if err := json.Unmarshal(got, &item); err != nil {
+			t.Fatalf("decode converted item: %v", err)
+		}
+		if item.Type != "function_call" || item.ID != "ctc_1" || item.CallID != "call_patch" || item.Name != "apply_patch" {
+			t.Fatalf("converted item = %#v", item)
+		}
+		var arguments map[string]string
+		if err := json.Unmarshal([]byte(item.Arguments), &arguments); err != nil {
+			t.Fatalf("decode function arguments: %v", err)
+		}
+		if arguments["input"] != "*** Begin Patch" {
+			t.Fatalf("arguments = %#v, want original custom input", arguments)
+		}
+	})
+
+	t.Run("custom tool call output", func(t *testing.T) {
+		got := encodeFunctionFallbackInputItem(json.RawMessage(
+			`{"type":"custom_tool_call_output","call_id":"call_patch","output":"Done"}`,
+		))
+		var item map[string]any
+		if err := json.Unmarshal(got, &item); err != nil {
+			t.Fatalf("decode converted item: %v", err)
+		}
+		want := map[string]any{
+			"type":    "function_call_output",
+			"call_id": "call_patch",
+			"output":  "Done",
+		}
+		if !reflect.DeepEqual(item, want) {
+			t.Fatalf("converted item = %#v, want %#v", item, want)
+		}
+	})
+
+	t.Run("non custom item", func(t *testing.T) {
+		raw := json.RawMessage(`{"type":"computer_call","id":"computer_1"}`)
+		if got := encodeFunctionFallbackInputItem(raw); !bytes.Equal(got, raw) {
+			t.Fatalf("non-custom item changed: got %s, want %s", got, raw)
+		}
+	})
+
+	t.Run("malformed JSON", func(t *testing.T) {
+		raw := json.RawMessage(`{"type":`)
+		if got := encodeFunctionFallbackInputItem(raw); !bytes.Equal(got, raw) {
+			t.Fatalf("malformed item changed: got %s, want %s", got, raw)
+		}
+	})
+}
+
+func TestResponsesFunctionFallbackConvertsCustomToolChoice(t *testing.T) {
+	inbound := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{
+		"model":"gpt-5.5",
+		"input":"edit",
+		"tool_choice":{"type":"custom","name":"apply_patch"},
+		"tools":[{"type":"custom","name":"apply_patch","description":"Edit files","format":{"type":"grammar"}}]
+	}`))
+	req, err := (&ResponsesCodec{}).DecodeRequest(inbound)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	outbound, err := (&ResponsesCodec{}).EncodeRequest(req, &codec.ChannelConfig{
+		BaseURL:             "http://stub",
+		APIKey:              "k",
+		Model:               "glm-5.2",
+		BuiltinToolFallback: "function",
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	body, err := io.ReadAll(outbound.Body)
+	if err != nil {
+		t.Fatalf("read outbound body: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode outbound body: %v", err)
+	}
+	choice, ok := raw["tool_choice"].(map[string]any)
+	if !ok || choice["type"] != "function" || choice["name"] != "apply_patch" {
+		t.Fatalf("tool_choice = %#v, want function/apply_patch", raw["tool_choice"])
+	}
+}
+
+func TestResponsesPreservesCustomToolChoiceWithoutFunctionFallback(t *testing.T) {
+	req := &codec.Request{
+		InboundProtocol: codec.ProtocolOpenAIResponses,
+		ToolChoice:      &codec.ToolChoice{Type: "custom", Name: "apply_patch"},
+		Messages:        []codec.Message{codec.TextMessage(codec.RoleUser, "edit")},
+		Tools: []codec.Tool{{
+			Type:        "custom",
+			Name:        "apply_patch",
+			Description: "Edit files",
+			RawConfig: map[string]any{
+				"type": "custom",
+				"name": "apply_patch",
+			},
+		}},
+	}
+	outbound, err := (&ResponsesCodec{}).EncodeRequest(req, &codec.ChannelConfig{
+		BaseURL: "http://stub",
+		APIKey:  "k",
+		Model:   "gpt-5.5",
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	body, err := io.ReadAll(outbound.Body)
+	if err != nil {
+		t.Fatalf("read outbound body: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode outbound body: %v", err)
+	}
+	choice, ok := raw["tool_choice"].(map[string]any)
+	if !ok || choice["type"] != "custom" || choice["name"] != "apply_patch" {
+		t.Fatalf("tool_choice = %#v, want custom/apply_patch", raw["tool_choice"])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestResponsesEncodeRejectsEmptyNameFunctionTool — missing name validation
 // ---------------------------------------------------------------------------
@@ -463,5 +595,159 @@ func TestResponsesEncodeRejectsEmptyNameFunctionTool(t *testing.T) {
 	_, err := c.EncodeRequest(req, cfg)
 	if !errors.Is(err, codec.ErrFunctionToolMissingName) {
 		t.Errorf("want ErrFunctionToolMissingName, got %v", err)
+	}
+}
+
+func TestResponsesEncodeRequest_DropsEmptyTextBlock(t *testing.T) {
+	req := &codec.Request{
+		Model: "gpt-5",
+		Messages: []codec.Message{
+			{Role: codec.RoleAssistant, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: ""},
+				{Type: codec.ContentTypeText, Text: "Hello! I see you're working on..."},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "gpt-5"}
+	httpReq, err := (&ResponsesCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	body, _ := io.ReadAll(httpReq.Body)
+	if bytes.Contains(body, []byte(`{"type":"input_text"}`)) {
+		t.Errorf("body contains illegal empty input_text block: %s", body)
+	}
+	if !bytes.Contains(body, []byte("Hello! I see you're working on...")) {
+		t.Errorf("real text missing: %s", body)
+	}
+}
+
+func TestResponsesEncodeRequest_AllEmptyTextBecomesEmptyString(t *testing.T) {
+	req := &codec.Request{
+		Model: "gpt-5",
+		Messages: []codec.Message{
+			{Role: codec.RoleAssistant, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: ""},
+				{Type: codec.ContentTypeText, Text: ""},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "gpt-5"}
+	httpReq, err := (&ResponsesCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	body, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	item := raw["input"].([]any)[0].(map[string]any)
+	if item["content"] != "" {
+		t.Errorf("content = %#v, want empty string", item["content"])
+	}
+}
+
+func TestResponsesEncodeRequest_TwoRealTextBlocksUnchanged(t *testing.T) {
+	req := &codec.Request{
+		Model: "gpt-5",
+		Messages: []codec.Message{
+			{Role: codec.RoleUser, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: "first"},
+				{Type: codec.ContentTypeText, Text: "second"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "gpt-5"}
+	httpReq, err := (&ResponsesCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	body, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	json.Unmarshal(body, &raw)
+	item := raw["input"].([]any)[0].(map[string]any)
+	content := item["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want 2", len(content))
+	}
+}
+
+func TestResponsesEncodeRequest_EmitsImageBlock_Base64(t *testing.T) {
+	req := &codec.Request{
+		Model: "gpt-5",
+		Messages: []codec.Message{
+			{Role: codec.RoleUser, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: "look"},
+				{Type: codec.ContentTypeImage, MediaB64: "abc123", MimeType: "image/png"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "gpt-5"}
+	httpReq, err := (&ResponsesCodec{}).EncodeRequest(req, cfg)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	body, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	content := raw["input"].([]any)[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want 2 (text + image)", len(content))
+	}
+	img := content[1].(map[string]any)
+	if img["type"] != "input_image" {
+		t.Errorf("block[1] type = %v, want input_image", img["type"])
+	}
+	if img["image_url"] != "data:image/png;base64,abc123" {
+		t.Errorf("image_url = %v, want data URI", img["image_url"])
+	}
+}
+
+func TestResponsesEncodeRequest_EmitsImageBlock_URLFallback(t *testing.T) {
+	req := &codec.Request{
+		Model: "gpt-5",
+		Messages: []codec.Message{
+			{Role: codec.RoleUser, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: "look"},
+				{Type: codec.ContentTypeImage, MediaURL: "https://example.com/x.png"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "gpt-5"}
+	httpReq, _ := (&ResponsesCodec{}).EncodeRequest(req, cfg)
+	body, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	json.Unmarshal(body, &raw)
+	content := raw["input"].([]any)[0].(map[string]any)["content"].([]any)
+	img := content[1].(map[string]any)
+	if img["type"] != "input_image" || img["image_url"] != "https://example.com/x.png" {
+		t.Errorf("got %#v, want input_image with the raw URL", img)
+	}
+}
+
+func TestResponsesEncodeRequest_TextOnlyUnchanged(t *testing.T) {
+	req := &codec.Request{
+		Model: "gpt-5",
+		Messages: []codec.Message{
+			{Role: codec.RoleUser, Content: []codec.ContentBlock{
+				{Type: codec.ContentTypeText, Text: "a"},
+				{Type: codec.ContentTypeText, Text: "b"},
+			}},
+		},
+	}
+	cfg := &codec.ChannelConfig{BaseURL: "http://stub", APIKey: "k", Model: "gpt-5"}
+	httpReq, _ := (&ResponsesCodec{}).EncodeRequest(req, cfg)
+	body, _ := io.ReadAll(httpReq.Body)
+	var raw map[string]any
+	json.Unmarshal(body, &raw)
+	content := raw["input"].([]any)[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content len = %d, want 2 text blocks", len(content))
+	}
+	if content[0].(map[string]any)["type"] != "input_text" {
+		t.Errorf("text block type wrong: %#v", content[0])
 	}
 }

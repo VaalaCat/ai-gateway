@@ -22,7 +22,7 @@ func startRealMaster(t *testing.T) (*master.Server, string, func()) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
 
-	cfg := newTestMasterRuntimeConfig("127.0.0.1:0")
+	cfg := newTestMasterRuntimeConfig(t, "127.0.0.1:0")
 	srv, err := master.New(cfg, logger)
 	if err != nil {
 		t.Fatalf("new master: %v", err)

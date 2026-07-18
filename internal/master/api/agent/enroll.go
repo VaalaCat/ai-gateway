@@ -11,7 +11,7 @@ import (
 )
 
 func (h *Handler) Enroll(c *app.Context, req EnrollRequest) (api.Created[EnrollResponse], error) {
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)
 

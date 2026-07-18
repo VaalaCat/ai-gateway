@@ -282,30 +282,32 @@ export default function PlaygroundPage() {
   // Model & params
   const [model, setModel] = useUserPref<string>("playground-model", "");
   const [manualModelInput, setManualModelInput] = useState(false);
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableModelsResult, setAvailableModelsResult] = useState<{ apiKey: string; models: string[] }>({
+    apiKey: "",
+    models: [],
+  });
+  const availableModels = availableModelsResult.apiKey === apiKey ? availableModelsResult.models : [];
 
   // Fetch models from /v1/models using the selected API token
   useEffect(() => {
-    if (!apiKey) {
-      setAvailableModels([]);
-      return;
-    }
-    let cancelled = false;
+    if (!apiKey) return;
+    const controller = new AbortController();
     (async () => {
       try {
         const res = await fetch(`${endpoint}/v1/models`, {
           headers: { [HTTP_HEADERS.AUTHORIZATION]: `Bearer ${apiKey}` },
+          signal: controller.signal,
         });
         if (!res.ok) return;
         const json = await res.json();
-        if (!cancelled && Array.isArray(json.data)) {
-          setAvailableModels(json.data.map((m: { id: string }) => m.id));
+        if (!controller.signal.aborted && Array.isArray(json.data)) {
+          setAvailableModelsResult({ apiKey, models: json.data.map((m: { id: string }) => m.id) });
         }
       } catch {
         /* ignore */
       }
     })();
-    return () => { cancelled = true; };
+    return () => controller.abort();
   }, [apiKey, endpoint]);
   const [temperature, setTemperature] = useState(1);
   const [maxTokens, setMaxTokens] = useState(2048);
@@ -337,9 +339,10 @@ export default function PlaygroundPage() {
     return { model, messages: msgs, stream: true, temperature, max_tokens: maxTokens };
   }, [model, messages, systemPrompt, temperature, maxTokens, input]);
 
-  useEffect(() => {
-    if (requestTab === "json") setRequestJson(JSON.stringify(buildRequestBody(), null, 2));
-  }, [requestTab, buildRequestBody]);
+  const selectRequestTab = useCallback((tab: string) => {
+    if (tab === "json") setRequestJson(JSON.stringify(buildRequestBody(), null, 2));
+    setRequestTab(tab);
+  }, [buildRequestBody]);
 
   // Send
   const handleSend = useCallback(async () => {
@@ -420,7 +423,7 @@ export default function PlaygroundPage() {
   const settingsProps = {
     t, selectedTokenId, setSelectedTokenId,
     manualKey, setManualKey, useManualKey, setUseManualKey,
-    requestTab, setRequestTab, model, setModel,
+    requestTab, setRequestTab: selectRequestTab, model, setModel,
     manualModelInput, setManualModelInput, availableModels, systemPrompt, setSystemPrompt,
     temperature, setTemperature, maxTokens, setMaxTokens,
     requestJson, setRequestJson,

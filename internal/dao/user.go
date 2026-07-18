@@ -1,6 +1,9 @@
 package dao
 
 import (
+	"errors"
+	"math"
+
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"gorm.io/gorm"
 )
@@ -18,6 +21,8 @@ type UserListRow struct {
 	models.User
 	GroupName string `gorm:"column:group_name" json:"group_name"`
 }
+
+var ErrQuotaOutOfRange = errors.New("quota out of range")
 
 type AdminUserQuery interface {
 	GetByID(id uint) (*models.User, error)
@@ -149,8 +154,21 @@ func (m *adminUserMutation) Delete(id uint) error {
 }
 
 func (m *adminUserMutation) UpdateQuota(id uint, delta int64) error {
-	return m.ctx.GetDB().Model(&models.User{}).Where("id = ?", id).
-		Update("quota", gorm.Expr("quota + ?", delta)).Error
+	query := m.ctx.GetDB().Model(&models.User{}).Where("id = ?", id)
+	if delta > 0 {
+		query = query.Where("quota <= ?", math.MaxInt64-delta)
+	} else if delta < 0 {
+		query = query.Where("quota >= ?", math.MinInt64-delta)
+	}
+
+	result := query.Update("quota", gorm.Expr("quota + ?", delta))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrQuotaOutOfRange
+	}
+	return nil
 }
 
 // DeductQuota atomically decrements quota and increments used_quota by amount,

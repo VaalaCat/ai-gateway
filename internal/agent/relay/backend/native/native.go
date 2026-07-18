@@ -83,7 +83,7 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 		RCtx:   rctx,
 		Logger: logger,
 	})
-	if err := flow.Run(pass); err != nil {
+	if err := flow.Run(ctx, pass); err != nil {
 		return state.AttemptResult{Err: err}
 	}
 	if pass.Aborted {
@@ -117,7 +117,20 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 		return result
 	}
 
-	return streamNativeResponse(c, rec, resp, inboundCodec, outboundCodec, isStream, startTime, httpResponseMs, upstreamModel, logger)
+	return streamNativeResponse(
+		ctx,
+		c,
+		rec,
+		resp,
+		inboundCodec,
+		outboundCodec,
+		codec.FunctionFallbackTools(pass.Working),
+		isStream,
+		startTime,
+		httpResponseMs,
+		upstreamModel,
+		logger,
+	)
 }
 
 // streamNativeResponse 把 2xx 上行响应通过 outboundCodec.DecodeResponse →
@@ -132,11 +145,13 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 //   - 修改 c.Writer（wrap 成 Recorder-tracked writer）。
 //   - 切换 Recorder stage（StageUpstreamDecode → StageClientEncode → StageNone）。
 func streamNativeResponse(
+	ctx context.Context,
 	c *gin.Context,
 	rec *trace.Recorder,
 	resp *http.Response,
 	inboundCodec codec.InboundCodec,
 	outboundCodec codec.OutboundCodec,
+	functionFallbackTools map[string]codec.FunctionFallbackTool,
 	isStream bool,
 	startTime time.Time,
 	httpResponseMs int,
@@ -156,6 +171,7 @@ func streamNativeResponse(
 		rec.WithFail(trace.StageUpstreamDecode, err)
 		return state.AttemptResult{Err: fmt.Errorf("decode upstream response: %w", err)}
 	}
+	events = codec.AdaptFunctionFallbackEvents(ctx, events, functionFallbackTools)
 
 	// Monitor events: collect usage and first-response timing.
 	// For non-stream requests, use the HTTP response time as TTFR since the

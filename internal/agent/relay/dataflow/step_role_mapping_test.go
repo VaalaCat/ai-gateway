@@ -1,6 +1,7 @@
 package dataflow
 
 import (
+	"context"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
@@ -20,7 +21,7 @@ func TestStepRoleMapping_KeysOnOriginalModel(t *testing.T) {
 			{Role: codec.RoleSystem, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "s"}}},
 		}},
 	}
-	if err := s.Apply(p); err != nil {
+	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Working.Messages[0].Role != codec.RoleUser {
@@ -36,7 +37,7 @@ func TestStepRoleMapping_NilRulesNoop(t *testing.T) {
 			{Role: codec.RoleSystem, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "s"}}},
 		}},
 	}
-	if err := s.Apply(p); err != nil {
+	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if p.Working.Messages[0].Role != codec.RoleSystem {
@@ -53,7 +54,7 @@ func TestStepRoleMapping_NoMatchKeepsRoles(t *testing.T) {
 			{Role: codec.RoleSystem, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "s"}}},
 		}},
 	}
-	_ = s.Apply(p)
+	_ = s.Apply(context.Background(), p)
 	if p.Working.Messages[0].Role != codec.RoleSystem {
 		t.Fatalf("role = %q, want system (no rule match)", p.Working.Messages[0].Role)
 	}

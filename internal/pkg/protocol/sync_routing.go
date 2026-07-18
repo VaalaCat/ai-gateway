@@ -8,6 +8,7 @@ type SyncedRouting struct {
 	Name    string          `json:"name"`
 	Scope   string          `json:"scope"`
 	UserID  uint            `json:"user_id"`
+	TokenID uint            `json:"token_id"`
 	Members []RoutingMember `json:"members"`
 	Enabled bool            `json:"enabled"`
 }
@@ -25,4 +26,21 @@ type RoutingMember struct {
 // 而 loaders 包不能反向 import cache。
 type UserRoutingMap struct {
 	Routings map[string]*SyncedRouting `json:"routings"`
+}
+
+type TokenRoutingMap struct {
+	Routings map[string]*SyncedRouting `json:"routings"`
+}
+
+type RoutingOwner struct {
+	UserID  uint
+	TokenID uint
+}
+
+const TokenFetchSideSchemaV1 = 1
+
+type TokenFetchSide struct {
+	SchemaVersion int              `json:"schema_version"`
+	User          *SyncedUser      `json:"user,omitempty"`
+	TokenRoutings *TokenRoutingMap `json:"token_routings,omitempty"`
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { api } from "@/lib/api/client";
@@ -19,13 +19,10 @@ function RegisterForm() {
   const { data: publicConfig } = usePublicConfig();
   const registrationEnabled = publicConfig?.registration_enabled;
   const inviteEnabled = publicConfig?.invite_enabled;
-  const [form, setForm] = useState({ username: "", email: "", password: "", confirmPassword: "", inviteCode: "" });
+  const [form, setForm] = useState(() => ({
+    username: "", email: "", password: "", confirmPassword: "", inviteCode: searchParams.get("invite") ?? "",
+  }));
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    const code = searchParams.get("invite");
-    if (code) setForm((f) => ({ ...f, inviteCode: code }));
-  }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

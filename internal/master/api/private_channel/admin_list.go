@@ -42,7 +42,7 @@ func (h *Handler) AdminList(c *app.Context, req AdminListRequest) (api.Paginated
 		}
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	rows, total, err := q.PrivateChannel().ListAcrossOwners(
 		dao.ListOptions{Page: page, PageSize: pageSize},

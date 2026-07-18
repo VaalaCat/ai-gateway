@@ -3,7 +3,10 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -15,15 +18,22 @@ import (
 
 // captureWSClient 捕获 Start() 注册的 OnNotification 回调，供测试直接触发。
 type captureWSClient struct {
-	handlers map[string]app.NotificationHandler
+	handlers       map[string]app.NotificationHandler
+	inlineHandlers map[string]app.NotificationHandler
 }
 
 func newCaptureWSClient() *captureWSClient {
-	return &captureWSClient{handlers: map[string]app.NotificationHandler{}}
+	return &captureWSClient{
+		handlers:       map[string]app.NotificationHandler{},
+		inlineHandlers: map[string]app.NotificationHandler{},
+	}
 }
 
 func (c *captureWSClient) OnNotification(method string, handler app.NotificationHandler) {
 	c.handlers[method] = handler
+}
+func (c *captureWSClient) OnNotificationInline(method string, handler app.NotificationHandler) {
+	c.inlineHandlers[method] = handler
 }
 func (c *captureWSClient) Call(_ context.Context, _ string, _ any) (json.RawMessage, error) {
 	return nil, nil
@@ -31,6 +41,137 @@ func (c *captureWSClient) Call(_ context.Context, _ string, _ any) (json.RawMess
 func (c *captureWSClient) Notify(_ string, _ any) error { return nil }
 func (c *captureWSClient) Close() error                 { return nil }
 func (c *captureWSClient) ReadLoop()                    {}
+
+func TestWSBridgeAgentCapabilitiesApplyBoundedInlineUpdates(t *testing.T) {
+	client := newCaptureWSClient()
+	store := NewStore(nil, config.AgentCacheConfig{})
+	bridge := NewWSBridge(client, store, nil, zap.NewNop())
+	bridge.Start()
+
+	if _, ok := client.handlers[consts.RPCSyncAgentCapabilities]; ok {
+		t.Fatal("bounded capability updates must not be dispatched asynchronously")
+	}
+	handler := client.inlineHandlers[consts.RPCSyncAgentCapabilities]
+	if handler == nil {
+		t.Fatal("capability inline handler not registered")
+	}
+	if client.inlineHandlers[consts.RPCSyncPush] == nil {
+		t.Fatal("registering capabilities displaced ordered sync.push handling")
+	}
+
+	raw, err := json.Marshal(protocol.AgentCapabilitiesUpdate{
+		AgentID: "agent-a",
+		Capabilities: []string{
+			" future.short ",
+			protocol.AgentCapabilityTunnelV1,
+			protocol.AgentCapabilityTunnelV1,
+			"",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler(context.Background(), raw); err != nil {
+		t.Fatalf("valid capability update: %v", err)
+	}
+	want := []string{protocol.AgentCapabilityTunnelV1, "future.short"}
+	if got := store.GetAgentCapabilities("agent-a"); !slices.Equal(got, want) {
+		t.Fatalf("stored capabilities = %#v, want %#v", got, want)
+	}
+
+	raw, err = json.Marshal(protocol.AgentCapabilitiesUpdate{AgentID: "agent-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler(context.Background(), raw); err != nil {
+		t.Fatalf("empty capability update: %v", err)
+	}
+	if got := store.GetAgentCapabilities("agent-a"); got != nil {
+		t.Fatalf("empty update did not clear capabilities: %#v", got)
+	}
+}
+
+func TestWSBridgeAgentCapabilitiesIgnoreMalformedOrEmptyAgentWithoutPanicking(t *testing.T) {
+	client := newCaptureWSClient()
+	store := NewStore(nil, config.AgentCacheConfig{})
+	store.SetAgentCapabilities("agent-a", []string{"existing"})
+	bridge := NewWSBridge(client, store, nil, zap.NewNop())
+	bridge.Start()
+	handler := client.inlineHandlers[consts.RPCSyncAgentCapabilities]
+	if handler == nil {
+		t.Fatal("capability inline handler not registered")
+	}
+
+	if _, err := handler(context.Background(), json.RawMessage(`{"agent_id":`)); err != nil {
+		t.Fatalf("malformed update must be ignored, got %v", err)
+	}
+	if got := store.GetAgentCapabilities("agent-a"); !slices.Equal(got, []string{"existing"}) {
+		t.Fatalf("malformed update changed existing state: %#v", got)
+	}
+	for _, agentID := range []string{"", "   "} {
+		raw, err := json.Marshal(protocol.AgentCapabilitiesUpdate{
+			AgentID:      agentID,
+			Capabilities: []string{"must-not-exist"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handler(context.Background(), raw); err != nil {
+			t.Fatalf("empty agent update: %v", err)
+		}
+	}
+	if got := store.GetAgentCapabilities(""); got != nil {
+		t.Fatalf("empty agent ID polluted Store: %#v", got)
+	}
+	if got := store.GetAgentCapabilities("   "); got != nil {
+		t.Fatalf("blank agent ID polluted Store: %#v", got)
+	}
+
+	nilStoreClient := newCaptureWSClient()
+	NewWSBridge(nilStoreClient, nil, nil, zap.NewNop()).Start()
+	nilStoreHandler := nilStoreClient.inlineHandlers[consts.RPCSyncAgentCapabilities]
+	if nilStoreHandler == nil {
+		t.Fatal("nil-Store bridge did not register capability handler")
+	}
+	if _, err := nilStoreHandler(context.Background(), json.RawMessage(`{"agent_id":"agent-a","capabilities":["future.short"]}`)); err != nil {
+		t.Fatalf("nil-Store update must be ignored: %v", err)
+	}
+}
+
+func TestWSBridgeRequestedFullSyncUsesInlineDirectAdmission(t *testing.T) {
+	client := newCaptureWSClient()
+	store := NewStore(nil, config.AgentCacheConfig{})
+	syncer := NewSyncer(store, client, nil, zap.NewNop(), time.Hour)
+	bridge := NewWSBridge(client, store, nil, zap.NewNop())
+	bridge.Syncer = syncer
+	bridge.Start()
+
+	if _, ok := client.handlers[consts.RPCSyncRequestFullSync]; ok {
+		t.Fatal("requested full sync must not use asynchronous notification registration")
+	}
+	handler := client.inlineHandlers[consts.RPCSyncRequestFullSync]
+	if handler == nil {
+		t.Fatal("requested full sync inline handler not registered")
+	}
+
+	start := make(chan struct{})
+	var calls sync.WaitGroup
+	calls.Add(100)
+	for i := 0; i < 100; i++ {
+		go func() {
+			defer calls.Done()
+			<-start
+			if _, err := handler(context.Background(), nil); err != nil {
+				t.Errorf("requested full sync handler: %v", err)
+			}
+		}()
+	}
+	close(start)
+	calls.Wait()
+	if syncer.RequestFullSync() {
+		t.Fatal("100 direct admissions must leave exactly one pending signal")
+	}
+}
 
 // TestWSBridge_AppliesUserQuotaSync 验证 master 回送的 UserQuotaSync 被应用到本地
 // user 缓存余额。覆盖 success(已缓存 user 被更新)、boundary(未缓存 user 静默忽略)、
@@ -93,17 +234,29 @@ func TestWSBridge_AppliesUserQuotaSync(t *testing.T) {
 
 func TestWSBridgeHandleAutoAddrUpdate(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
-	s.SetAgent(&models.Agent{
-		AgentID:       "agent-c",
-		HTTPAddresses: `[{"url":"http://10.0.0.1:8139","tag":"auto-detected"}]`,
+	s.SetAgent(&models.Agent{AgentID: "agent-c"})
+	s.BeginDirectAddressSession("master-a")
+
+	client := newCaptureWSClient()
+	b := NewWSBridge(client, s, nil, zap.NewNop())
+	b.Start()
+	if client.handlers[consts.RPCSyncAutoAddrUpdate] != nil {
+		t.Fatal("direct address updates must not be dispatched asynchronously")
+	}
+	handler := client.inlineHandlers[consts.RPCSyncAutoAddrUpdate]
+	if handler == nil {
+		t.Fatal("direct address inline handler not registered")
+	}
+
+	raw, err := json.Marshal(protocol.AgentDirectAddressesUpdate{
+		MasterInstanceID: "master-a", AgentID: "agent-c", SessionGeneration: 3, Sequence: 9,
+		HTTPAddresses: []protocol.Address{{URL: "http://10.0.0.9:8139", Tag: "auto-detected"}},
 	})
-
-	logger, _ := zap.NewDevelopment()
-	b := &WSBridge{Store: s, Logger: logger}
-
-	err := b.handleAutoAddrUpdate([]byte(`{"agent_id":"agent-c","http_addresses":[{"url":"http://10.0.0.9:8139","tag":"auto-detected"}]}`))
 	if err != nil {
-		t.Fatalf("handleAutoAddrUpdate failed: %v", err)
+		t.Fatal(err)
+	}
+	if _, err := handler(context.Background(), raw); err != nil {
+		t.Fatalf("handle direct addresses update failed: %v", err)
 	}
 
 	agent := s.GetAgent("agent-c")
@@ -112,5 +265,22 @@ func TestWSBridgeHandleAutoAddrUpdate(t *testing.T) {
 	}
 	if agent.HTTPAddresses != `[{"url":"http://10.0.0.9:8139","tag":"auto-detected"}]` {
 		t.Fatalf("unexpected updated addresses: %s", agent.HTTPAddresses)
+	}
+
+	if _, err := handler(context.Background(), json.RawMessage(`{"master_instance_id":`)); err != nil {
+		t.Fatalf("malformed direct address update must be contained, got %v", err)
+	}
+	wrongEpoch, err := json.Marshal(protocol.AgentDirectAddressesUpdate{
+		MasterInstanceID: "master-b", AgentID: "agent-c", SessionGeneration: 4, Sequence: 10,
+		HTTPAddresses: []protocol.Address{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler(context.Background(), wrongEpoch); err != nil {
+		t.Fatalf("wrong-epoch direct address update must be contained, got %v", err)
+	}
+	if got := s.GetAgent("agent-c").HTTPAddresses; got != agent.HTTPAddresses {
+		t.Fatalf("rejected direct address update changed state: before=%s after=%s", agent.HTTPAddresses, got)
 	}
 }

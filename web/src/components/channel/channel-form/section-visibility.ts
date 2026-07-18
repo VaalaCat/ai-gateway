@@ -22,7 +22,7 @@ export const SECTION_FIELDS: Record<SectionId, ReadonlyArray<keyof ChannelForm>>
     "header_override", "endpoints", "passthrough_enabled",
     "system_prompt_in_input", "other_settings",
   ],
-  connection: ["organization", "api_version", "proxy_url", "disable_keepalive"],
+  connection: ["organization", "api_version", "proxy_url", "disable_keepalive", "other_settings"],
   resilience: ["resilience"],
   response: ["status_code_mapping", "free", "price_ratio"],
 };

@@ -30,7 +30,7 @@ func (h *Handler) FetchPricing(c *app.Context, req FetchPricingRequest) (FetchPr
 
 	// Resolve proxy: DB setting > config file > env
 	dbProxy := ""
-	if setting, found, err := dao.NewAdminQuery(dao.NewContext(c.App)).Setting().Lookup("proxy_url"); err == nil && found {
+	if setting, found, err := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Setting().Lookup("proxy_url"); err == nil && found {
 		dbProxy = setting.Value
 	}
 	proxyURL := httputil.ResolveProxyURL(dbProxy, c.Settings.Master.ProxyURL)
@@ -105,7 +105,7 @@ func (h *Handler) FetchPricing(c *app.Context, req FetchPricingRequest) (FetchPr
 		}
 	}
 
-	daoCtx := dao.NewContext(c.App)
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
 	allModels, err := q.ModelConfig().ListAll()
