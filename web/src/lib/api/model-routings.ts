@@ -45,8 +45,11 @@ function routingBody<T extends Record<string, unknown>>(
   owner: ModelRoutingOwner,
 ): T | Omit<T, "scope" | "user_id" | "token_id"> {
   if (owner.kind !== "token") return body;
-  const { scope: _scope, user_id: _userID, token_id: _tokenID, ...tokenBody } = body;
-  return tokenBody;
+  const tokenBody: Record<string, unknown> = { ...body };
+  delete tokenBody.scope;
+  delete tokenBody.user_id;
+  delete tokenBody.token_id;
+  return tokenBody as Omit<T, "scope" | "user_id" | "token_id">;
 }
 
 export function useModelRoutings(

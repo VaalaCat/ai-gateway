@@ -158,6 +158,25 @@ describe("ChannelExportDialog", () => {
     expect(downloadExport).toHaveBeenCalledWith("/channels/export", { mode: "filter", filter: { status: "enabled" } });
   });
 
+  it("resets the export scope from the current selection when reopened", async () => {
+    const user = userEvent.setup();
+    downloadExport.mockResolvedValueOnce(undefined);
+    const props = {
+      path: "/channels/export",
+      selectedIds: [2, 7],
+      filter: { search: "openai" },
+      onOpenChange: vi.fn(),
+    };
+    const { rerender } = render(<ChannelExportDialog open {...props} />);
+
+    await user.click(screen.getByRole("radio", { name: /Current filter/ }));
+    rerender(<ChannelExportDialog open={false} {...props} />);
+    rerender(<ChannelExportDialog open {...props} selectedIds={[9]} />);
+    await user.click(screen.getByRole("button", { name: "Export" }));
+
+    expect(downloadExport).toHaveBeenCalledWith("/channels/export", { mode: "ids", ids: [9] });
+  });
+
   it("keeps the dialog open and reports export failures", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();

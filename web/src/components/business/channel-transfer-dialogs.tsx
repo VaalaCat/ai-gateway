@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { AlertTriangle, Download, Loader2, Upload } from "lucide-react";
 import { toast } from "sonner";
@@ -214,14 +214,24 @@ interface ChannelExportDialogProps {
 }
 
 export function ChannelExportDialog({ open, onOpenChange, path, selectedIds, filter }: ChannelExportDialogProps) {
+  const hasSelection = selectedIds.length > 0;
+  return (
+    <ChannelExportDialogSession
+      key={`${open}:${hasSelection}`}
+      open={open}
+      onOpenChange={onOpenChange}
+      path={path}
+      selectedIds={selectedIds}
+      filter={filter}
+    />
+  );
+}
+
+function ChannelExportDialogSession({ open, onOpenChange, path, selectedIds, filter }: ChannelExportDialogProps) {
   const t = useTranslations("channelTransfer");
   const tc = useTranslations("common");
   const [mode, setMode] = useState<ChannelExportMode>(selectedIds.length > 0 ? "ids" : "filter");
   const [exporting, setExporting] = useState(false);
-
-  useEffect(() => {
-    if (open) setMode(selectedIds.length > 0 ? "ids" : "filter");
-  }, [open, selectedIds.length]);
 
   const handleExport = async () => {
     setExporting(true);
