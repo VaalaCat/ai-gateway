@@ -1,6 +1,7 @@
 package codec_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
@@ -51,6 +52,30 @@ func TestResponses2Responses_StreamText(t *testing.T) {
 
 	assertSSEFormat(t, sse, codec.ProtocolOpenAIResponses)
 	assertGoldenSSE(t, sse, "responses2responses/stream_text.sse")
+}
+
+func TestResponses2Responses_StreamNoEventLines(t *testing.T) {
+	outCodec := codec.GetOutbound(codec.ProtocolOpenAIResponses)
+	inCodec := codec.GetInbound(codec.ProtocolOpenAIResponses)
+
+	events, sse := roundTripStream(t,
+		"openai_responses/stream_no_event_lines.txt",
+		outCodec, inCodec, true, true)
+
+	assertEventSequence(t, events, []expectedEvent{
+		{Type: codec.EventStreamStart},
+		{Type: codec.EventContentDelta, Text: "Hello"},
+		{Type: codec.EventContentDelta, Text: " world"},
+		{Type: codec.EventUsage},
+		{Type: codec.EventDone, FinishReason: "stop"},
+	})
+	assertSSEFormat(t, sse, codec.ProtocolOpenAIResponses)
+	if strings.Contains(sse, "event: \ndata:") {
+		t.Fatalf("Responses stream contains an empty event name:\n%s", sse)
+	}
+	if !strings.Contains(sse, "event: response.created\n") {
+		t.Fatalf("Responses stream did not normalize response.created:\n%s", sse)
+	}
 }
 
 func TestResponses2Responses_StreamToolCall(t *testing.T) {
