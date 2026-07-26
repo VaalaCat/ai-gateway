@@ -159,8 +159,14 @@ func TestMasterProbeTargetFinderUsesMergedAddresses(t *testing.T) {
 	})
 	require.NoError(t, server.DB.Create(&models.Agent{
 		AgentID: "probe-merged", Name: "merged", Status: consts.StatusEnabled,
-		HTTPAddresses: `[{"url":"http://configured","tag":"configured"}]`,
+		HTTPAddresses: `[{"url":"http://configured","tag":"configured"}]`, RelayMode: consts.RelayModeCustom,
 	}).Error)
+	require.NoError(t, server.DB.Model(&models.Agent{}).
+		Where("agent_id = ?", "probe-merged").
+		Updates(map[string]any{
+			"direct_inbound_enabled": false,
+			"relay_outbound_enabled": false,
+		}).Error)
 
 	tests := []struct {
 		name       string
@@ -185,6 +191,11 @@ func TestMasterProbeTargetFinderUsesMergedAddresses(t *testing.T) {
 			require.Len(t, targets, 1)
 			require.Equal(t, test.want, targets[0].Addresses)
 			require.Equal(t, test.generation, targets[0].ControlGeneration)
+			require.False(t, targets[0].DirectInboundEnabled)
+			require.True(t, targets[0].DirectOutboundEnabled)
+			require.True(t, targets[0].RelayInboundEnabled)
+			require.False(t, targets[0].RelayOutboundEnabled)
+			require.Equal(t, consts.RelayModeCustom, targets[0].RelayMode)
 		})
 	}
 }

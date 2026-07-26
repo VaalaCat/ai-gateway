@@ -27,15 +27,15 @@ func TestStoreAgentCapabilitiesAreBoundedDefensiveAndSeparateFromAgentModel(t *t
 
 	input := []string{
 		" future.short ",
-		protocol.AgentCapabilityTunnelV1,
+		protocol.AgentCapabilityTunnelV2,
 		"",
-		protocol.AgentCapabilityTunnelV1,
+		protocol.AgentCapabilityTunnelV2,
 		strings.Repeat("x", protocol.AgentCapabilityMaxLength+1),
 		protocol.AgentCapabilityForwardV1,
 	}
 	s.SetAgentCapabilities("agent-a", input)
 	input[0] = "mutated-input"
-	want := []string{protocol.AgentCapabilityForwardV1, protocol.AgentCapabilityTunnelV1, "future.short"}
+	want := []string{protocol.AgentCapabilityForwardV1, protocol.AgentCapabilityTunnelV2, "future.short"}
 	if got := s.GetAgentCapabilities("agent-a"); !slices.Equal(got, want) {
 		t.Fatalf("capabilities = %#v, want %#v", got, want)
 	}
@@ -486,6 +486,65 @@ func TestStoreHandleSyncEventAgentUpdateCarriesRelayConfiguration(t *testing.T) 
 	}
 	if agent.Name != "after" || agent.RelayMode != consts.RelayModeCustom || agent.RelayURI != updated.RelayURI {
 		t.Fatalf("full agent push did not carry relay configuration: %+v", agent)
+	}
+}
+
+func TestStoreAgentTransportPolicySurvivesEventsFullSyncAndDelete(t *testing.T) {
+	s := NewStore(nil, config.AgentCacheConfig{})
+	created := models.Agent{
+		AgentID: "policy-cache-agent", Name: "created",
+		DirectInboundEnabled: true, DirectOutboundEnabled: false,
+		RelayInboundEnabled: false, RelayOutboundEnabled: true,
+	}
+	createdJSON, err := json.Marshal(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.HandleSyncEvent(events.EntityAgent, events.ActionCreate, createdJSON)
+	assertCachedAgentTransportPolicy(t, s.GetAgent(created.AgentID), [4]bool{true, false, false, true})
+
+	updated := created
+	updated.Name = "updated"
+	updated.DirectInboundEnabled = false
+	updated.DirectOutboundEnabled = true
+	updated.RelayInboundEnabled = true
+	updated.RelayOutboundEnabled = false
+	updatedJSON, err := json.Marshal(updated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.HandleSyncEvent(events.EntityAgent, events.ActionUpdate, updatedJSON)
+	assertCachedAgentTransportPolicy(t, s.GetAgent(created.AgentID), [4]bool{false, true, true, false})
+
+	s.HandleSyncEvent(events.EntityAgent, events.ActionDelete, updatedJSON)
+	if got := s.GetAgent(created.AgentID); got != nil {
+		t.Fatalf("deleted agent retained cached policy: %+v", got)
+	}
+	if s.configuredAgents[created.AgentID] != nil {
+		t.Fatal("deleted agent retained configured policy")
+	}
+
+	s.LoadAgents([]models.Agent{created})
+	assertCachedAgentTransportPolicy(t, s.GetAgent(created.AgentID), [4]bool{true, false, false, true})
+	s.LoadAgents(nil)
+	if got := s.GetAgent(created.AgentID); got != nil {
+		t.Fatalf("full-sync removal retained cached policy: %+v", got)
+	}
+}
+
+func assertCachedAgentTransportPolicy(t *testing.T, agent *models.Agent, want [4]bool) {
+	t.Helper()
+	if agent == nil {
+		t.Fatal("expected cached agent")
+	}
+	got := [4]bool{
+		agent.DirectInboundEnabled,
+		agent.DirectOutboundEnabled,
+		agent.RelayInboundEnabled,
+		agent.RelayOutboundEnabled,
+	}
+	if got != want {
+		t.Fatalf("transport policy = %v, want %v", got, want)
 	}
 }
 

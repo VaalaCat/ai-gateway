@@ -15,8 +15,8 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude"  // register claude codec for tests
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"  // register openai codec for tests
+	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude" // register claude codec for tests
+	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai" // register openai codec for tests
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -56,7 +56,7 @@ func newNativeTestCtx(t *testing.T, body []byte, inbound codec.Protocol, isStrea
 			IsStream:     isStream,
 			StartTime:    time.Now(),
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	return rctx, w
 }
@@ -517,7 +517,7 @@ func TestNative_DispatchHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req, _ := http.NewRequest(http.MethodGet, "http://10.255.255.1:9/hang", nil) // 不可路由
-	rec := trace.NewRecorder(false, 0)
+	rec := trace.NewRecorder(trace.CaptureOff, 0)
 
 	start := time.Now()
 	_, err := b.dispatchUpstream(ctx, req, &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, rec)
@@ -527,6 +527,96 @@ func TestNative_DispatchHonorsCanceledContext(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("canceled context should fail fast, took %v", time.Since(start))
 	}
+}
+
+func TestNativeErrorBodyIsBoundedAndTraceKeepsTail(t *testing.T) {
+	const physicalTail = `","tail":"native-physical-tail"}}`
+	body := `{"error":{"type":"invalid_request_error","message":"` + strings.Repeat("x", 96*1024) + physicalTail
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer upstream.Close()
+	rctx, _ := newNativeTestCtx(t, []byte(`{"model":"gpt-4","messages":[]}`), codec.ProtocolOpenAIChat, false)
+	rctx.State.Recorder = trace.NewRecorder(trace.CaptureFull, 64)
+	got := (&Backend{}).Relay(rctx, state.Attempt{Channel: makeNativeChannel(upstream.URL), RealModel: "gpt-4"})
+	var upErr *common.UpstreamError
+	if !errors.As(got.Err, &upErr) {
+		t.Fatalf("err=%T %v, want UpstreamError", got.Err, got.Err)
+	}
+	if len(upErr.Body) >= len(body) {
+		t.Fatalf("bounded body len=%d, original=%d", len(upErr.Body), len(body))
+	}
+	if upErr.ProviderErrorType != "invalid_request_error" {
+		t.Fatalf("provider error type=%q", upErr.ProviderErrorType)
+	}
+	traceRecord := rctx.State.Recorder.Finalize()
+	if !strings.Contains(traceRecord.UpstreamBody, physicalTail) {
+		t.Fatalf("trace tail=%q", traceRecord.UpstreamBody)
+	}
+}
+
+func TestNativeErrorBodyReadErrorPropagates(t *testing.T) {
+	wantErr := errors.New("native error body failed")
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Body: &backendErrorReadCloser{err: wantErr}}
+	result, handled := handleNativeErrorStatus(trace.NewRecorder(trace.CaptureFull, 64), resp, nil, nil, "gpt-4")
+	if !handled || !errors.Is(result.Err, wantErr) {
+		t.Fatalf("handled=%v err=%v, want read error", handled, result.Err)
+	}
+}
+
+func TestNativeErrorBodyCancellationUnblocksRead(t *testing.T) {
+	body := newBackendBlockingReadCloser()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Body: body, Request: req}
+	done := make(chan error, 1)
+	go func() {
+		result, _ := handleNativeErrorStatus(trace.NewRecorder(trace.CaptureFull, 64), resp, nil, nil, "gpt-4")
+		done <- result.Err
+	}()
+	<-body.entered
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		_ = body.Close()
+		t.Fatal("cancellation did not unblock native error body")
+	}
+}
+
+type backendErrorReadCloser struct{ err error }
+
+func (r *backendErrorReadCloser) Read([]byte) (int, error) { return 0, r.err }
+func (r *backendErrorReadCloser) Close() error             { return nil }
+
+type backendBlockingReadCloser struct {
+	entered chan struct{}
+	closed  chan struct{}
+}
+
+func newBackendBlockingReadCloser() *backendBlockingReadCloser {
+	return &backendBlockingReadCloser{entered: make(chan struct{}), closed: make(chan struct{})}
+}
+func (r *backendBlockingReadCloser) Read([]byte) (int, error) {
+	select {
+	case <-r.entered:
+	default:
+		close(r.entered)
+	}
+	<-r.closed
+	return 0, errors.New("closed")
+}
+func (r *backendBlockingReadCloser) Close() error {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
+	return nil
 }
 
 // ==================== Test fixtures ====================

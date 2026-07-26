@@ -56,27 +56,31 @@ func TestDirectGateStaleAndCheckingRetainPreviousDecision(t *testing.T) {
 }
 
 func TestDirectGateCancelledProbePreservesPreviousCompletedResult(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	gate := NewDirectGate(DirectGateOptions{FreshFor: time.Minute, MaxEntries: 8, Now: func() time.Time { return now }})
-	previous := protocol.DirectProbeResult{
-		TargetAgentID: "agent-b", AddressFingerprint: "fp-b", Network: "unreachable",
-		Identity: "unknown", CheckedAt: now.Unix(), ReasonCode: "direct_connect",
-	}
-	gate.ApplyProbeResult(previous)
-	gate.MarkChecking("agent-b", "fp-b")
-	gate.ApplyProbeResult(protocol.DirectProbeResult{
-		TargetAgentID: "agent-b", AddressFingerprint: "fp-b", Network: "unreachable",
-		Identity: "unknown", CheckedAt: now.Add(time.Second).Unix(), ReasonCode: "cancelled",
-	})
+	for _, reason := range []string{"cancelled", "request_cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0)
+			gate := NewDirectGate(DirectGateOptions{FreshFor: time.Minute, MaxEntries: 8, Now: func() time.Time { return now }})
+			previous := protocol.DirectProbeResult{
+				TargetAgentID: "agent-b", AddressFingerprint: "fp-b", Network: "unreachable",
+				Identity: "unknown", CheckedAt: now.Unix(), ReasonCode: "direct_connect",
+			}
+			gate.ApplyProbeResult(previous)
+			gate.MarkChecking("agent-b", "fp-b")
+			gate.ApplyProbeResult(protocol.DirectProbeResult{
+				TargetAgentID: "agent-b", AddressFingerprint: "fp-b", Network: "unreachable",
+				Identity: "unknown", CheckedAt: now.Add(time.Second).Unix(), ReasonCode: reason,
+			})
 
-	key := directGateKey{targetAgentID: "agent-b", addressFingerprint: "fp-b"}
-	gate.mu.Lock()
-	entry := gate.entries[key]
-	gate.mu.Unlock()
-	require.True(t, entry.hasResult)
-	require.False(t, entry.checking)
-	require.Equal(t, previous, entry.result)
-	require.Equal(t, "direct_connect", gate.Decision("agent-b", "fp-b"))
+			key := directGateKey{targetAgentID: "agent-b", addressFingerprint: "fp-b"}
+			gate.mu.Lock()
+			entry := gate.entries[key]
+			gate.mu.Unlock()
+			require.True(t, entry.hasResult)
+			require.False(t, entry.checking)
+			require.Equal(t, previous, entry.result)
+			require.Equal(t, "direct_connect", gate.Decision("agent-b", "fp-b"))
+		})
+	}
 }
 
 func TestDirectGateFirstCancelledProbeRemainsUnknown(t *testing.T) {

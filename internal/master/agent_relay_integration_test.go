@@ -1,7 +1,6 @@
 package master
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -14,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -70,6 +70,14 @@ type agentRouteSocketCase struct {
 	wantRouteSource     string
 	wantRouteID         uint
 	wantPath            string
+}
+
+func newTransportEnabledAgent(agent models.Agent) *models.Agent {
+	agent.DirectInboundEnabled = true
+	agent.DirectOutboundEnabled = true
+	agent.RelayInboundEnabled = true
+	agent.RelayOutboundEnabled = true
+	return &agent
 }
 
 func TestAgentRelayRouteUsageRealSocketNoReplayMatrix(t *testing.T) {
@@ -134,12 +142,6 @@ func TestAgentRelayRouteUsageRealSocketNoReplayMatrix(t *testing.T) {
 			targetAddress: func(f *agentRouteSocketFixture) string { return f.targetAgent.URL },
 			wantHTTPCode:  http.StatusBadGateway, wantTargetProviders: 1, wantRows: 1,
 			wantAgentID: "target", wantRouteSource: "source", wantRouteID: 42, wantPath: "direct",
-		},
-		{
-			name: "direct uncertain has no replay", routeTarget: "target",
-			targetAddress: func(f *agentRouteSocketFixture) string { return f.uncertainAddress() },
-			wantHTTPCode:  http.StatusBadGateway, wantRows: 1,
-			wantRouteSource: "source", wantRouteID: 42, wantPath: "direct",
 		},
 	}
 
@@ -255,31 +257,31 @@ func requestAgentRelayHTTP(t *testing.T, baseURL string) (int, http.Header, []by
 }
 
 type agentRouteSocketFixture struct {
-	t                    *testing.T
-	db                   *gorm.DB
-	settler              *billing.Settler
-	source               *agent.Server
-	target               *agent.Server
-	sourceAgent          *httptest.Server
-	targetAgent          *httptest.Server
-	plainTarget          *httptest.Server
-	sourceProvider       *httptest.Server
-	targetProvider       *httptest.Server
-	sourceProviderCalls  atomic.Int32
-	targetProviderCalls  atomic.Int32
-	uncertainTargetCalls atomic.Int32
-	forwardAuth          agentproxy.ForwardAuthSnapshot
-	issueForwardTickets  atomic.Bool
-	signer               *masteragentauth.Signer
-	sourceDirect         *agentproxy.DirectForwarder
-	sourceTransport      app.TransportPool
-	targetTransport      app.TransportPool
-	agentHTTPActive      atomic.Int32
-	providerActive       atomic.Int32
-	sourceCalls          agentOwnershipCalls
-	targetCalls          agentOwnershipCalls
-	targetAttempt        atomic.Pointer[attemptwire.AttemptProxyMeta]
-	targetCacheClient    app.WSClient
+	t                   *testing.T
+	db                  *gorm.DB
+	settler             *billing.Settler
+	source              *agent.Server
+	target              *agent.Server
+	sourceAgent         *httptest.Server
+	targetAgent         *httptest.Server
+	plainTarget         *httptest.Server
+	sourceProvider      *httptest.Server
+	targetProvider      *httptest.Server
+	sourceProviderCalls atomic.Int32
+	targetProviderCalls atomic.Int32
+	forwardAuth         agentproxy.ForwardAuthSnapshot
+	issueForwardTickets atomic.Bool
+	signer              *masteragentauth.Signer
+	sourceDirect        *agentproxy.DirectForwarder
+	sourceDirectPool    *agenttunnel.DirectSessionPool
+	sourceTransport     app.TransportPool
+	targetTransport     app.TransportPool
+	agentHTTPActive     atomic.Int32
+	providerActive      atomic.Int32
+	sourceCalls         agentOwnershipCalls
+	targetCalls         agentOwnershipCalls
+	targetAttempt       atomic.Pointer[attemptwire.AttemptProxyMeta]
+	targetCacheClient   app.WSClient
 }
 
 type agentOwnershipCalls struct {
@@ -288,6 +290,12 @@ type agentOwnershipCalls struct {
 	requestLimiter atomic.Int32
 	attemptLimiter atomic.Int32
 	publisher      atomic.Int32
+}
+
+type forwardCredentialReaderFunc func() (agentauthcache.ForwardCredential, error)
+
+func (f forwardCredentialReaderFunc) CachedForwardCredential() (agentauthcache.ForwardCredential, error) {
+	return f()
 }
 
 type visiblePrivateChannelClient struct {
@@ -394,11 +402,11 @@ type agentOwnershipScriptProvider struct {
 	calls *agentOwnershipCalls
 }
 
-func (p agentOwnershipScriptProvider) MatchScripts(channelID uint, model string) []*script.Compiled {
-	if channelID == 0 {
+func (p agentOwnershipScriptProvider) MatchScripts(input script.MatchInput) []*script.Compiled {
+	if input.ChannelID == 0 {
 		p.calls.script.Add(1)
 	}
-	return p.store.MatchScripts(channelID, model)
+	return p.store.MatchScripts(input)
 }
 
 type agentOwnershipApplication struct {
@@ -459,13 +467,17 @@ func newAgentRouteSocketFixtureWithTargetClient(
 
 	f.target, f.targetAgent = f.newAgent("target", f.targetProvider.URL, true)
 	f.source, f.sourceAgent = f.newAgent("source", f.sourceProvider.URL, false)
-	f.target.Store.SetAgent(&models.Agent{AgentID: "source", Status: consts.StatusEnabled})
+	f.target.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "source", Status: consts.StatusEnabled}))
 	return f
 }
 
 type agentRouteDBProvider struct{ db *gorm.DB }
 
-func (p *agentRouteDBProvider) GetDB() *gorm.DB { return p.db }
+func (p *agentRouteDBProvider) GetCoreDB() *gorm.DB { return p.db }
+func (p *agentRouteDBProvider) GetLogDB() *gorm.DB  { return p.db }
+func (p *agentRouteDBProvider) GetDatabaseLayoutMode() app.DatabaseLayoutMode {
+	return app.DatabaseLayoutLegacySingle
+}
 
 type agentRouteSigningStore struct{ key *models.MasterSigningKey }
 
@@ -532,16 +544,15 @@ func (f *agentRouteSocketFixture) newAgent(id, providerURL string, trustedIngres
 		},
 		Runtime: config.RuntimeConfig{RelayTimeout: 1}, Relay: config.RelayConfig{Timeout: 1},
 	}
-	srv, err := agent.NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: id, Secret: "secret"})
-	require.NoError(f.t, err)
+	var embeddedOptions []agent.EmbeddedOptions
 	if id == "target" && f.targetCacheClient != nil {
-		previous := srv.Store
-		srv.Store = agentcache.NewStore(f.targetCacheClient, cfg.Agent.Cache)
-		srv.Store.SetLogger(srv.Logger)
-		previous.Close()
-		requireAgentRouteDone(f.t, previous.Done(), "replaced target cache")
+		embeddedOptions = append(embeddedOptions, agent.EmbeddedOptions{
+			Store: agentcache.NewStore(f.targetCacheClient, cfg.Agent.Cache),
+		})
 	}
-	srv.Store.SetAgent(&models.Agent{AgentID: id, Status: consts.StatusEnabled})
+	srv, err := agent.NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: id, Secret: "secret"}, embeddedOptions...)
+	require.NoError(f.t, err)
+	srv.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: id, Status: consts.StatusEnabled}))
 	srv.Store.SetToken(&models.Token{ID: 1, Key: "route-token", Status: consts.StatusEnabled, ExpiredAt: -1})
 	srv.Store.SetChannel(&models.Channel{
 		ChannelCore: models.ChannelCore{
@@ -552,7 +563,6 @@ func (f *agentRouteSocketFixture) newAgent(id, providerURL string, trustedIngres
 	})
 	srv.Store.RebuildModelIndex()
 	srv.Store.LoadSettings([]models.Setting{
-		{Key: consts.SettingAgentRelayFallbackEnabled, Value: "1"},
 		{Key: "retry_max_channels", Value: "1"},
 		{Key: "max_retries_per_channel", Value: "0"},
 		{Key: "breaker_enabled", Value: "0"},
@@ -576,11 +586,11 @@ func (f *agentRouteSocketFixture) newAgent(id, providerURL string, trustedIngres
 	}
 	httpServer := httptest.NewServer(trackAgentRouteActive(&f.agentHTTPActive, router))
 	f.t.Cleanup(func() {
-		requireAgentRouteActiveZero(f.t, &f.agentHTTPActive, id+" agent HTTP")
-		httpServer.Close()
 		if id == "source" {
 			f.closeManagedSourceResources()
 		}
+		requireAgentRouteActiveZero(f.t, &f.agentHTTPActive, id+" agent HTTP")
+		httpServer.Close()
 		if id == "target" && f.targetTransport != nil {
 			f.targetTransport.CloseIdleConnections()
 		}
@@ -627,10 +637,7 @@ func mountManagedAttemptTarget(
 		agentattemptproxy.NewResponseExecutor(),
 	)
 	handlers := []gin.HandlerFunc{
-		agentattemptproxy.IngressMiddleware(agentattemptproxy.IngressConfig{
-			FindAgentByID:    srv.Store.GetAgent,
-			LoadAuthSnapshot: loadAuthSnapshot,
-		}),
+		agentattemptproxy.IngressMiddleware(agentattemptproxy.IngressConfig{}),
 	}
 	if option.capture != nil {
 		handlers = append(handlers, func(c *gin.Context) {
@@ -642,6 +649,18 @@ func mountManagedAttemptTarget(
 	}
 	handlers = append(handlers, agenttokenauth.TokenAuth(srv.Store), attemptHandler.Serve)
 	router.POST(attemptwire.EndpointPath, handlers...)
+	if previous := srv.DirectTunnelIngress; previous != nil {
+		_ = previous.Close(context.Background())
+	}
+	srv.DirectTunnelIngress = agenttunnel.NewDirectTunnelIngress(agenttunnel.DirectTunnelIngressOptions{
+		TargetAgentID: srv.Creds.AgentID,
+		FindAgentByID: srv.Store.GetAgent,
+		LoadAuth:      loadAuthSnapshot,
+		TargetHandler: srv.NewTunnelTargetHandler(router),
+		Logger:        zap.NewNop(),
+		MaxSessions:   func() int { return 8 },
+	})
+	router.GET(agenttunnel.DirectTunnelPath, srv.DirectTunnelIngress.Handle)
 	return transport
 }
 
@@ -652,15 +671,33 @@ func (f *agentRouteSocketFixture) closeManagedSourceResources() {
 		cancel()
 		requireAgentRouteDone(f.t, f.sourceDirect.Done(), "source direct forwarder")
 	}
+	if f.sourceDirectPool != nil {
+		ctx, cancel := agentRouteCleanupContext(f.t)
+		require.NoError(f.t, f.sourceDirectPool.Close(ctx))
+		cancel()
+		requireAgentRouteDone(f.t, f.sourceDirectPool.Done(), "source direct session pool")
+	}
 	if f.sourceTransport != nil {
 		f.sourceTransport.CloseIdleConnections()
 	}
 }
 
 func (f *agentRouteSocketFixture) mountManagedSourceRoutes(srv *agent.Server, router *gin.Engine) {
-	f.sourceDirect = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
-		ResponseHeaderTimeout: time.Second,
+	f.sourceDirectPool = agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		SourceAgentID: "source",
+		Dialer:        agenttunnel.NewDirectDialer(agenttunnel.DirectDialerOptions{}),
+		Credentials: forwardCredentialReaderFunc(func() (agentauthcache.ForwardCredential, error) {
+			if !f.issueForwardTickets.Load() {
+				return agentauthcache.ForwardCredential{}, errors.New("managed forward ticket unavailable")
+			}
+			ticket, expiresAt, err := f.signer.SignForward("source")
+			return agentauthcache.ForwardCredential{Ticket: ticket, ExpiresAt: expiresAt}, err
+		}),
+		MaxSessions:  func() int { return 8 },
+		DrainTimeout: func() time.Duration { return time.Second },
+		Logger:       zap.NewNop(),
 	})
+	f.sourceDirect = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: f.sourceDirectPool})
 	f.sourceTransport = upstream.NewTransportPool(32, 8, time.Second, upstream.KeepaliveConfig{
 		Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 3,
 	})
@@ -669,15 +706,13 @@ func (f *agentRouteSocketFixture) mountManagedSourceRoutes(srv *agent.Server, ro
 		SourceAgentID: "source",
 		Direct:        f.sourceDirect,
 		Targets:       srv,
-		CachedForwardTicket: func() (agentauth.ForwardTicket, error) {
-			if !f.issueForwardTickets.Load() {
-				return "", errors.New("managed forward ticket unavailable")
-			}
-			ticket, _, err := f.signer.SignForward("source")
-			return ticket, err
+		DirectOutboundEnabled: func() bool {
+			source := srv.Store.GetAgent("source")
+			return source != nil && source.DirectOutboundEnabled
 		},
-		RelayEnabled: func() bool {
-			return srv.Store.Settings().RelayFallbackEnabled == 1
+		RelayOutboundEnabled: func() bool {
+			source := srv.Store.GetAgent("source")
+			return source != nil && source.RelayOutboundEnabled
 		},
 	})
 	handler := agentrelay.NewHandler(
@@ -735,10 +770,10 @@ func TestAgentRelayCurrentAttemptChannelRouteRunsSourceThenTarget(t *testing.T) 
 	f := newAgentRouteSocketFixture(t, http.StatusOK)
 	failingA := newAgentRouteProvider(t, &f.sourceProviderCalls, &f.providerActive, http.StatusInternalServerError)
 	f.setTwoAttemptChannels(failingA.URL)
-	f.source.Store.SetAgent(&models.Agent{
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{
 		AgentID: "target", Status: consts.StatusEnabled,
 		HTTPAddresses: fmt.Sprintf(`[{"url":%q,"tag":"local"}]`, f.targetAgent.URL),
-	})
+	}))
 	f.source.Store.RouteIndex.Put(&models.AgentRoute{
 		ID: 42, SourceType: "channel", SourceID: 8, Model: "gpt-4o", AgentID: "target", Priority: 100,
 	})
@@ -767,10 +802,10 @@ func TestAgentRelayCurrentAttemptChannelRouteRunsSourceThenTarget(t *testing.T) 
 func TestAgentRelayTargetProviderFailureAdvancesNextSourceAttempt(t *testing.T) {
 	f := newAgentRouteSocketFixture(t, http.StatusInternalServerError)
 	f.setTwoAttemptChannels(f.sourceProvider.URL)
-	f.source.Store.SetAgent(&models.Agent{
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{
 		AgentID: "target", Status: consts.StatusEnabled,
 		HTTPAddresses: fmt.Sprintf(`[{"url":%q,"tag":"local"}]`, f.targetAgent.URL),
-	})
+	}))
 	f.source.Store.RouteIndex.Put(&models.AgentRoute{
 		ID: 43, SourceType: "channel", SourceID: 7, Model: "gpt-4o", AgentID: "target", Priority: 100,
 	})
@@ -870,12 +905,20 @@ func TestAgentRelayAttemptEndpointRejectsPrivateAuthBoundaries(t *testing.T) {
 				ID: 1, UserID: test.tokenUserID, Key: "route-token", Status: consts.StatusEnabled, ExpiredAt: -1,
 			})
 
-			response := f.directBoundAttempt(test.authorization, attemptwire.BoundAttempt{
+			response, result, streamErr := f.directBoundAttempt(test.authorization, attemptwire.BoundAttempt{
 				Channel:   attemptwire.ChannelRef{Source: attemptwire.SourcePrivate, ID: 7},
 				RealModel: "gpt-4o", Mode: attemptwire.ModePassthrough,
 			})
 
-			require.Equal(t, test.wantStatus, response.StatusCode)
+			if test.wantStatus == http.StatusUnauthorized {
+				require.Error(t, streamErr)
+			} else {
+				require.NoError(t, streamErr)
+				require.Equal(t, http.StatusOK, response.StatusCode)
+				require.Equal(t, attemptwire.ModeControl, response.Header.Get(attemptwire.HeaderMode))
+				require.Equal(t, attemptwire.ResultProxyRejected, result.Kind)
+				require.Equal(t, test.wantStatus, result.HTTPStatus)
+			}
 			require.Zero(t, probe.calls.Load())
 			require.Zero(t, f.targetProviderCalls.Load())
 			require.Zero(t, f.targetCalls.attemptLimiter.Load())
@@ -922,37 +965,16 @@ func TestAgentRelayAttemptEndpointFailsClosedBeforeOrdinaryPlanner(t *testing.T)
 		require.NoError(t, err)
 		defer response.Body.Close()
 
-		require.Equal(t, http.StatusUnauthorized, response.StatusCode)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.Equal(t, attemptwire.ModeControl, response.Header.Get(attemptwire.HeaderMode))
+		body, err := io.ReadAll(response.Body)
+		require.NoError(t, err)
+		require.Empty(t, body)
 		require.Zero(t, f.targetProviderCalls.Load())
 		require.Zero(t, f.targetCalls.attemptLimiter.Load())
 		require.Zero(t, f.targetCalls.planner.Load())
 	})
 
-	t.Run("corrupt bound attempt", func(t *testing.T) {
-		f := newAgentRouteSocketFixture(t, http.StatusOK)
-		ticket, _, err := f.signer.SignForward("source")
-		require.NoError(t, err)
-		request, err := http.NewRequest(
-			http.MethodPost,
-			f.targetAgent.URL+attemptwire.EndpointPath,
-			strings.NewReader(relayRequestBody(false)),
-		)
-		require.NoError(t, err)
-		request.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+"route-token")
-		request.Header.Set(consts.HeaderContentType, consts.ContentTypeJSON)
-		request.Header.Set(consts.HeaderXAgentForwardTicket, string(ticket))
-		request.Header.Set(consts.HeaderXAgentRouteID, "0")
-		request.Header.Set(consts.HeaderXAgentHop, "1")
-		request.Header.Set(attemptwire.HeaderMeta, `{}`)
-		response, err := http.DefaultClient.Do(request)
-		require.NoError(t, err)
-		defer response.Body.Close()
-
-		require.Equal(t, http.StatusBadRequest, response.StatusCode)
-		require.Zero(t, f.targetProviderCalls.Load())
-		require.Zero(t, f.targetCalls.attemptLimiter.Load())
-		require.Zero(t, f.targetCalls.planner.Load())
-	})
 }
 
 // behavior change: a present-but-empty execution agent is not a legacy entry
@@ -976,30 +998,36 @@ func TestAgentRelayUsageExecutionAgentPointerPresence(t *testing.T) {
 func (f *agentRouteSocketFixture) directBoundAttempt(
 	authorization string,
 	attempt attemptwire.BoundAttempt,
-) *http.Response {
+) (*http.Response, attemptwire.AttemptProxyResult, error) {
 	f.t.Helper()
-	meta, err := attemptwire.EncodeMeta(attemptwire.AttemptProxyMeta{
+	meta := attemptwire.AttemptProxyMeta{
 		Attempt: attempt, RequestPath: "/v1/chat/completions",
+	}
+	targetURL, err := url.Parse(f.targetAgent.URL)
+	require.NoError(f.t, err)
+	body := relayRequestBody(false)
+	stream, err := f.sourceDirectPool.OpenAttemptStream(f.t.Context(), agentproxy.DirectSessionTarget{
+		TargetAgentID: "target", AddressFingerprint: "target-test", WebSocketURL: targetURL,
+	}, app.AttemptStreamRequest{
+		TargetAgentID: "target", RequestID: "direct-bound-attempt",
+		Method: http.MethodPost, Path: attemptwire.EndpointPath,
+		Header: http.Header{
+			consts.HeaderAuthorization: {authorization},
+			consts.HeaderContentType:   {consts.ContentTypeJSON},
+		},
+		BodyLength: int64(len(body)), Remaining: time.Second, Hop: 1, Attempt: meta,
 	})
 	require.NoError(f.t, err)
-	ticket, _, err := f.signer.SignForward("source")
-	require.NoError(f.t, err)
-	req, err := http.NewRequest(
-		http.MethodPost,
-		f.targetAgent.URL+attemptwire.EndpointPath,
-		strings.NewReader(relayRequestBody(false)),
-	)
-	require.NoError(f.t, err)
-	req.Header.Set(consts.HeaderAuthorization, authorization)
-	req.Header.Set(consts.HeaderContentType, consts.ContentTypeJSON)
-	req.Header.Set(consts.HeaderXAgentForwardTicket, string(ticket))
-	req.Header.Set(consts.HeaderXAgentRouteID, "0")
-	req.Header.Set(consts.HeaderXAgentHop, "1")
-	req.Header.Set(attemptwire.HeaderMeta, meta)
-	response, err := http.DefaultClient.Do(req)
-	require.NoError(f.t, err)
-	f.t.Cleanup(func() { _ = response.Body.Close() })
-	return response
+	defer stream.Close()
+	recorder := httptest.NewRecorder()
+	if err := stream.Commit(f.t.Context()); err != nil {
+		return recorder.Result(), attemptwire.AttemptProxyResult{}, err
+	}
+	if err := stream.Upload(f.t.Context(), strings.NewReader(body)); err != nil {
+		return recorder.Result(), attemptwire.AttemptProxyResult{}, err
+	}
+	result, err := stream.CopyAttemptResponse(f.t.Context(), recorder)
+	return recorder.Result(), result, err
 }
 
 func syncedPrivateChannel(id, ownerID uint, providerURL, key string) protocol.SyncedPrivateChannel {
@@ -1034,10 +1062,10 @@ func (f *agentRouteSocketFixture) configurePrivateCollision(
 	})
 	f.source.Store.RebuildModelIndex()
 	f.target.Store.RebuildModelIndex()
-	f.source.Store.SetAgent(&models.Agent{
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{
 		AgentID: "target", Status: consts.StatusEnabled,
 		HTTPAddresses: fmt.Sprintf(`[{"url":%q,"tag":"local"}]`, f.targetAgent.URL),
-	})
+	}))
 	f.source.Store.RouteIndex.Put(&models.AgentRoute{
 		ID: 44, SourceType: "token", SourceID: 1, Model: "gpt-4o", AgentID: "target", Priority: 100,
 	})
@@ -1098,9 +1126,9 @@ func (f *agentRouteSocketFixture) configureSourceRoute(routeTarget, hardTarget, 
 	if address != "" {
 		httpAddresses = fmt.Sprintf(`[{"url":%q,"tag":"local"}]`, address)
 	}
-	f.source.Store.SetAgent(&models.Agent{
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{
 		AgentID: targetID, Status: consts.StatusEnabled, HTTPAddresses: httpAddresses,
-	})
+	}))
 	if routeTarget != "" {
 		f.source.Store.RouteIndex.Put(&models.AgentRoute{
 			ID: 42, SourceType: "token", SourceID: 1, Model: "gpt-4o", AgentID: routeTarget, Priority: 100,
@@ -1144,38 +1172,6 @@ func (f *agentRouteSocketFixture) closedTCPAddress() string {
 	address := listener.Addr().String()
 	require.NoError(f.t, listener.Close())
 	return "http://" + address
-}
-
-func (f *agentRouteSocketFixture) uncertainAddress() string {
-	f.t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(f.t, err)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		f.uncertainTargetCalls.Add(1)
-		reader := bufio.NewReader(conn)
-		for {
-			line, readErr := reader.ReadString('\n')
-			if readErr != nil || line == "\r\n" {
-				break
-			}
-		}
-		_ = conn.Close()
-	}()
-	f.t.Cleanup(func() {
-		_ = listener.Close()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			f.t.Error("uncertain target socket did not stop")
-		}
-	})
-	return "http://" + listener.Addr().String()
 }
 
 func TestAgentRelayRealSourceHandlerUsageAndNoReplayMatrix(t *testing.T) {
@@ -1258,11 +1254,11 @@ func TestAgentRelayMissingForwardCapabilityFallsBackToRelay(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(directTarget.Close)
-	f.source.Store.SetAgent(&models.Agent{
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{
 		AgentID: "target", Status: consts.StatusEnabled,
 		HTTPAddresses: fmt.Sprintf(`[{"url":%q,"tag":"local"}]`, directTarget.URL),
-	})
-	f.source.Store.SetAgentCapabilities("target", []string{protocol.AgentCapabilityTunnelV1})
+	}))
+	f.source.Store.SetAgentCapabilities("target", []string{protocol.AgentCapabilityTunnelV2})
 
 	status, body, err := f.request(t.Context(), false)
 	require.NoError(t, err)
@@ -1360,8 +1356,8 @@ func TestAgentRelayHardTagFailsOverThenFreezesReachedMember(t *testing.T) {
 	var providerAttempts atomic.Int32
 	targetProvider := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if providerAttempts.Add(1) == 1 {
-			f.source.Store.SetAgent(&models.Agent{AgentID: "target", Status: consts.StatusEnabled})
-			f.source.Store.SetAgent(&models.Agent{AgentID: "unreachable", Status: consts.StatusEnabled})
+			f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "target", Status: consts.StatusEnabled}))
+			f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "unreachable", Status: consts.StatusEnabled}))
 			w.Header().Set(consts.HeaderContentType, consts.ContentTypeJSON)
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = io.WriteString(w, `{"error":{"message":"freeze reached member"}}`)
@@ -1371,8 +1367,8 @@ func TestAgentRelayHardTagFailsOverThenFreezesReachedMember(t *testing.T) {
 	})
 	f = newOwnedRoutedRelayFixture(t, targetProvider, true)
 	f.setTwoAttemptChannels()
-	f.source.Store.SetAgent(&models.Agent{AgentID: "target", Status: consts.StatusEnabled, Tags: "hard-pool"})
-	f.source.Store.SetAgent(&models.Agent{AgentID: "unreachable", Status: consts.StatusEnabled, Tags: "hard-pool"})
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "target", Status: consts.StatusEnabled, Tags: "hard-pool"}))
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "unreachable", Status: consts.StatusEnabled, Tags: "hard-pool"}))
 	requestID := requestIDForAgentOrder(t, "hard-pool", "unreachable", "target")
 
 	status, body, err := f.requestWithSelector(t.Context(), false, "", "hard-pool", requestID)
@@ -1471,7 +1467,6 @@ func configureTwoAttemptAgents(
 ) {
 	for _, srv := range []*agent.Server{source, target} {
 		srv.Store.LoadSettings([]models.Setting{
-			{Key: consts.SettingAgentRelayFallbackEnabled, Value: "1"},
 			{Key: "retry_max_channels", Value: "2"},
 			{Key: "max_retries_per_channel", Value: "0"},
 			{Key: "breaker_enabled", Value: "0"},
@@ -1545,16 +1540,16 @@ type routedRelayAgentLookup struct {
 
 func newRoutedRelayAgentLookup() *routedRelayAgentLookup {
 	return &routedRelayAgentLookup{capabilities: map[string][]string{
-		"source": {protocol.AgentCapabilityTunnelV1},
-		"target": {protocol.AgentCapabilityTunnelV1},
+		"source": {protocol.AgentCapabilityTunnelV2},
+		"target": {protocol.AgentCapabilityTunnelV2},
 	}}
 }
 
 func (*routedRelayAgentLookup) GetByAgentID(_ context.Context, id string) (*models.Agent, error) {
-	if id != "source" && id != "target" {
+	if id != "source" && id != "target" && id != "unreachable" {
 		return nil, gorm.ErrRecordNotFound
 	}
-	return &models.Agent{AgentID: id, Status: consts.StatusEnabled}, nil
+	return newTransportEnabledAgent(models.Agent{AgentID: id, Status: consts.StatusEnabled}), nil
 }
 
 func (l *routedRelayAgentLookup) Capabilities(agentID string) []string {
@@ -1587,7 +1582,6 @@ type routedRelayManagerRun struct {
 type routedRelayFixture struct {
 	t                   *testing.T
 	db                  *gorm.DB
-	admission           *mastertunnel.AdmissionGate
 	lookup              *routedRelayAgentLookup
 	signer              *masteragentauth.Signer
 	limits              wire.Limits
@@ -1637,12 +1631,10 @@ func newRoutedRelayFixtureWithOwnership(
 		MaxMetadataBytes: 64 << 10, MaxDataBytes: 64 << 10, InitialStreamWindow: 256 << 10,
 		MaxQueuedSessionBytes: 1 << 20, MaxConcurrentStreams: 4,
 	}
-	f.admission = &mastertunnel.AdmissionGate{}
-	f.admission.Set(true)
 	f.lookup = newRoutedRelayAgentLookup()
 	f.hub = mastertunnel.NewHub(mastertunnel.HubOptions{
 		InstanceID: "master-route-fixture", Signer: f.signer, Agents: f.lookup,
-		Admission: f.admission, Limits: f.limits, Logger: zap.NewNop(),
+		Limits: f.limits, Logger: zap.NewNop(),
 	})
 	hubRouter := gin.New()
 	hubRouter.GET("/ws/agent-relay", f.hub.HandleWS)
@@ -1655,8 +1647,8 @@ func newRoutedRelayFixtureWithOwnership(
 	f.target = f.newAgent("target", f.targetProvider.URL)
 
 	sourceRouter := f.setupRoutedRelayRouters(relayURI, connectTarget, ownership)
-	f.source.Store.SetAgent(&models.Agent{AgentID: "target", Status: consts.StatusEnabled})
-	f.target.Store.SetAgent(&models.Agent{AgentID: "source", Status: consts.StatusEnabled})
+	f.source.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "target", Status: consts.StatusEnabled}))
+	f.target.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "source", Status: consts.StatusEnabled}))
 	f.source.Store.RouteIndex.Put(&models.AgentRoute{
 		ID: 77, SourceType: "token", SourceID: 1, Model: "gpt-4o", AgentID: "target", Priority: 100,
 	})
@@ -1711,6 +1703,7 @@ func TestRelayProbeReachesEmbeddedAgentThroughSharedMasterPing(t *testing.T) {
 
 	result := prober.Probe(t.Context(), protocol.RelayProbeTarget{
 		TargetAgentID: "target", SourceRelayGeneration: sourceGeneration, TargetRelayGeneration: targetGeneration,
+		Policy: protocol.ProbeRespectBusinessPolicy,
 	})
 	require.Equal(t, protocol.RelayProbeReachable, result.State, "%+v", result)
 	require.Equal(t, protocol.RelayProbeStageResponse, result.Stage)
@@ -1736,7 +1729,7 @@ func (f *routedRelayFixture) newAgent(id, providerURL string) *agent.Server {
 	}
 	srv, err := agent.NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: id, Secret: "secret"})
 	require.NoError(f.t, err)
-	srv.Store.SetAgent(&models.Agent{AgentID: id, Status: consts.StatusEnabled})
+	srv.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: id, Status: consts.StatusEnabled}))
 	srv.Store.SetToken(&models.Token{ID: 1, Key: "route-token", Status: consts.StatusEnabled, ExpiredAt: -1})
 	srv.Store.SetChannel(&models.Channel{
 		ChannelCore: models.ChannelCore{
@@ -1747,7 +1740,6 @@ func (f *routedRelayFixture) newAgent(id, providerURL string) *agent.Server {
 	})
 	srv.Store.RebuildModelIndex()
 	srv.Store.LoadSettings([]models.Setting{
-		{Key: consts.SettingAgentRelayFallbackEnabled, Value: "1"},
 		{Key: "retry_max_channels", Value: "1"},
 		{Key: "max_retries_per_channel", Value: "0"},
 		{Key: "breaker_enabled", Value: "0"},
@@ -1767,18 +1759,21 @@ func (f *routedRelayFixture) newAgent(id, providerURL string) *agent.Server {
 }
 
 func (f *routedRelayFixture) mountRoutedSourceRoutes(router *gin.Engine) {
-	f.sourceDirect = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{ResponseHeaderTimeout: time.Second})
+	f.sourceDirect = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: f.source.DirectSessionPool})
 	f.sourceTransport = upstream.NewTransportPool(32, 8, time.Second, upstream.KeepaliveConfig{
 		Idle: 15 * time.Second, Interval: 15 * time.Second, Count: 3,
 	})
 	agentApp := newAgentOwnershipApplication(f.source, f.sourceTransport, &f.sourceCalls)
 	remote := relayexec.NewRemoteAttemptExecutor(relayexec.RemoteAttemptExecutorOptions{
 		SourceAgentID: "source", Direct: f.sourceDirect, Relay: f.source.TunnelManager, Targets: f.source,
-		CachedForwardTicket: func() (agentauth.ForwardTicket, error) {
-			ticket, _, err := f.signer.SignForward("source")
-			return ticket, err
+		DirectOutboundEnabled: func() bool {
+			source := f.source.Store.GetAgent("source")
+			return source != nil && source.DirectOutboundEnabled
 		},
-		RelayEnabled: func() bool { return f.source.Store.Settings().RelayFallbackEnabled == 1 },
+		RelayOutboundEnabled: func() bool {
+			source := f.source.Store.GetAgent("source")
+			return source != nil && source.RelayOutboundEnabled
+		},
 	})
 	handler := agentrelay.NewHandler(
 		f.source.Bus, agentApp, backend.NewDispatcher(agentApp), f.source.Inflight, nil, nil,
@@ -1816,9 +1811,18 @@ func (f *routedRelayFixture) installManager(
 	if previous := srv.TunnelManager; previous != nil {
 		closeAgentRouteManager(f.t, previous, agentID+" previous manager")
 	}
+	srv.TunnelManager = f.buildManager(agentID, signer, limits, targetHandler)
+}
+
+func (f *routedRelayFixture) buildManager(
+	agentID string,
+	signer *masteragentauth.Signer,
+	limits wire.Limits,
+	targetHandler *agenttunnel.TargetHandler,
+) *agenttunnel.Manager {
 	bootstrap := agentauthcache.BootstrapSnapshot{
 		MasterInstanceID: "master-route-fixture",
-		Capabilities:     []string{protocol.AgentCapabilityTunnelV1},
+		Capabilities:     []string{protocol.AgentCapabilityTunnelV2},
 		SigningKeys:      []agentauth.PublicKey{signer.PublicKey()},
 	}
 	dialer := agenttunnel.NewClientDialer(agenttunnel.ClientDialerOptions{
@@ -1826,7 +1830,7 @@ func (f *routedRelayFixture) installManager(
 		Limits: func() wire.Limits { return limits }, DrainTimeout: func() time.Duration { return time.Second },
 		TargetHandler: targetHandler, Logger: zap.NewNop(),
 	})
-	srv.TunnelManager = agenttunnel.NewManager(agenttunnel.ManagerOptions{
+	return agenttunnel.NewManager(agenttunnel.ManagerOptions{
 		Dialer: dialer, Tickets: routedRelayTicketProvider{agentID: agentID, signer: signer}, Limits: limits,
 		DrainTimeout: time.Second, BackoffMin: time.Millisecond, BackoffMax: 10 * time.Millisecond, Logger: zap.NewNop(),
 	})
@@ -2084,7 +2088,8 @@ func newAgentRelaySocketFixture(t *testing.T, providerHandler http.Handler) *age
 	var err error
 	f.target, err = agent.NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "target", Secret: "secret"})
 	require.NoError(t, err)
-	f.target.Store.SetAgent(&models.Agent{AgentID: "target", Status: consts.StatusEnabled})
+	f.target.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "target", Status: consts.StatusEnabled}))
+	f.target.Store.SetAgent(newTransportEnabledAgent(models.Agent{AgentID: "source", Status: consts.StatusEnabled}))
 	f.target.Store.SetToken(&models.Token{ID: 1, Key: "route-token", Status: consts.StatusEnabled, ExpiredAt: -1})
 	f.target.Store.SetChannel(&models.Channel{
 		ChannelCore: models.ChannelCore{
@@ -2095,7 +2100,6 @@ func newAgentRelaySocketFixture(t *testing.T, providerHandler http.Handler) *age
 	})
 	f.target.Store.RebuildModelIndex()
 	f.target.Store.LoadSettings([]models.Setting{
-		{Key: consts.SettingAgentRelayFallbackEnabled, Value: "1"},
 		{Key: "retry_max_channels", Value: "1"},
 		{Key: "max_retries_per_channel", Value: "0"},
 		{Key: "breaker_enabled", Value: "0"},
@@ -2111,6 +2115,7 @@ func newAgentRelaySocketFixture(t *testing.T, providerHandler http.Handler) *age
 
 	f.wsClient, f.peer, f.wsServer = agentRelayWebSocketPair(t)
 	f.session = agenttunnel.NewSession(f.wsClient, 1, f.limits, agenttunnel.SessionOptions{
+		Direction:     agenttunnel.SessionDirectionRelay,
 		TargetHandler: f.target.NewTunnelTargetHandler(router),
 	})
 	f.runDone = make(chan struct{})
@@ -2214,6 +2219,7 @@ func (f *agentRelaySocketFixture) readResponse(id wire.StreamID) (int, string, w
 	f.t.Helper()
 	status := 0
 	var body strings.Builder
+	var result attemptwire.AttemptProxyResult
 	for {
 		frame := f.read()
 		require.Equal(f.t, id, frame.StreamID)
@@ -2225,11 +2231,15 @@ func (f *agentRelaySocketFixture) readResponse(id wire.StreamID) (int, string, w
 			status = headers.StatusCode
 		case wire.FrameResponseData:
 			body.Write(frame.Payload)
-		case wire.FrameEnd:
-			var trailers wire.Trailers
-			require.NoError(f.t, wire.DecodeMetadata(frame.Payload, &trailers, f.limits.MaxMetadataBytes))
-			result, err := attemptwire.DecodeResult(http.Header(trailers.Header).Get(attemptwire.TrailerResult))
+		case wire.FrameAttemptResult:
+			var err error
+			result, err = attemptwire.DecodeResultJSON(frame.Payload)
 			require.NoError(f.t, err)
+		case wire.FrameEnd:
+			if len(frame.Payload) > 0 {
+				var trailers wire.Trailers
+				require.NoError(f.t, wire.DecodeMetadata(frame.Payload, &trailers, f.limits.MaxMetadataBytes))
+			}
 			return status, body.String(), frame.Type, result
 		case wire.FrameReset:
 			return status, body.String(), frame.Type, attemptwire.AttemptProxyResult{}

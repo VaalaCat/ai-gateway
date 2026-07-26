@@ -10,7 +10,7 @@ import (
 
 func TestIngressMetaRoundTripAndIsolation(t *testing.T) {
 	meta := IngressMeta{
-		Kind: IngressKindTunnel, SourceAgentID: "source-a", RouteID: 42,
+		Kind: IngressKindRelayTunnel, SourceAgentID: "source-a", RouteID: 42,
 		StreamID: wire.StreamID{1}, Hop: 1,
 	}
 	ctx := WithIngressMeta(t.Context(), meta)
@@ -23,9 +23,9 @@ func TestIngressMetaRoundTripAndIsolation(t *testing.T) {
 }
 
 func TestIngressKindValuesRemainTransportSpecific(t *testing.T) {
-	require.Equal(t, "direct", IngressKindDirect)
-	require.Equal(t, "tunnel", IngressKindTunnel)
-	require.NotEqual(t, IngressKindDirect, IngressKindTunnel)
+	require.Equal(t, "direct_tunnel", IngressKindDirectTunnel)
+	require.Equal(t, "relay_tunnel", IngressKindRelayTunnel)
+	require.NotEqual(t, IngressKindDirectTunnel, IngressKindRelayTunnel)
 }
 
 func TestIngressMetaRejectsNilContext(t *testing.T) {

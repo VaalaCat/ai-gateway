@@ -137,7 +137,7 @@ func (g *DirectGate) ApplyProbeResult(result protocol.DirectProbeResult) {
 	now := g.now()
 	key := directGateKey{targetAgentID: result.TargetAgentID, addressFingerprint: result.AddressFingerprint}
 	g.mu.Lock()
-	if result.ReasonCode == "cancelled" {
+	if result.ReasonCode == "cancelled" || result.ReasonCode == "request_cancelled" {
 		entry := g.entries[key]
 		entry.checking = false
 		entry.updatedAt = now

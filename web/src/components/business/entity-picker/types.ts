@@ -6,6 +6,7 @@ export type AdminScope = "self" | "all";
 export interface EntityListParams {
   search?: string;
   scope?: AdminScope;
+  ownerUserId?: number;
   page_size: number;
 }
 

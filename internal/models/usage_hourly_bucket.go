@@ -34,6 +34,7 @@ type UsageHourlyBucket struct {
 	InputCost        int64 `json:"input_cost"`
 	OutputCost       int64 `json:"output_cost"`
 	TotalCost        int64 `json:"total_cost"`
+	RawCost          int64 `json:"raw_cost"` // 折前原价日聚合(与 ChannelDailyBilling.RawCost 同口径)
 
 	// 速度累计 (仅 stream + success + completion_tokens > 0 才入)
 	StreamRequestCount        int64 `json:"stream_request_count"`

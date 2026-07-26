@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { UseQueryOptions } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
-import type { Token, PaginatedResponse, PaginatedParams } from "@/lib/types";
+import type { Token, TokenTraceMode, PaginatedResponse, PaginatedParams } from "@/lib/types";
 
 export function useTokens(
   params: PaginatedParams & {
@@ -29,7 +29,7 @@ export function useToken(id: number) {
 export function useCreateToken() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: { user_id?: number; name: string; key?: string; expired_at?: number; models?: string; template_id?: number; trace_enabled?: boolean; byok_only?: boolean; allowed_channel_ids?: number[] }) =>
+    mutationFn: (body: { user_id?: number; name: string; key?: string; expired_at?: number; models?: string; template_id?: number; trace_enabled?: boolean; trace_mode?: TokenTraceMode; byok_only?: boolean; allowed_channel_ids?: number[] }) =>
       api.post<Token>("/tokens", body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["tokens"] });

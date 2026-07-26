@@ -29,8 +29,14 @@ type AgentServer interface {
 	GetRelayLink() RelayLink
 }
 
-type RelayRequest struct {
-	Purpose       tunnel.StreamPurpose
+type ProbePolicy = tunnel.ProbePolicy
+
+const (
+	ProbeRespectBusinessPolicy = tunnel.ProbeRespectBusinessPolicy
+	ProbeBypassBusinessPolicy  = tunnel.ProbeBypassBusinessPolicy
+)
+
+type AttemptStreamRequest struct {
 	TargetAgentID string
 	RouteID       uint
 	RequestID     string
@@ -40,10 +46,26 @@ type RelayRequest struct {
 	BodyLength    int64
 	Remaining     time.Duration
 	Hop           uint8
-	Attempt       *attemptwire.AttemptProxyMeta
+	Attempt       attemptwire.AttemptProxyMeta
 }
 
-type RelayStream interface {
+type ProbeStreamRequest struct {
+	TargetAgentID string
+	RequestID     string
+	Remaining     time.Duration
+	Policy        ProbePolicy
+}
+
+type AttemptStream interface {
+	Commit(ctx context.Context) error
+	Upload(ctx context.Context, src io.Reader) error
+	CopyAttemptResponse(ctx context.Context, dst http.ResponseWriter) (attemptwire.AttemptProxyResult, error)
+	CommitState() tunnel.CommitState
+	Cancel(cause error)
+	Close() error
+}
+
+type ProbeStream interface {
 	Commit(ctx context.Context) error
 	Upload(ctx context.Context, src io.Reader) error
 	CopyResponse(ctx context.Context, dst http.ResponseWriter) error
@@ -52,6 +74,15 @@ type RelayStream interface {
 	Close() error
 }
 
+type AttemptStreamOpener interface {
+	OpenAttemptStream(context.Context, AttemptStreamRequest) (AttemptStream, error)
+}
+
+type ProbeStreamOpener interface {
+	OpenProbeStream(context.Context, ProbeStreamRequest) (ProbeStream, error)
+}
+
 type RelayLink interface {
-	OpenStream(ctx context.Context, req RelayRequest) (RelayStream, error)
+	AttemptStreamOpener
+	ProbeStreamOpener
 }

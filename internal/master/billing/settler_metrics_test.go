@@ -27,7 +27,7 @@ func TestSettleOne_EmitsBYOKRequestTotal_OnlyForPrivateOwner(t *testing.T) {
 
 	metrics.BYOKRequestTotal.Reset()
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 
 	// 一条 BYOK 行
 	settler.Settle(context.Background(), "agent-1", []protocol.UsageLogEntry{{

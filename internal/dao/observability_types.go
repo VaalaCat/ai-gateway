@@ -68,6 +68,7 @@ type Scope struct {
 type ObsFilter struct {
 	ModelName string
 	UserID    uint
+	TokenID   uint
 }
 
 // EffectiveUserID 返回查询实际应锁定的 user_id。
@@ -81,13 +82,20 @@ func (f ObsFilter) EffectiveUserID(scope Scope) uint {
 
 // TimeBucket 是 trend 输出的统一桶。Tokens 含 cache(= 4 个分量之和)。
 type TimeBucket struct {
-	Ts       int64  `json:"ts"`
-	Label    string `json:"label"`
-	Cost     int64  `json:"cost"`
-	Requests int64  `json:"requests"`
-	Tokens   int64  `json:"tokens"`
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	CacheReadTokens  int64 `json:"cache_read_tokens"`
-	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	Ts               int64  `json:"ts"`
+	Label            string `json:"label"`
+	Cost             int64  `json:"cost"`
+	Requests         int64  `json:"requests"`
+	Tokens           int64  `json:"tokens"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	CacheReadTokens  int64  `json:"cache_read_tokens"`
+	CacheWriteTokens int64  `json:"cache_write_tokens"`
+	// TTFTMs/TPS 是该桶的均值(仅 stream 累计有效时才非零); CacheHitRate 是 0-100 百分比
+	// (= cache_read/(prompt+cache_read)*100)。CacheHitRate 三条聚合路径都填充;
+	// TTFTMs/TPS 在 hourlyTrendFromBuckets 与 hourlyTrendFromUsageLog 路径填充,
+	// token_daily 路径无 stream/first_response 逐请求列, 该路径下 TTFTMs/TPS 恒为 0。
+	TTFTMs       int64   `json:"ttft_ms"`
+	TPS          float64 `json:"tps"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
 }

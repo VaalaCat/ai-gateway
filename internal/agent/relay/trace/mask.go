@@ -1,9 +1,11 @@
 package trace
 
 import (
+	"bytes"
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var sensitiveHeaderKeys = map[string]bool{
@@ -55,6 +57,23 @@ func maskText(text string, secrets []string) string {
 	return text
 }
 
+// maskTextPreservingLength keeps raw byte offsets stable so a source-side
+// partial-write count can safely trim an already-masked remote fallback.
+func maskTextPreservingLength(text string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, strings.Repeat("*", len(secret)))
+	}
+	for _, pattern := range sensitivePatterns {
+		text = pattern.ReplaceAllStringFunc(text, func(match string) string {
+			return strings.Repeat("*", len(match))
+		})
+	}
+	return text
+}
+
 func maskHeaders(headers map[string][]string, secrets []string) map[string][]string {
 	result := make(map[string][]string, len(headers))
 	for k, vals := range headers {
@@ -91,13 +110,30 @@ func channelSecrets(key, baseURL string) []string {
 }
 
 const defaultTraceMaxBodySize = 64 * 1024 // 64KB
+const truncatedPrefix = "...(truncated)"
 
 func truncateBodyWithLimit(body string, limit int) string {
+	return string(truncateBodyTail([]byte(body), limit, false))
+}
+
+// truncateBodyTail is the single final body truncation implementation. The
+// marker is metadata and therefore does not consume payload capacity.
+func truncateBodyTail(body []byte, limit int, force bool) []byte {
 	if limit <= 0 {
 		limit = defaultTraceMaxBodySize
 	}
-	if len(body) > limit {
-		return body[:limit] + "...(truncated)"
+	if len(body) <= limit && !force {
+		return body
 	}
-	return body
+	start := len(body) - limit
+	if start < 0 {
+		start = 0
+	}
+	for start < len(body) && !utf8.RuneStart(body[start]) {
+		start++
+	}
+	tail := bytes.ToValidUTF8(body[start:], nil)
+	result := make([]byte, 0, len(truncatedPrefix)+len(tail))
+	result = append(result, truncatedPrefix...)
+	return append(result, tail...)
 }

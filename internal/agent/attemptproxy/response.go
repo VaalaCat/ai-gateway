@@ -36,26 +36,36 @@ func (e *ResponseExecutor) Execute(
 		writeResponseExecutorRejection(rctx)
 		return
 	}
+	resultWriter, ok := attemptResultWriter(rctx)
+	if !ok {
+		writeControlHeaders(rctx.Context.Writer)
+		return
+	}
+	e.executeWithResultWriter(rctx, attempt, provider, resultWriter)
+}
 
+func (e *ResponseExecutor) executeWithResultWriter(
+	rctx *state.RelayContext,
+	attempt state.Attempt,
+	provider attemptexec.ProviderAttemptExecutor,
+	resultWriter attemptwire.AttemptResultWriter,
+) {
 	base := rctx.Context.Writer
 	writer := newAttemptResponseWriter(base)
 	rctx.Context.Writer = writer
 	providerResult := provider.Execute(rctx, attempt)
 	proxyResult := resultFromProvider(rctx, providerResult, writer)
-	if writer.resultTrailerUnsupported && !writer.ResponseStarted() {
-		rctx.Context.Writer = base
-		writeControl(base, unsupportedTrailerControlResult(proxyResult))
-		return
-	}
-
 	switch {
 	case providerResult.Outcome.Written || writer.ResponseStarted():
-		writer.FinishResponse(proxyResult)
+		proxyResult = writer.FinishResponse(proxyResult)
 	case providerResult.Outcome.Err == nil:
-		writer.CommitBufferedSuccess(proxyResult)
+		proxyResult = writer.CommitBufferedSuccess(proxyResult)
 	default:
 		rctx.Context.Writer = base
-		writeControl(base, proxyResult)
+		writeControlHeaders(base)
+	}
+	if err := resultWriter.WriteAttemptResult(proxyResult); err != nil {
+		writer.markUncertain()
 	}
 }
 
@@ -67,36 +77,28 @@ func writeResponseExecutorRejection(rctx *state.RelayContext) {
 	if rctx == nil || rctx.Context == nil || rctx.Context.Writer == nil || rctx.Context.Writer.Written() {
 		return
 	}
-	writeProxyRejection(rctx.Context.Writer, http.StatusInternalServerError, "response_executor_unavailable", "attempt response executor unavailable")
+	writeProxyRejection(rctx.Context, http.StatusInternalServerError, "response_executor_unavailable", "attempt response executor unavailable")
 }
 
-func writeControl(writer gin.ResponseWriter, result attemptwire.AttemptProxyResult) {
+func writeControlHeaders(writer gin.ResponseWriter) {
 	if writer == nil || writer.Written() {
 		return
 	}
-	body, err := attemptwire.EncodeResultJSON(result)
-	if err != nil {
-		body, _ = json.Marshal(minimalControlResult(result, "control_encode_failed"))
-	}
 	header := writer.Header()
-	header.Set("Content-Type", "application/json")
 	header.Set(attemptwire.HeaderMode, attemptwire.ModeControl)
 	deleteHeaderCaseInsensitive(header, "Content-Length")
 	header.Del("Trailer")
-	header.Del(http.TrailerPrefix + attemptwire.TrailerResult)
 	writer.WriteHeader(http.StatusOK)
 	writer.WriteHeaderNow()
-	_, _ = writer.Write(body)
 }
 
 type attemptResponseWriter struct {
-	base                     gin.ResponseWriter
-	header                   http.Header
-	status                   int
-	committed                bool
-	responseStarted          bool
-	uncertain                bool
-	resultTrailerUnsupported bool
+	base            gin.ResponseWriter
+	header          http.Header
+	status          int
+	committed       bool
+	responseStarted bool
+	uncertain       bool
 }
 
 var _ gin.ResponseWriter = (*attemptResponseWriter)(nil)
@@ -121,7 +123,6 @@ func (w *attemptResponseWriter) WriteHeader(code int) {
 		return
 	}
 	w.status = code
-	w.resultTrailerUnsupported = statusDisallowsResultTrailer(code)
 }
 
 func (w *attemptResponseWriter) WriteHeaderNow() {
@@ -240,9 +241,9 @@ func (w *attemptResponseWriter) ResponseStarted() bool {
 	return w != nil && (w.responseStarted || (w.base != nil && w.base.Written()))
 }
 
-func (w *attemptResponseWriter) FinishResponse(result attemptwire.AttemptProxyResult) {
+func (w *attemptResponseWriter) FinishResponse(result attemptwire.AttemptProxyResult) attemptwire.AttemptProxyResult {
 	if w == nil {
-		return
+		return result
 	}
 	if err := w.commit(); err != nil {
 		w.markUncertain()
@@ -251,11 +252,11 @@ func (w *attemptResponseWriter) FinishResponse(result attemptwire.AttemptProxyRe
 	if result.ResponseStarted {
 		result.PlanAdvanceAllowed = false
 	}
-	w.writeResultTrailer(result)
+	return result
 }
 
-func (w *attemptResponseWriter) CommitBufferedSuccess(result attemptwire.AttemptProxyResult) {
-	w.FinishResponse(result)
+func (w *attemptResponseWriter) CommitBufferedSuccess(result attemptwire.AttemptProxyResult) attemptwire.AttemptProxyResult {
+	return w.FinishResponse(result)
 }
 
 func (w *attemptResponseWriter) commit() (err error) {
@@ -268,18 +269,12 @@ func (w *attemptResponseWriter) commit() (err error) {
 		}
 		return nil
 	}
-	if statusDisallowsResultTrailer(w.status) {
-		w.resultTrailerUnsupported = true
-		return errResultTrailerUnsupported
-	}
-
 	deleteHeaderCaseInsensitive(w.header, "Content-Length")
 	deleteHeaderCaseInsensitive(w.base.Header(), "Content-Length")
 	w.committed = true
 	w.responseStarted = true
 	copyAttemptHeaders(w.base.Header(), w.header)
 	w.base.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
-	declareResultTrailer(w.base.Header())
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			w.markUncertain()
@@ -289,24 +284,6 @@ func (w *attemptResponseWriter) commit() (err error) {
 	w.base.WriteHeader(w.status)
 	w.base.WriteHeaderNow()
 	return nil
-}
-
-func (w *attemptResponseWriter) writeResultTrailer(result attemptwire.AttemptProxyResult) {
-	if w == nil || w.base == nil {
-		return
-	}
-	if w.uncertain {
-		result = minimalCommitUncertainResult(result, "response_commit_uncertain")
-	}
-	encoded, err := attemptwire.EncodeResult(result)
-	if err != nil {
-		result = minimalCommitUncertainResult(result, "result_encode_failed")
-		encoded, err = attemptwire.EncodeResult(result)
-	}
-	if err != nil {
-		return
-	}
-	w.base.Header().Set(http.TrailerPrefix+attemptwire.TrailerResult, encoded)
 }
 
 func (w *attemptResponseWriter) markUncertain() {
@@ -319,7 +296,7 @@ func (w *attemptResponseWriter) markUncertain() {
 
 func copyAttemptHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if strings.EqualFold(key, attemptwire.HeaderMode) || strings.EqualFold(key, attemptwire.TrailerResult) {
+		if strings.EqualFold(key, attemptwire.HeaderMode) {
 			continue
 		}
 		dst[key] = append([]string(nil), values...)
@@ -332,23 +309,6 @@ func deleteHeaderCaseInsensitive(header http.Header, name string) {
 			delete(header, key)
 		}
 	}
-}
-
-var errResultTrailerUnsupported = errors.New("HTTP status does not support attempt result trailer")
-
-func statusDisallowsResultTrailer(status int) bool {
-	return status < http.StatusOK || status == http.StatusNoContent || status == http.StatusNotModified
-}
-
-func declareResultTrailer(header http.Header) {
-	for _, line := range header.Values("Trailer") {
-		for token := range strings.SplitSeq(line, ",") {
-			if strings.EqualFold(strings.TrimSpace(token), attemptwire.TrailerResult) {
-				return
-			}
-		}
-	}
-	header.Add("Trailer", attemptwire.TrailerResult)
 }
 
 func minimalCommitUncertainResult(result attemptwire.AttemptProxyResult, reason string) attemptwire.AttemptProxyResult {
@@ -365,36 +325,11 @@ func minimalCommitUncertainResult(result attemptwire.AttemptProxyResult, reason 
 	}
 }
 
-func minimalControlResult(result attemptwire.AttemptProxyResult, reason string) attemptwire.AttemptProxyResult {
-	return attemptwire.AttemptProxyResult{
-		Kind:                attemptwire.ResultCommitUncertain,
-		Dispatches:          result.Dispatches,
-		ProviderDispatched:  result.ProviderDispatched || result.Dispatches > 0,
-		ProviderResultKnown: result.ProviderResultKnown,
-		ReasonCode:          reason,
-		ErrorMessage:        "control result encoding failed",
+func attemptResultWriter(rctx *state.RelayContext) (attemptwire.AttemptResultWriter, bool) {
+	if rctx == nil || rctx.Request == nil {
+		return nil, false
 	}
-}
-
-func unsupportedTrailerControlResult(result attemptwire.AttemptProxyResult) attemptwire.AttemptProxyResult {
-	return attemptwire.AttemptProxyResult{
-		Kind:                attemptwire.ResultCommitUncertain,
-		PromptTokens:        result.PromptTokens,
-		CompletionTokens:    result.CompletionTokens,
-		CacheReadTokens:     result.CacheReadTokens,
-		CacheWriteTokens:    result.CacheWriteTokens,
-		FirstResponseMs:     result.FirstResponseMs,
-		UpstreamModel:       result.UpstreamModel,
-		TokenSource:         result.TokenSource,
-		Dispatches:          result.Dispatches,
-		ProviderDispatched:  result.ProviderDispatched,
-		ProviderResultKnown: true,
-		Written:             false,
-		PlanAdvanceAllowed:  false,
-		ResponseStarted:     false,
-		ReasonCode:          "result_trailer_unsupported",
-		ErrorMessage:        "provider response status cannot carry attempt result trailer",
-	}
+	return attemptwire.AttemptResultWriterFromContext(rctx.Request.Context())
 }
 
 func resultFromProvider(
@@ -424,7 +359,20 @@ func resultFromProvider(
 		result = minimalCommitUncertainResult(result, "response_commit_uncertain")
 	}
 	result.Trace = finalizeAttemptTrace(rctx)
+	if result.Kind == attemptwire.ResultSucceeded && result.Trace != nil {
+		result.Trace.FailureFallback = traceBodyFallbackToWire(rctx.State.Recorder.BuildRemoteFailureBodyFallback())
+	}
 	return result
+}
+
+func traceBodyFallbackToWire(record *trace.TraceRecord) *attemptwire.AttemptTraceBodyWire {
+	if record == nil {
+		return nil
+	}
+	return &attemptwire.AttemptTraceBodyWire{
+		InboundBody: record.InboundBody, OutboundBody: record.OutboundBody,
+		ResponseBody: record.UpstreamBody, ClientResponseBody: record.ClientResponseBody,
+	}
 }
 
 func classifyProviderResult(result *attemptwire.AttemptProxyResult, outcome state.AttemptResult) {

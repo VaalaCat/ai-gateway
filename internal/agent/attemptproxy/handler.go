@@ -1,7 +1,6 @@
 package attemptproxy
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -36,20 +35,20 @@ func (h *Handler) Serve(c *gin.Context) {
 		return
 	}
 	if h == nil || h.dependenciesUnavailable() {
-		writeProxyRejection(c.Writer, http.StatusInternalServerError, "proxy_dependencies_unavailable", "attempt proxy dependencies unavailable")
+		writeProxyRejection(c, http.StatusInternalServerError, "proxy_dependencies_unavailable", "attempt proxy dependencies unavailable")
 		return
 	}
 	meta, ok := metaForRequest(c)
 	if !ok {
-		writeProxyRejection(c.Writer, http.StatusBadRequest, "attempt_meta_missing", "bound attempt metadata missing")
+		writeProxyRejection(c, http.StatusBadRequest, "attempt_meta_missing", "bound attempt metadata missing")
 		return
 	}
 	if err := meta.Validate(); err != nil {
-		writeProxyRejection(c.Writer, http.StatusBadRequest, "attempt_meta_invalid", "bound attempt metadata invalid")
+		writeProxyRejection(c, http.StatusBadRequest, "attempt_meta_invalid", "bound attempt metadata invalid")
 		return
 	}
 	if c.Request == nil || !attemptwire.ProviderPathAllowed(c.Request.Method, meta.RequestPath) {
-		writeProxyRejection(c.Writer, http.StatusBadRequest, "attempt_path_invalid", "provider request path invalid")
+		writeProxyRejection(c, http.StatusBadRequest, "attempt_path_invalid", "provider request path invalid")
 		return
 	}
 	rctx, release, err := h.Contexts.Build(c, meta)
@@ -60,12 +59,12 @@ func (h *Handler) Serve(c *gin.Context) {
 			relay.CloseContext(rctx)
 		}
 		status, reason, message := contextRejection(err)
-		writeProxyRejection(c.Writer, status, reason, message)
+		writeProxyRejection(c, status, reason, message)
 		return
 	}
 	if release == nil {
 		relay.CloseContext(rctx)
-		writeProxyRejection(c.Writer, http.StatusInternalServerError, "context_release_unavailable", "attempt context release unavailable")
+		writeProxyRejection(c, http.StatusInternalServerError, "context_release_unavailable", "attempt context release unavailable")
 		return
 	}
 	defer release()
@@ -75,7 +74,7 @@ func (h *Handler) Serve(c *gin.Context) {
 	})
 	if err != nil {
 		status, reason, message := channelRejection(err)
-		writeProxyRejection(c.Writer, status, reason, message)
+		writeProxyRejection(c, status, reason, message)
 		return
 	}
 	h.Responses.Execute(rctx, attempt, h.Provider)
@@ -130,24 +129,20 @@ func channelRejection(err error) (int, string, string) {
 	}
 }
 
-func writeProxyRejection(writer gin.ResponseWriter, status int, reason, message string) {
-	if writer == nil || writer.Written() {
+func writeProxyRejection(c *gin.Context, status int, reason, message string) {
+	if c == nil || c.Writer == nil || c.Writer.Written() {
 		return
 	}
 	result := attemptwire.AttemptProxyResult{
 		Kind: attemptwire.ResultProxyRejected, HTTPStatus: status,
-		ReasonCode: reason, ErrorMessage: message,
+		ProviderResultKnown: true, ReasonCode: reason, ErrorMessage: message,
 	}
-	body, err := json.Marshal(result)
-	if err != nil {
-		body = []byte(`{"kind":"proxy_rejected","reason_code":"proxy_response_encode_failed"}`)
+	if c.Request != nil {
+		if resultWriter, ok := attemptwire.AttemptResultWriterFromContext(c.Request.Context()); ok {
+			writeControlHeaders(c.Writer)
+			_ = resultWriter.WriteAttemptResult(result)
+			return
+		}
 	}
-	header := writer.Header()
-	header.Set("Content-Type", "application/json")
-	header.Del(attemptwire.HeaderMode)
-	header.Del("Trailer")
-	header.Del(http.TrailerPrefix + attemptwire.TrailerResult)
-	writer.WriteHeader(status)
-	writer.WriteHeaderNow()
-	_, _ = writer.Write(body)
+	writeControlHeaders(c.Writer)
 }

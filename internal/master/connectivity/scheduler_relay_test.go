@@ -38,18 +38,20 @@ func (f relaySchedulerFinder) FindEnabledProbeSource(context.Context, string) (P
 }
 
 type relaySchedulerCaller struct {
-	mu          sync.Mutex
-	directCalls int
-	relayCalls  []protocol.RelayProbeTarget
-	relayStart  chan struct{}
-	relayBlock  <-chan struct{}
+	mu            sync.Mutex
+	directCalls   int
+	directTargets []protocol.DirectProbeTarget
+	relayCalls    []protocol.RelayProbeTarget
+	relayStart    chan struct{}
+	relayBlock    <-chan struct{}
 }
 
 func (c *relaySchedulerCaller) CallDirectProbe(_ context.Context, _ string, _ uint64, target protocol.DirectProbeTarget) (protocol.DirectProbeResult, error) {
 	c.mu.Lock()
 	c.directCalls++
+	c.directTargets = append(c.directTargets, target)
 	c.mu.Unlock()
-	return protocol.DirectProbeResult{
+	return protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.TargetAgentID, AddressFingerprint: target.AddressFingerprint,
 		Network: "reachable", Identity: "verified", Eligible: true, CheckedAt: 100,
 	}, nil
@@ -71,11 +73,11 @@ func (c *relaySchedulerCaller) CallRelayProbe(ctx context.Context, _ string, _ u
 	if block != nil {
 		select {
 		case <-ctx.Done():
-			return protocol.RelayProbeResult{}, context.Cause(ctx)
+			return protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy}, context.Cause(ctx)
 		case <-block:
 		}
 	}
-	return protocol.RelayProbeResult{
+	return protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.TargetAgentID, State: protocol.RelayProbeReachable,
 		Stage: protocol.RelayProbeStageResponse, CheckedAt: 100, LatencyMS: 9,
 	}, nil
@@ -90,7 +92,7 @@ func (c *relaySchedulerCaller) snapshot() (int, []protocol.RelayProbeTarget) {
 func TestSchedulerRunsDirectAndRelayPathsButTracksManualProgressPerTarget(t *testing.T) {
 	release := make(chan struct{})
 	caller := &relaySchedulerCaller{relayStart: make(chan struct{}), relayBlock: release}
-	scheduler, service := relaySchedulerForTest(caller, consts.PeerRouteModeDirectFirst, true, true)
+	scheduler, service := relaySchedulerForTest(caller, true, true)
 	runCtx, cancelRun := context.WithCancel(t.Context())
 	runDone := make(chan error, 1)
 	go func() { runDone <- scheduler.Run(runCtx) }()
@@ -128,14 +130,18 @@ func TestSchedulerRunsDirectAndRelayPathsButTracksManualProgressPerTarget(t *tes
 	require.Equal(t, 1, directCalls)
 	require.Equal(t, []protocol.RelayProbeTarget{{
 		TargetAgentID: "target", SourceRelayGeneration: 11, TargetRelayGeneration: 22,
+		Policy: protocol.ProbeBypassBusinessPolicy,
 	}}, relayCalls)
 	require.True(t, service.directSnapshot("source").Targets["target"].Eligible)
 	require.Equal(t, protocol.RelayProbeReachable, service.relayPathSnapshot("source").Targets["target"].State)
 }
 
-func TestSchedulerRelayOnlyNeverQueuesDirectProbe(t *testing.T) {
+func TestSchedulerManualBypassesDisabledDirectPolicyButMarksItIneligible(t *testing.T) {
 	caller := &relaySchedulerCaller{}
-	scheduler, service := relaySchedulerForTest(caller, consts.PeerRouteModeRelayOnly, true, true)
+	scheduler, service := relaySchedulerForTest(caller, true, true)
+	finder := scheduler.finder.(relaySchedulerFinder)
+	finder.source.DirectOutboundEnabled = false
+	scheduler.finder = finder
 	runCtx, cancelRun := context.WithCancel(t.Context())
 	runDone := make(chan error, 1)
 	go func() { runDone <- scheduler.Run(runCtx) }()
@@ -149,9 +155,10 @@ func TestSchedulerRelayOnlyNeverQueuesDirectProbe(t *testing.T) {
 		return found && progress.State == "completed"
 	}, time.Second, time.Millisecond)
 	directCalls, relayCalls := caller.snapshot()
-	require.Zero(t, directCalls)
+	require.Equal(t, 1, directCalls)
 	require.Len(t, relayCalls, 1)
-	require.Empty(t, service.directSnapshot("source").Targets)
+	require.False(t, service.directSnapshot("source").Targets["target"].Eligible)
+	require.Equal(t, "reachable", service.directSnapshot("source").Targets["target"].Network)
 	require.Equal(t, protocol.RelayProbeReachable, service.relayPathSnapshot("source").Targets["target"].State)
 
 	cancelRun()
@@ -178,7 +185,7 @@ func TestSchedulerOnlyRunsPathsWhoseContractsAndInputsAreAvailable(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			caller := &relaySchedulerCaller{}
 			scheduler, _ := relaySchedulerForTestWithInputs(
-				caller, consts.PeerRouteModeDirectFirst,
+				caller,
 				test.sourceCapability, test.targetCapability, test.targetDirect, test.targetAddresses,
 			)
 			runCtx, cancelRun := context.WithCancel(t.Context())
@@ -205,16 +212,14 @@ func TestSchedulerOnlyRunsPathsWhoseContractsAndInputsAreAvailable(t *testing.T)
 
 func relaySchedulerForTest(
 	caller *relaySchedulerCaller,
-	mode string,
 	sourceCapability bool,
 	targetCapability bool,
 ) (*Scheduler, *Service) {
-	return relaySchedulerForTestWithInputs(caller, mode, sourceCapability, targetCapability, true, true)
+	return relaySchedulerForTestWithInputs(caller, sourceCapability, targetCapability, true, true)
 }
 
 func relaySchedulerForTestWithInputs(
 	caller *relaySchedulerCaller,
-	mode string,
 	sourceCapability bool,
 	targetCapability bool,
 	targetDirect bool,
@@ -227,15 +232,20 @@ func relaySchedulerForTestWithInputs(
 		return []string{protocol.AgentCapabilityRelayHTTPPingV1}
 	}
 	source := ProbeTarget{
-		AgentID: "source", ControlGeneration: 7, PeerRouteMode: mode,
-		Capabilities: capability(sourceCapability),
+		AgentID: "source", ControlGeneration: 7,
+		Capabilities:         capability(sourceCapability),
+		DirectInboundEnabled: true, DirectOutboundEnabled: true,
+		RelayInboundEnabled: true, RelayOutboundEnabled: true, RelayMode: consts.RelayModeInherit,
 	}
+	source.Capabilities = append(source.Capabilities, protocol.AgentCapabilityDirectTunnelV1)
 	target := ProbeTarget{
 		AgentID: "target", Name: "Target", ControlGeneration: 8,
-		Capabilities: capability(targetCapability),
+		Capabilities:         capability(targetCapability),
+		DirectInboundEnabled: true, DirectOutboundEnabled: true,
+		RelayInboundEnabled: true, RelayOutboundEnabled: true, RelayMode: consts.RelayModeInherit,
 	}
 	if targetDirect {
-		target.Capabilities = append(target.Capabilities, protocol.AgentCapabilityDirectIngressV1)
+		target.Capabilities = append(target.Capabilities, protocol.AgentCapabilityDirectTunnelV1)
 	}
 	if targetAddresses {
 		target.Addresses = []protocol.Address{{URL: "http://target"}}

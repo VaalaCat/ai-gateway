@@ -67,7 +67,7 @@ type adminPrivateChannelShareQuery struct{ ctx *baseContext }
 
 func (q *adminPrivateChannelQuery) GetByID(id uint) (*models.PrivateChannel, error) {
 	var pc models.PrivateChannel
-	err := q.ctx.GetDB().First(&pc, id).Error
+	err := q.ctx.GetCoreDB().First(&pc, id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -76,13 +76,13 @@ func (q *adminPrivateChannelQuery) GetByID(id uint) (*models.PrivateChannel, err
 
 func (q *adminPrivateChannelQuery) CountByOwner(ownerID uint) (int64, error) {
 	var n int64
-	err := q.ctx.GetDB().Model(&models.PrivateChannel{}).
+	err := q.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("owner_id = ?", ownerID).Count(&n).Error
 	return n, err
 }
 
 func (q *adminPrivateChannelQuery) ListOwnedBy(ownerID uint, opts ListOptions, filter PrivateChannelFilter) ([]models.PrivateChannel, int64, error) {
-	db := q.ctx.GetDB().Model(&models.PrivateChannel{}).Where("owner_id = ?", ownerID)
+	db := q.ctx.GetCoreDB().Model(&models.PrivateChannel{}).Where("owner_id = ?", ownerID)
 	if filter.Search != "" {
 		db = db.Where("name LIKE ?", "%"+filter.Search+"%")
 	}
@@ -105,7 +105,7 @@ func (q *adminPrivateChannelQuery) ListOwnedBy(ownerID uint, opts ListOptions, f
 }
 
 func (q *adminPrivateChannelQuery) ListAcrossOwners(opts ListOptions, filter PrivateChannelFilter) ([]models.PrivateChannel, int64, error) {
-	db := q.ctx.GetDB().Model(&models.PrivateChannel{})
+	db := q.ctx.GetCoreDB().Model(&models.PrivateChannel{})
 	if filter.OwnerID != nil {
 		db = db.Where("owner_id = ?", *filter.OwnerID)
 	}
@@ -163,7 +163,7 @@ func (q *adminPrivateChannelQuery) CountByBaseURLPrefix(prefix string) (int64, [
 	pattern := escaped + "%"
 
 	var count int64
-	if err := q.ctx.GetDB().Model(&models.PrivateChannel{}).
+	if err := q.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("base_url LIKE ? ESCAPE '\\'", pattern).
 		Count(&count).Error; err != nil {
 		return 0, nil, err
@@ -173,7 +173,7 @@ func (q *adminPrivateChannelQuery) CountByBaseURLPrefix(prefix string) (int64, [
 	if count == 0 {
 		return 0, pairs, nil
 	}
-	if err := q.ctx.GetDB().Model(&models.PrivateChannel{}).
+	if err := q.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("base_url LIKE ? ESCAPE '\\'", pattern).
 		Select("owner_id, name AS channel_name").
 		Order("id ASC").
@@ -211,7 +211,7 @@ func (q *adminPrivateChannelQuery) ListVisibleTo(userID uint, userGroupIDs []uin
 	if userID == 0 {
 		return nil, nil
 	}
-	db := q.ctx.GetDB().Model(&models.PrivateChannel{}).Where("status = 1")
+	db := q.ctx.GetCoreDB().Model(&models.PrivateChannel{}).Where("status = 1")
 	db = db.Where(`
 		owner_id = ? OR id IN (SELECT channel_id FROM private_channel_shares
 			WHERE (target_type = 'user' AND target_id = ?)
@@ -225,7 +225,7 @@ func (q *adminPrivateChannelQuery) ListVisibleTo(userID uint, userGroupIDs []uin
 
 func (q *adminPrivateChannelShareQuery) ListSharesForUser(userID uint, groupIDs []uint) ([]models.PrivateChannelShare, error) {
 	var rows []models.PrivateChannelShare
-	err := q.ctx.GetDB().Where(
+	err := q.ctx.GetCoreDB().Where(
 		"(target_type = 'user' AND target_id = ?) OR (target_type = 'group' AND target_id IN ?)",
 		userID, normalizeGroupIDs(groupIDs),
 	).Find(&rows).Error
@@ -234,7 +234,7 @@ func (q *adminPrivateChannelShareQuery) ListSharesForUser(userID uint, groupIDs 
 
 func (q *adminPrivateChannelShareQuery) ListSharesByChannel(channelID uint) ([]models.PrivateChannelShare, error) {
 	var rows []models.PrivateChannelShare
-	err := q.ctx.GetDB().Where("channel_id = ?", channelID).Find(&rows).Error
+	err := q.ctx.GetCoreDB().Where("channel_id = ?", channelID).Find(&rows).Error
 	return rows, err
 }
 
@@ -285,7 +285,7 @@ var privateChannelReservedPatchKeys = []string{
 }
 
 func (m *adminPrivateChannelMutation) Create(pc *models.PrivateChannel) error {
-	if err := m.ctx.GetDB().Create(pc).Error; err != nil {
+	if err := m.ctx.GetCoreDB().Create(pc).Error; err != nil {
 		return err
 	}
 	m.refreshOwnerGauge(pc.OwnerID)
@@ -296,13 +296,13 @@ func (m *adminPrivateChannelMutation) Update(id, ownerID uint, patch map[string]
 	for _, k := range privateChannelReservedPatchKeys {
 		delete(patch, k)
 	}
-	return m.ctx.GetDB().Model(&models.PrivateChannel{}).
+	return m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("id = ? AND owner_id = ?", id, ownerID).
 		Updates(patch).Error
 }
 
 func (m *adminPrivateChannelMutation) UpdateKey(id, ownerID uint, newCipher []byte, newLast4 string) error {
-	return m.ctx.GetDB().Model(&models.PrivateChannel{}).
+	return m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("id = ? AND owner_id = ?", id, ownerID).
 		Updates(map[string]any{
 			"key_cipher": newCipher,
@@ -311,7 +311,7 @@ func (m *adminPrivateChannelMutation) UpdateKey(id, ownerID uint, newCipher []by
 }
 
 func (m *adminPrivateChannelMutation) Delete(id, ownerID uint) error {
-	if err := m.ctx.GetDB().
+	if err := m.ctx.GetCoreDB().
 		Where("id = ? AND owner_id = ?", id, ownerID).
 		Delete(&models.PrivateChannel{}).Error; err != nil {
 		return err
@@ -321,13 +321,13 @@ func (m *adminPrivateChannelMutation) Delete(id, ownerID uint) error {
 }
 
 func (m *adminPrivateChannelMutation) AdminDisable(id uint) error {
-	return m.ctx.GetDB().Model(&models.PrivateChannel{}).
+	return m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("id = ?", id).
 		Update("status", 0).Error
 }
 
 func (m *adminPrivateChannelMutation) DeleteByOwner(ownerID uint) error {
-	if err := m.ctx.GetDB().
+	if err := m.ctx.GetCoreDB().
 		Where("owner_id = ?", ownerID).
 		Delete(&models.PrivateChannel{}).Error; err != nil {
 		return err
@@ -347,7 +347,7 @@ func (m *adminPrivateChannelMutation) refreshOwnerGauge(ownerID uint) {
 		return
 	}
 	var n int64
-	if err := m.ctx.GetDB().Model(&models.PrivateChannel{}).
+	if err := m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("owner_id = ?", ownerID).Count(&n).Error; err != nil {
 		return
 	}
@@ -355,7 +355,7 @@ func (m *adminPrivateChannelMutation) refreshOwnerGauge(ownerID uint) {
 }
 
 func (m *adminPrivateChannelShareMutation) DeleteSharesByTarget(targetType string, targetID uint) error {
-	return m.ctx.GetDB().
+	return m.ctx.GetCoreDB().
 		Where("target_type = ? AND target_id = ?", targetType, targetID).
 		Delete(&models.PrivateChannelShare{}).Error
 }

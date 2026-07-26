@@ -72,7 +72,13 @@ func (h *Handler) GetAllInflight(c *app.Context, _ api.EmptyRequest) (AllInfligh
 		byUID[a.AgentID] = a
 	}
 	h.enrichLastSeen(agents)
-	batch := h.Connections.BuildMany(agents)
+	batch, err := h.Connections.BuildManyContext(c.RequestContext(), agents)
+	if err != nil {
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return AllInflightResponse{}, apiErr
+		}
+		return AllInflightResponse{}, api.InternalError("build connection snapshot failed", err)
+	}
 	if apiErr := requestContextAPIError(c); apiErr != nil {
 		return AllInflightResponse{}, apiErr
 	}

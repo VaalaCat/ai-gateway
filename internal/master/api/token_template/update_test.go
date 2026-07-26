@@ -26,7 +26,7 @@ func setupTplUpdateTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	}
 
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	// Update does not publish events; bus is kept for setup symmetry with token package.
 	application.SetEventBus(eventbus.NewMemoryBus())
 

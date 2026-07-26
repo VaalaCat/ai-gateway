@@ -13,6 +13,7 @@ import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -93,8 +94,7 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const baseHref = apiMode === "admin" ? "/model-routings" : "/profile/model-routings";
   const isAdmin = apiMode === "admin";
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
 
   const filterSpec = useMemo(() => ({
     search: { kind: "text", placeholder: t("filters.searchPlaceholder") },
@@ -111,12 +111,7 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
     } : {}),
   } satisfies FilterSpec), [t, isAdmin]);
 
-  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
-
-  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
-    setPage(1);
-    setFilterValuesRaw(next);
-  };
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const scopeFilter = filterValues.scope ? String(filterValues.scope) as "global" | "user" : undefined;
   const userIdFilter = filterValues.user_id ? String(filterValues.user_id) : "";
@@ -137,12 +132,7 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const pageCount = Math.ceil(total / pageSize) || 1;
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
-    if (newPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(newPageSize);
-    } else {
-      setPage(newPage);
-    }
+    setPagination(newPageSize === pageSize ? newPage : 1, newPageSize);
   };
 
   const updateMut = useUpdateModelRouting(apiMode);

@@ -12,7 +12,6 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
-	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
@@ -42,25 +41,37 @@ func RunUpstreamScripts(
 	agent app.AgentApplication,
 	c *gin.Context,
 	rctx *state.RelayContext,
-	ch *models.Channel,
+	attempt state.Attempt,
 	proto codec.Protocol,
-	model string,
 	upstreamReq *http.Request,
 	outboundBody []byte,
 ) ([]byte, bool, state.AttemptResult) {
+	if attempt.Channel == nil {
+		return outboundBody, false, state.AttemptResult{}
+	}
 	eng := engineOf(agent)
 	if eng == nil {
 		return outboundBody, false, state.AttemptResult{}
 	}
+	var userID, groupID uint
+	if info := rctx.Input.UserInfo; info != nil {
+		userID = info.UserID
+		groupID = info.GroupID
+	}
 	res := eng.Run(script.HookInput{
-		Hook:      script.HookUpstream,
-		ChannelID: ch.ID,
-		Model:     model,
-		User:      scriptUserMap(rctx.Input.UserInfo),
-		Headers:   scriptHeaderMap(c.Request.Header),
-		Channel:   map[string]any{"id": ch.ID, "name": ch.Name},
-		Protocol:  string(proto),
-		Body:      outboundBody,
+		Hook: script.HookUpstream,
+		Match: script.MatchInput{
+			Source:    attempt.Source,
+			ChannelID: attempt.SourceID,
+			Model:     attempt.RealModel,
+			UserID:    userID,
+			GroupID:   groupID,
+		},
+		User:     scriptUserMap(rctx.Input.UserInfo),
+		Headers:  scriptHeaderMap(c.Request.Header),
+		Channel:  map[string]any{"id": attempt.SourceID, "name": attempt.Channel.Name},
+		Protocol: string(proto),
+		Body:     outboundBody,
 	})
 	if res.Rejected {
 		c.AbortWithStatusJSON(res.Status, gin.H{

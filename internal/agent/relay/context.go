@@ -23,7 +23,7 @@ func NewContext(c *gin.Context, agent app.AgentApplication) *state.RelayContext 
 		Context: c,
 		Agent:   agent,
 		State: &state.RelayState{
-			Recorder: trace.NewRecorder(trace.Enabled(c), maxBody),
+			Recorder: trace.NewRecorder(trace.CaptureModeFromContext(c), maxBody),
 		},
 	}
 }

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -34,6 +34,11 @@ vi.mock("next-intl", () => ({
     unknown: "Unknown",
     unsupported: "Unsupported",
     stale: "Stale",
+    sourceDirectOutboundDisabled: "Source Direct outbound is disabled",
+    targetDirectInboundDisabled: "Target Direct inbound is disabled",
+    sourceRelayOutboundDisabled: "Source Relay outbound is disabled",
+    targetRelayInboundDisabled: "Target Relay inbound is disabled",
+    relayConnectionDisabled: "Relay connection is disabled",
     noRouteTargets: "No route targets",
     probeTarget: `Check ${values?.target ?? "target"}`,
     copyTargetDiagnostic: "Copy target diagnostics",
@@ -99,11 +104,27 @@ function page(data: RouteTargetSnapshot[]): RouteTargetsPage {
     snapshot_seq: 7,
     observed_at: 100,
     summaries: {
-      direct: { state: "unknown", reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: data.length },
-      relay: { state: "unknown", reachable: 0, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: data.length },
+      direct: { state: "unknown", disabled: 0, reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: data.length },
+      relay: { state: "unknown", disabled: 0, reachable: 0, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: data.length },
     },
     data,
     limit: 20,
+  };
+}
+
+function allDisabledPage(): RouteTargetsPage {
+  const sourcePolicy = target("source-policy", "disabled", "disabled");
+  sourcePolicy.direct.policy_reason = "source_direct_outbound_disabled";
+  sourcePolicy.relay.policy_reason = "source_relay_outbound_disabled";
+  const targetPolicy = target("target-policy", "disabled", "disabled");
+  targetPolicy.direct.policy_reason = "target_direct_inbound_disabled";
+  targetPolicy.relay.policy_reason = "target_relay_inbound_disabled";
+  return {
+    ...page([sourcePolicy, targetPolicy]),
+    summaries: {
+      direct: { state: "disabled", disabled: 2, reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: 2 },
+      relay: { state: "disabled", disabled: 2, reachable: 0, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 2 },
+    },
   };
 }
 
@@ -160,6 +181,63 @@ describe("AgentRouteTargets", () => {
     expect(screen.queryByText(/relay_(unknown|unsupported|stale)/)).not.toBeInTheDocument();
   });
 
+  it("shows all four policy reasons for disabled Direct and Relay paths", async () => {
+    const user = userEvent.setup();
+    const sourcePolicy = target("source-policy", "disabled", "disabled");
+    sourcePolicy.direct.policy_reason = "source_direct_outbound_disabled";
+    sourcePolicy.relay.policy_reason = "source_relay_outbound_disabled";
+    const targetPolicy = target("target-policy", "disabled", "disabled");
+    targetPolicy.direct.policy_reason = "target_direct_inbound_disabled";
+    targetPolicy.relay.policy_reason = "target_relay_inbound_disabled";
+    renderTargets({ pages: [page([sourcePolicy, targetPolicy])] });
+
+    for (const reasonCode of [
+      "source_direct_outbound_disabled",
+      "target_direct_inbound_disabled",
+      "source_relay_outbound_disabled",
+      "target_relay_inbound_disabled",
+    ]) {
+      expect(screen.getByText(reasonCode)).toBeInTheDocument();
+    }
+    for (const badge of screen.getAllByText("Disabled")) {
+      expect(badge).toHaveAttribute("data-variant", "secondary");
+    }
+
+    await user.hover(screen.getByText("source_direct_outbound_disabled"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Source Direct outbound is disabled");
+  });
+
+  it("renders an all-disabled API page without weakening the mixed summary fixture", () => {
+    const mixed = page([target("mixed")]);
+    expect(mixed.summaries.direct.disabled).toBe(0);
+    expect(mixed.summaries.relay.disabled).toBe(0);
+
+    renderTargets({ pages: [allDisabledPage()] });
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getAllByText("Disabled")).toHaveLength(4);
+    expect(screen.getByText("source_direct_outbound_disabled")).toBeInTheDocument();
+    expect(screen.getByText("target_relay_inbound_disabled")).toBeInTheDocument();
+  });
+
+  it("prefers policy_reason over last_error and copies the complete target diagnostic", async () => {
+    const user = userEvent.setup();
+    const clipboardWrite = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const disabled = target("agent-policy", "disabled", "disabled");
+    disabled.direct.policy_reason = "target_direct_inbound_disabled";
+    disabled.relay.policy_reason = "relay_connection_disabled";
+    renderTargets({ pages: [page([disabled])] });
+
+    expect(screen.getByText("target_direct_inbound_disabled")).toBeInTheDocument();
+    expect(screen.getByText("relay_connection_disabled")).toBeInTheDocument();
+    expect(screen.queryByText("direct_disabled")).not.toBeInTheDocument();
+    expect(screen.queryByText("relay_disabled")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy target diagnostics" }));
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledOnce());
+    expect(JSON.parse(clipboardWrite.mock.calls[0][0])).toEqual(disabled);
+  });
+
   it("renders a bounded 100-target window", () => {
     const targets = Array.from({ length: 105 }, (_, index) => target(`agent-${index}`));
     renderTargets({ pages: [page(targets)], hasNextPage: true });
@@ -180,6 +258,36 @@ describe("AgentRouteTargets", () => {
     expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
   });
 
+  it("shows skeletons only when loading without targets", () => {
+    const { container } = renderTargets({ pages: undefined, isLoading: true });
+
+    expect(container.querySelectorAll("[data-slot=skeleton]")).toHaveLength(2);
+    expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
+  });
+
+  it("keeps matching targets visible during background loading", () => {
+    const { container } = renderTargets({
+      pages: [page([target("agent-b")])],
+      isLoading: true,
+    });
+
+    expect(screen.getByText("Agent agent-b")).toBeInTheDocument();
+    expect(container.querySelector("[data-slot=skeleton]")).not.toBeInTheDocument();
+  });
+
+  it("keeps targets visible while the next page is fetching", () => {
+    const first = { ...page([target("agent-b")]), next_cursor: "next" };
+    const { container } = renderTargets({
+      pages: [first],
+      hasNextPage: true,
+      isFetchingNextPage: true,
+    });
+
+    expect(screen.getByText("Agent agent-b")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeDisabled();
+    expect(container.querySelector("[data-slot=skeleton]")).not.toBeInTheDocument();
+  });
+
   it("probes one target and reports clipboard failure without throwing", async () => {
     const onProbeTarget = vi.fn();
     const user = userEvent.setup();
@@ -193,5 +301,28 @@ describe("AgentRouteTargets", () => {
     await user.click(screen.getByRole("button", { name: "Copy target diagnostics" }));
     expect(clipboardWrite).toHaveBeenCalledOnce();
     expect(toastError).toHaveBeenCalledWith("Could not copy target diagnostics");
+  });
+
+  it("disables snapshot-dependent actions while keeping diagnostics available", async () => {
+    const user = userEvent.setup();
+    const clipboardWrite = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const onProbeTarget = vi.fn();
+    const onLoadMore = vi.fn();
+    renderTargets({
+      operationsDisabled: true,
+      hasNextPage: true,
+      onProbeTarget,
+      onLoadMore,
+    });
+
+    expect(screen.getByRole("button", { name: "Check Agent agent-b" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeDisabled();
+    const copyButton = screen.getByRole("button", { name: "Copy target diagnostics" });
+    expect(copyButton).toBeEnabled();
+
+    await user.click(copyButton);
+    await waitFor(() => expect(clipboardWrite).toHaveBeenCalledOnce());
+    expect(onProbeTarget).not.toHaveBeenCalled();
+    expect(onLoadMore).not.toHaveBeenCalled();
   });
 });

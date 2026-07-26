@@ -23,11 +23,13 @@ func TestStreamRejectsTypedNilInputsBeforeAdmission(t *testing.T) {
 	require.False(t, stream.uploadStarted.Load())
 	response := frozenTrailerStream(t, wire.Headers{StatusCode: 200}, "")
 	var nilWriter *panicResponseWriter
-	require.NotPanics(t, func() { require.ErrorIs(t, response.CopyResponse(t.Context(), nilWriter), errNilResponseWriter) })
+	require.NotPanics(t, func() {
+		require.ErrorIs(t, copyAttemptResponse(response, t.Context(), nilWriter), errNilResponseWriter)
+	})
 	require.False(t, response.responseOwner.claimed)
 	require.NoError(t, stream.Commit(t.Context()))
 	require.NoError(t, stream.Upload(t.Context(), bytes.NewReader(nil)))
-	require.NoError(t, response.CopyResponse(t.Context(), httptest.NewRecorder()))
+	require.NoError(t, copyAttemptResponse(response, t.Context(), httptest.NewRecorder()))
 }
 
 func TestIsNilInterfaceHandlesNilableAndValueKinds(t *testing.T) {
@@ -66,10 +68,10 @@ func TestStreamPublicInputsRejectNilBeforeOneShotAdmission(t *testing.T) {
 	require.ErrorIs(t, stream.Upload(t.Context(), nil), errNilReader)
 	require.False(t, stream.uploadStarted.Load())
 	response := frozenTrailerStream(t, wire.Headers{StatusCode: 200}, "")
-	require.ErrorIs(t, response.CopyResponse(nil, httptest.NewRecorder()), errNilContext)
-	require.ErrorIs(t, response.CopyResponse(t.Context(), nil), errNilResponseWriter)
+	require.ErrorIs(t, copyAttemptResponse(response, nil, httptest.NewRecorder()), errNilContext)
+	require.ErrorIs(t, copyAttemptResponse(response, t.Context(), nil), errNilResponseWriter)
 	require.False(t, response.responseOwner.claimed)
-	require.NoError(t, response.CopyResponse(t.Context(), httptest.NewRecorder()))
+	require.NoError(t, copyAttemptResponse(response, t.Context(), httptest.NewRecorder()))
 }
 
 func TestStreamUploadRejectsInvalidReadCountsWithoutPanic(t *testing.T) {
@@ -99,9 +101,9 @@ func newPublicInputStream(t *testing.T) *Stream {
 	w := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error { return nil })
 	go w.Run()
 	session := &Session{generation: 1, limits: testLimits(1), ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now)}
-	stream := newStream(session, ctx, t.Context(), testStreamID(93), 0)
+	stream := newStream(session, ctx, testStreamID(93), 0, "")
 	stream.commitState.Store(uint32(wire.Committed))
 	t.Cleanup(func() { stream.abortBeforeRun(context.Canceled); cancel(); <-w.Done() })
 	return stream

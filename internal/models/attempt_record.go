@@ -11,11 +11,13 @@ const (
 	AgentPathRelay  AgentPathKind = "relay"
 
 	AgentPathSelected    AgentPathResult = "selected"
+	AgentPathDisabled    AgentPathResult = "disabled"
 	AgentPathUnavailable AgentPathResult = "unavailable"
 	AgentPathRejected    AgentPathResult = "rejected"
 	AgentPathUncertain   AgentPathResult = "uncertain"
 
 	AgentPathConnect      AgentPathStage = "connect"
+	AgentPathPolicy       AgentPathStage = "policy"
 	AgentPathAuthenticate AgentPathStage = "authenticate"
 	AgentPathDispatch     AgentPathStage = "dispatch"
 	AgentPathResponse     AgentPathStage = "response"

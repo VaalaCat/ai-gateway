@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef, type VisibilityState } from "@tanstack/react-table";
 import { toast } from "sonner";
-import { ChevronRight, Copy, Database, MoreHorizontal, Plus, RefreshCw, Ticket, Info } from "lucide-react";
+import { ChevronRight, Copy, Database, Info, LoaderCircle, MoreHorizontal, Plus, RefreshCw, Ticket, TriangleAlert } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { copyTextWithFeedback } from "@/lib/utils/clipboard";
 
@@ -15,6 +15,7 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import type { ToolbarAction } from "@/components/data-table/toolbar-actions";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -43,6 +44,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { CopyableText } from "@/components/business/copyable-text";
 import { AgentAddressEditor } from "@/components/business/agent-address-editor";
+import { BackgroundRefreshStatus } from "@/components/business/background-refresh-status";
 import { AgentConnectionStatus } from "@/components/business/agent-connection-status";
 import { AgentEditDialog } from "@/components/business/agent-edit-dialog";
 import { formatErrorToast } from "@/lib/api/error-toast";
@@ -86,13 +88,24 @@ export default function AgentsPage() {
   } satisfies FilterSpec), [t, tc]);
 
   const [filterValues, setFilterValues] = useFilterState(filterSpec);
+  const search = filterValues.search ? String(filterValues.search) : "";
+  const status = filterValues.status !== undefined && filterValues.status !== ""
+    ? Number(filterValues.status)
+    : undefined;
 
-  const { data, isLoading } = useAgents({
-    page,
-    page_size: pageSize,
-    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
-    ...(filterValues.status !== undefined && filterValues.status !== "" ? { status: Number(filterValues.status) } : {}),
-  });
+  const { data, isError, isFetching, isPending, refetch } = useAgents(
+    {
+      page,
+      page_size: pageSize,
+      ...(search ? { search } : {}),
+      ...(status !== undefined ? { status } : {}),
+    },
+    { retainPreviousData: true },
+  );
+  const initialLoading = isPending && !data;
+  const initialError = isError && !data;
+  const stale = isError && !!data;
+  const refreshing = isFetching && !!data && !stale;
 
   const agents = data?.data ?? [];
   const total = data?.total ?? 0;
@@ -114,6 +127,11 @@ export default function AgentsPage() {
   };
 
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- selection belongs to the current list parameters
+    setRowSelection({});
+  }, [page, pageSize, search, status]);
 
   const createMutation = useCreateAgent();
   const deleteMutation = useDeleteAgent();
@@ -369,10 +387,38 @@ export default function AgentsPage() {
         </CollapsibleContent>
       </Collapsible>
 
-      <DataTable
+      {initialLoading ? (
+        <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+          <LoaderCircle className="size-4 animate-spin" />
+          <span>{t("loadingAgents")}</span>
+        </div>
+      ) : null}
+
+      {stale ? (
+        <div role="status" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
+          <TriangleAlert className="size-4" />
+          <span>{t("dataStale")}</span>
+          <Button type="button" variant="ghost" size="xs" onClick={() => void refetch()}>
+            {t("retry")}
+          </Button>
+        </div>
+      ) : null}
+
+      {initialError ? (
+        <Alert variant="destructive">
+          <TriangleAlert />
+          <AlertTitle>{t("listLoadFailed")}</AlertTitle>
+          <AlertDescription>
+            <Button type="button" variant="outline" size="sm" onClick={() => void refetch()}>
+              {t("retry")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : (
+        <DataTable
         columns={columns}
         data={agents}
-        loading={isLoading}
+        loading={initialLoading}
         defaultColumnVisibility={breakpoint === "xs" ? undefined : {}}
         columnVisibilityState={columnVisibility}
         onColumnVisibilityChange={(next) => {
@@ -393,6 +439,13 @@ export default function AgentsPage() {
             spec={filterSpec}
             value={filterValues}
             onChange={setFilterValues}
+            secondaryContent={(
+              <BackgroundRefreshStatus
+                refreshing={refreshing}
+                label={t("refreshing")}
+                testId="agents-refresh-status"
+              />
+            )}
             secondaryActions={[
               Object.keys(rowSelection).length > 0 && {
                 label: t("fullSyncSelected", { count: Object.keys(rowSelection).length }),
@@ -440,7 +493,8 @@ export default function AgentsPage() {
             }
           />
         }
-      />
+        />
+      )}
 
       {/* Create Dialog */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>

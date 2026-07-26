@@ -10,19 +10,6 @@ import (
 )
 
 var errInvalidRelayConfiguration = errors.New("invalid relay configuration")
-var errInvalidPeerRouteMode = errors.New("invalid peer route mode")
-
-func normalizePeerRouteMode(mode string, defaultEmptyMode bool) (string, error) {
-	if mode == "" && defaultEmptyMode {
-		return consts.PeerRouteModeDirectFirst, nil
-	}
-	switch mode {
-	case consts.PeerRouteModeDirectFirst, consts.PeerRouteModeRelayOnly:
-		return mode, nil
-	default:
-		return "", errInvalidPeerRouteMode
-	}
-}
 
 func normalizeRelayConfiguration(mode, relayURI string, defaultEmptyMode bool) (string, string, error) {
 	if mode == "" && defaultEmptyMode {
@@ -50,7 +37,7 @@ func normalizeRelayConfiguration(mode, relayURI string, defaultEmptyMode bool) (
 
 func mergeAgentPatch(current models.Agent, patch AgentPatch) (models.Agent, map[string]any, error) {
 	merged := current
-	updates := make(map[string]any, 8)
+	updates := make(map[string]any, 11)
 
 	if patch.Name != nil {
 		merged.Name = *patch.Name
@@ -81,13 +68,21 @@ func mergeAgentPatch(current models.Agent, patch AgentPatch) (models.Agent, map[
 	if patch.RelayURI != nil {
 		merged.RelayURI = *patch.RelayURI
 	}
-	if patch.PeerRouteMode != nil {
-		mode, err := normalizePeerRouteMode(*patch.PeerRouteMode, false)
-		if err != nil {
-			return models.Agent{}, nil, err
-		}
-		merged.PeerRouteMode = mode
-		updates["peer_route_mode"] = mode
+	if patch.DirectInboundEnabled != nil {
+		merged.DirectInboundEnabled = *patch.DirectInboundEnabled
+		updates["direct_inbound_enabled"] = *patch.DirectInboundEnabled
+	}
+	if patch.DirectOutboundEnabled != nil {
+		merged.DirectOutboundEnabled = *patch.DirectOutboundEnabled
+		updates["direct_outbound_enabled"] = *patch.DirectOutboundEnabled
+	}
+	if patch.RelayInboundEnabled != nil {
+		merged.RelayInboundEnabled = *patch.RelayInboundEnabled
+		updates["relay_inbound_enabled"] = *patch.RelayInboundEnabled
+	}
+	if patch.RelayOutboundEnabled != nil {
+		merged.RelayOutboundEnabled = *patch.RelayOutboundEnabled
+		updates["relay_outbound_enabled"] = *patch.RelayOutboundEnabled
 	}
 
 	mode, relayURI, err := normalizeRelayConfiguration(merged.RelayMode, merged.RelayURI, false)

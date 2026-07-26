@@ -1,14 +1,17 @@
 package connectivity
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 )
 
@@ -143,6 +146,86 @@ func (s *Service) BuildMany(agents []models.Agent) SnapshotBatch {
 	}
 }
 
+func (s *Service) BuildContext(ctx context.Context, agent models.Agent) (ConnectionSnapshot, error) {
+	batch, err := s.BuildManyContext(ctx, []models.Agent{agent})
+	if err != nil {
+		return ConnectionSnapshot{}, err
+	}
+	return batch.Items[agent.AgentID], nil
+}
+
+func (s *Service) BuildManyContext(ctx context.Context, agents []models.Agent) (SnapshotBatch, error) {
+	identity := s.nextIdentity()
+	items := make(map[string]ConnectionSnapshot, len(agents))
+	sources := make(map[string]models.Agent, len(agents))
+	targetSet := make(map[string]struct{})
+	for _, source := range agents {
+		sources[source.AgentID] = source
+		snapshot := s.build(source, identity)
+		items[source.AgentID] = snapshot
+		for targetID := range snapshot.RouteTargets.Targets {
+			if targetID != "" {
+				targetSet[targetID] = struct{}{}
+			}
+		}
+	}
+	batch := SnapshotBatch{SnapshotEpoch: identity.epoch, SnapshotSeq: identity.sequence, ObservedAt: identity.observedAt, Items: items}
+	if len(targetSet) == 0 {
+		return batch, nil
+	}
+	var policies map[string]models.Agent
+	if s.options.AgentTransportPolicyFinder != nil {
+		targetIDs := make([]string, 0, len(targetSet))
+		for targetID := range targetSet {
+			targetIDs = append(targetIDs, targetID)
+		}
+		sort.Strings(targetIDs)
+		var err error
+		policies, err = s.options.AgentTransportPolicyFinder.FindAgentTransportPolicies(ctx, targetIDs)
+		if err != nil {
+			return SnapshotBatch{}, err
+		}
+	}
+	for sourceID, snapshot := range batch.Items {
+		overlayRouteTargetPolicies(&snapshot, sources[sourceID], policies)
+		batch.Items[sourceID] = snapshot
+	}
+	return batch, nil
+}
+
+func overlayRouteTargetPolicies(snapshot *ConnectionSnapshot, source models.Agent, policies map[string]models.Agent) {
+	if snapshot == nil {
+		return
+	}
+	for targetID, target := range snapshot.RouteTargets.Targets {
+		if !source.DirectOutboundEnabled {
+			disableDirectRouteTarget(&target.Direct, consts.RouteErrorSourceDirectOutboundDisabled)
+		} else if policy, ok := policies[targetID]; ok && !policy.DirectInboundEnabled {
+			disableDirectRouteTarget(&target.Direct, consts.RouteErrorTargetDirectInboundDisabled)
+		}
+		if !source.RelayOutboundEnabled {
+			disableRelayRouteTarget(&target.Relay, consts.RouteErrorSourceRelayOutboundDisabled)
+		} else if policy, ok := policies[targetID]; ok && !policy.RelayInboundEnabled {
+			disableRelayRouteTarget(&target.Relay, consts.RouteErrorTargetRelayInboundDisabled)
+		}
+		snapshot.RouteTargets.Targets[targetID] = target
+	}
+	snapshot.RouteTargets.Summaries = summarizeRouteTargets(snapshot.RouteTargets.Targets)
+	snapshot.RouteTargets.Generation = routeTargetsGeneration(snapshot.RouteTargets)
+	snapshot.TargetSummaries = snapshot.RouteTargets.Summaries
+}
+
+func disableDirectRouteTarget(target *RouteDirectTargetSnapshot, reason string) {
+	target.State = routeTargetStateDisabled
+	target.PolicyReason = reason
+	target.Eligible = false
+}
+
+func disableRelayRouteTarget(target *RelayTargetSnapshot, reason string) {
+	target.State = protocol.RelayProbeState(routeTargetStateDisabled)
+	target.PolicyReason = reason
+}
+
 func (s *Service) Authorize(agent models.Agent, op Operation) (OperationLease, error) {
 	if !isKnownOperation(op) {
 		return OperationLease{}, fmt.Errorf("unknown operation %q", op)
@@ -194,6 +277,7 @@ func (s *Service) build(agent models.Agent, identity snapshotIdentity) Connectio
 		ObservedAt:        identity.observedAt,
 		AgentID:           agent.AgentID,
 		AdminStatus:       agent.Status,
+		TransportPolicy:   transportPolicySnapshot(agent),
 		Control:           s.controlSnapshot(agent, control, hasControl, identity.observedAt),
 		Relay:             relaySnapshot(relay),
 		Direct:            s.directSnapshot(agent.AgentID),
@@ -201,6 +285,28 @@ func (s *Service) build(agent models.Agent, identity snapshotIdentity) Connectio
 		TargetSummaries:   routeTargets.Summaries,
 		RouteTargets:      routeTargets,
 		AllowedOperations: s.allowedOperations(agent, control, hasControl, relay),
+	}
+}
+
+func transportPolicySnapshot(agent models.Agent) AgentTransportPolicySnapshot {
+	direction := func(configured, physical bool) TransportDirectionSnapshot {
+		snapshot := TransportDirectionSnapshot{Configured: configured}
+		if !configured {
+			return snapshot
+		}
+		snapshot.Effective = physical
+		if !physical {
+			snapshot.ReasonCode = consts.RouteErrorRelayConnectionDisabled
+		}
+		return snapshot
+	}
+
+	relayPhysical := agent.RelayMode != consts.RelayModeDisabled
+	return AgentTransportPolicySnapshot{
+		DirectInbound:  direction(agent.DirectInboundEnabled, true),
+		DirectOutbound: direction(agent.DirectOutboundEnabled, true),
+		RelayInbound:   direction(agent.RelayInboundEnabled, relayPhysical),
+		RelayOutbound:  direction(agent.RelayOutboundEnabled, relayPhysical),
 	}
 }
 

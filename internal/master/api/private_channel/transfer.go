@@ -54,9 +54,7 @@ func (h *Handler) ImportHTTP(adapter *api.Adapter) gin.HandlerFunc {
 			api.WriteMappedError(adapter, ginCtx, err)
 			return
 		}
-		envelope, err := channelfile.Decode[channelfile.BYOKChannel](
-			ginCtx.Request.Body, channelfile.KindBYOKChannels,
-		)
+		envelope, err := channelfile.DecodeBYOKChannelImport(ginCtx.Request.Body)
 		if err != nil {
 			api.WriteMappedError(adapter, ginCtx, api.MapChannelFileError(err))
 			return
@@ -150,7 +148,7 @@ func selectPrivateChannels(
 			return nil, api.ErrorWithCode(http.StatusBadRequest, "too_many_channels", "too many channels", nil)
 		}
 		var rows []models.PrivateChannel
-		if err := daoCtx.GetDB().Where("owner_id = ? AND id IN ?", ownerID, selection.IDs).
+		if err := daoCtx.GetCoreDB().Where("owner_id = ? AND id IN ?", ownerID, selection.IDs).
 			Order("id ASC").Find(&rows).Error; err != nil {
 			return nil, api.InternalError("list private channels", err)
 		}
@@ -230,7 +228,7 @@ func (h *Handler) previewPrivateChannelImport(
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	var existing []string
-	if err := daoCtx.GetDB().Model(&models.PrivateChannel{}).Where("owner_id = ?", owner.UserID).
+	if err := daoCtx.GetCoreDB().Model(&models.PrivateChannel{}).Where("owner_id = ?", owner.UserID).
 		Pluck("name", &existing).Error; err != nil {
 		return preview, nil, api.InternalError("list private channel names", err)
 	}

@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/stretchr/testify/require"
@@ -50,6 +52,20 @@ func TestManagerCandidateFailureLogsAreSuppressedAndSanitized(t *testing.T) {
 		require.NotContains(t, entry.Message+fmt.Sprint(entry.ContextMap()), "token=secret")
 		require.NotContains(t, entry.Message+fmt.Sprint(entry.ContextMap()), "user:pass")
 	}
+}
+
+func TestManagerOpenAttemptStreamEnforcesRelayOutboundButProbeBypassesBusinessGate(t *testing.T) {
+	manager := NewManager(ManagerOptions{
+		RelayOutboundEnabled: func() bool { return false },
+	})
+
+	_, err := manager.OpenAttemptStream(t.Context(), agentproxy.AttemptStreamRequest{})
+	requirePolicyOpenFailure(t, err, consts.RouteErrorSourceRelayOutboundDisabled)
+
+	_, err = manager.OpenProbeStream(t.Context(), agentproxy.ProbeStreamRequest{
+		Policy: wire.ProbeBypassBusinessPolicy, TargetAgentID: "target-a", Remaining: time.Second,
+	})
+	require.ErrorIs(t, err, errRelayNotAvailable)
 }
 
 func TestSanitizeManagerErrorFailsClosedAfterURIRedaction(t *testing.T) {
@@ -130,7 +146,7 @@ func TestManagerSuccessfulCandidateRecoversSuppressedAuthFailures(t *testing.T) 
 	}
 	require.True(t, suppressor.Contains(authKey))
 
-	candidate := newSession(newMemorySessionConn(), 34, testLimits(1), SessionOptions{})
+	candidate := newSession(newMemorySessionConn(), 34, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	candidateCtx, cancelCandidate := context.WithCancel(t.Context())
 	candidateDone := make(chan error, 1)
 	go func() { candidateDone <- candidate.Run(candidateCtx) }()
@@ -175,8 +191,8 @@ func TestManagerConfigTransitionLogsInfoWithoutURI(t *testing.T) {
 
 func TestManagerSnapshotProjectsOnlyActiveSessionRecentErrors(t *testing.T) {
 	manager := NewManager(ManagerOptions{})
-	old := newSessionValue(nil, 1, testLimits(1), SessionOptions{})
-	current := newSessionValue(nil, 2, testLimits(1), SessionOptions{})
+	old := newSessionValue(nil, 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
+	current := newSessionValue(nil, 2, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	old.recordError(diagnostics.Event{Code: "stale", Stage: "read", At: time.Unix(1, 0)})
 	current.recordError(diagnostics.Event{Code: "current", Stage: "read", At: time.Unix(2, 0)})
 	manager.active = managerSlot{session: current, desiredGen: 1}
@@ -308,7 +324,7 @@ func TestManagerPublicMethodSetIsLocked(t *testing.T) {
 		methods = append(methods, typeOfManager.Method(i).Name)
 	}
 	require.Equal(t, []string{
-		"Apply", "Close", "Disconnect", "Done", "Drain", "OpenStream", "Reconnect", "Run", "Snapshot",
+		"Apply", "Close", "Disconnect", "Done", "Drain", "OpenAttemptStream", "OpenProbeStream", "Reconnect", "Run", "Snapshot",
 	}, methods)
 }
 
@@ -346,7 +362,7 @@ func TestManagerOptionsFieldSetIsLocked(t *testing.T) {
 		fields = append(fields, typeOfOptions.Field(i).Name)
 	}
 	require.Equal(t, []string{
-		"SourceID", "Dialer", "Tickets", "Limits", "DrainTimeout", "BackoffMin", "BackoffMax", "Logger", "Now", "Suppressor",
+		"SourceID", "RelayOutboundEnabled", "Dialer", "Tickets", "Limits", "DrainTimeout", "BackoffMin", "BackoffMax", "Logger", "Now", "Suppressor",
 	}, fields)
 }
 
@@ -391,7 +407,7 @@ func TestManagerCandidateFailureKeepsActiveUntilReadyReplacement(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
 
-	old := newSession(newMemorySessionConn(), 101, testLimits(4), SessionOptions{})
+	old := newSession(newMemorySessionConn(), 101, testLimits(4), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: old}
 	firstGeneration := manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay-a/ws"})
 	<-dialer.calls
@@ -409,7 +425,7 @@ func TestManagerCandidateFailureKeepsActiveUntilReadyReplacement(t *testing.T) {
 	require.True(t, failed.AcceptingNewStreams)
 	require.NotContains(t, failed.LastError, "secret")
 
-	replacement := newSession(newMemorySessionConn(), 202, testLimits(4), SessionOptions{})
+	replacement := newSession(newMemorySessionConn(), 202, testLimits(4), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: replacement}
 	require.NoError(t, manager.Reconnect(t.Context()))
 	require.Eventually(t, func() bool {
@@ -433,7 +449,7 @@ func TestManagerDisabledStopsAdmissionAndConvergesWithoutRetry(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
 
-	active := newSession(newMemorySessionConn(), 303, testLimits(4), SessionOptions{})
+	active := newSession(newMemorySessionConn(), 303, testLimits(4), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: active}
 	manager.Apply(Desired{Mode: "inherit", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
@@ -485,14 +501,14 @@ func TestManagerActiveDisconnectClearsMatchingGenerationAndRetries(t *testing.T)
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
 
-	first := newSession(newMemorySessionConn(), 11, testLimits(1), SessionOptions{})
+	first := newSession(newMemorySessionConn(), 11, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: first}
 	desiredGeneration := manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
 	require.Eventually(t, func() bool { return manager.Snapshot().SessionGeneration == 11 }, time.Second, time.Millisecond)
 	first.Cancel(errors.New("transport closed"))
 
-	second := newSession(newMemorySessionConn(), 22, testLimits(1), SessionOptions{})
+	second := newSession(newMemorySessionConn(), 22, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: second}
 	retryCall := <-dialer.calls
 	require.Equal(t, desiredGeneration, retryCall.generation)
@@ -516,7 +532,7 @@ func TestManagerActiveDisconnectClearsMatchingGenerationAndRetries(t *testing.T)
 func TestSessionCancelCoordinatesBlockedConnectionCloseOnlyOnce(t *testing.T) {
 	conn := newBlockingCloseSessionConn()
 	t.Cleanup(conn.release)
-	session := newSession(conn, 24, testLimits(1), SessionOptions{})
+	session := newSession(conn, 24, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	for range 100 {
 		session.Cancel(context.Canceled)
 	}
@@ -547,7 +563,7 @@ func TestManagerDisconnectReturnsWhileSessionCloseIsBlocked(t *testing.T) {
 	go func() { runDone <- manager.Run(runCtx) }()
 	conn := newBlockingCloseSessionConn()
 	t.Cleanup(conn.release)
-	active := newSession(conn, 23, testLimits(1), SessionOptions{})
+	active := newSession(conn, 23, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: active}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
@@ -601,7 +617,7 @@ func TestManagerCandidateThatEndsBeforePromotionIsNeverLeftActive(t *testing.T) 
 	})
 	closedConn := newMemorySessionConn()
 	require.NoError(t, closedConn.Close())
-	deadCandidate := newSession(closedConn, 31, testLimits(1), SessionOptions{})
+	deadCandidate := newSession(closedConn, 31, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	deadCandidate.Cancel(errors.New("transport closed"))
 	manager.desired = Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"}
 	manager.desiredGen = 1
@@ -619,8 +635,8 @@ func TestManagerCandidateThatEndsBeforePromotionIsNeverLeftActive(t *testing.T) 
 
 func TestManagerCandidateCanceledAfterPrecheckDoesNotReplaceHealthyActive(t *testing.T) {
 	manager := NewManager(ManagerOptions{Limits: testLimits(1), BackoffMin: time.Hour, BackoffMax: time.Hour})
-	old := newSession(newMemorySessionConn(), 32, testLimits(1), SessionOptions{})
-	candidate := newSession(newMemorySessionConn(), 33, testLimits(1), SessionOptions{})
+	old := newSession(newMemorySessionConn(), 32, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
+	candidate := newSession(newMemorySessionConn(), 33, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	oldCtx, cancelOld := context.WithCancel(t.Context())
 	candidateCtx, cancelCandidate := context.WithCancel(t.Context())
 	oldDone := make(chan error, 1)
@@ -673,13 +689,13 @@ func TestManagerReconnectHealthyActiveWaitsForActualReplacement(t *testing.T) {
 	runCtx, cancel := context.WithCancel(t.Context())
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
-	first := newSession(newMemorySessionConn(), 41, testLimits(1), SessionOptions{})
+	first := newSession(newMemorySessionConn(), 41, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: first}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
 	require.Eventually(t, func() bool { return manager.Snapshot().SessionGeneration == 41 }, time.Second, time.Millisecond)
 
-	second := newSession(newMemorySessionConn(), 42, testLimits(1), SessionOptions{})
+	second := newSession(newMemorySessionConn(), 42, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: second}
 	reconnectDone := make(chan error, 1)
 	go func() { reconnectDone <- manager.Reconnect(t.Context()) }()
@@ -701,7 +717,7 @@ func TestManagerReconnectContextCancellationCancelsOnlyCandidateDial(t *testing.
 	runCtx, cancelRun := context.WithCancel(t.Context())
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
-	active := newSession(newMemorySessionConn(), 43, testLimits(1), SessionOptions{})
+	active := newSession(newMemorySessionConn(), 43, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: active}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
@@ -785,7 +801,7 @@ func TestManagerApplyRefreshesRuntimeSettingsForControlledReplacement(t *testing
 	runCtx, cancel := context.WithCancel(t.Context())
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
-	first := newSession(newMemorySessionConn(), 51, initialLimits, SessionOptions{})
+	first := newSession(newMemorySessionConn(), 51, initialLimits, SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: first}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
@@ -794,7 +810,7 @@ func TestManagerApplyRefreshesRuntimeSettingsForControlledReplacement(t *testing
 	nextLimits := testLimits(2)
 	currentLimits = nextLimits
 	currentDrainTimeout = 2 * time.Second
-	second := newSession(newMemorySessionConn(), 52, nextLimits, SessionOptions{})
+	second := newSession(newMemorySessionConn(), 52, nextLimits, SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: second}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	select {
@@ -819,7 +835,7 @@ func TestManagerRejectsCandidateThatExceedsConfiguredLimits(t *testing.T) {
 	go func() { runDone <- manager.Run(runCtx) }()
 	granted := configured
 	granted.MaxConcurrentStreams = 2
-	dialer.results <- managerDialResult{session: newSession(newMemorySessionConn(), 53, granted, SessionOptions{})}
+	dialer.results <- managerDialResult{session: newSession(newMemorySessionConn(), 53, granted, SessionOptions{Direction: SessionDirectionRelay})}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
 	require.Eventually(t, func() bool { return manager.Snapshot().LastError != "" }, time.Second, time.Millisecond)
@@ -857,7 +873,7 @@ func TestManagerDrainContextCancellationDoesNotAbandonSessionDrain(t *testing.T)
 	runCtx, cancelRun := context.WithCancel(t.Context())
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
-	active := newSession(newMemorySessionConn(), 61, testLimits(1), SessionOptions{})
+	active := newSession(newMemorySessionConn(), 61, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: active}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
@@ -888,7 +904,7 @@ func TestManagerDrainWaitsForCommittedStream(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
 	client, peer := websocketPair(t)
-	active := NewSession(client, 62, limits, SessionOptions{})
+	active := NewSession(client, 62, limits, SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: active}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
@@ -926,7 +942,7 @@ func TestManagerBackoffSequenceStaysWithinExponentialJitterBounds(t *testing.T) 
 
 func TestManagerFinalizerClearsRetainedSessionsAndEventsBeforeDone(t *testing.T) {
 	manager := NewManager(ManagerOptions{})
-	stale := newSession(newMemorySessionConn(), 71, testLimits(1), SessionOptions{})
+	stale := newSession(newMemorySessionConn(), 71, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	manager.draining[stale] = stale.Generation()
 	manager.events <- managerEvent{ended: &sessionEnd{session: stale, sessionGen: stale.Generation()}}
 	require.NoError(t, manager.Close(context.Background()))
@@ -946,7 +962,7 @@ func TestManagerDoneRejectsConcurrentOperationsWithoutRetainingReferences(t *tes
 	require.NoError(t, manager.Close(t.Context()))
 	<-manager.Done()
 
-	retained := newSession(newMemorySessionConn(), 73, testLimits(1), SessionOptions{})
+	retained := newSession(newMemorySessionConn(), 73, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	const callers = 256
 	finished := make(chan struct{}, callers)
 	for range callers {
@@ -978,7 +994,7 @@ func TestManagerCanceledDialWorkerJoinsUnclaimedSession(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	conn := newBlockingControlSessionConn()
 	t.Cleanup(func() { require.NoError(t, conn.Close()) })
-	session := newSession(conn, 72, testLimits(1), SessionOptions{PingInterval: time.Millisecond})
+	session := newSession(conn, 72, testLimits(1), SessionOptions{Direction: SessionDirectionRelay, PingInterval: time.Millisecond})
 	dialer.results <- managerDialResult{session: session}
 	manager.workers.Add(1)
 	go manager.dialCandidate(ctx, 1, 1, "ws://relay/ws")
@@ -1008,7 +1024,7 @@ func TestManagerDrainTimeoutClosesBorrowedActive(t *testing.T) {
 	runCtx, cancel := context.WithCancel(t.Context())
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
-	active := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{})
+	active := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	dialer.results <- managerDialResult{session: active}
 	manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay/ws"})
 	<-dialer.calls
@@ -1036,7 +1052,7 @@ func TestManagerFiveHundredReplaceDrainCyclesCloseEverySession(t *testing.T) {
 
 	sessions := make([]*Session, 0, 500)
 	for i := 1; i <= 500; i++ {
-		session := newSession(newMemorySessionConn(), uint64(i), testLimits(1), SessionOptions{})
+		session := newSession(newMemorySessionConn(), uint64(i), testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 		sessions = append(sessions, session)
 		dialer.results <- managerDialResult{session: session}
 		generation := manager.Apply(Desired{Mode: "custom", EffectiveURI: "ws://relay.example/ws?generation=" + fmt.Sprint(i)})

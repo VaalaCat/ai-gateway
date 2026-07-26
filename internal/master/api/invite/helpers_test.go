@@ -39,7 +39,7 @@ func inviteCtx(t *testing.T, db *gorm.DB, isAdmin bool, userID uint) *app.Contex
 	w := httptest.NewRecorder()
 	g, _ := gin.CreateTestContext(w)
 	a := app.NewApplication()
-	a.SetDB(db)
+	a.SetCoreDB(db)
 	role := consts.RoleUser
 	if isAdmin {
 		role = consts.RoleAdmin

@@ -290,6 +290,78 @@ func TestWriterReplaceWithoutQueuedFrameKeepsSequenceAfterInFlight(t *testing.T)
 	require.EqualValues(t, 3, acceptedSequence)
 }
 
+func TestWriterWaitStreamFlushed(t *testing.T) {
+	t.Run("nil context", func(t *testing.T) {
+		writer := newFairWriter(t.Context(), 4096, time.Second, func(wire.Frame) error { return nil })
+
+		require.ErrorIs(t, writer.WaitStreamFlushed(nil, testStreamID(90)), errNilContext)
+	})
+
+	t.Run("already flushed", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		writer := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error { return nil })
+
+		require.NoError(t, writer.WaitStreamFlushed(t.Context(), testStreamID(91)))
+	})
+
+	t.Run("in flight", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		started := make(chan struct{})
+		release := make(chan struct{})
+		writer := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error {
+			close(started)
+			<-release
+			return nil
+		})
+		go writer.Run()
+		t.Cleanup(func() { cancel(); <-writer.Done() })
+		id := testStreamID(92)
+		require.NoError(t, writer.Enqueue(t.Context(), wire.Frame{
+			Version: wire.ProtocolVersion, Type: wire.FrameReset, StreamID: id,
+		}, nil))
+		<-started
+		flushed := make(chan error, 1)
+		go func() { flushed <- writer.WaitStreamFlushed(t.Context(), id) }()
+		select {
+		case err := <-flushed:
+			t.Fatalf("WaitStreamFlushed returned before the write completed: %v", err)
+		default:
+		}
+		close(release)
+		require.NoError(t, <-flushed)
+	})
+
+	t.Run("caller cancelled", func(t *testing.T) {
+		writerCtx, cancelWriter := context.WithCancel(t.Context())
+		defer cancelWriter()
+		writer := newFairWriter(writerCtx, 4096, time.Second, func(wire.Frame) error { return nil })
+		id := testStreamID(93)
+		require.NoError(t, writer.Enqueue(t.Context(), wire.Frame{
+			Version: wire.ProtocolVersion, Type: wire.FrameReset, StreamID: id,
+		}, nil))
+		cause := errors.New("caller cancelled")
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancel(cause)
+
+		require.ErrorIs(t, writer.WaitStreamFlushed(ctx, id), cause)
+	})
+
+	t.Run("writer cancelled", func(t *testing.T) {
+		cause := errors.New("writer cancelled")
+		writerCtx, cancelWriter := context.WithCancelCause(t.Context())
+		writer := newFairWriter(writerCtx, 4096, time.Second, func(wire.Frame) error { return nil })
+		id := testStreamID(94)
+		require.NoError(t, writer.Enqueue(t.Context(), wire.Frame{
+			Version: wire.ProtocolVersion, Type: wire.FrameReset, StreamID: id,
+		}, nil))
+		cancelWriter(cause)
+
+		require.ErrorIs(t, writer.WaitStreamFlushed(t.Context(), id), cause)
+	})
+}
+
 func TestWriterReplaceRejectsPreCancelledCallerBeforeAdmission(t *testing.T) {
 	writerCtx, cancelWriter := context.WithCancel(t.Context())
 	defer cancelWriter()
@@ -380,7 +452,7 @@ func TestTargetResetReplacementRemainsTerminalForSource(t *testing.T) {
 		return nil
 	})
 	session := &Session{
-		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{}), ctx: ctx, writer: w,
+		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), ctx: ctx, writer: w,
 		streams: make(map[wire.StreamID]*Stream), targets: make(map[wire.StreamID]*targetStream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now),
 	}
@@ -435,7 +507,7 @@ func TestTargetStreamResetUsesStableCauseCode(t *testing.T) {
 				return nil
 			})
 			session := &Session{
-				generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{}), ctx: ctx, writer: writer,
+				generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), ctx: ctx, writer: writer,
 				streams: make(map[wire.StreamID]*Stream), targets: make(map[wire.StreamID]*targetStream),
 				tombstones: newTombstoneStore(8, time.Second, time.Now),
 			}

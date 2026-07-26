@@ -43,6 +43,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ginutil"
@@ -104,32 +105,37 @@ type Server struct {
 	agentAuthCacheMu sync.RWMutex
 	agentAuthCache   *agentauthcache.Cache
 
-	TunnelManager *agenttunnel.Manager
-	tunnelStateMu sync.RWMutex
-	tunnelState   tunnelRuntimeState
+	TunnelManager       *agenttunnel.Manager
+	DirectTunnelIngress *agenttunnel.DirectTunnelIngress
+	DirectSessionPool   *agenttunnel.DirectSessionPool
+	tunnelStateMu       sync.RWMutex
+	tunnelState         tunnelRuntimeState
 
-	lifecycleOnce        sync.Once
-	lifecycleMu          sync.Mutex
-	rootCtx              context.Context
-	rootCancel           context.CancelCauseFunc
-	done                 chan struct{}
-	closing              bool
-	startupState         startupState
-	startupGeneration    uint64
-	startupLease         *startupLease
-	shutdownErr          error
-	shutdownOnce         sync.Once
-	workers              conc.WaitGroup
-	transportPool        app.TransportPool
-	directForwarder      *agentproxy.DirectForwarder
-	directGate           *agentroute.DirectGate
-	directProber         *rpc.DirectProber
-	relayProber          *rpc.RelayProber
-	legacyTransportOwner *agentrelaylegacy.TransportOwner
-	activeWorkers        atomic.Int64
-	httpHandlers         atomic.Int64
-	acceptedSockets      atomic.Int64
-	watchdogActive       atomic.Int64
+	lifecycleOnce             sync.Once
+	lifecycleMu               sync.Mutex
+	rootCtx                   context.Context
+	rootCancel                context.CancelCauseFunc
+	done                      chan struct{}
+	closing                   bool
+	startupState              startupState
+	startupGeneration         uint64
+	startupLease              *startupLease
+	shutdownErr               error
+	shutdownOnce              sync.Once
+	workers                   conc.WaitGroup
+	transportPool             app.TransportPool
+	directForwarder           *agentproxy.DirectForwarder
+	directGate                *agentroute.DirectGate
+	directProber              *rpc.DirectProber
+	relayProber               *rpc.RelayProber
+	directSessionDialer       agenttunnel.DirectSessionDialer
+	forwardCredentialReader   agentauthcache.ForwardCredentialReader
+	forwardAuthSnapshotLoader func() agentproxy.ForwardAuthSnapshot
+	legacyTransportOwner      *agentrelaylegacy.TransportOwner
+	activeWorkers             atomic.Int64
+	httpHandlers              atomic.Int64
+	acceptedSockets           atomic.Int64
+	watchdogActive            atomic.Int64
 
 	beforeHTTPRegister         func()
 	beforeConnectLoop          func()
@@ -137,6 +143,7 @@ type Server struct {
 	afterRuntimePhaseAReady    func(context.Context)
 	afterShutdownSnapshot      func()
 	runBackgroundReady         func()
+	recordShutdownPhase        func(string)
 }
 
 type tunnelRuntimeState struct {
@@ -146,7 +153,16 @@ type tunnelRuntimeState struct {
 	fingerprint string
 }
 
-func New(cfg config.AgentRuntimeProvider, logger *zap.Logger) (*Server, error) {
+// StandaloneOptions injects transport-edge dependencies that must be fixed
+// before New builds the production Direct handlers and router.
+type StandaloneOptions struct {
+	DirectSessionDialer       agenttunnel.DirectSessionDialer
+	ForwardCredentialReader   agentauthcache.ForwardCredentialReader
+	ForwardAuthSnapshotLoader func() agentproxy.ForwardAuthSnapshot
+	TunnelManagerBuilder      func(*Server) *agenttunnel.Manager
+}
+
+func New(cfg config.AgentRuntimeProvider, logger *zap.Logger, options ...StandaloneOptions) (*Server, error) {
 	runtimeCfg := cfg.ToAgentRuntimeConfig()
 	if runtimeCfg == nil {
 		return nil, fmt.Errorf("agent runtime config is required")
@@ -160,28 +176,29 @@ func New(cfg config.AgentRuntimeProvider, logger *zap.Logger) (*Server, error) {
 	bus := eventbus.NewMemoryBus()
 	metricsRegistry := prometheus.NewRegistry()
 
+	var standalone StandaloneOptions
+	if len(options) > 0 {
+		standalone = options[0]
+	}
 	s := &Server{
-		Cfg:                  runtimeCfg,
-		Logger:               logger,
-		Bus:                  bus,
-		Router:               gin.New(),
-		Creds:                creds,
-		MetricsRegistry:      metricsRegistry,
-		RelayMetrics:         pkgmetrics.NewAgentRelayMetrics(metricsRegistry, metricsRegistry),
-		RouteSuppressor:      diagnostics.NewSuppressor(diagnostics.SuppressorOptions{}),
-		legacyTransportOwner: agentrelaylegacy.NewTransportOwner(),
-		ownsHTTPListener:     true,
+		Cfg:                       runtimeCfg,
+		Logger:                    logger,
+		Bus:                       bus,
+		Router:                    gin.New(),
+		Creds:                     creds,
+		MetricsRegistry:           metricsRegistry,
+		RelayMetrics:              pkgmetrics.NewAgentRelayMetrics(metricsRegistry, metricsRegistry),
+		RouteSuppressor:           diagnostics.NewSuppressor(diagnostics.SuppressorOptions{}),
+		directSessionDialer:       standalone.DirectSessionDialer,
+		forwardCredentialReader:   standalone.ForwardCredentialReader,
+		forwardAuthSnapshotLoader: standalone.ForwardAuthSnapshotLoader,
+		legacyTransportOwner:      agentrelaylegacy.NewTransportOwner(),
+		ownsHTTPListener:          true,
 	}
 	s.initLifecycle()
 	if err := s.initRouteObservation(); err != nil {
 		return nil, err
 	}
-	s.directForwarder = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
-		ResponseHeaderTimeout: time.Duration(runtimeCfg.Runtime.RelayTimeout) * time.Second,
-		OnCircuitTransition:   s.logDirectCircuitTransition,
-	})
-	s.directGate = agentroute.NewDirectGate(agentroute.DirectGateOptions{})
-	s.directProber = rpc.NewDirectProber(rpc.DirectProberOptions{Metrics: s.RelayMetrics})
 	// lazyWSClient 将 LRU Loader 的 RPC 调用委托给运行时实际连接，
 	// 避免 Store 在连接建立前因持有 nil client 而 Loader 不可用。
 	s.Store = cache.NewStore(&lazyWSClient{getClient: s.getClient}, runtimeCfg.Agent.Cache)
@@ -190,7 +207,18 @@ func New(cfg config.AgentRuntimeProvider, logger *zap.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.TunnelManager = s.newTunnelManager()
+	s.DirectSessionPool = s.newDirectSessionPool()
+	s.directForwarder = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports:          s.DirectSessionPool,
+		OnCircuitTransition: s.logDirectCircuitTransition,
+	})
+	s.directGate = agentroute.NewDirectGate(agentroute.DirectGateOptions{})
+	s.directProber = rpc.NewDirectProber(rpc.DirectProberOptions{Pool: s.DirectSessionPool, Metrics: s.RelayMetrics})
+	if standalone.TunnelManagerBuilder != nil {
+		s.TunnelManager = standalone.TunnelManagerBuilder(s)
+	} else {
+		s.TunnelManager = s.newTunnelManager()
+	}
 	s.relayProber = s.newRelayProber()
 
 	warnAge := time.Duration(s.Cfg.Runtime.RelayTimeout) * 2 * time.Second
@@ -219,7 +247,7 @@ func (s *Server) setupRoutes() {
 			"version":         s.Store.Version(),
 		})
 	})
-	s.registerDirectIngressIdentityRoute(s.Router)
+	s.registerDirectTunnelRoute(s.Router)
 	s.setupMetricsRoute()
 
 	runtime := s.buildRelayHandler(time.Duration(s.Cfg.Runtime.RelayTimeout) * time.Second)
@@ -257,9 +285,12 @@ func (s *Server) NewTunnelTargetHandler(router http.Handler) *agenttunnel.Target
 	if s.Creds != nil {
 		agentID = s.Creds.AgentID
 	}
-	return agenttunnel.NewTargetHandler(agentID, func() bool {
-		return s.Store != nil && s.Store.Settings().RelayFallbackEnabled == 1
-	}, router)
+	return agenttunnel.NewTargetHandler(agenttunnel.TargetHandlerOptions{
+		TargetAgentID: agentID, DirectInboundEnabled: s.directInboundEnabled,
+		RelayInboundEnabled: s.relayInboundEnabled, SourceEnabled: s.sourceAgentEnabled, Router: router,
+		DirectPathDisabled: agenttunnel.NewDirectPathDisabledRecorder(s.RelayMetrics, s.Logger, s.RouteSuppressor),
+	})
+
 }
 
 func (s *Server) GetRelayLink() agentproxy.RelayLink {
@@ -330,18 +361,30 @@ func (s *Server) Run() error {
 type EmbeddedOptions struct {
 	MetricsRegistry *prometheus.Registry
 	RelayMetrics    *pkgmetrics.AgentRelayMetrics
+	// Store is owned by the embedded server once passed. NewEmbedded closes it
+	// before returning an error, and Shutdown closes it after a successful start.
+	Store *cache.Store
 }
 
 func NewEmbedded(cfg config.AgentRuntimeProvider, logger *zap.Logger, creds *enrollment.Credentials, options ...EmbeddedOptions) (*Server, error) {
+	var embedded EmbeddedOptions
+	if len(options) > 0 {
+		embedded = options[0]
+	}
+	if cfg == nil {
+		closeEmbeddedStore(embedded.Store)
+		return nil, fmt.Errorf("agent runtime config is required")
+	}
 	runtimeCfg := cfg.ToAgentRuntimeConfig()
 	if runtimeCfg == nil {
+		closeEmbeddedStore(embedded.Store)
 		return nil, fmt.Errorf("agent runtime config is required")
 	}
 
 	bus := eventbus.NewMemoryBus()
-	var embedded EmbeddedOptions
-	if len(options) > 0 && options[0].MetricsRegistry != nil && options[0].RelayMetrics != nil {
-		embedded = options[0]
+	metricsRegistry, relayMetrics := (*prometheus.Registry)(nil), (*pkgmetrics.AgentRelayMetrics)(nil)
+	if embedded.MetricsRegistry != nil && embedded.RelayMetrics != nil {
+		metricsRegistry, relayMetrics = embedded.MetricsRegistry, embedded.RelayMetrics
 	}
 
 	s := &Server{
@@ -350,29 +393,35 @@ func NewEmbedded(cfg config.AgentRuntimeProvider, logger *zap.Logger, creds *enr
 		Bus:                  bus,
 		Router:               nil, // embedded agent does not own a router
 		Creds:                creds,
-		MetricsRegistry:      embedded.MetricsRegistry,
-		RelayMetrics:         embedded.RelayMetrics,
+		MetricsRegistry:      metricsRegistry,
+		RelayMetrics:         relayMetrics,
 		RouteSuppressor:      diagnostics.NewSuppressor(diagnostics.SuppressorOptions{}),
 		legacyTransportOwner: agentrelaylegacy.NewTransportOwner(),
 	}
+	// lazyWSClient 将 LRU Loader 的 RPC 调用委托给运行时实际连接。
+	s.Store = embedded.Store
+	if s.Store == nil {
+		s.Store = cache.NewStore(&lazyWSClient{getClient: s.getClient}, runtimeCfg.Agent.Cache)
+	}
+	s.Store.SetLogger(s.Logger)
 	s.initLifecycle()
 	if err := s.initRouteObservation(); err != nil {
+		closeEmbeddedStore(s.Store)
 		return nil, err
 	}
-	s.directForwarder = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
-		ResponseHeaderTimeout: time.Duration(runtimeCfg.Runtime.RelayTimeout) * time.Second,
-		OnCircuitTransition:   s.logDirectCircuitTransition,
-	})
-	s.directGate = agentroute.NewDirectGate(agentroute.DirectGateOptions{})
-	s.directProber = rpc.NewDirectProber(rpc.DirectProberOptions{Metrics: s.RelayMetrics})
-	// lazyWSClient 将 LRU Loader 的 RPC 调用委托给运行时实际连接。
-	s.Store = cache.NewStore(&lazyWSClient{getClient: s.getClient}, runtimeCfg.Agent.Cache)
-	s.Store.SetLogger(s.Logger)
 	var err error
 	s.BodyStore, err = newRequestBodyStore(runtimeCfg, s.Logger)
 	if err != nil {
+		closeEmbeddedStore(s.Store)
 		return nil, err
 	}
+	s.DirectSessionPool = s.newDirectSessionPool()
+	s.directForwarder = agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports:          s.DirectSessionPool,
+		OnCircuitTransition: s.logDirectCircuitTransition,
+	})
+	s.directGate = agentroute.NewDirectGate(agentroute.DirectGateOptions{})
+	s.directProber = rpc.NewDirectProber(rpc.DirectProberOptions{Pool: s.DirectSessionPool, Metrics: s.RelayMetrics})
 
 	warnAge := time.Duration(s.Cfg.Runtime.RelayTimeout) * 2 * time.Second
 	if warnAge < 60*time.Second {
@@ -383,6 +432,14 @@ func NewEmbedded(cfg config.AgentRuntimeProvider, logger *zap.Logger, creds *enr
 	s.watchdogActive.Store(1)
 
 	return s, nil
+}
+
+func closeEmbeddedStore(store *cache.Store) {
+	if store == nil {
+		return
+	}
+	store.Close()
+	<-store.Done()
 }
 
 func (s *Server) logDirectCircuitTransition(transition agentproxy.DirectCircuitTransition) {
@@ -401,7 +458,7 @@ func (s *Server) logDirectCircuitTransition(transition agentproxy.DirectCircuitT
 // MountRoutes registers /v1/* relay routes on the given router.
 // This is used by the embedded agent to share the master's router.
 func (s *Server) MountRoutes(router *gin.Engine) {
-	s.registerDirectIngressIdentityRoute(router)
+	s.registerDirectTunnelRoute(router)
 	if s.TunnelManager == nil {
 		s.TunnelManager = s.newTunnelManagerWithRouter(router)
 	}
@@ -437,42 +494,40 @@ func (s *Server) registerAttemptProxyRoute(router *gin.Engine, handler *agentatt
 	}
 	router.POST(
 		attemptwire.EndpointPath,
-		agentattemptproxy.IngressMiddleware(agentattemptproxy.IngressConfig{
-			FindAgentByID:    s.Store.GetAgent,
-			LoadAuthSnapshot: s.currentForwardAuthSnapshot,
-		}),
+		agentattemptproxy.IngressMiddleware(agentattemptproxy.IngressConfig{}),
 		auth.TokenAuth(s.Store),
 		handler.Serve,
 	)
 }
 
-func (s *Server) peerRouteMode() string {
-	if s == nil || s.Store == nil || s.Creds == nil {
-		return consts.PeerRouteModeDirectFirst
-	}
-	self := s.Store.GetAgent(s.Creds.AgentID)
-	if self != nil && self.PeerRouteMode == consts.PeerRouteModeRelayOnly {
-		return consts.PeerRouteModeRelayOnly
-	}
-	return consts.PeerRouteModeDirectFirst
-}
-
-func (s *Server) registerDirectIngressIdentityRoute(router *gin.Engine) {
-	if s == nil || router == nil || s.Creds == nil || s.Creds.AgentID == "" {
+func (s *Server) registerDirectTunnelRoute(router *gin.Engine) {
+	if s == nil || router == nil {
 		return
 	}
-	agentID := s.Creds.AgentID
-	router.GET(protocol.DirectIngressIdentityPath, func(c *gin.Context) {
-		if c.Query("target_agent_id") != agentID {
-			c.Status(http.StatusNotFound)
-			return
+	s.lifecycleMu.Lock()
+	ingress := s.DirectTunnelIngress
+	closing := s.closing
+	s.lifecycleMu.Unlock()
+	if ingress == nil && !closing {
+		candidate := s.newDirectTunnelIngress(router)
+		s.lifecycleMu.Lock()
+		switch {
+		case s.closing:
+		case s.DirectTunnelIngress != nil:
+			ingress = s.DirectTunnelIngress
+		default:
+			s.DirectTunnelIngress = candidate
+			ingress = candidate
+			candidate = nil
 		}
-		c.JSON(http.StatusOK, protocol.DirectIngressIdentity{
-			Contract: protocol.DirectIngressContractV1,
-			Role:     "agent",
-			AgentID:  agentID,
-		})
-	})
+		s.lifecycleMu.Unlock()
+		if candidate != nil {
+			candidate.Cancel()
+		}
+	}
+	if ingress != nil {
+		router.GET(agenttunnel.DirectTunnelPath, ingress.Handle)
+	}
 }
 
 // PreparedBackground owns a phase-A-ready embedded runtime. Commit only opens
@@ -837,9 +892,13 @@ func (s *Server) CancelDirectForwarding() {
 	}
 	s.lifecycleMu.Lock()
 	directForwarder := s.directForwarder
+	directIngress := s.DirectTunnelIngress
 	s.lifecycleMu.Unlock()
 	if directForwarder != nil {
 		directForwarder.Cancel()
+	}
+	if directIngress != nil {
+		directIngress.StopAdmission()
 	}
 }
 
@@ -848,6 +907,8 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	httpSrv := s.httpSrv
 	tunnelManager := s.TunnelManager
 	directForwarder := s.directForwarder
+	directIngress := s.DirectTunnelIngress
+	directPool := s.DirectSessionPool
 	s.lifecycleMu.Unlock()
 	if s.afterShutdownSnapshot != nil {
 		s.afterShutdownSnapshot()
@@ -856,18 +917,25 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 		<-startupDone
 	}
 
+	s.recordShutdown("direct_drain")
 	drains := pool.New().WithContext(ctx)
 	if httpSrv != nil {
 		drains.Go(func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
 	}
-	if tunnelManager != nil {
-		drains.Go(func(ctx context.Context) error { return tunnelManager.Drain(ctx) })
+	if directIngress != nil {
+		// Drain both direct sides gracefully within the shutdown deadline before
+		// the root context is cancelled.
+		drains.Go(func(ctx context.Context) error { return directIngress.Drain(ctx) })
+	}
+	if directPool != nil {
+		drains.Go(func(ctx context.Context) error { return directPool.Drain(ctx) })
 	}
 	drainErr := drains.Wait()
 	shutdownCause := context.Cause(ctx)
 	if shutdownCause == nil {
 		shutdownCause = errors.New("agent server: shutdown")
 	}
+	s.recordShutdown("root_cancel")
 	s.rootCancel(shutdownCause)
 	if directForwarder != nil {
 		directForwarder.Cancel()
@@ -880,14 +948,28 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 		s.stopWatchdog()
 		s.watchdogActive.Store(0)
 	}
-	if s.Store != nil {
-		s.Store.Close()
-		<-s.Store.Done()
-	}
 	if httpSrv != nil {
 		_ = httpSrv.Close()
 	}
+	s.recordShutdown("direct_close")
+	if directPool != nil {
+		drainErr = errors.Join(drainErr, directPool.Close(ctx))
+	}
+	if directIngress != nil {
+		// Close is the only bounded wait for direct ingress: an incoming target
+		// handler that ignores cancellation must never block shutdown past the
+		// deadline, so we do not await Done() unboundedly here.
+		drainErr = errors.Join(drainErr, directIngress.Close(ctx))
+	}
+	s.recordShutdown("forwarder_close")
+	if directForwarder != nil {
+		_ = directForwarder.Close(ctx)
+		<-directForwarder.Done()
+	}
+	s.recordShutdown("relay_control_close")
 	if tunnelManager != nil {
+		relayDrainErr := normalizeTunnelManagerShutdownError(tunnelManager.Drain(ctx))
+		drainErr = errors.Join(drainErr, relayDrainErr)
 		_ = tunnelManager.Close(ctx)
 		<-tunnelManager.Done()
 	}
@@ -897,6 +979,10 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	}
 	if authCache := s.borrowAgentAuthCache(); authCache != nil {
 		s.stopAgentAuthSession(authCache)
+	}
+	if s.Store != nil {
+		s.Store.Close()
+		<-s.Store.Done()
 	}
 	if s.Reporter != nil {
 		_ = s.Reporter.Close(ctx)
@@ -909,10 +995,6 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	if s.transportPool != nil {
 		s.transportPool.CloseIdleConnections()
 	}
-	if directForwarder != nil {
-		_ = directForwarder.Close(ctx)
-		<-directForwarder.Done()
-	}
 	if s.legacyTransportOwner != nil {
 		s.legacyTransportOwner.CloseIdleConnections()
 	}
@@ -921,6 +1003,21 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	s.shutdownErr = drainErr
 	s.lifecycleMu.Unlock()
 	close(s.done)
+}
+
+func normalizeTunnelManagerShutdownError(err error) error {
+	if agenttunnel.IsManagerClosed(err) {
+		// behavior change: root cancellation may close an active manager while
+		// Shutdown is asking it to drain; that is successful convergence.
+		return nil
+	}
+	return err
+}
+
+func (s *Server) recordShutdown(phase string) {
+	if s != nil && s.recordShutdownPhase != nil {
+		s.recordShutdownPhase(phase)
+	}
 }
 
 func (s *Server) countHTTPHandlers(next http.Handler) http.Handler {
@@ -977,6 +1074,24 @@ func (s *Server) ResourceCountsForTest() app.ResourceCounts {
 	}
 	if s.legacyTransportOwner != nil {
 		counts.Transports += int64(s.legacyTransportOwner.ResourceCount())
+	}
+	if s.DirectSessionPool != nil {
+		snapshot := s.DirectSessionPool.Snapshot()
+		counts.DirectOutgoingActive += int64(snapshot.Active)
+		counts.DirectOutgoingCandidates += int64(snapshot.Candidates)
+		counts.DirectOutgoingDraining += int64(snapshot.Draining)
+		counts.DirectStreams += int64(snapshot.Streams)
+		counts.DirectSockets += int64(snapshot.Sockets)
+		counts.Timers += int64(snapshot.Timers)
+	}
+	if s.DirectTunnelIngress != nil {
+		snapshot := s.DirectTunnelIngress.Snapshot()
+		counts.DirectIncomingActive += int64(snapshot.Active)
+		counts.DirectIncomingCandidates += int64(snapshot.Candidates)
+		counts.DirectIncomingDraining += int64(snapshot.Draining)
+		counts.DirectStreams += int64(snapshot.Streams)
+		counts.DirectSockets += int64(snapshot.Sockets)
+		counts.Timers += int64(snapshot.Timers)
 	}
 	return counts
 }
@@ -1181,9 +1296,9 @@ func (s *Server) applyDirectAddressesForAuthCache(
 
 func agentRuntimeCapabilities() []string {
 	return []string{
-		protocol.AgentCapabilityTunnelV1,
+		protocol.AgentCapabilityTunnelV2,
 		protocol.AgentCapabilityForwardV1,
-		protocol.AgentCapabilityDirectIngressV1,
+		protocol.AgentCapabilityDirectTunnelV1,
 		protocol.AgentCapabilityRelayHTTPPingV1,
 		protocol.AgentCapabilityTokenRoutingV1,
 	}
@@ -1220,7 +1335,7 @@ func deriveTunnelDesired(agent *models.Agent, defaultURI, masterURL string) (age
 
 func tunnelBootstrapSupported(bootstrap agentauthcache.BootstrapSnapshot) bool {
 	for _, capability := range bootstrap.Capabilities {
-		if capability == protocol.AgentCapabilityTunnelV1 {
+		if capability == protocol.AgentCapabilityTunnelV2 {
 			return true
 		}
 	}
@@ -1246,6 +1361,9 @@ func (s *Server) currentTunnelBootstrap() agentauthcache.BootstrapSnapshot {
 }
 
 func (s *Server) currentForwardAuthSnapshot() agentproxy.ForwardAuthSnapshot {
+	if s != nil && s.forwardAuthSnapshotLoader != nil {
+		return s.forwardAuthSnapshotLoader()
+	}
 	bootstrap := s.currentTunnelBootstrap()
 	return agentproxy.ForwardAuthSnapshot{
 		Capabilities: bootstrap.Capabilities,
@@ -1263,16 +1381,8 @@ func (s *Server) targetSupportsForwardTickets(agentID string) bool {
 func (s *Server) targetSupportsDirectIngress(agentID string) bool {
 	return s != nil && s.Store != nil && slices.Contains(
 		s.Store.GetAgentCapabilities(agentID),
-		protocol.AgentCapabilityDirectIngressV1,
+		protocol.AgentCapabilityDirectTunnelV1,
 	)
-}
-
-func (s *Server) cachedForwardTicket(_ context.Context) (agentauth.ForwardTicket, error) {
-	cache := s.borrowAgentAuthCache()
-	if cache == nil {
-		return "", errors.New("agent forward auth bootstrap unavailable")
-	}
-	return cache.CachedForwardTicket()
 }
 
 func (s *Server) newTunnelManager() *agenttunnel.Manager {
@@ -1310,27 +1420,138 @@ func (s *Server) newTunnelManagerWithRouter(router http.Handler) *agenttunnel.Ma
 		TargetHandler: s.NewTunnelTargetHandler(router), Logger: logger.Named("relay-tunnel-client"),
 	})
 	return agenttunnel.NewManager(agenttunnel.ManagerOptions{
-		SourceID: s.Creds.AgentID, Dialer: dialer, Tickets: serverTunnelTickets{server: s}, Limits: limits,
+		SourceID: s.Creds.AgentID, RelayOutboundEnabled: s.relayOutboundEnabled,
+		Dialer: dialer, Tickets: serverTunnelTickets{server: s}, Limits: limits,
 		DrainTimeout: drainTimeout, Logger: logger.Named("relay-tunnel-manager"),
 	})
 }
 
-func (s *Server) currentTunnelDrainTimeout() time.Duration {
-	if s == nil || s.Store == nil {
-		return 300 * time.Second
+func (s *Server) newDirectTunnelIngress(router http.Handler) *agenttunnel.DirectTunnelIngress {
+	if s == nil || s.Creds == nil || s.Store == nil {
+		return nil
 	}
-	return time.Duration(s.Store.Settings().TunnelDrainTimeoutSec) * time.Second
+	logger := s.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return agenttunnel.NewDirectTunnelIngress(agenttunnel.DirectTunnelIngressOptions{
+		TargetAgentID: s.Creds.AgentID,
+		FindAgentByID: s.Store.GetAgent,
+		LoadAuth:      s.currentForwardAuthSnapshot,
+		Limits:        s.currentTunnelLimits(),
+		TargetHandler: s.NewTunnelTargetHandler(router),
+		Logger:        logger.Named("direct-tunnel-ingress"),
+		Metrics:       s.RelayMetrics,
+		Suppressor:    s.RouteSuppressor,
+		DrainTimeout:  s.currentTunnelDrainTimeout(),
+		MaxSessions:   s.currentDirectMaxSessions,
+	})
+}
+
+// serverForwardCredentials adapts the current agent auth cache to the pool's
+// ForwardCredentialReader. The cache changes on reconnect, so it is read live.
+type serverForwardCredentials struct{ server *Server }
+
+func (c serverForwardCredentials) CachedForwardCredential() (agentauthcache.ForwardCredential, error) {
+	cache := c.server.borrowAgentAuthCache()
+	if cache == nil {
+		return agentauthcache.ForwardCredential{}, errors.New("agent forward auth bootstrap unavailable")
+	}
+	return cache.CachedForwardCredential()
+}
+
+func (s *Server) currentDirectMaxSessions() int {
+	if s == nil {
+		return 0
+	}
+	return directPoolMaxSessions(s.Store)
+}
+
+func (s *Server) currentDirectIdleTimeout() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return directPoolIdleTimeout(s.Store)
+}
+
+func (s *Server) newDirectSessionPool() *agenttunnel.DirectSessionPool {
+	if s == nil || s.Creds == nil {
+		return nil
+	}
+	logger := s.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	dialer := s.directSessionDialer
+	if dialer == nil {
+		dialer = agenttunnel.NewDirectDialer(agenttunnel.DirectDialerOptions{
+			Logger: logger.Named("direct-tunnel-dialer"),
+		})
+	}
+	credentials := s.forwardCredentialReader
+	if credentials == nil {
+		credentials = serverForwardCredentials{server: s}
+	}
+	store := s.Store
+	return agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		SourceAgentID:         s.Creds.AgentID,
+		DirectOutboundEnabled: s.directOutboundEnabled,
+		Dialer:                dialer,
+		Credentials:           credentials,
+		Limits:                func() pkgtunnel.Limits { return tunnelLimitsFromStore(store) },
+		MaxSessions:           func() int { return directPoolMaxSessions(store) },
+		IdleTimeout:           func() time.Duration { return directPoolIdleTimeout(store) },
+		DrainTimeout:          func() time.Duration { return directPoolDrainTimeout(store) },
+		Logger:                logger.Named("direct-tunnel-pool"),
+		Metrics:               s.RelayMetrics,
+		Suppressor:            s.RouteSuppressor,
+	})
+}
+
+func (s *Server) currentTunnelDrainTimeout() time.Duration {
+	if s == nil {
+		return directPoolDrainTimeout(nil)
+	}
+	return directPoolDrainTimeout(s.Store)
 }
 
 func (s *Server) currentTunnelLimits() pkgtunnel.Limits {
+	if s == nil {
+		return tunnelLimitsFromStore(nil)
+	}
+	return tunnelLimitsFromStore(s.Store)
+}
+
+func directPoolMaxSessions(store *cache.Store) int {
+	if store == nil {
+		return 0
+	}
+	return store.Settings().DirectMaxSessions
+}
+
+func directPoolIdleTimeout(store *cache.Store) time.Duration {
+	if store == nil {
+		return 0
+	}
+	return time.Duration(store.Settings().DirectSessionIdleTimeoutSec) * time.Second
+}
+
+func directPoolDrainTimeout(store *cache.Store) time.Duration {
+	if store == nil {
+		return 300 * time.Second
+	}
+	return time.Duration(store.Settings().TunnelDrainTimeoutSec) * time.Second
+}
+
+func tunnelLimitsFromStore(store *cache.Store) pkgtunnel.Limits {
 	limits := pkgtunnel.Limits{
 		MaxMetadataBytes: 64 * 1024, MaxDataBytes: 64 * 1024,
 		InitialStreamWindow: 512 * 1024, MaxQueuedSessionBytes: 8 * 1024 * 1024, MaxConcurrentStreams: 256,
 	}
-	if s == nil || s.Store == nil {
+	if store == nil {
 		return limits
 	}
-	settings := s.Store.Settings()
+	settings := store.Settings()
 	return pkgtunnel.Limits{
 		MaxMetadataBytes: settings.TunnelMaxMetadataBytes, MaxDataBytes: settings.TunnelMaxDataBytes,
 		InitialStreamWindow:   settings.TunnelInitialWindowBytes,
@@ -1340,10 +1561,6 @@ func (s *Server) currentTunnelLimits() pkgtunnel.Limits {
 
 func (s *Server) startTunnelRuntime(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
-	if s.TunnelManager == nil {
-		close(done)
-		return done
-	}
 	go func() {
 		defer close(done)
 		reconcileDone := make(chan struct{})
@@ -1351,7 +1568,11 @@ func (s *Server) startTunnelRuntime(ctx context.Context) <-chan struct{} {
 			defer close(reconcileDone)
 			s.runTunnelDesiredLoop(ctx)
 		}()
-		_ = s.TunnelManager.Run(ctx)
+		if s.TunnelManager != nil {
+			_ = s.TunnelManager.Run(ctx)
+		} else {
+			<-ctx.Done()
+		}
 		<-reconcileDone
 	}()
 	return done
@@ -1371,7 +1592,26 @@ func (s *Server) runTunnelDesiredLoop(ctx context.Context) {
 }
 
 func (s *Server) reconcileTunnelDesired() {
-	if s.TunnelManager == nil || s.Creds == nil || s.Store == nil {
+	if s.Creds == nil || s.Store == nil {
+		return
+	}
+	settings := s.Store.Settings()
+	directSettings := agenttunnel.DirectRuntimeSettings{
+		Limits: pkgtunnel.Limits{
+			MaxMetadataBytes: settings.TunnelMaxMetadataBytes, MaxDataBytes: settings.TunnelMaxDataBytes,
+			InitialStreamWindow: settings.TunnelInitialWindowBytes, MaxQueuedSessionBytes: settings.TunnelMaxSessionQueueBytes,
+			MaxConcurrentStreams: settings.TunnelMaxStreams,
+		},
+		MaxSessions: settings.DirectMaxSessions, IdleTimeout: time.Duration(settings.DirectSessionIdleTimeoutSec) * time.Second,
+		DrainTimeout: time.Duration(settings.TunnelDrainTimeoutSec) * time.Second,
+	}
+	if s.DirectSessionPool != nil {
+		s.DirectSessionPool.ApplyRuntimeSettings(directSettings)
+	}
+	if s.DirectTunnelIngress != nil {
+		s.DirectTunnelIngress.ApplyRuntimeSettings(directSettings)
+	}
+	if s.TunnelManager == nil {
 		return
 	}
 	cache := s.borrowAgentAuthCache()
@@ -1380,7 +1620,6 @@ func (s *Server) reconcileTunnelDesired() {
 		bootstrap = cache.Bootstrap()
 	}
 	agent := s.Store.GetAgent(s.Creds.AgentID)
-	settings := s.Store.Settings()
 	masterURL := ""
 	if s.Cfg != nil {
 		masterURL = s.Cfg.Agent.MasterURL
@@ -1641,12 +1880,46 @@ func (s *Server) SnapshotRemoteTarget(agentID string) (relayexec.RemoteTargetSna
 		preferredTag = s.Cfg.Agent.PreferredAddrTag
 	}
 	return relayexec.RemoteTargetSnapshot{
-		Enabled:        target.Status == consts.StatusEnabled,
-		HTTPAddresses:  target.HTTPAddresses,
-		ProxyURL:       target.ProxyURL,
-		GlobalProxyURL: globalProxyURL,
-		PreferredTag:   preferredTag,
+		Enabled:              target.Status == consts.StatusEnabled,
+		DirectInboundEnabled: target.DirectInboundEnabled, RelayInboundEnabled: target.RelayInboundEnabled,
+		HTTPAddresses: target.HTTPAddresses, ProxyURL: target.ProxyURL,
+		GlobalProxyURL: globalProxyURL, PreferredTag: preferredTag,
 	}, true
+}
+
+func (s *Server) selfAgent() *models.Agent {
+	if s == nil || s.Store == nil || s.Creds == nil {
+		return nil
+	}
+	return s.Store.GetAgent(s.Creds.AgentID)
+}
+
+func (s *Server) sourceAgentEnabled(agentID string) bool {
+	if s == nil || s.Store == nil {
+		return false
+	}
+	agent := s.Store.GetAgent(agentID)
+	return agent != nil && agent.Status == consts.StatusEnabled
+}
+
+func (s *Server) directInboundEnabled() bool {
+	agent := s.selfAgent()
+	return agent != nil && agent.DirectInboundEnabled
+}
+
+func (s *Server) directOutboundEnabled() bool {
+	agent := s.selfAgent()
+	return agent != nil && agent.DirectOutboundEnabled
+}
+
+func (s *Server) relayInboundEnabled() bool {
+	agent := s.selfAgent()
+	return agent != nil && agent.RelayInboundEnabled
+}
+
+func (s *Server) relayOutboundEnabled() bool {
+	agent := s.selfAgent()
+	return agent != nil && agent.RelayOutboundEnabled
 }
 
 func (s *Server) observeAttemptPath(record models.AgentPathRecord) {
@@ -1714,18 +1987,14 @@ func (s *Server) buildRelayHandler(relayTimeout time.Duration) relayRuntime {
 	s.LimiterStore = limiter.NewMemStore()
 	s.Breakers = resilience.NewRegistry()
 	remote := relayexec.NewRemoteAttemptExecutor(relayexec.RemoteAttemptExecutorOptions{
-		SourceAgentID: s.Creds.AgentID,
-		Direct:        s.directForwarder,
-		Relay:         s.TunnelManager,
-		Targets:       s,
-		CachedForwardTicket: func() (agentauth.ForwardTicket, error) {
-			return s.cachedForwardTicket(context.Background())
-		},
-		RelayEnabled: func() bool {
-			return s.Store != nil && s.Store.Settings().RelayFallbackEnabled == 1
-		},
-		PeerRouteMode: s.peerRouteMode,
-		Observer:      s.observeAttemptPath,
+		SourceAgentID:         s.Creds.AgentID,
+		Direct:                s.directForwarder,
+		Relay:                 s.TunnelManager,
+		Targets:               s,
+		DirectOutboundEnabled: s.directOutboundEnabled,
+		RelayOutboundEnabled:  s.relayOutboundEnabled,
+		Observer:              s.observeAttemptPath,
+		DirectPathDisabled:    agenttunnel.NewDirectPathDisabledRecorder(s.RelayMetrics, s.Logger, s.RouteSuppressor),
 	})
 	relayHandler := agentrelay.NewHandler(
 		s.Bus, agentApp, dispatcher, s.Inflight, s.LimiterStore, s.Breakers,
@@ -1812,7 +2081,9 @@ func (l *lazyWSClient) ReadLoop() {
 var _ app.WSClient = (*lazyWSClient)(nil)
 
 func (s *Server) buildReporter() (*reporter.Reporter, error) {
-	store := reporter.NewMemPendingUsageStore(s.Cfg.Runtime.ReportBufferSize*10, s.Logger)
+	store := reporter.NewMemPendingUsageStoreWithLimits(deliveryqueue.Limits{
+		MaxEntries: s.Cfg.Runtime.ReportBufferSize * 10,
+	}, s.Logger)
 	uploader, err := reporter.NewUsageUploader(reporter.UploaderConfig{
 		Store:                    store,
 		MasterURL:                s.Cfg.Agent.MasterURL,

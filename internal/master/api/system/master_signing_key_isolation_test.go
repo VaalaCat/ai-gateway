@@ -17,7 +17,7 @@ func TestGetSettingsResponseExcludesMasterSigningState(t *testing.T) {
 	c := newSettingsContext(t)
 	privateMarker := []byte("settings-private-signing-marker")
 	one := uint8(1)
-	db := c.App.GetDB()
+	db := c.App.GetCoreDB()
 	quietDB := db.Session(&gorm.Session{Logger: db.Logger.LogMode(gormlogger.Silent)})
 	require.NoError(t, quietDB.Create(&models.MasterSigningKey{
 		KeyID:      strings.Repeat("a", 64),

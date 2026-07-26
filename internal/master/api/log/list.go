@@ -1,6 +1,8 @@
 package log
 
 import (
+	"errors"
+	"net/http"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -85,6 +87,9 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[m
 		},
 	)
 	if err != nil {
+		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+			return api.PaginatedResponse[models.UsageLog]{}, logDatabaseUnavailableError()
+		}
 		return api.PaginatedResponse[models.UsageLog]{}, api.InternalError("list logs failed", err)
 	}
 
@@ -96,4 +101,8 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[m
 	}
 
 	return api.PaginatedResponse[models.UsageLog]{Data: logs, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func logDatabaseUnavailableError() error {
+	return api.ErrorWithCode(http.StatusServiceUnavailable, "LogDatabaseUnavailable", "log database is temporarily unavailable", nil)
 }

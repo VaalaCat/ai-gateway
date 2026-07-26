@@ -10,16 +10,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Field,
-  FieldContent,
   FieldDescription,
   FieldError,
   FieldGroup,
   FieldLabel,
-  FieldTitle,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import {
   useSettings,
   useUpdateAgentRelaySettings,
@@ -28,7 +25,6 @@ import {
 import { parseOptionalRelayURI } from "@/lib/utils/relay-uri";
 
 const DEFAULT_URI_KEY = "agent.relay_default_uri";
-const FALLBACK_ENABLED_KEY = "agent.relay_fallback_enabled";
 const PROBE_SUCCESS_TTL_KEY = "agent.connectivity_probe_success_ttl_seconds";
 const PROBE_RETRY_MIN_KEY = "agent.connectivity_probe_failure_retry_min_seconds";
 const PROBE_RETRY_MAX_KEY = "agent.connectivity_probe_failure_retry_max_seconds";
@@ -43,20 +39,17 @@ export function AgentRelaySettings() {
   const { data, isError, isFetching, refetch } = useSettings();
   const update = useUpdateAgentRelaySettings();
   const currentURI = data?.settings[DEFAULT_URI_KEY] ?? "";
-  const currentEnabled = data?.settings[FALLBACK_ENABLED_KEY] === "1";
   const currentSuccessTTL = data?.settings[PROBE_SUCCESS_TTL_KEY] ?? "300";
   const currentRetryMin = data?.settings[PROBE_RETRY_MIN_KEY] ?? "30";
   const currentRetryMax = data?.settings[PROBE_RETRY_MAX_KEY] ?? "300";
   const hasBaseline = data !== undefined;
   const [uriDraft, setURIDraft] = useState<string | null>(null);
-  const [enabledDraft, setEnabledDraft] = useState<boolean | null>(null);
   const [successTTLDraft, setSuccessTTLDraft] = useState<string | null>(null);
   const [retryMinDraft, setRetryMinDraft] = useState<string | null>(null);
   const [retryMaxDraft, setRetryMaxDraft] = useState<string | null>(null);
   const [saveError, setSaveError] = useState(false);
 
   const uri = uriDraft ?? currentURI;
-  const enabled = enabledDraft ?? currentEnabled;
   const successTTL = successTTLDraft ?? currentSuccessTTL;
   const retryMin = retryMinDraft ?? currentRetryMin;
   const retryMax = retryMaxDraft ?? currentRetryMax;
@@ -64,7 +57,6 @@ export function AgentRelaySettings() {
   const uriError = "error" in parsedURI ? parsedURI.error : undefined;
   const normalizedURI = "normalized" in parsedURI ? parsedURI.normalized : uri;
   const uriChanged = normalizedURI !== currentURI;
-  const enabledChanged = enabled !== currentEnabled;
   const successTTLChanged = successTTL !== currentSuccessTTL;
   const retryMinChanged = retryMin !== currentRetryMin;
   const retryMaxChanged = retryMax !== currentRetryMax;
@@ -72,7 +64,7 @@ export function AgentRelaySettings() {
   const retryMinError = !integerInRange(retryMin, 5, 300);
   const retryMaxError = !integerInRange(retryMax, 5, 3600) || Number(retryMax) < Number(retryMin);
   const timingError = successTTLError || retryMinError || retryMaxError;
-  const hasChanges = uriChanged || enabledChanged || successTTLChanged || retryMinChanged || retryMaxChanged;
+  const hasChanges = uriChanged || successTTLChanged || retryMinChanged || retryMaxChanged;
 
   const retry = () => {
     void refetch();
@@ -82,7 +74,6 @@ export function AgentRelaySettings() {
     if (!hasBaseline || update.isPending || uriError || timingError || !hasChanges) return;
     const settings: AgentRelaySettingsPatch = {};
     if (uriChanged) settings[DEFAULT_URI_KEY] = normalizedURI;
-    if (enabledChanged) settings[FALLBACK_ENABLED_KEY] = enabled ? "1" : "0";
     if (successTTLChanged) settings[PROBE_SUCCESS_TTL_KEY] = successTTL;
     if (retryMinChanged) settings[PROBE_RETRY_MIN_KEY] = retryMin;
     if (retryMaxChanged) settings[PROBE_RETRY_MAX_KEY] = retryMax;
@@ -91,7 +82,6 @@ export function AgentRelaySettings() {
     try {
       await update.mutateAsync({ settings });
       setURIDraft(null);
-      setEnabledDraft(null);
       setSuccessTTLDraft(null);
       setRetryMinDraft(null);
       setRetryMaxDraft(null);
@@ -124,7 +114,7 @@ export function AgentRelaySettings() {
             </AlertDescription>
           </Alert>
         ) : (
-          <div role="status" aria-label={t("loading")} className="space-y-3 py-1">
+          <div role="status" aria-label={t("loading")} className="flex flex-col gap-3 py-1">
             <Skeleton className="h-4 w-32" />
             <Skeleton className="h-9 w-full" />
             <Skeleton className="h-8 w-3/5" />
@@ -167,23 +157,6 @@ export function AgentRelaySettings() {
               {uriError ? (
                 <FieldError>{uriError === "too_long" ? t("uriTooLong") : t("invalidUri")}</FieldError>
               ) : null}
-            </Field>
-
-            <Field orientation="horizontal" data-disabled={update.isPending || undefined}>
-              <FieldContent>
-                <FieldTitle>{t("fallbackEnabled")}</FieldTitle>
-                <FieldDescription>{t("fallbackEnabledDescription")}</FieldDescription>
-              </FieldContent>
-              <Switch
-                id="agent-relay-fallback-enabled"
-                checked={enabled}
-                disabled={update.isPending}
-                aria-label={t("fallbackEnabled")}
-                onCheckedChange={(checked) => {
-                  setEnabledDraft(checked);
-                  setSaveError(false);
-                }}
-              />
             </Field>
 
             <FieldGroup className="grid min-w-0 gap-4 sm:grid-cols-3">

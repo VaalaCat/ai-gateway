@@ -53,6 +53,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api/user_group"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
+	masterdatabase "github.com/VaalaCat/ai-gateway/internal/master/database"
+	masterhistorybackfill "github.com/VaalaCat/ai-gateway/internal/master/historybackfill"
+	masterlogqueue "github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	masteroperations "github.com/VaalaCat/ai-gateway/internal/master/operations"
 	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	mastertunnel "github.com/VaalaCat/ai-gateway/internal/master/tunnel"
@@ -68,11 +71,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
 	webassets "github.com/VaalaCat/ai-gateway/web"
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sourcegraph/conc"
-	"github.com/sourcegraph/conc/pool"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -83,6 +84,8 @@ var _ app.MasterServer = (*Server)(nil)
 var (
 	errMasterServerClosing = errors.New("master server: shutting down")
 	ErrAlreadyRunning      = errors.New("master server: already running")
+	openCoreDatabase       = (*masterdatabase.Connector).OpenCore
+	openLogDatabase        = (*masterdatabase.Connector).OpenLog
 )
 
 type startupState uint8
@@ -94,27 +97,45 @@ const (
 	startupClosing
 )
 
+type readyListener struct {
+	net.Listener
+	once  sync.Once
+	ready chan struct{}
+}
+
+func newReadyListener(listener net.Listener) *readyListener {
+	return &readyListener{Listener: listener, ready: make(chan struct{})}
+}
+
+func (l *readyListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.ready) })
+	return l.Listener.Accept()
+}
+
 type Server struct {
-	Cfg              *config.MasterRuntimeConfig
-	Logger           *zap.Logger
-	DB               *gorm.DB
-	Bus              app.EventBus
-	Router           *gin.Engine
-	Version          atomic.Int64
-	lastSavedVersion atomic.Int64
-	Hub              *msync.Hub
-	RelayHub         *mastertunnel.Hub
-	RelayAdmission   *mastertunnel.AdmissionGate
-	InstanceID       string
-	Signer           *masteragentauth.Signer
-	Connections      *connectivity.Service
-	ProbeScheduler   *connectivity.Scheduler
-	Operations       *masteroperations.Service
-	Listener         net.Listener
-	httpSrv          *http.Server
-	App              app.Application
-	MetricsRegistry  *prometheus.Registry
-	RelayMetrics     *pkgmetrics.AgentRelayMetrics
+	Cfg                   *config.MasterRuntimeConfig
+	Logger                *zap.Logger
+	DB                    *gorm.DB
+	LogDB                 *gorm.DB
+	Bus                   app.EventBus
+	Router                *gin.Engine
+	Version               atomic.Int64
+	lastSavedVersion      atomic.Int64
+	Hub                   *msync.Hub
+	RelayHub              *mastertunnel.Hub
+	InstanceID            string
+	Signer                *masteragentauth.Signer
+	Connections           *connectivity.Service
+	ProbeScheduler        *connectivity.Scheduler
+	Operations            *masteroperations.Service
+	Listener              net.Listener
+	httpSrv               *http.Server
+	App                   app.Application
+	MetricsRegistry       *prometheus.Registry
+	RelayMetrics          *pkgmetrics.AgentRelayMetrics
+	StatsCache            *dao.StatsCache
+	LogDeliveryWorker     *masterlogqueue.LogDeliveryWorker
+	HistoryBackfillWorker *masterhistorybackfill.Worker
 
 	// Heartbeat captures agent last_seen in memory and periodically flushes
 	// to DB; also serves freshness reads for API enrichment. Started in Run
@@ -123,7 +144,7 @@ type Server struct {
 
 	// Aggregator buffers per-key billing rollup deltas (token_daily /
 	// channel_daily / hourly_bucket) in memory and flushes them in
-	// batched UPSERTs. Settler hands off each committed UsageLog to it
+	// batched UPSERTs. Settler hands off each committed BillingLog to it
 	// via the UsageAggregator interface. Started in Run; Stop() in
 	// Shutdown drains the final batch before Heartbeat.Stop.
 	Aggregator *billing.Aggregator
@@ -172,7 +193,9 @@ type Server struct {
 	beforeSetupEmbedded    func()
 	afterEmbeddedConstruct func(*agent.Server)
 	beforeRunCommit        func()
+	afterHTTPServeStarted  func()
 	beforeRunRelease       func()
+	recordShutdownPhase    func(string)
 }
 
 type relayAgentLookup struct {
@@ -212,84 +235,19 @@ func (l relayAgentLookup) GetRelayRuntime(agentID string) (connectivity.RelayRun
 	return *fact.Runtime.Relay, true
 }
 
-const sqliteWALPragma = "_pragma=journal_mode(WAL)"
-
-// sqliteBusyTimeoutPragma: 回填 rebuild 等长写事务持锁时,给并发 settle 30s 等锁
-// 窗口,而不是 5s 就 SQLITE_BUSY。
-const sqliteBusyTimeoutPragma = "_pragma=busy_timeout(30000)"
-
-func isSQLiteMemoryDSN(dsn string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(dsn))
-	return normalized == ":memory:" ||
-		strings.Contains(normalized, "mode=memory") ||
-		strings.Contains(normalized, "::memory:")
-}
-
-func withSQLiteWAL(dsn string) string {
-	trimmed := strings.TrimSpace(dsn)
-	if trimmed == "" || isSQLiteMemoryDSN(trimmed) {
-		return trimmed
-	}
-
-	normalized := strings.ToLower(trimmed)
-	if strings.Contains(normalized, "journal_mode(wal)") {
-		return trimmed
-	}
-	if strings.Contains(trimmed, "?") {
-		return trimmed + "&" + sqliteWALPragma
-	}
-	return trimmed + "?" + sqliteWALPragma
-}
-
-// withSQLiteBusyTimeout ensures a busy_timeout pragma is present in the sqlite
-// DSN so concurrent writers (settle) wait up to 30s for the write lock
-// instead of failing immediately with SQLITE_BUSY when a long rebuild
-// transaction is holding it. Mirrors withSQLiteWAL: idempotent, and leaves
-// non-file/memory DSNs untouched the same way withSQLiteWAL does.
-func withSQLiteBusyTimeout(dsn string) string {
-	trimmed := strings.TrimSpace(dsn)
-	if trimmed == "" || isSQLiteMemoryDSN(trimmed) {
-		return trimmed
-	}
-
-	normalized := strings.ToLower(trimmed)
-	if strings.Contains(normalized, "busy_timeout(") {
-		return trimmed
-	}
-	if strings.Contains(trimmed, "?") {
-		return trimmed + "&" + sqliteBusyTimeoutPragma
-	}
-	return trimmed + "?" + sqliteBusyTimeoutPragma
-}
-
-func sqliteDirFromDSN(dsn string) string {
-	base := dsn
-	if i := strings.Index(base, "?"); i >= 0 {
-		base = base[:i]
-	}
-	return filepath.Dir(base)
-}
-
 func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) {
 	runtimeCfg := cfg.ToMasterRuntimeConfig()
 	if runtimeCfg == nil {
 		return nil, fmt.Errorf("master runtime config is required")
 	}
 
-	sqliteDSN := withSQLiteBusyTimeout(withSQLiteWAL(runtimeCfg.Master.DBPath))
-
-	// Skip directory creation for in-memory databases
-	if !isSQLiteMemoryDSN(sqliteDSN) {
-		dir := sqliteDirFromDSN(sqliteDSN)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("create data dir: %w", err)
-		}
-	}
-
-	db, err := gorm.Open(sqlite.Open(sqliteDSN), &gorm.Config{})
+	connector := masterdatabase.NewConnector()
+	databases, err := prepareDatabases(context.Background(), &runtimeCfg.Master, connector, logger)
 	if err != nil {
-		return nil, fmt.Errorf("open db: %w", err)
+		return nil, err
 	}
+	db := databases.core
+	logDB := databases.log
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, fmt.Errorf("get sql db: %w", err)
@@ -300,16 +258,19 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 			_ = sqlDB.Close()
 		}
 	}()
-	if isSQLiteMemoryDSN(sqliteDSN) {
-		// SQLite :memory: is per connection. Keep a single connection so all
-		// requests and goroutines see the same in-memory schema/data.
-		sqlDB.SetMaxOpenConns(1)
-		sqlDB.SetMaxIdleConns(1)
+	var logSQLDB interface{ Close() error }
+	if logDB != nil {
+		logSQLDB, err = logDB.DB()
+		if err != nil {
+			return nil, fmt.Errorf("get log sql database: %w", err)
+		}
 	}
-
-	if err := models.AutoMigrate(db); err != nil {
-		return nil, fmt.Errorf("migrate: %w", err)
-	}
+	logDBOwned := true
+	defer func() {
+		if logDBOwned && logSQLDB != nil {
+			_ = logSQLDB.Close()
+		}
+	}()
 
 	if err := models.SeedDefaultUserGroup(db); err != nil {
 		return nil, fmt.Errorf("seed default user group: %w", err)
@@ -329,13 +290,16 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	metricsRegistry := prometheus.NewRegistry()
 
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
+	application.SetLogDB(logDB)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
 	application.SetEventBus(bus)
 
 	s := &Server{
 		Cfg:             runtimeCfg,
 		Logger:          logger,
 		DB:              db,
+		LogDB:           logDB,
 		Bus:             bus,
 		Router:          gin.New(),
 		App:             application,
@@ -343,8 +307,48 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		InstanceID:      uuid.NewString(),
 		MetricsRegistry: metricsRegistry,
 		RelayMetrics:    pkgmetrics.NewAgentRelayMetrics(metricsRegistry, metricsRegistry),
+		StatsCache:      dao.NewStatsCache(),
 	}
+	logDeliveryMetrics := pkgmetrics.NewLogDeliveryMetrics(metricsRegistry)
+	settingsFinder := masterlogqueue.NewCoreSettingsFinder(application.GetCoreDB, func(err error) {
+		logger.Error("load log delivery settings", zap.Error(err))
+	})
+	s.LogDeliveryWorker = masterlogqueue.NewLogDeliveryWorker(masterlogqueue.WorkerOptions{
+		Writer:    &masterlogqueue.LogBatchWriter{DBFinder: application.GetLogDB},
+		Settings:  settingsFinder,
+		Connector: masterlogqueue.SQLiteLogConnector{Path: runtimeCfg.Master.LogDBPath, Connector: connector},
+		Handoff: func(recovered *gorm.DB) *gorm.DB {
+			old := application.GetLogDB()
+			application.SetLogDB(recovered)
+			s.lifecycleMu.Lock()
+			s.LogDB = recovered
+			s.lifecycleMu.Unlock()
+			return old
+		},
+		Metrics:      logDeliveryMetrics,
+		SnapshotPath: masterLogSnapshotPath(runtimeCfg.Master.LogDBPath, s.InstanceID),
+		OnError:      func(err error) { logger.Error("log delivery degraded", zap.Error(err)) },
+	})
 	s.initLifecycle()
+	if err := s.LogDeliveryWorker.Start(s.lifecycleContext()); err != nil {
+		return nil, fmt.Errorf("start log delivery worker: %w", err)
+	}
+	logWorkerOwned := true
+	defer func() {
+		if logWorkerOwned {
+			_ = s.LogDeliveryWorker.Stop(context.Background())
+		}
+	}()
+	s.HistoryBackfillWorker, err = newHistoryBackfillWorker(&runtimeCfg.Master, application, connector, logger)
+	if err != nil {
+		return nil, fmt.Errorf("prepare history backfill worker: %w", err)
+	}
+	historyWorkerOwned := true
+	defer func() {
+		if historyWorkerOwned {
+			_ = s.HistoryBackfillWorker.Stop(context.Background())
+		}
+	}()
 	signer, err := masteragentauth.NewSigner(
 		context.Background(),
 		dao.NewMasterSigningKeyStore(db),
@@ -375,7 +379,7 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 			MasterInstanceID: s.InstanceID,
 			Capabilities: []string{
 				protocol.AgentCapabilityForwardV1,
-				protocol.AgentCapabilityTunnelV1,
+				protocol.AgentCapabilityTunnelV2,
 			},
 			AgentTicketSigner: s.Signer,
 		},
@@ -406,8 +410,6 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		1,
 		10,
 	)
-	s.RelayAdmission = &mastertunnel.AdmissionGate{}
-	s.RelayAdmission.Set(settingQuery.LookupInt(consts.SettingAgentRelayFallbackEnabled, 0) == 1)
 	s.RelayHub = mastertunnel.NewHub(mastertunnel.HubOptions{
 		InstanceID: s.InstanceID,
 		Signer:     s.Signer,
@@ -415,10 +417,9 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 			application: s.App,
 			control:     s.Hub,
 		},
-		Admission: s.RelayAdmission,
 		Limits: pkgtunnel.Limits{
-			MaxMetadataBytes:      pkgtunnel.MaxV1PayloadBytes,
-			MaxDataBytes:          pkgtunnel.MaxV1PayloadBytes,
+			MaxMetadataBytes:      pkgtunnel.MaxV2PayloadBytes,
+			MaxDataBytes:          pkgtunnel.MaxV2PayloadBytes,
 			InitialStreamWindow:   256 * 1024,
 			MaxQueuedSessionBytes: 4 * 1024 * 1024,
 			MaxConcurrentStreams:  128,
@@ -439,9 +440,10 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		},
 	})
 	s.Connections = connectivity.NewService(s.InstanceID, connectivity.Sources{Control: s.Hub, Relay: s.RelayHub}, connectivity.Options{
-		HeartbeatDegradedAfter: time.Duration(controlHeartbeatDegradedSec) * time.Second,
-		RecoverySamples:        controlHealthRecoverySamples,
-		Logger:                 logger.Named("connectivity"),
+		HeartbeatDegradedAfter:     time.Duration(controlHeartbeatDegradedSec) * time.Second,
+		RecoverySamples:            controlHealthRecoverySamples,
+		AgentTransportPolicyFinder: masterAgentTransportPolicyFinder{application: s.App},
+		Logger:                     logger.Named("connectivity"),
 	})
 	s.Hub.RouteObservations = s.Connections
 	s.Hub.SetControlSessionRemoved(s.Connections.Forget)
@@ -472,43 +474,23 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	publisher := msync.NewPublisher(s.Hub, bus, &s.Version, logger)
 	publisher.Start()
 
-	// Aggregator: buffer rollup writes in memory; flush in batches.
-	// Settings provide override; defaults match spec (30s tick / 5000 row cap).
-	aggFlushSec := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
-		"billing.aggregator_flush_interval_seconds", 30,
-	)
-	aggMaxRows := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
-		"billing.aggregator_max_buffered_rows", 5000,
-	)
-	aggregator := billing.NewAggregator(application, logger, billing.AggregatorOptions{
-		FlushEvery: time.Duration(aggFlushSec) * time.Second,
-		MaxRows:    aggMaxRows,
-	})
-	aggregator.SetFlushContextFns(
-		func(ctx context.Context, rows []dao.TokenDailyRow) error {
-			return dao.NewAdminMutation(dao.NewContextWithContext(application, ctx)).Billing().BatchUpsertTokenDaily(rows)
-		},
-		func(ctx context.Context, rows []dao.ChannelDailyRow) error {
-			return dao.NewAdminMutation(dao.NewContextWithContext(application, ctx)).Billing().BatchUpsertChannelDaily(rows)
-		},
-		func(ctx context.Context, rows []dao.HourlyBucketRow) error {
-			return dao.NewAdminMutation(dao.NewContextWithContext(application, ctx)).Billing().BatchUpsertHourlyBucket(rows)
-		},
-		func(ctx context.Context, rows []dao.DurationHistogramRow) error {
-			return dao.NewAdminMutation(dao.NewContextWithContext(application, ctx)).Billing().BatchUpsertDurationHistogram(rows)
-		},
-	)
-	s.Aggregator = aggregator
-
-	// RebuildRunner: per-hour async rebuild scheduler. Terminal-job retention
-	// is admin-configurable; default 24h. Production sliceFn falls back to
-	// dao.RebuildHourSlice (set inside run() when SliceFn is nil + app non-nil).
-	retainSec := dao.NewAdminQuery(dao.NewContext(application)).Setting().LookupInt(
+	// RebuildRunner: per-hour async rebuild scheduler.
+	retainSec := settingQuery.LookupInt(
 		"billing.rebuild_job_retain_seconds", 86400,
 	)
 	s.RebuildRunner = billing.NewRebuildRunner(application, logger, time.Duration(retainSec)*time.Second)
+	s.Aggregator = billing.NewAggregator(application, logger, buildBillingAggregatorOptions(settingQuery))
+	s.Aggregator.SetProjectionFlushContextFn(func(ctx context.Context, facts []models.BillingLog) error {
+		return application.GetCoreDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return billing.ProjectCommittedBillingFactsInTx(ctx, tx, facts)
+		})
+	})
+	s.RebuildRunner.SetCoreRebuildAdmission(s.Aggregator)
+	// 片间 sleep:后台回填对 DB 细水长流,别抢高峰 IO。默认 1s,admin 可调 [0,60000]ms。
+	sliceSleepMs := lookupIntInRange(settingQuery, consts.SettingKeyRebuildSliceSleepMs, 1000, 0, 60000)
+	s.RebuildRunner.SetSliceSleep(time.Duration(sliceSleepMs) * time.Millisecond)
 
-	settler := billing.NewSettlerWithAggregator(application, bus, logger, aggregator)
+	settler := billing.NewCoreFactSettler(application, bus, logger, s.Aggregator, s.LogDeliveryWorker)
 	settler.Start()
 	// 数据面同步结算入口:HTTP 摄取(POST /api/agents/usage)只在 SettleBatch 落库
 	// 成功后才 200,把 ack 语义从"进了内存 bus"收紧到"已持久化"。ws 路径(usage.reported
@@ -526,7 +508,21 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	s.setupRoutes()
 
 	dbOwned = false
+	logDBOwned = false
+	logWorkerOwned = false
+	historyWorkerOwned = false
 	return s, nil
+}
+
+type billingAggregatorSettingFinder interface {
+	LookupInt(key string, fallback int) int
+}
+
+func buildBillingAggregatorOptions(settings billingAggregatorSettingFinder) billing.AggregatorOptions {
+	return billing.AggregatorOptions{
+		FlushEvery: time.Duration(settings.LookupInt("billing.aggregator_flush_interval_seconds", 30)) * time.Second,
+		MaxRows:    settings.LookupInt("billing.aggregator_max_buffered_rows", 5000),
+	}
 }
 
 func lookupIntInRange(query dao.AdminSettingQuery, key string, fallback, minimum, maximum int) int {
@@ -575,8 +571,22 @@ func (s *Server) setupRoutes() {
 	}
 
 	systemH := &apisystem.Handler{
-		ConnectedCount: s.Hub.ConnectedAgents,
-		RelayAdmission: s.RelayAdmission,
+		ConnectedCount:     s.Hub.ConnectedAgents,
+		CoreDatabasePath:   s.Cfg.Master.DBPath,
+		LogDatabasePath:    s.Cfg.Master.LogDBPath,
+		LegacyDatabasePath: s.Cfg.Master.LegacyDBPath,
+		CoreDatabase:       s.App.GetCoreDB,
+		LogDatabase:        s.App.GetLogDB,
+		LogDatabaseReady:   s.LogDeliveryWorker.SchemaReady,
+		LogDatabaseError:   func() string { return s.LogDeliveryWorker.Status().LastError },
+		LogQueueSnapshot: func() apisystem.LogQueueStatus {
+			return apisystem.LogQueueStatusFrom(s.LogDeliveryWorker.Status())
+		},
+		RetryLogQueue: s.LogDeliveryWorker.RetryNow,
+		ClearLogQueueBacklog: func() (apisystem.ClearLogBacklogResponse, error) {
+			cleared, err := s.LogDeliveryWorker.ClearBacklog()
+			return apisystem.ClearLogBacklogResponse{Pending: cleared.Pending, Retry: cleared.Retry, Bytes: cleared.Bytes}, err
+		},
 		RefreshProbeTimings: func(ctx context.Context) {
 			if s.ProbeScheduler == nil {
 				return
@@ -588,6 +598,93 @@ func (s *Server) setupRoutes() {
 				time.Duration(settings.LookupInt(consts.SettingAgentConnectivityProbeFailureRetryMaxSeconds, 300))*time.Second,
 			)
 		},
+	}
+	if s.HistoryBackfillWorker != nil {
+		legacyPath := func() (string, error) {
+			parsed, err := masterdatabase.ParseSQLiteDSN(s.Cfg.Master.LegacyDBPath)
+			if err != nil {
+				return "", fmt.Errorf("parse legacy database path: %w", err)
+			}
+			if parsed.Memory {
+				return "", fmt.Errorf("legacy database must be file-backed")
+			}
+			path, err := filepath.Abs(parsed.FilesystemPath)
+			if err != nil {
+				return "", fmt.Errorf("canonicalize legacy database path: %w", err)
+			}
+			return filepath.Clean(path), nil
+		}
+		validateTargets := func() error {
+			return masterdatabase.ValidateLegacyCleanerTargets(s.App.GetCoreDB(), s.App.GetLogDB())
+		}
+		migrationState := func() string {
+			state := s.HistoryBackfillWorker.Status().State
+			if state == masterhistorybackfill.StateSourceDeleted {
+				return string(masterhistorybackfill.StateCompleted)
+			}
+			return string(state)
+		}
+		systemH.LegacyArtifactSnapshot = func() (masterdatabase.LegacyArtifact, error) {
+			path, err := legacyPath()
+			if err != nil {
+				return masterdatabase.LegacyArtifact{}, err
+			}
+			return masterdatabase.FindLegacyArtifact(path)
+		}
+		systemH.HistoryBackfillSnapshot = s.HistoryBackfillWorker.Status
+		systemH.RetryHistoryBackfill = s.HistoryBackfillWorker.RetryNow
+		systemH.SkipHistoryBackfill = s.HistoryBackfillWorker.SkipRemaining
+		systemH.CompleteHistoryBackfill = s.HistoryBackfillWorker.Complete
+		systemH.DeleteLegacySource = func(confirmation string) error {
+			path, err := legacyPath()
+			if err != nil {
+				return err
+			}
+			return (masterdatabase.LegacyFileCleaner{
+				MigrationState: migrationState(),
+				BatchRunning:   s.HistoryBackfillWorker.BatchRunning, ValidateTargets: validateTargets,
+			}).DeleteConfiguredSource(path, s.HistoryBackfillWorker.Status().SourcePath, confirmation)
+		}
+		systemH.DeleteLegacyArtifact = func(confirmation string) error {
+			return (masterdatabase.LegacyArtifactDeletionCommand{
+				FindArtifact: systemH.LegacyArtifactSnapshot,
+				BuildValidator: func() masterdatabase.LegacyArtifactDeletionValidator {
+					return masterdatabase.LegacyArtifactDeletionValidator{
+						CoreDB: s.App.GetCoreDB(), LogDB: s.App.GetLogDB(),
+						LogDatabaseReady: s.LogDeliveryWorker.SchemaReady(),
+						CoreDatabaseDSN:  s.Cfg.Master.DBPath, LogDatabaseDSN: s.Cfg.Master.LogDBPath,
+						ActiveLegacySources: apisystem.ActiveLegacyDatabaseSources(
+							s.Cfg.Master.LegacyDBPath, s.HistoryBackfillWorker.Status(),
+						),
+					}
+				},
+			}).Delete(confirmation)
+		}
+		markHistorySourceDeleted := func(ctx context.Context) error {
+			return apisystem.MarkHistorySourceDeleted(ctx, s.App.GetCoreDB(), time.Now().Unix())
+		}
+		systemH.MarkHistorySourceDeleted = func(ctx context.Context) error {
+			configuredPath, err := legacyPath()
+			if err != nil {
+				return err
+			}
+			path, err := masterdatabase.CanonicalLegacySourcePath(configuredPath, s.HistoryBackfillWorker.Status().SourcePath)
+			if err != nil {
+				return err
+			}
+			return apisystem.ReconcileHistorySourceDeletion(ctx, path, markHistorySourceDeleted)
+		}
+		systemH.ReconcileHistorySourceDeleted = func(ctx context.Context, persistedPath string) error {
+			configuredPath, err := legacyPath()
+			if err != nil {
+				return err
+			}
+			path, err := masterdatabase.CanonicalLegacySourcePath(configuredPath, persistedPath)
+			if err != nil {
+				return err
+			}
+			return apisystem.ReconcileHistorySourceDeletion(ctx, path, markHistorySourceDeleted)
+		}
 	}
 
 	// Public endpoints
@@ -787,10 +884,10 @@ func (s *Server) setupRoutes() {
 	auth.DELETE("/tokens/:id/model-routings/:routing_id", api.Adapt(adapter, api.BindURI, mrH.TokenDelete))
 
 	logH := &apilog.Handler{}
-	billingH := &apibilling.Handler{Runner: s.RebuildRunner}
-	statsH := &stats.Handler{ConnectedCount: s.Hub.ConnectedAgents}
-	monitoringH := &apimonitoring.Handler{}
-	insightsH := &apiinsights.Handler{Tracker: s.Heartbeat}
+	billingH := &apibilling.Handler{Runner: s.RebuildRunner, Cache: s.StatsCache}
+	statsH := &stats.Handler{ConnectedCount: s.Hub.ConnectedAgents, Cache: s.StatsCache, LogDatabaseReady: s.LogDeliveryWorker.SchemaReady}
+	monitoringH := &apimonitoring.Handler{LogDatabaseReady: s.LogDeliveryWorker.SchemaReady}
+	insightsH := &apiinsights.Handler{Tracker: s.Heartbeat, LogDatabaseReady: s.LogDeliveryWorker.SchemaReady}
 
 	// Token/Log/Stats routes on userAuth (accessible by all authenticated users)
 	userAuth.GET("/tokens", api.Adapt(adapter, api.BindQuery, tokenH.List))
@@ -812,6 +909,10 @@ func (s *Server) setupRoutes() {
 	// Observability v1: dashboard / billing insights / logs insights (all users; admin/user scope
 	// 由各 handler 内部按 RequestScope 区分);monitoring insights / generic insights 仅 admin。
 	userAuth.GET("/stats/dashboard", api.Adapt(adapter, api.BindQuery, statsH.Dashboard))
+	userAuth.GET("/stats/channel-model-breakdown", api.Adapt(adapter, api.BindQuery, statsH.ChannelModelBreakdown))
+	userAuth.GET("/stats/market-share", api.Adapt(adapter, api.BindQuery, statsH.MarketShare))
+	userAuth.GET("/stats/metric-trend", api.Adapt(adapter, api.BindQuery, statsH.MetricTrend))
+	userAuth.GET("/stats/model-distribution", api.Adapt(adapter, api.BindQuery, statsH.ModelDistribution))
 	userAuth.GET("/billing/insights", api.Adapt(adapter, api.BindQuery, billingH.Insights))
 	userAuth.GET("/logs/insights", api.Adapt(adapter, api.BindQuery, logH.Insights))
 	auth.GET("/monitoring/insights", api.Adapt(adapter, api.BindQuery, monitoringH.Insights))
@@ -835,6 +936,13 @@ func (s *Server) setupRoutes() {
 	auth.GET("/stats", api.Adapt(adapter, api.BindNone, statsH.Overview))
 
 	auth.GET("/system/stats", api.Adapt(adapter, api.BindNone, systemH.Stats))
+	auth.POST("/system/log-queue/retry", api.Adapt(adapter, api.BindNone, systemH.RetryLogQueueNow))
+	auth.DELETE("/system/log-queue/backlog", api.Adapt(adapter, api.BindQuery, systemH.ClearLogBacklog))
+	auth.POST("/system/history-backfill/retry", api.Adapt(adapter, api.BindNone, systemH.RetryHistoryBackfillNow))
+	auth.POST("/system/history-backfill/skip", api.Adapt(adapter, api.BindQuery, systemH.SkipHistoryBackfillRemaining))
+	auth.POST("/system/history-backfill/complete", api.Adapt(adapter, api.BindJSON, systemH.CompleteHistoryBackfillNow))
+	auth.DELETE("/system/history-backfill/source", api.Adapt(adapter, api.BindQuery, systemH.DeleteHistoryBackfillSource))
+	auth.DELETE("/system/history-backfill/legacy-artifact", api.Adapt(adapter, api.BindQuery, systemH.DeleteHistoryBackfillLegacyArtifact))
 	auth.GET("/system/cleanup/preview", api.Adapt(adapter, api.BindQuery, systemH.CleanupPreview))
 	auth.POST("/system/cleanup", api.Adapt(adapter, api.BindJSON, systemH.Cleanup))
 	auth.GET("/system/settings", api.Adapt(adapter, api.BindNone, systemH.GetSettings))
@@ -1314,8 +1422,25 @@ func (s *Server) Run() error {
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
+	readyLn := newReadyListener(ln)
+	var serveErr error
+	var serveGroup conc.WaitGroup
+	serveGroup.Go(func() { serveErr = httpSrv.Serve(readyLn) })
+	<-readyLn.ready
+	if s.afterHTTPServeStarted != nil {
+		s.afterHTTPServeStarted()
+	}
 	s.Logger.Info("master listening", zap.String("addr", ln.Addr().String()))
-	return httpSrv.Serve(ln)
+	if s.HistoryBackfillWorker != nil {
+		if err := s.HistoryBackfillWorker.Start(s.lifecycleContext()); err != nil {
+			_ = httpSrv.Close()
+			serveGroup.Wait()
+			return fmt.Errorf("start history backfill worker: %w", err)
+		}
+		s.Logger.Info("database_split_history_backfill_started")
+	}
+	serveGroup.Wait()
+	return serveErr
 }
 
 func (s *Server) runStateSweeper(ctx context.Context, store *apioauth.StateStore) {
@@ -1515,27 +1640,38 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	if startupDone != nil {
 		<-startupDone
 	}
-	if s.RelayAdmission != nil {
-		s.RelayAdmission.Set(false)
-	}
 	s.lifecycleMu.Lock()
 	httpSrv := s.httpSrv
 	listener := s.Listener
 	relayHub := s.RelayHub
 	s.lifecycleMu.Unlock()
-	drains := pool.New().WithContext(ctx)
+	var drainErr error
 	if httpSrv != nil {
-		drains.Go(func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
+		drainErr = httpSrv.Shutdown(ctx)
 	}
-	if relayHub != nil {
-		drains.Go(func(ctx context.Context) error { return relayHub.DrainAll(ctx) })
-	}
-	drainErr := drains.Wait()
 	shutdownCause := context.Cause(ctx)
 	if shutdownCause == nil {
 		shutdownCause = errors.New("master server: shutdown")
 	}
 	s.rootCancel(shutdownCause)
+	if s.embeddedBackground != nil {
+		s.embeddedBackground.Cancel(shutdownCause)
+	}
+	s.recordShutdown("embedded_direct")
+	if s.embeddedAgent != nil {
+		embeddedErr := s.embeddedAgent.Shutdown(ctx)
+		drainErr = errors.Join(drainErr, embeddedErr)
+		if embeddedErr == nil {
+			<-s.embeddedAgent.Done()
+		}
+	}
+	if s.embeddedBackground != nil {
+		s.embeddedBackground.Wait()
+	}
+	s.recordShutdown("relay_hubs")
+	if relayHub != nil {
+		drainErr = errors.Join(drainErr, relayHub.DrainAll(ctx))
+	}
 	if s.ProbeScheduler != nil {
 		_ = s.ProbeScheduler.Close(ctx)
 		<-s.ProbeScheduler.Done()
@@ -1557,19 +1693,10 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 		_ = s.Hub.Close(ctx)
 		<-s.Hub.Done()
 	}
-	s.waitHTTPHandlers()
-	if s.embeddedBackground != nil {
-		s.embeddedBackground.Cancel(shutdownCause)
-	}
-	if s.embeddedAgent != nil {
-		_ = s.embeddedAgent.Shutdown(ctx)
-		<-s.embeddedAgent.Done()
-	}
-	if s.embeddedBackground != nil {
-		s.embeddedBackground.Wait()
-	}
+	// behavior change: shared-listener handlers cannot extend shutdown past its context.
+	drainErr = errors.Join(drainErr, s.waitHTTPHandlers(ctx))
 	if s.Aggregator != nil {
-		_ = s.Aggregator.Close(ctx)
+		drainErr = errors.Join(drainErr, s.Aggregator.Close(ctx))
 		<-s.Aggregator.Done()
 	}
 	if s.RebuildRunner != nil {
@@ -1584,6 +1711,12 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 		_ = s.Heartbeat.Close(ctx)
 		<-s.Heartbeat.Done()
 	}
+	if s.HistoryBackfillWorker != nil {
+		drainErr = errors.Join(drainErr, s.HistoryBackfillWorker.Stop(ctx))
+	}
+	if s.LogDeliveryWorker != nil {
+		drainErr = errors.Join(drainErr, s.LogDeliveryWorker.Stop(ctx))
+	}
 	s.workers.Wait()
 	if s.DB != nil {
 		s.saveVersion(ctx)
@@ -1593,10 +1726,29 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 			_ = sqlDB.Close()
 		}
 	}
+	if s.LogDB != nil {
+		if sqlDB, err := s.LogDB.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	}
 	s.lifecycleMu.Lock()
 	s.shutdownErr = drainErr
 	s.lifecycleMu.Unlock()
 	close(s.done)
+}
+
+func masterLogSnapshotPath(logDSN, instanceID string) string {
+	parsed, err := masterdatabase.ParseSQLiteDSN(logDSN)
+	if err == nil && !parsed.Memory && parsed.FilesystemPath != "" {
+		return filepath.Join(filepath.Dir(parsed.FilesystemPath), "log_backlog.snapshot.gz")
+	}
+	return filepath.Join(os.TempDir(), "ai-gateway-"+instanceID, "log_backlog.snapshot.gz")
+}
+
+func (s *Server) recordShutdown(phase string) {
+	if s != nil && s.recordShutdownPhase != nil {
+		s.recordShutdownPhase(phase)
+	}
 }
 
 func (s *Server) countHTTPHandlers(next http.Handler) http.Handler {
@@ -1613,10 +1765,15 @@ func (s *Server) countHTTPHandlers(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) waitHTTPHandlers() {
+func (s *Server) waitHTTPHandlers(ctx context.Context) error {
 	for s.httpHandlers.Load() > 0 {
-		<-s.httpHandlerChanged
+		select {
+		case <-s.httpHandlerChanged:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
 	}
+	return nil
 }
 
 func (s *Server) countAcceptedSockets(_ net.Conn, state http.ConnState) {
@@ -1679,6 +1836,14 @@ func (s *Server) ResourceCountsForTest() app.ResourceCounts {
 		counts.Timers += embedded.Timers
 		counts.Transports += embedded.Transports
 		counts.RelaySockets += embedded.RelaySockets
+		counts.DirectOutgoingActive += embedded.DirectOutgoingActive
+		counts.DirectOutgoingCandidates += embedded.DirectOutgoingCandidates
+		counts.DirectOutgoingDraining += embedded.DirectOutgoingDraining
+		counts.DirectIncomingActive += embedded.DirectIncomingActive
+		counts.DirectIncomingCandidates += embedded.DirectIncomingCandidates
+		counts.DirectIncomingDraining += embedded.DirectIncomingDraining
+		counts.DirectStreams += embedded.DirectStreams
+		counts.DirectSockets += embedded.DirectSockets
 	}
 	return counts
 }

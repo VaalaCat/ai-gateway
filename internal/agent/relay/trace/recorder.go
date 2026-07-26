@@ -1,7 +1,6 @@
 package trace
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/url"
@@ -9,18 +8,35 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
+	backendcommon "github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/legacy"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
+)
+
+type CaptureMode uint8
+
+const (
+	CaptureOff CaptureMode = iota
+	CaptureHeaders
+	CaptureFull
+)
+
+var (
+	unknownTraceModeSuppressor = diagnostics.NewSuppressor(diagnostics.SuppressorOptions{})
+	traceModeNow               = time.Now
 )
 
 // Recorder 是 request-scoped 的 trace 数据 + 请求体 buffer 唯一持有者。
 // 字段全 unexport，状态变更只能经下面的 With* / Wrap* / ResetAttempt / Finalize 方法。
 type Recorder struct {
-	enabled     bool
+	mode        CaptureMode
 	maxBodySize int
+	bodyMask    func(string, []string) string
 
 	startedAt  time.Time
 	stageBegin time.Time
@@ -30,16 +46,18 @@ type Recorder struct {
 	inboundPath    string
 	inboundHeaders http.Header
 	inboundBody    []byte
+	inboundSeen    int64
 
 	outboundPath    string
 	outboundHeaders http.Header
 	outboundBody    []byte
+	outboundSeen    int64
 
 	upstreamStatus  int
 	responseHeaders http.Header
-	upstreamBody    *bytes.Buffer
+	upstreamBody    *backendcommon.MaskingTail
 
-	clientBody  *bytes.Buffer
+	clientBody  *backendcommon.MaskingTail
 	passthrough bool
 
 	channelKey     string
@@ -51,20 +69,21 @@ type Recorder struct {
 	attempts []*TraceRecord // 每候选 SnapshotAttempt() 追加一条
 }
 
-// NewRecorder 创建一个 request-scoped Recorder。enabled 控制 Finalize 是否产出
-// TraceRecord（即是否把 4 份 body 落到 UsageLogTrace 表）；buffer 始终累积，供
-// usage extraction / SSE scan / reconcile 复用。
-func NewRecorder(enabled bool, maxBodySize int) *Recorder {
+// NewRecorder 创建一个 request-scoped Recorder。mode 控制成功 attempt 的 trace
+// 捕获范围；业务所需的 response buffer 始终累积。
+func NewRecorder(mode CaptureMode, maxBodySize int) *Recorder {
 	now := time.Now()
+	bufferLimit := traceBufferHardLimit(maxBodySize)
 	return &Recorder{
-		enabled:      enabled,
+		mode:         mode,
 		maxBodySize:  maxBodySize,
+		bodyMask:     maskText,
 		startedAt:    now,
 		stageBegin:   now,
 		currStage:    StageNone,
 		timings:      make(map[Stage]time.Duration),
-		upstreamBody: &bytes.Buffer{},
-		clientBody:   &bytes.Buffer{},
+		upstreamBody: backendcommon.NewMaskingTail(bufferLimit),
+		clientBody:   backendcommon.NewMaskingTail(bufferLimit),
 		failStage:    StageNone,
 	}
 }
@@ -78,7 +97,7 @@ func (r *Recorder) WithInbound(req *http.Request, body []byte) *Recorder {
 		r.inboundPath = req.URL.Path
 		r.inboundHeaders = cloneHeader(req.Header)
 	}
-	r.inboundBody = append(r.inboundBody[:0], body...)
+	r.inboundBody, r.inboundSeen = boundedTail(body, r.bufferHardLimit())
 	return r
 }
 
@@ -92,7 +111,7 @@ func (r *Recorder) WithOutbound(req *http.Request, body []byte, ch *models.Chann
 		r.outboundPath = req.URL.Path
 		r.outboundHeaders = cloneHeader(req.Header)
 	}
-	r.outboundBody = append(r.outboundBody[:0], body...)
+	r.outboundBody, r.outboundSeen = boundedTail(body, r.bufferHardLimit())
 	if ch != nil {
 		r.channelKey = ch.Key
 		r.channelBaseURL = ch.GetBaseURL()
@@ -180,7 +199,10 @@ func (r *Recorder) WithLegacyTrace(td *legacy.TraceData, ch *models.Channel) *Re
 		}
 	}
 	if td.OutboundBody != nil {
-		r.outboundBody = append(r.outboundBody[:0], td.OutboundBody...)
+		r.outboundBody, r.outboundSeen = boundedTail(td.OutboundBody, r.bufferHardLimit())
+		if td.OutboundBodySeen > r.outboundSeen {
+			r.outboundSeen = td.OutboundBodySeen
+		}
 	}
 	if td.OutboundHeaders != nil {
 		r.outboundHeaders = cloneHeader(td.OutboundHeaders)
@@ -193,7 +215,8 @@ func (r *Recorder) WithLegacyTrace(td *legacy.TraceData, ch *models.Channel) *Re
 	}
 	if td.ResponseBody != nil {
 		r.upstreamBody.Reset()
-		r.upstreamBody.Write(td.ResponseBody)
+		_, _ = r.upstreamBody.Write(td.ResponseBody)
+		r.upstreamBody.SetTotalSeenLowerBound(td.ResponseBodySeen)
 	}
 	if ch != nil {
 		r.channelKey = ch.Key
@@ -210,55 +233,98 @@ func (r *Recorder) SetUpstreamBody(body []byte) {
 	if r == nil {
 		return
 	}
-	la := &limitedAppender{r: r, target: r.upstreamBody}
-	la.Write(body)
+	_, _ = r.upstreamBody.Write(body)
+}
+
+// SetUpstreamBodyCapture installs a bounded upstream tail while preserving the
+// reader's lower-bound byte count for final truncation metadata.
+func (r *Recorder) SetUpstreamBodyCapture(body []byte, totalSeen int64, truncated bool) {
+	if r == nil {
+		return
+	}
+	r.upstreamBody.Reset()
+	_, _ = r.upstreamBody.Write(body)
+	r.upstreamBody.SetTotalSeenLowerBound(totalSeen)
+	if truncated {
+		r.upstreamBody.SetTotalSeenLowerBound(int64(len(body)) + 1)
+	}
 }
 
 // WrapUpstreamBody 永远把 resp.Body 包成 TeeReader 流到 Recorder 的 upstreamBody。
 // 即使 disabled，buffer 仍然累积，供 usage extraction 等业务路径复用。
-// 单 buffer 硬上限 = maxBodySize × TraceBufferHardLimitMultiple，超出静默 drop（不切下游）。
+// 单 buffer 硬上限 = maxBodySize × TraceBufferHardLimitMultiple；超限淘汰最早
+// 字节并继续保留真实流尾，不影响下游读取。
 func (r *Recorder) WrapUpstreamBody(resp *http.Response) io.ReadCloser {
 	if r == nil || resp == nil || resp.Body == nil {
 		return nil
 	}
-	return io.NopCloser(io.TeeReader(resp.Body, &limitedAppender{r: r, target: r.upstreamBody}))
+	return io.NopCloser(io.TeeReader(resp.Body, r.upstreamBody))
 }
 
-// limitedAppender 让 io.TeeReader 写入 Recorder buffer 时受 hard-limit 控制。
-type limitedAppender struct {
-	r      *Recorder
-	target *bytes.Buffer
+// tailAppender is a fixed-capacity streaming window that always acknowledges
+// the original write length so capture cannot interfere with relay I/O.
+type tailAppender struct {
+	buf       []byte
+	limit     int
+	totalSeen int64
 }
 
-func (la *limitedAppender) Write(p []byte) (int, error) {
-	limit := la.r.bufferHardLimit()
-	remaining := limit - la.target.Len()
-	if remaining <= 0 {
-		return len(p), nil // 静默 drop，对下游 TeeReader 报"全部写入"
+func newTailAppender(limit int) *tailAppender {
+	if limit <= 0 {
+		limit = defaultTraceMaxBodySize
 	}
-	if len(p) <= remaining {
-		la.target.Write(p)
-	} else {
-		la.target.Write(p[:remaining])
-	}
-	return len(p), nil
+	return &tailAppender{limit: limit}
 }
 
-func (r *Recorder) bufferHardLimit() int {
-	size := r.maxBodySize
+func (a *tailAppender) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	a.totalSeen += int64(originalLen)
+	if originalLen >= a.limit {
+		a.buf = append(a.buf[:0], p[originalLen-a.limit:]...)
+		return originalLen, nil
+	}
+	overflow := len(a.buf) + originalLen - a.limit
+	if overflow > 0 {
+		copy(a.buf, a.buf[overflow:])
+		a.buf = a.buf[:len(a.buf)-overflow]
+	}
+	a.buf = append(a.buf, p...)
+	return originalLen, nil
+}
+
+func (a *tailAppender) WriteString(s string) (int, error) { return a.Write([]byte(s)) }
+func (a *tailAppender) Bytes() []byte                     { return a.buf }
+func (a *tailAppender) String() string                    { return string(a.buf) }
+func (a *tailAppender) Len() int                          { return len(a.buf) }
+func (a *tailAppender) Limit() int                        { return a.limit }
+func (a *tailAppender) TotalSeen() int64                  { return a.totalSeen }
+func (a *tailAppender) Truncated() bool                   { return a.totalSeen > int64(a.limit) }
+func (a *tailAppender) Reset() {
+	a.buf = a.buf[:0]
+	a.totalSeen = 0
+}
+
+func boundedTail(body []byte, limit int) ([]byte, int64) {
+	a := backendcommon.NewMaskingTail(limit)
+	_, _ = a.Write(body)
+	return append([]byte(nil), a.Bytes()...), a.TotalSeen()
+}
+
+func traceBufferHardLimit(size int) int {
 	if size <= 0 {
 		size = defaultTraceMaxBodySize
 	}
 	return size * consts.TraceBufferHardLimitMultiple
 }
 
+func (r *Recorder) bufferHardLimit() int { return traceBufferHardLimit(r.maxBodySize) }
+
 // appendClientBody 给 recordingResponseWriter 调用。
 func (r *Recorder) appendClientBody(p []byte) {
 	if r == nil {
 		return
 	}
-	la := &limitedAppender{r: r, target: r.clientBody}
-	la.Write(p)
+	_, _ = r.clientBody.Write(p)
 }
 
 // WrapClientWriter 永远把 c.Writer 包成 recordingResponseWriter。
@@ -291,53 +357,169 @@ func (r *Recorder) ResetAttempt() {
 	r.outboundPath = ""
 	r.outboundHeaders = nil
 	r.outboundBody = r.outboundBody[:0]
+	r.outboundSeen = 0
 	r.upstreamStatus = 0
 	r.responseHeaders = nil
 	r.upstreamBody.Reset()
 	r.clientBody.Reset()
 }
 
-// buildTraceRecord 用当前 attempt 状态构建一条 mask 过的 TraceRecord。
-// 调用方负责在 Finalize 场景下提前 flush 最后一个 stage 的耗时；
-// SnapshotAttempt 场景不 flush（mid-attempt 快照）。
-func (r *Recorder) buildTraceRecord() *TraceRecord {
-	rec := &TraceRecord{
+// buildSummary 构建不含持久化 payload 的轻量 attempt 摘要。
+func (r *Recorder) buildSummary() *TraceRecord {
+	return &TraceRecord{
 		Timings:        cloneTimings(r.timings),
 		FailStage:      r.failStage,
-		UpstreamStatus: r.upstreamStatus, // 始终填入:消费方在 snapshot 上无视 verbose 直接读它(轻量字段,无安全风险)
+		UpstreamStatus: r.upstreamStatus,
 	}
+}
 
-	// verbose 决策：enabled OR 任意失败。
-	// failStage != StageNone 表示 WithFail 被调过；这是回归 169892f 之前
-	// "失败请求强制落 body" 的老语义（见 design §背景.二次发现）。
-	verbose := r.enabled || r.failStage != StageNone
-	rec.Verbose = verbose
-	if !verbose {
-		return rec
+func (r *Recorder) effectiveMode() CaptureMode {
+	if r.failStage != StageNone {
+		return CaptureFull
 	}
+	return r.mode
+}
 
-	secrets := channelSecrets(r.channelKey, r.channelBaseURL)
+func (r *Recorder) fillHeaders(rec *TraceRecord, secrets []string) {
+	rec.InboundPath = r.inboundPath
+	rec.InboundHeaders = http.Header(maskHeaders(r.inboundHeaders, secrets))
+	rec.OutboundPath = r.outboundPath
+	rec.OutboundHeaders = http.Header(maskHeaders(r.outboundHeaders, secrets))
+	rec.ResponseHeaders = http.Header(maskHeaders(r.responseHeaders, secrets))
+}
+
+func (r *Recorder) fillBodies(rec *TraceRecord, secrets []string) {
 	limit := r.maxBodySize
 	if limit <= 0 {
 		limit = defaultTraceMaxBodySize
 	}
+	rec.InboundBody = r.finalizeBody(r.inboundBody, r.inboundSeen, secrets, limit)
+	rec.OutboundBody = r.finalizeBody(r.outboundBody, r.outboundSeen, secrets, limit)
+	rec.UpstreamBody = r.finalizeBody(r.upstreamBody.Bytes(), r.upstreamBody.TotalSeen(), secrets, limit)
 
-	rec.InboundPath = r.inboundPath
-	rec.InboundHeaders = http.Header(maskHeaders(r.inboundHeaders, secrets))
-	rec.InboundBody = truncateBodyWithLimit(maskText(string(r.inboundBody), secrets), limit)
-	rec.OutboundPath = r.outboundPath
-	rec.OutboundHeaders = http.Header(maskHeaders(r.outboundHeaders, secrets))
-	rec.OutboundBody = truncateBodyWithLimit(maskText(string(r.outboundBody), secrets), limit)
-	rec.ResponseHeaders = http.Header(maskHeaders(r.responseHeaders, secrets))
-	rec.UpstreamBody = truncateBodyWithLimit(maskText(r.upstreamBody.String(), secrets), limit)
+	rec.ClientResponseBody = r.clientResponseBody(secrets, limit)
+}
 
-	// 客户端响应体：passthrough 路径若未独立采集（clientBody 空）则镜像 upstream。
+func (r *Recorder) finalizeBody(raw []byte, totalSeen int64, secrets []string, limit int) string {
+	if totalSeen > int64(len(raw)) {
+		raw = sanitizeTruncatedLeadingFragment(raw, secrets)
+	}
+	masked := []byte(r.bodyMask(string(raw), secrets))
+	return string(truncateBodyTail(masked, limit, totalSeen > int64(len(raw)) || totalSeen > int64(limit)))
+}
+
+func sanitizeTruncatedLeadingFragment(raw []byte, secrets []string) []byte {
+	matched := 0
+	for _, secret := range secrets {
+		if overlap := leadingSecretSuffixLength(raw, []byte(secret)); overlap > matched {
+			matched = overlap
+		}
+	}
+	raw = raw[matched:]
+	return raw
+}
+
+func leadingSecretSuffixLength(raw, secret []byte) int {
+	maxLen := len(secret)
+	if maxLen > len(raw) {
+		maxLen = len(raw)
+	}
+	if maxLen == 0 {
+		return 0
+	}
+	pattern := raw[:maxLen]
+	prefix := make([]int, len(pattern))
+	for i, matched := 1, 0; i < len(pattern); i++ {
+		for matched > 0 && pattern[i] != pattern[matched] {
+			matched = prefix[matched-1]
+		}
+		if pattern[i] == pattern[matched] {
+			matched++
+		}
+		prefix[i] = matched
+	}
+	matched := 0
+	for index, b := range secret {
+		for matched > 0 && b != pattern[matched] {
+			matched = prefix[matched-1]
+		}
+		if b == pattern[matched] {
+			matched++
+			if matched == len(pattern) {
+				if index == len(secret)-1 {
+					return matched
+				}
+				matched = prefix[matched-1]
+			}
+		}
+	}
+	return matched
+}
+
+func (r *Recorder) clientResponseBody(secrets []string, limit int) string {
+	clientRaw := r.clientBody.String()
+	totalSeen := r.clientBody.TotalSeen()
+	if clientRaw == "" && r.passthrough {
+		clientRaw = r.upstreamBody.String()
+		totalSeen = r.upstreamBody.TotalSeen()
+	}
+	return r.finalizeBody([]byte(clientRaw), totalSeen, secrets, limit)
+}
+
+func (r *Recorder) safeClientResponseBody() (body string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			body, ok = "", false
+		}
+	}()
+	limit := r.maxBodySize
+	if limit <= 0 {
+		limit = defaultTraceMaxBodySize
+	}
+	return r.clientResponseBody(channelSecrets(r.channelKey, r.channelBaseURL), limit), true
+}
+
+// BuildRemoteFailureBodyFallback returns the bounded, masked target bodies
+// needed only if a Header-only remote success is interrupted after its Result.
+func (r *Recorder) BuildRemoteFailureBodyFallback() (rec *TraceRecord) {
+	if r == nil || r.mode != CaptureHeaders || r.failStage != StageNone {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			rec = nil
+		}
+	}()
+	rec = &TraceRecord{}
+	limit := r.maxBodySize
+	if limit <= 0 {
+		limit = defaultTraceMaxBodySize
+	}
+	secrets := channelSecrets(r.channelKey, r.channelBaseURL)
+	rec.InboundBody = truncateBodyWithLimit(maskTextPreservingLength(string(r.inboundBody), secrets), limit)
+	rec.OutboundBody = truncateBodyWithLimit(maskTextPreservingLength(string(r.outboundBody), secrets), limit)
+	rec.UpstreamBody = truncateBodyWithLimit(maskTextPreservingLength(r.upstreamBody.String(), secrets), limit)
 	clientRaw := r.clientBody.String()
 	if clientRaw == "" && r.passthrough {
 		clientRaw = r.upstreamBody.String()
 	}
-	rec.ClientResponseBody = truncateBodyWithLimit(maskText(clientRaw, secrets), limit)
+	rec.ClientResponseBody = truncateBodyWithLimit(maskTextPreservingLength(clientRaw, secrets), limit)
+	return rec
+}
 
+// buildTraceRecord 用当前 attempt 状态构建一条按 effective mode 脱敏的记录。
+func (r *Recorder) buildTraceRecord() *TraceRecord {
+	rec := r.buildSummary()
+	mode := r.effectiveMode()
+	if mode == CaptureOff {
+		return rec
+	}
+	secrets := channelSecrets(r.channelKey, r.channelBaseURL)
+	r.fillHeaders(rec, secrets)
+	if mode == CaptureFull {
+		r.fillBodies(rec, secrets)
+	}
+	rec.Verbose = true
 	return rec
 }
 
@@ -388,6 +570,23 @@ func (r *Recorder) SnapshotAttempt() {
 	r.attempts = append(r.attempts, r.buildTraceRecord())
 }
 
+// RefreshLastAttemptClientResponse updates the final upstream-status attempt
+// after the outer handler writes its error response. Other attempt fields stay
+// frozen at execution time, preserving fallback ordering and remote ownership.
+func (r *Recorder) RefreshLastAttemptClientResponse() {
+	if r == nil || len(r.attempts) == 0 {
+		return
+	}
+	last := r.attempts[len(r.attempts)-1]
+	if last == nil || !last.Verbose || last.FailStage != StageUpstreamStatus {
+		return
+	}
+	body, ok := r.safeClientResponseBody()
+	if ok {
+		last.ClientResponseBody = body
+	}
+}
+
 // AppendAttempt appends a trace produced by a remote attempt. A nil trace is
 // kept as an empty snapshot so Attempts indexes continue to match fallback Seq.
 func (r *Recorder) AppendAttempt(record *TraceRecord) {
@@ -395,6 +594,21 @@ func (r *Recorder) AppendAttempt(record *TraceRecord) {
 		return
 	}
 	r.attempts = append(r.attempts, cloneTraceRecord(record))
+}
+
+// AppendFailedRemoteAttempt upgrades a remote attempt to Full after the source
+// detects a later transport or protocol failure. Target fields take priority;
+// the source snapshot fills fields the target did not capture.
+func (r *Recorder) AppendFailedRemoteAttempt(record *TraceRecord, err error) {
+	if r == nil {
+		return
+	}
+	if err == nil {
+		r.AppendAttempt(record)
+		return
+	}
+	r.WithFail(StageInternal, err)
+	r.attempts = append(r.attempts, mergeRemoteTrace(r.buildTraceRecord(), record))
 }
 
 // Attempts 返回已快照的逐候选 TraceRecord（顺序即候选顺序）。
@@ -431,6 +645,59 @@ func cloneTraceRecord(record *TraceRecord) *TraceRecord {
 	}
 }
 
+func mergeRemoteTrace(source, target *TraceRecord) *TraceRecord {
+	merged := cloneTraceRecord(source)
+	if target == nil {
+		return merged
+	}
+	mergeRemoteTraceMetadata(merged, target)
+	mergeRemoteTraceBodies(merged, target)
+	merged.Verbose = true
+	return merged
+}
+
+func mergeRemoteTraceMetadata(merged, target *TraceRecord) {
+	if target.InboundPath != "" {
+		merged.InboundPath = strings.Clone(target.InboundPath)
+	}
+	if len(target.InboundHeaders) > 0 {
+		merged.InboundHeaders = target.InboundHeaders.Clone()
+	}
+	if target.OutboundPath != "" {
+		merged.OutboundPath = strings.Clone(target.OutboundPath)
+	}
+	if len(target.OutboundHeaders) > 0 {
+		merged.OutboundHeaders = target.OutboundHeaders.Clone()
+	}
+	if len(target.ResponseHeaders) > 0 {
+		merged.ResponseHeaders = target.ResponseHeaders.Clone()
+	}
+	if target.UpstreamStatus != 0 {
+		merged.UpstreamStatus = target.UpstreamStatus
+	}
+	if len(target.Timings) > 0 {
+		merged.Timings = cloneTimings(target.Timings)
+	}
+	if target.FailStage != "" && target.FailStage != StageNone {
+		merged.FailStage = target.FailStage
+	}
+}
+
+func mergeRemoteTraceBodies(merged, target *TraceRecord) {
+	if target.InboundBody != "" {
+		merged.InboundBody = strings.Clone(target.InboundBody)
+	}
+	if target.OutboundBody != "" {
+		merged.OutboundBody = strings.Clone(target.OutboundBody)
+	}
+	if target.UpstreamBody != "" {
+		merged.UpstreamBody = strings.Clone(target.UpstreamBody)
+	}
+	if target.ClientResponseBody != "" {
+		merged.ClientResponseBody = strings.Clone(target.ClientResponseBody)
+	}
+}
+
 func cloneTimings(timings map[Stage]time.Duration) map[Stage]time.Duration {
 	cloned := make(map[Stage]time.Duration, len(timings))
 	for stage, duration := range timings {
@@ -448,18 +715,39 @@ func (r *Recorder) LastSnapshotVerbose() bool {
 	return r.attempts[len(r.attempts)-1].Verbose
 }
 
-// Enabled 从 gin.Context 里 UserInfo 取 TraceEnabled 标志。
-// 提供给 relay 主包构造 Recorder 时判断 enabled 入参。
-func Enabled(c *gin.Context) bool {
+// CaptureModeFromContext 从鉴权上下文读取并规范化成功 attempt 的捕获模式。
+func CaptureModeFromContext(c *gin.Context) CaptureMode {
+	if c == nil {
+		return CaptureOff
+	}
 	v, ok := c.Get(consts.CtxKeyUserInfo)
 	if !ok {
-		return false
+		return CaptureOff
 	}
 	ui, ok := v.(*app.UserInfo)
-	if !ok || ui == nil {
-		return false
+	if !ok || ui == nil || !ui.TraceEnabled {
+		return CaptureOff
 	}
-	return ui.TraceEnabled
+	mode, unknown := ui.TraceMode.ForRuntime()
+	if unknown {
+		logUnknownTraceMode(ui.TraceMode)
+	}
+	if mode == models.TokenTraceModeHeaders {
+		return CaptureHeaders
+	}
+	return CaptureFull
+}
+
+func logUnknownTraceMode(mode models.TokenTraceMode) {
+	key := diagnostics.SuppressionKey{Source: "token_auth", Stage: "trace_mode", ReasonCode: "unknown_token_trace_mode"}
+	decision := unknownTraceModeSuppressor.Observe(key, traceModeNow())
+	if decision.Allow {
+		zap.L().Warn("unknown token trace mode; falling back to full", zap.String("trace_mode", string(mode)))
+		return
+	}
+	if decision.Summary != nil {
+		zap.L().Warn("unknown token trace mode warnings suppressed", zap.Uint64("suppressed_count", decision.Summary.SuppressedCount))
+	}
 }
 
 // cloneHeader 浅复制一份 http.Header，避免后续业务路径修改影响 trace 数据。

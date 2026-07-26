@@ -18,16 +18,20 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent"
+	agentauthcache "github.com/VaalaCat/ai-gateway/internal/agent/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
+	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
+	masterlogqueue "github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -36,6 +40,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
 	"github.com/sourcegraph/conc"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 	"go.uber.org/zap"
 	"gorm.io/datatypes"
@@ -49,6 +54,162 @@ type blockingEmbeddedStartupBus struct {
 	once    sync.Once
 	mu      sync.Mutex
 	topics  map[string]int
+}
+
+func TestServerShutdownJoinsAggregatorFlushErrorAndContinuesDatabaseClose(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.Setting{}))
+	require.NoError(t, db.Create(&models.Setting{Key: "version", Value: "0"}).Error)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	flushErr := errors.New("aggregator shutdown flush failed")
+	aggregator := billing.NewAggregator(nil, zap.NewNop(), billing.AggregatorOptions{})
+	aggregator.SetCoreFlushContextFn(func(context.Context, []dao.TokenDailyRow, []dao.ChannelDailyRow, []dao.BillingHourlyRow) error {
+		return flushErr
+	})
+	aggregator.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1})
+	srv := &Server{DB: db, Aggregator: aggregator, Logger: zap.NewNop()}
+
+	require.ErrorIs(t, srv.Shutdown(t.Context()), flushErr)
+	require.Error(t, sqlDB.Ping())
+}
+
+type masterIgnoringDirectDialer struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (d *masterIgnoringDirectDialer) DialDirectSession(context.Context, agenttunnel.DirectSessionDialRequest) (*agenttunnel.Session, error) {
+	d.once.Do(func() { close(d.started) })
+	<-d.release
+	return nil, errors.New("released blocked direct dial")
+}
+
+type masterForwardCredentials struct{}
+
+func (masterForwardCredentials) CachedForwardCredential() (agentauthcache.ForwardCredential, error) {
+	return agentauthcache.ForwardCredential{Ticket: agentauth.ForwardTicket("ticket-a"), ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func TestResourceCountsAggregateEmbeddedDirectTimer(t *testing.T) {
+	pool := agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		SourceAgentID: "embedded", MaxSessions: func() int { return 1 },
+		IdleTimeout: func() time.Duration { return time.Minute }, DrainTimeout: func() time.Duration { return time.Second },
+		Limits: func() wire.Limits { return wire.Limits{} },
+	})
+	srv := &Server{embeddedAgent: &agent.Server{DirectSessionPool: pool}}
+	if got := srv.ResourceCountsForTest(); got != (app.ResourceCounts{Timers: 1}) {
+		t.Fatalf("embedded direct resources = %+v, want one sweep timer", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := pool.Close(ctx); err != nil {
+		t.Fatalf("close direct pool: %v", err)
+	}
+	<-pool.Done()
+	if got := srv.ResourceCountsForTest(); got != (app.ResourceCounts{}) {
+		t.Fatalf("embedded direct resources after close = %+v", got)
+	}
+}
+
+func TestShutdownOrdersEmbeddedDirectBeforeRelayHubs(t *testing.T) {
+	pool := agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		Limits: func() wire.Limits { return wire.Limits{} }, MaxSessions: func() int { return 1 },
+		IdleTimeout: func() time.Duration { return time.Hour }, DrainTimeout: func() time.Duration { return time.Second },
+	})
+	embedded := &agent.Server{DirectSessionPool: pool}
+	var mu sync.Mutex
+	var phases []string
+	relayObservedDirectDone := false
+	srv := &Server{embeddedAgent: embedded}
+	srv.recordShutdownPhase = func(phase string) {
+		mu.Lock()
+		phases = append(phases, phase)
+		if phase == "relay_hubs" {
+			select {
+			case <-pool.Done():
+				relayObservedDirectDone = true
+			default:
+			}
+		}
+		mu.Unlock()
+	}
+	require.NoError(t, srv.Shutdown(t.Context()))
+	require.Equal(t, []string{"embedded_direct", "relay_hubs"}, phases)
+	require.True(t, relayObservedDirectDone, "embedded direct shutdown must finish before relay hub drain starts")
+	requireServerLifecycleDone(t, pool.Done())
+}
+
+func TestShutdownStopsStartedLogDeliveryWorker(t *testing.T) {
+	queue := deliveryqueue.New(deliveryqueue.Limits{MaxEntries: 10}, masterlogqueue.BatchSize, nil)
+	worker := masterlogqueue.NewLogDeliveryWorker(masterlogqueue.WorkerOptions{
+		Queue: queue, SnapshotPath: filepath.Join(t.TempDir(), "log_backlog.snapshot.gz"),
+		PollInterval: time.Millisecond, FlushTimeout: 10 * time.Millisecond,
+	})
+	require.NoError(t, worker.Start(context.Background()))
+	srv := &Server{LogDeliveryWorker: worker}
+
+	require.NoError(t, srv.Shutdown(t.Context()))
+
+	result := worker.Enqueue(masterlogqueue.LogBatch{})
+	require.True(t, result.Dropped)
+	require.Contains(t, result.Error, "not accepting")
+}
+
+func TestNewActivatesSplitLayoutBeforeLogDeliveryAdmission(t *testing.T) {
+	cfg := &config.MasterRuntimeConfig{
+		Master: config.MasterConfig{Listen: ":0", DBPath: ":memory:", LogDBPath: ":memory:", JWTSecret: strings.Repeat("x", 32)},
+		Agent:  config.AgentConfig{CredentialsFile: filepath.Join(t.TempDir(), "embedded.json")},
+	}
+	srv, err := New(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	require.Equal(t, app.DatabaseLayoutSplit, srv.App.GetDatabaseLayoutMode())
+	require.True(t, srv.App.GetCoreDB().Migrator().HasTable(&models.BillingLog{}))
+	require.False(t, srv.App.GetCoreDB().Migrator().HasTable(&models.RequestLog{}))
+	require.True(t, srv.App.GetLogDB().Migrator().HasTable(&models.RequestLog{}))
+	require.False(t, srv.App.GetLogDB().Migrator().HasTable(&models.User{}))
+	require.NotNil(t, srv.LogDeliveryWorker)
+	result := srv.LogDeliveryWorker.Enqueue(masterlogqueue.LogBatch{})
+	require.True(t, result.Accepted)
+}
+
+func TestShutdownDeadlineDoesNotWaitForEmbeddedBlockedDirectPoolDialer(t *testing.T) {
+	dialer := &masterIgnoringDirectDialer{started: make(chan struct{}), release: make(chan struct{})}
+	pool := agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		SourceAgentID: "source-a", Dialer: dialer, Credentials: masterForwardCredentials{},
+		Limits: func() wire.Limits { return wire.Limits{} }, MaxSessions: func() int { return 1 },
+		IdleTimeout: func() time.Duration { return time.Hour }, DrainTimeout: func() time.Duration { return time.Second },
+	})
+	embedded := &agent.Server{DirectSessionPool: pool}
+	srv := &Server{embeddedAgent: embedded}
+	openDone := make(chan error, 1)
+	go func() {
+		_, err := pool.OpenProbeStream(context.Background(), agentproxy.DirectSessionTarget{
+			TargetAgentID: "target-a", AddressFingerprint: "fp-a",
+			WebSocketURL: &url.URL{Scheme: "https", Host: "target.invalid"},
+		}, agentproxy.ProbeStreamRequest{TargetAgentID: "target-a", Remaining: time.Minute, Policy: wire.ProbeBypassBusinessPolicy})
+		openDone <- err
+	}()
+	requireServerLifecycleDone(t, dialer.started)
+	defer func() {
+		close(dialer.release)
+		requireServerLifecycleDone(t, pool.Done())
+		<-openDone
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, srv.Shutdown(ctx), context.DeadlineExceeded)
+	requireServerLifecycleDone(t, srv.Done())
+	select {
+	case <-pool.Done():
+		t.Fatal("embedded pool unexpectedly stopped while external dialer remains blocked")
+	default:
+	}
 }
 
 func TestMasterShutdownCancelsEmbeddedInfiniteDirectSSEBeforeHTTPDrain(t *testing.T) {
@@ -92,7 +253,9 @@ func TestMasterShutdownCancelsEmbeddedInfiniteDirectSSEBeforeHTTPDrain(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	target.Store.SetAgent(&models.Agent{AgentID: "peer", Status: consts.StatusEnabled})
+	target.Store.SetAgent(&models.Agent{
+		AgentID: "peer", Status: consts.StatusEnabled, DirectInboundEnabled: true,
+	})
 	target.Store.SetToken(&models.Token{ID: 1, Key: "lifecycle-token", Status: consts.StatusEnabled, ExpiredAt: -1})
 	target.Store.SetChannel(&models.Channel{
 		ChannelCore: models.ChannelCore{
@@ -156,7 +319,7 @@ func TestMasterShutdownCancelsEmbeddedInfiniteDirectSSEBeforeHTTPDrain(t *testin
 	}
 	embedded.Store.SetAgentCapabilities("peer", []string{
 		protocol.AgentCapabilityForwardV1,
-		protocol.AgentCapabilityDirectIngressV1,
+		protocol.AgentCapabilityDirectTunnelV1,
 	})
 	embedded.Store.SetToken(&models.Token{ID: 1, Key: "lifecycle-token", Status: consts.StatusEnabled, ExpiredAt: -1})
 	embedded.Store.SetChannel(&models.Channel{
@@ -1152,8 +1315,8 @@ func TestLifecycleShutdownDeadlineCancelsMasterWorkersBeforeClosingDB(t *testing
 		cause := context.Cause(ctx)
 		aggregatorCanceled <- cause
 		return cause
-	}, nil, nil, nil)
-	aggregator.Submit(&models.UsageLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1})
+	}, nil, nil)
+	aggregator.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1})
 
 	heartbeatCanceled := make(chan error, 1)
 	heartbeat := msync.NewHeartbeatTracker(nil, zap.NewNop(), time.Hour)
@@ -1199,7 +1362,7 @@ func TestLifecycleShutdownDeadlineCancelsMasterWorkersBeforeClosingDB(t *testing
 		t.Fatal(err)
 	}
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	limit := billing.NewLimitEvaluator(application, nil, zap.NewNop(), time.Nanosecond)
 
 	srv := &Server{
@@ -1268,7 +1431,7 @@ func TestLifecycleShutdownClosesControlSocketBeforeJoiningHTTPHandlers(t *testin
 		t.Fatal(err)
 	}
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	heartbeat := msync.NewHeartbeatTracker(application, zap.NewNop(), 0)
 	hub := msync.NewHub(application, zap.NewNop(), nil, func() int64 { return 0 }, nil, msync.HubOptions{})
 	hub.Heartbeat = heartbeat

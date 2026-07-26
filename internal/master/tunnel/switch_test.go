@@ -150,7 +150,11 @@ func TestSwitchRewritesSourceOwnershipAndReducesDeadline(t *testing.T) {
 	target := newTestSession(h, "target", 2)
 	sw := newTestSwitch(h, source, target, wire.StreamID{1})
 	sw.openedAt = time.Now().Add(-time.Millisecond)
-	open := wire.Open{SourceAgentID: "forged", TargetAgentID: "target", RemainingNanos: int64(time.Second)}
+	meta := validHubAttemptMeta()
+	open := wire.Open{
+		Method: http.MethodPost, Path: attemptwire.EndpointPath, SourceAgentID: "forged", TargetAgentID: "target",
+		RemainingNanos: int64(time.Second), Hop: 1, Attempt: &meta,
+	}
 	payload, err := wire.EncodeMetadata(open, testLimits().MaxMetadataBytes)
 	require.NoError(t, err)
 	forwarded, err := sw.prepareOpen(wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: sw.id, Sequence: 1, Payload: payload})
@@ -856,8 +860,10 @@ func TestSwitchProtocolTerminalDeliveryIsolatesBlockedOffender(t *testing.T) {
 			sw := newSwitch(h, source, target, wire.StreamID{111, byte(len(offenderName))}, time.Now(), limits)
 			require.NoError(t, h.attachSwitch(sw))
 			sw.start()
+			meta := validHubAttemptMeta()
 			openPayload, err := wire.EncodeMetadata(wire.Open{
-				Method: http.MethodPost, Path: "/v1/responses", TargetAgentID: "target", RemainingNanos: int64(time.Second),
+				Method: http.MethodPost, Path: attemptwire.EndpointPath, TargetAgentID: "target", RemainingNanos: int64(time.Second),
+				Hop: 1, Attempt: &meta,
 			}, limits.MaxMetadataBytes)
 			require.NoError(t, err)
 			require.NoError(t, sw.accept(source, source.generation, wire.Frame{

@@ -167,7 +167,7 @@ func sessionGeneration(session *Session) uint64 {
 }
 
 func sessionLimitsAllowed(granted, allowed wire.Limits) bool {
-	if _, err := wire.NormalizeV1Limits(allowed); err != nil {
+	if _, err := wire.NormalizeV2Limits(allowed); err != nil {
 		return true
 	}
 	return granted.MaxMetadataBytes <= allowed.MaxMetadataBytes &&

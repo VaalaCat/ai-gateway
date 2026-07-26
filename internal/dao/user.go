@@ -48,12 +48,12 @@ type adminUserMutation struct{ ctx *baseContext }
 
 func (q *userQuery) GetProfile() (*models.User, error) {
 	var user models.User
-	err := q.ctx.GetDB().First(&user, q.ctx.userInfo.UserID).Error
+	err := q.ctx.GetCoreDB().First(&user, q.ctx.userInfo.UserID).Error
 	return &user, err
 }
 
 func (m *userMutation) UpdatePassword(hashedPwd string) error {
-	return m.ctx.GetDB().Model(&models.User{}).Where("id = ?", m.ctx.userInfo.UserID).
+	return m.ctx.GetCoreDB().Model(&models.User{}).Where("id = ?", m.ctx.userInfo.UserID).
 		Updates(map[string]any{"password": hashedPwd, "password_set": true}).Error
 }
 
@@ -65,14 +65,14 @@ func (m *userMutation) UpdateProfile(updates map[string]any) error {
 	if len(updates) == 0 {
 		return nil
 	}
-	return m.ctx.GetDB().Model(&models.User{}).
+	return m.ctx.GetCoreDB().Model(&models.User{}).
 		Where("id = ?", m.ctx.userInfo.UserID).
 		Updates(updates).Error
 }
 
 func (q *adminUserQuery) GetByID(id uint) (*models.User, error) {
 	var user models.User
-	err := q.ctx.GetDB().First(&user, id).Error
+	err := q.ctx.GetCoreDB().First(&user, id).Error
 	return &user, err
 }
 
@@ -81,24 +81,24 @@ func (q *adminUserQuery) ListByGroupIDs(groupIDs []uint) ([]models.User, error) 
 		return nil, nil
 	}
 	var rows []models.User
-	err := q.ctx.GetDB().Where("group_id IN ?", groupIDs).Find(&rows).Error
+	err := q.ctx.GetCoreDB().Where("group_id IN ?", groupIDs).Find(&rows).Error
 	return rows, err
 }
 
 func (q *adminUserQuery) GetByUsername(username string) (*models.User, error) {
 	var user models.User
-	err := q.ctx.GetDB().Where("username = ?", username).First(&user).Error
+	err := q.ctx.GetCoreDB().Where("username = ?", username).First(&user).Error
 	return &user, err
 }
 
 func (q *adminUserQuery) GetByEmail(email string) (*models.User, error) {
 	var user models.User
-	err := q.ctx.GetDB().Where("email = ?", email).First(&user).Error
+	err := q.ctx.GetCoreDB().Where("email = ?", email).First(&user).Error
 	return &user, err
 }
 
 func (q *adminUserQuery) List(opts ListOptions, filter UserListFilter) ([]models.User, int64, error) {
-	db := q.ctx.GetDB().Model(&models.User{})
+	db := q.ctx.GetCoreDB().Model(&models.User{})
 	if filter.Search != "" {
 		like := "%" + filter.Search + "%"
 		db = db.Where("username LIKE ?", like)
@@ -119,7 +119,7 @@ func (q *adminUserQuery) List(opts ListOptions, filter UserListFilter) ([]models
 }
 
 func (q *adminUserQuery) ListWithGroup(opts ListOptions, filter UserListFilter) ([]UserListRow, int64, error) {
-	db := q.ctx.GetDB().Table("users").
+	db := q.ctx.GetCoreDB().Table("users").
 		Select("users.*, user_groups.name AS group_name").
 		Joins("LEFT JOIN user_groups ON user_groups.id = users.group_id")
 	if filter.Search != "" {
@@ -142,19 +142,19 @@ func (q *adminUserQuery) ListWithGroup(opts ListOptions, filter UserListFilter) 
 }
 
 func (m *adminUserMutation) Create(user *models.User) error {
-	return m.ctx.GetDB().Create(user).Error
+	return m.ctx.GetCoreDB().Create(user).Error
 }
 
 func (m *adminUserMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetDB().Model(&models.User{}).Where("id = ?", id).Updates(updates).Error
+	return m.ctx.GetCoreDB().Model(&models.User{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (m *adminUserMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.User{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.User{}, id).Error
 }
 
 func (m *adminUserMutation) UpdateQuota(id uint, delta int64) error {
-	query := m.ctx.GetDB().Model(&models.User{}).Where("id = ?", id)
+	query := m.ctx.GetCoreDB().Model(&models.User{}).Where("id = ?", id)
 	if delta > 0 {
 		query = query.Where("quota <= ?", math.MaxInt64-delta)
 	} else if delta < 0 {
@@ -175,7 +175,7 @@ func (m *adminUserMutation) UpdateQuota(id uint, delta int64) error {
 // then returns the resulting quota value. Must be called within RunInTx for
 // the returned value to be reliable under concurrent access.
 func (m *adminUserMutation) DeductQuota(id uint, amount int64) (int64, error) {
-	result := m.ctx.GetDB().Model(&models.User{}).Where("id = ?", id).
+	result := m.ctx.GetCoreDB().Model(&models.User{}).Where("id = ?", id).
 		Updates(map[string]any{
 			"quota":      gorm.Expr("quota - ?", amount),
 			"used_quota": gorm.Expr("used_quota + ?", amount),
@@ -184,7 +184,7 @@ func (m *adminUserMutation) DeductQuota(id uint, amount int64) (int64, error) {
 		return 0, result.Error
 	}
 	var user models.User
-	if err := m.ctx.GetDB().Select("quota").First(&user, id).Error; err != nil {
+	if err := m.ctx.GetCoreDB().Select("quota").First(&user, id).Error; err != nil {
 		return 0, err
 	}
 	return user.Quota, nil

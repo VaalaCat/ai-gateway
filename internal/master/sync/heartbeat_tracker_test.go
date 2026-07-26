@@ -98,7 +98,7 @@ func TestHeartbeatTracker_FlushDoesNotMoveDatabaseLastSeenBackward(t *testing.T)
 	require.NoError(t, db.AutoMigrate(&models.Agent{}))
 	require.NoError(t, db.Create(&models.Agent{AgentID: "agent-a", LastSeen: 900}).Error)
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 
 	tr := NewHeartbeatTracker(application, zap.NewNop(), 0)
 	tr.SetLastSeenPersistFn(func(updates map[string]int64) error {

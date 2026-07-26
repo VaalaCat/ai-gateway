@@ -19,12 +19,12 @@ var (
 )
 
 const (
-	ErrorCodeRelayProtocol         = "relay_protocol"
-	ErrorCodeRelayOverloaded       = "relay_overloaded"
-	ErrorCodeStreamWindowTimeout   = "stream_window_timeout"
-	ErrorCodeRequestCancelled      = "request_cancelled"
-	ErrorCodeRequestDeadline       = "request_deadline"
-	ErrorCodeSessionClosed         = "session_closed"
-	ErrorCodeDrainTimeout          = "drain_timeout"
-	ErrorCodeRelayFallbackDisabled = "relay_fallback_disabled"
+	ErrorCodeRelayProtocol              = "relay_protocol"
+	ErrorCodeUnsupportedProtocolVersion = "unsupported_protocol_version"
+	ErrorCodeRelayOverloaded            = "relay_overloaded"
+	ErrorCodeStreamWindowTimeout        = "stream_window_timeout"
+	ErrorCodeRequestCancelled           = "request_cancelled"
+	ErrorCodeRequestDeadline            = "request_deadline"
+	ErrorCodeSessionClosed              = "session_closed"
+	ErrorCodeDrainTimeout               = "drain_timeout"
 )

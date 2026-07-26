@@ -55,6 +55,7 @@ func (r *DirectProbeRunner) Run(ctx context.Context, job probeJob) probeRunResul
 	result := protocol.DirectProbeResult{
 		TargetAgentID: job.target.AgentID, AddressFingerprint: job.key.fingerprint,
 		Network: "unreachable", Identity: "unknown", CheckedAt: now.Unix(), ReasonCode: "probe_unavailable",
+		Policy: job.key.policy,
 	}
 	var callErr error
 	if r.caller == nil {
@@ -63,7 +64,7 @@ func (r *DirectProbeRunner) Run(ctx context.Context, job probeJob) probeRunResul
 		result, callErr = r.caller.CallDirectProbe(ctx, job.key.sourceID, job.sourceGeneration, protocol.DirectProbeTarget{
 			TargetAgentID: job.target.AgentID, Addresses: append([]protocol.Address(nil), job.target.Addresses...),
 			EffectiveProxy: job.target.EffectiveProxy, AddressFingerprint: job.key.fingerprint,
-			TargetGeneration: job.target.ControlGeneration,
+			TargetGeneration: job.target.ControlGeneration, Policy: job.key.policy,
 		})
 	}
 	if result.TargetAgentID == "" {
@@ -78,12 +79,18 @@ func (r *DirectProbeRunner) Run(ctx context.Context, job probeJob) probeRunResul
 	if callErr != nil && result.ReasonCode == "" {
 		result.Network, result.Identity, result.ReasonCode = "unreachable", "unknown", "probe_call_failed"
 	}
+	result.Policy = job.key.policy
+	if job.policyReason != "" {
+		result.PolicyDisabled = true
+		result.PolicyReasonCode = job.policyReason
+		result.Eligible = false
+	}
 	if r.service != nil && (callErr != nil || result.ReasonCode == "cancelled" || result.ReasonCode == consts.RouteErrorRequestCancelled) {
 		r.service.FinishDirectProbeWithoutResult(job.key.sourceID, job.sourceGeneration, job.target, job.key.fingerprint, job.probeGeneration)
 	} else if r.service != nil {
 		r.service.ApplyDirectProbeResult(job.key.sourceID, job.sourceGeneration, job.target, result, job.probeGeneration)
 	}
-	return probeRunResult{succeeded: callErr == nil && result.Eligible, callErr: callErr}
+	return probeRunResult{succeeded: callErr == nil && result.Eligible && !result.PolicyDisabled, callErr: callErr}
 }
 
 type RelayProbeRunner struct {
@@ -107,6 +114,7 @@ func (r *RelayProbeRunner) Run(ctx context.Context, job probeJob) probeRunResult
 	result := protocol.RelayProbeResult{
 		TargetAgentID: job.target.AgentID, State: protocol.RelayProbeUnavailable,
 		Stage: protocol.RelayProbeStageOpen, CheckedAt: now.Unix(), ReasonCode: consts.RouteErrorRelayNotReady,
+		Policy: job.key.policy,
 	}
 	var callErr error
 	if r.caller == nil {
@@ -116,6 +124,7 @@ func (r *RelayProbeRunner) Run(ctx context.Context, job probeJob) probeRunResult
 			TargetAgentID:         job.target.AgentID,
 			SourceRelayGeneration: job.sourceRelayGeneration,
 			TargetRelayGeneration: job.targetRelayGeneration,
+			Policy:                job.key.policy,
 		})
 	}
 	if result.CheckedAt == 0 && r.service != nil {
@@ -125,6 +134,11 @@ func (r *RelayProbeRunner) Run(ctx context.Context, job probeJob) probeRunResult
 		result.State = protocol.RelayProbeUnavailable
 		result.Stage = protocol.RelayProbeStageOpen
 		result.ReasonCode = consts.RouteErrorRelayNotReady
+	}
+	result.Policy = job.key.policy
+	if job.policyReason != "" {
+		result.PolicyDisabled = true
+		result.PolicyReasonCode = job.policyReason
 	}
 	withoutResult := callErr != nil || result.State == protocol.RelayProbeUnknown ||
 		result.ReasonCode == consts.RouteErrorRequestCancelled
@@ -138,5 +152,8 @@ func (r *RelayProbeRunner) Run(ctx context.Context, job probeJob) probeRunResult
 			job.sourceRelayGeneration, job.targetRelayGeneration, result,
 		)
 	}
-	return probeRunResult{succeeded: callErr == nil && result.State == protocol.RelayProbeReachable, callErr: callErr}
+	return probeRunResult{
+		succeeded: callErr == nil && result.State == protocol.RelayProbeReachable && !result.PolicyDisabled,
+		callErr:   callErr,
+	}
 }

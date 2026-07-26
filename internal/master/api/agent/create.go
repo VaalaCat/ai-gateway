@@ -13,10 +13,6 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 	if err != nil {
 		return api.Created[models.Agent]{}, api.BadRequestError(errInvalidRelayConfiguration.Error(), nil)
 	}
-	peerRouteMode, err := normalizePeerRouteMode(req.PeerRouteMode, true)
-	if err != nil {
-		return api.Created[models.Agent]{}, api.BadRequestError(errInvalidPeerRouteMode.Error(), nil)
-	}
 	if req.AgentID == "" {
 		req.AgentID = GenerateRandomID("agent-")
 	}
@@ -24,24 +20,34 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		req.Secret = GenerateRandomID("sec-")
 	}
 	agent := models.Agent{
-		AgentID:       req.AgentID,
-		Secret:        req.Secret,
-		Name:          req.Name,
-		Status:        1,
-		HTTPAddresses: req.HTTPAddresses,
-		Tags:          req.Tags,
-		ProxyURL:      req.ProxyURL,
-		RelayMode:     relayMode,
-		RelayURI:      relayURI,
-		PeerRouteMode: peerRouteMode,
+		AgentID:               req.AgentID,
+		Secret:                req.Secret,
+		Name:                  req.Name,
+		Status:                1,
+		HTTPAddresses:         req.HTTPAddresses,
+		Tags:                  req.Tags,
+		ProxyURL:              req.ProxyURL,
+		RelayMode:             relayMode,
+		RelayURI:              relayURI,
+		DirectInboundEnabled:  boolValueOrDefault(req.DirectInboundEnabled, true),
+		DirectOutboundEnabled: boolValueOrDefault(req.DirectOutboundEnabled, true),
+		RelayInboundEnabled:   boolValueOrDefault(req.RelayInboundEnabled, true),
+		RelayOutboundEnabled:  boolValueOrDefault(req.RelayOutboundEnabled, true),
 	}
 
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	m := dao.NewAdminMutation(daoCtx)
 
-	if err := m.Agent().Create(&agent); err != nil {
+	if err := m.Agent().CreateWithTransportPolicy(&agent); err != nil {
 		return api.Created[models.Agent]{}, api.ConflictError("create agent failed", err)
 	}
 	events.PublishAgentCreate(c.RequestContext(), c.GetBus(), agent)
 	return api.Created[models.Agent]{Value: agent}, nil
+}
+
+func boolValueOrDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }

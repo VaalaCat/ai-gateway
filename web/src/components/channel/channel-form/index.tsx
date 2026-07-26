@@ -20,6 +20,7 @@ import { ConnectionSection } from "./sections/connection";
 import { AffinitySection } from "./sections/affinity";
 import { ResilienceSection } from "./sections/resilience";
 import { ResponseSection } from "./sections/response";
+import { UsageSection } from "./sections/usage";
 
 export interface ChannelFormProps<Entity = unknown> {
   mode: ChannelFormMode;
@@ -35,6 +36,7 @@ const STAGES: ReadonlyArray<{ id: SectionId; titleKey: string; descKey: string }
   { id: "connection", titleKey: "stageConnection", descKey: "stageConnectionDesc" },
   { id: "resilience", titleKey: "stageResilience", descKey: "stageResilienceDesc" },
   { id: "response", titleKey: "stageResponse", descKey: "stageResponseDesc" },
+  { id: "usage", titleKey: "stageUsage", descKey: "stageUsageDesc" },
 ];
 
 export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps<Entity>) {
@@ -95,6 +97,8 @@ export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps
         return <ResilienceSection form={state.form} setForm={state.setForm} />;
       case "response":
         return <ResponseSection form={state.form} setForm={state.setForm} hiddenFields={adapter.hiddenFields} />;
+      case "usage":
+        return <UsageSection channelId={channelId} />;
     }
   };
 

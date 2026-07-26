@@ -53,12 +53,12 @@ type adminAgentRouteQuery struct{ ctx *baseContext }
 
 func (q *adminAgentRouteQuery) GetByID(id uint) (*models.AgentRoute, error) {
 	var route models.AgentRoute
-	err := q.ctx.GetDB().First(&route, id).Error
+	err := q.ctx.GetCoreDB().First(&route, id).Error
 	return &route, err
 }
 
 func (q *adminAgentRouteQuery) List(opts ListOptions, filter AgentRouteListFilter) ([]models.AgentRoute, int64, error) {
-	db := q.ctx.GetDB().Model(&models.AgentRoute{})
+	db := q.ctx.GetCoreDB().Model(&models.AgentRoute{})
 
 	if filter.SourceType != "" {
 		db = db.Where("source_type = ?", filter.SourceType)
@@ -81,13 +81,13 @@ func (q *adminAgentRouteQuery) List(opts ListOptions, filter AgentRouteListFilte
 
 func (q *adminAgentRouteQuery) ListAll() ([]models.AgentRoute, error) {
 	var routes []models.AgentRoute
-	err := q.ctx.GetDB().Order("priority DESC").Find(&routes).Error
+	err := q.ctx.GetCoreDB().Order("priority DESC").Find(&routes).Error
 	return routes, err
 }
 
 func (q *adminAgentRouteQuery) MaxID() (uint, error) {
 	var maxID uint
-	err := q.ctx.GetDB().Model(&models.AgentRoute{}).
+	err := q.ctx.GetCoreDB().Model(&models.AgentRoute{}).
 		Select("COALESCE(MAX(id), 0)").
 		Scan(&maxID).Error
 	return maxID, err
@@ -101,7 +101,7 @@ func (q *adminAgentRouteQuery) ListKeyset(afterID uint, snapshotMaxID uint, limi
 	if limit > protocol.FullSyncMaxPageSize {
 		limit = protocol.FullSyncMaxPageSize
 	}
-	err := q.ctx.GetDB().
+	err := q.ctx.GetCoreDB().
 		Where("id > ? AND id <= ?", afterID, snapshotMaxID).
 		Order("id ASC").
 		Limit(limit).
@@ -114,7 +114,7 @@ func (q *adminAgentRouteQuery) CountThroughID(snapshotMaxID uint) (int64, error)
 		return 0, nil
 	}
 	var total int64
-	err := q.ctx.GetDB().Model(&models.AgentRoute{}).
+	err := q.ctx.GetCoreDB().Model(&models.AgentRoute{}).
 		Where("id <= ?", snapshotMaxID).
 		Count(&total).Error
 	return total, err
@@ -124,11 +124,11 @@ type adminAgentRouteMutation struct{ ctx *baseContext }
 
 func (m *adminAgentRouteMutation) Create(route *models.AgentRoute) error {
 	route.Priority = route.CalcPriority()
-	return m.ctx.GetDB().Create(route).Error
+	return m.ctx.GetCoreDB().Create(route).Error
 }
 
 func (m *adminAgentRouteMutation) Update(route *models.AgentRoute) error {
-	result := m.ctx.GetDB().Model(&models.AgentRoute{}).
+	result := m.ctx.GetCoreDB().Model(&models.AgentRoute{}).
 		Where("id = ?", route.ID).
 		Select(
 			"source_type", "source_id", "model",
@@ -145,5 +145,5 @@ func (m *adminAgentRouteMutation) Update(route *models.AgentRoute) error {
 }
 
 func (m *adminAgentRouteMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.AgentRoute{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.AgentRoute{}, id).Error
 }

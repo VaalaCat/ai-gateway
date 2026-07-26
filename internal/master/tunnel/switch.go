@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
@@ -25,18 +26,19 @@ const (
 )
 
 var switchFrameRoutes = map[wire.Type]routeDirection{
-	wire.FrameOpen:         routeSourceToTarget,
-	wire.FrameReady:        routeTargetToSource,
-	wire.FrameCommit:       routeSourceToTarget,
-	wire.FrameCommitted:    routeTargetToSource,
-	wire.FrameRequestData:  routeSourceToTarget,
-	wire.FrameRequestEnd:   routeSourceToTarget,
-	wire.FrameHeaders:      routeTargetToSource,
-	wire.FrameResponseData: routeTargetToSource,
-	wire.FrameEnd:          routeTargetToSource,
-	wire.FrameCancel:       routeSourceToTarget | routeTargetToSource,
-	wire.FrameReset:        routeSourceToTarget | routeTargetToSource,
-	wire.FrameWindowUpdate: routeSourceToTarget | routeTargetToSource,
+	wire.FrameOpen:          routeSourceToTarget,
+	wire.FrameReady:         routeTargetToSource,
+	wire.FrameCommit:        routeSourceToTarget,
+	wire.FrameCommitted:     routeTargetToSource,
+	wire.FrameRequestData:   routeSourceToTarget,
+	wire.FrameRequestEnd:    routeSourceToTarget,
+	wire.FrameHeaders:       routeTargetToSource,
+	wire.FrameResponseData:  routeTargetToSource,
+	wire.FrameAttemptResult: routeTargetToSource,
+	wire.FrameEnd:           routeTargetToSource,
+	wire.FrameCancel:        routeSourceToTarget | routeTargetToSource,
+	wire.FrameReset:         routeSourceToTarget | routeTargetToSource,
+	wire.FrameWindowUpdate:  routeSourceToTarget | routeTargetToSource,
 }
 
 var terminalFrames = map[wire.Type]struct{}{
@@ -47,6 +49,22 @@ type switchQueue struct {
 	destination *Session
 	frames      chan queuedFrame
 }
+
+type switchStreamKind uint8
+
+const (
+	switchStreamUnknown switchStreamKind = iota
+	switchStreamAttempt
+	switchStreamProbe
+)
+
+type responsePhase uint8
+
+const (
+	responseWaitingHeaders responsePhase = iota
+	responseStreaming
+	responseResult
+)
 
 type Switch struct {
 	hub    *Hub
@@ -83,6 +101,8 @@ type Switch struct {
 	openSeen           bool
 	openDelivered      bool
 	deliveredCommitted bool
+	streamKind         switchStreamKind
+	responsePhase      responsePhase
 	workers            sync.WaitGroup
 	terminalContext    terminalContextFactory
 
@@ -153,6 +173,9 @@ func (s *Switch) accept(from *Session, generation uint64, frame wire.Frame) erro
 	if from != s.source && from != s.target {
 		return errInvalidDirection
 	}
+	if err := validateFramePayloadHardLimit(frame); err != nil {
+		return err
+	}
 	if frame.Type == wire.FrameOpen {
 		s.sequenceMu.Lock()
 		if from != s.source || s.openSeen {
@@ -176,12 +199,25 @@ func (s *Switch) accept(from *Session, generation uint64, frame wire.Frame) erro
 			return err
 		}
 	}
+	if err := s.validateResponseOrder(from, frame.Type); err != nil {
+		return err
+	}
 	s.recordFrameMetrics(from, frame)
 	if !s.started.Load() {
 		s.start()
 	}
 	if err := s.enqueue(s.ctx, destination, frame); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateFramePayloadHardLimit(frame wire.Frame) error {
+	if len(frame.Payload) > wire.MaxV2PayloadBytes {
+		return errProtocol
+	}
+	if frame.Type == wire.FrameAttemptResult && len(frame.Payload) > attemptwire.MaxResultWireBytes {
+		return errProtocol
 	}
 	return nil
 }
@@ -205,6 +241,10 @@ func (s *Switch) prepareOpen(frame wire.Frame) (wire.Frame, error) {
 	if err := wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes); err != nil {
 		return wire.Frame{}, err
 	}
+	kind, err := switchKindForOpen(open)
+	if err != nil {
+		return wire.Frame{}, err
+	}
 	open.SourceAgentID = s.source.agentID
 	if open.RemainingNanos > 0 {
 		remaining := time.Duration(open.RemainingNanos) - time.Since(s.openedAt)
@@ -221,8 +261,61 @@ func (s *Switch) prepareOpen(frame wire.Frame) (wire.Frame, error) {
 	if err != nil {
 		return wire.Frame{}, err
 	}
+	s.sequenceMu.Lock()
+	s.streamKind = kind
+	s.responsePhase = responseWaitingHeaders
+	s.sequenceMu.Unlock()
 	frame.Payload = payload
 	return frame, nil
+}
+
+func switchKindForOpen(open wire.Open) (switchStreamKind, error) {
+	if open.Attempt == nil {
+		if open.IsConnectivityProbe() {
+			return switchStreamProbe, nil
+		}
+		return switchStreamUnknown, errProtocol
+	}
+	if open.ProbePolicy != "" {
+		return switchStreamUnknown, errProtocol
+	}
+	return switchStreamAttempt, nil
+}
+
+func (s *Switch) validateResponseOrder(from *Session, frameType wire.Type) error {
+	if from != s.target {
+		return nil
+	}
+	s.sequenceMu.Lock()
+	defer s.sequenceMu.Unlock()
+	if s.streamKind == switchStreamUnknown {
+		return nil
+	}
+	switch frameType {
+	case wire.FrameHeaders:
+		if s.responsePhase != responseWaitingHeaders {
+			return errProtocol
+		}
+		s.responsePhase = responseStreaming
+	case wire.FrameResponseData:
+		if s.responsePhase != responseStreaming {
+			return errProtocol
+		}
+	case wire.FrameAttemptResult:
+		if s.streamKind != switchStreamAttempt || s.responsePhase != responseStreaming {
+			return errProtocol
+		}
+		s.responsePhase = responseResult
+	case wire.FrameEnd:
+		expected := responseResult
+		if s.streamKind == switchStreamProbe {
+			expected = responseStreaming
+		}
+		if s.responsePhase != expected {
+			return errProtocol
+		}
+	}
+	return nil
 }
 
 func (s *Switch) destination(from *Session, frameType wire.Type) *Session {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
@@ -18,10 +19,10 @@ import (
 
 func TestStreamCommitUploadAndCopyResponse(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	request := validBoundRelayRequest("/v1/responses")
 	request.BodyLength = 6
-	stream, err := session.OpenStream(t.Context(), request)
+	stream, err := session.OpenAttemptStream(t.Context(), request)
 	require.NoError(t, err)
 	open := readPeerFrame(t, peer, limits)
 
@@ -53,14 +54,23 @@ func TestStreamCommitUploadAndCopyResponse(t *testing.T) {
 	require.EqualValues(t, 5, requestEnd.Sequence)
 	require.NoError(t, <-uploadDone)
 
-	responseDone := make(chan error, 1)
+	type copyResult struct {
+		result attemptwire.AttemptProxyResult
+		err    error
+	}
+	responseDone := make(chan copyResult, 1)
 	recorder := httptest.NewRecorder()
-	go func() { responseDone <- stream.CopyResponse(t.Context(), recorder) }()
+	go func() {
+		result, err := stream.CopyAttemptResponse(t.Context(), recorder)
+		responseDone <- copyResult{result: result, err: err}
+	}()
 	writePeerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameHeaders, StreamID: open.StreamID, Sequence: 4,
 		Payload: mustMetadata(t, wire.Headers{StatusCode: http.StatusCreated, Header: http.Header{"X-Relay": {"yes"}}}, limits)})
 	writePeerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameResponseData, StreamID: open.StreamID, Sequence: 5, Payload: []byte("xyz")})
 	writePeerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, StreamID: open.StreamID, Sequence: 6})
-	require.NoError(t, <-responseDone)
+	copy := <-responseDone
+	require.NoError(t, copy.err)
+	require.Equal(t, attemptwire.ResultSucceeded, copy.result.Kind)
 	require.Equal(t, http.StatusCreated, recorder.Code)
 	require.Equal(t, "yes", recorder.Header().Get("X-Relay"))
 	require.Equal(t, "xyz", recorder.Body.String())
@@ -72,11 +82,11 @@ func TestStreamRejectsInvalidResponseHeaderBeforeWriterMutation(t *testing.T) {
 		{"X-Test": {"bad\r\nvalue"}},
 	} {
 		limits := testLimits(1)
-		session, peer := startTestSession(t, limits, SessionOptions{})
+		session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 		stream, open := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 		writer := &mutationTrackingWriter{header: make(http.Header)}
 		done := make(chan error, 1)
-		go func() { done <- stream.CopyResponse(t.Context(), writer) }()
+		go func() { done <- copyAttemptResponse(stream, t.Context(), writer) }()
 		require.Eventually(t, func() bool {
 			stream.responseOwner.mu.Lock()
 			defer stream.responseOwner.mu.Unlock()
@@ -94,8 +104,8 @@ func TestStreamRejectsInvalidResponseHeaderBeforeWriterMutation(t *testing.T) {
 }
 
 func TestStreamCommitDeadlineWhileWaitingForReady(t *testing.T) {
-	session, peer := startTestSession(t, testLimits(1), SessionOptions{})
-	stream, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	session, peer := startTestSession(t, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
+	stream, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
 	_ = readPeerFrame(t, peer, testLimits(1))
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
@@ -106,8 +116,8 @@ func TestStreamCommitDeadlineWhileWaitingForReady(t *testing.T) {
 
 func TestStreamOpenCommitTimeoutCancelsPreCommitAndReturnsAdmission(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{OpenCommitTimeout: 20 * time.Millisecond})
-	stream, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay, OpenCommitTimeout: 20 * time.Millisecond})
+	stream, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
 	_ = readPeerFrame(t, peer, limits)
 	select {
@@ -115,15 +125,15 @@ func TestStreamOpenCommitTimeoutCancelsPreCommitAndReturnsAdmission(t *testing.T
 	case <-time.After(time.Second):
 		t.Fatal("pre-commit stream did not time out")
 	}
-	second, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	second, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
 	second.Cancel(context.Canceled)
 }
 
 func TestStreamOpenCommitTimeoutCancelsCommitUncertain(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{OpenCommitTimeout: 20 * time.Millisecond})
-	stream, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay, OpenCommitTimeout: 20 * time.Millisecond})
+	stream, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
 	open := readPeerFrame(t, peer, limits)
 	writePeerFrame(t, peer, limits, wire.Frame{
@@ -149,10 +159,10 @@ func TestStreamOpenCommitTimeoutCancelsCommitUncertain(t *testing.T) {
 
 func TestStreamRequestDeadlineWinsOverOpenCommitTimeout(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{OpenCommitTimeout: time.Second})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay, OpenCommitTimeout: time.Second})
 	request := validBoundRelayRequest("/v1/responses")
 	request.Remaining = 20 * time.Millisecond
-	stream, err := session.OpenStream(t.Context(), request)
+	stream, err := session.OpenAttemptStream(t.Context(), request)
 	require.NoError(t, err)
 	open := readPeerFrame(t, peer, limits)
 	writePeerFrame(t, peer, limits, wire.Frame{
@@ -172,7 +182,7 @@ func TestStreamRequestDeadlineWinsOverOpenCommitTimeout(t *testing.T) {
 
 func TestStreamCommitResultIsRepeatable(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	stream, _ := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 	for range 2 {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
@@ -195,13 +205,13 @@ func TestStreamCommitSocketFailureRemainsUncertain(t *testing.T) {
 	session := &Session{
 		generation: 1,
 		limits:     testLimits(1),
-		opts:       defaultSessionOptions(SessionOptions{}),
+		opts:       defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}),
 		ctx:        ctx,
 		writer:     w,
 		streams:    make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(1, time.Second, time.Now),
 	}
-	stream := newStream(session, ctx, t.Context(), testStreamID(42), 0)
+	stream := newStream(session, ctx, testStreamID(42), 0, "")
 	w.onError = stream.Cancel
 	stream.signalReady(nil)
 	go w.Run()
@@ -220,7 +230,7 @@ func TestStreamCommitSocketFailureRemainsUncertain(t *testing.T) {
 func TestStreamUploadNoDeadlineStopsAtWindowStallTimeout(t *testing.T) {
 	limits := testLimits(1)
 	limits.InitialStreamWindow = 1
-	session, peer := startTestSession(t, limits, SessionOptions{WindowStallTimeout: 20 * time.Millisecond})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay, WindowStallTimeout: 20 * time.Millisecond})
 	stream, open := committedTestStream(t, session, peer, limits, 1)
 	done := make(chan error, 1)
 	go func() { done <- stream.Upload(t.Context(), bytes.NewBufferString("ab")) }()
@@ -233,7 +243,7 @@ func TestStreamUploadNoDeadlineStopsAtWindowStallTimeout(t *testing.T) {
 func TestStreamRequestDeadlineWinsOverWindowStall(t *testing.T) {
 	limits := testLimits(1)
 	limits.InitialStreamWindow = 1
-	session, peer := startTestSession(t, limits, SessionOptions{WindowStallTimeout: time.Second})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay, WindowStallTimeout: time.Second})
 	stream, _ := committedTestStream(t, session, peer, limits, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
@@ -243,11 +253,11 @@ func TestStreamRequestDeadlineWinsOverWindowStall(t *testing.T) {
 
 func TestStreamDuplicateTerminalAndLateDataUseTombstone(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	stream, open := committedTestStream(t, session, peer, limits, 3)
 	recorder := httptest.NewRecorder()
 	done := make(chan error, 1)
-	go func() { done <- stream.CopyResponse(t.Context(), recorder) }()
+	go func() { done <- copyAttemptResponse(stream, t.Context(), recorder) }()
 	writePeerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameHeaders, StreamID: open.StreamID,
 		Payload: mustMetadata(t, wire.Headers{StatusCode: http.StatusOK}, limits)})
 	writePeerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, StreamID: open.StreamID})
@@ -267,10 +277,10 @@ func TestStreamDuplicateTerminalAndLateDataUseTombstone(t *testing.T) {
 
 func TestStreamFastHeadersEndReturnsSuccessDeterministically(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	stream, open := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 	done := make(chan error, 1)
-	go func() { done <- stream.CopyResponse(t.Context(), httptest.NewRecorder()) }()
+	go func() { done <- copyAttemptResponse(stream, t.Context(), httptest.NewRecorder()) }()
 	writePeerFrame(t, peer, limits, wire.Frame{
 		Version: wire.ProtocolVersion, Type: wire.FrameHeaders, StreamID: open.StreamID,
 		Payload: mustMetadata(t, wire.Headers{StatusCode: http.StatusNoContent}, limits),
@@ -296,7 +306,7 @@ func TestStreamBufferedHeadersWinOverTerminalCancellation(t *testing.T) {
 func TestStreamCancelWakesBlockedUpload(t *testing.T) {
 	limits := testLimits(1)
 	limits.InitialStreamWindow = 1
-	session, peer := startTestSession(t, limits, SessionOptions{WindowStallTimeout: time.Second})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay, WindowStallTimeout: time.Second})
 	stream, _ := committedTestStream(t, session, peer, limits, 1)
 	done := make(chan error, 1)
 	go func() { done <- stream.Upload(t.Context(), io.LimitReader(zeroReader{}, 2)) }()
@@ -307,7 +317,7 @@ func TestStreamCancelWakesBlockedUpload(t *testing.T) {
 
 func TestStreamCancelClosesBlockedUploadReader(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{WindowStallTimeout: time.Second})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay, WindowStallTimeout: time.Second})
 	stream, _ := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 	src := newBlockingReadCloser()
 	uploadDone := make(chan error, 1)
@@ -337,10 +347,10 @@ func TestStreamFailedEnqueueDoesNotConsumeSequence(t *testing.T) {
 	})
 	session := &Session{
 		generation: 1, limits: testLimits(1), ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now),
 	}
-	stream := newStream(session, ctx, t.Context(), testStreamID(61), 0)
+	stream := newStream(session, ctx, testStreamID(61), 0, "")
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 	require.ErrorIs(t, stream.enqueue(cancelled, wire.FrameWindowUpdate, []byte(`{"bytes":1}`)), context.Canceled)
@@ -357,9 +367,9 @@ func TestStreamConcurrentEnqueueCommitsFIFOSequences(t *testing.T) {
 	w := newFairWriter(ctx, 4096, time.Second, func(frame wire.Frame) error { written <- frame; return nil })
 	go w.Run()
 	session := &Session{generation: 1, limits: testLimits(1), ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now)}
-	stream := newStream(session, ctx, t.Context(), testStreamID(62), 0)
+	stream := newStream(session, ctx, testStreamID(62), 0, "")
 	results := make(chan error, 2)
 	go func() { results <- stream.enqueue(t.Context(), wire.FrameRequestData, []byte("a")) }()
 	go func() { results <- stream.enqueue(t.Context(), wire.FrameRequestData, []byte("b")) }()
@@ -379,9 +389,9 @@ func TestStreamPostTerminalCopyDrainsBufferedDataWithoutWindowUpdates(t *testing
 	limits.InitialStreamWindow = 1000
 	w := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error { return nil })
 	session := &Session{generation: 1, limits: limits, ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now)}
-	stream := newStream(session, ctx, t.Context(), testStreamID(63), 0)
+	stream := newStream(session, ctx, testStreamID(63), 0, "")
 	stream.receivePhase = receiveCommitted
 	stream.receiveSeq = 2
 	go stream.run()
@@ -390,7 +400,10 @@ func TestStreamPostTerminalCopyDrainsBufferedDataWithoutWindowUpdates(t *testing
 	for i := uint32(4); i < 1004; i++ {
 		stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameResponseData, Sequence: i, StreamID: stream.id, Payload: []byte("x")}
 	}
-	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, Sequence: 1004, StreamID: stream.id}
+	resultPayload, err := attemptwire.EncodeResultJSON(attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded})
+	require.NoError(t, err)
+	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameAttemptResult, Sequence: 1004, StreamID: stream.id, Payload: resultPayload}
+	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, Sequence: 1005, StreamID: stream.id}
 	require.Never(t, func() bool {
 		select {
 		case <-stream.Done():
@@ -400,7 +413,7 @@ func TestStreamPostTerminalCopyDrainsBufferedDataWithoutWindowUpdates(t *testing
 		}
 	}, 20*time.Millisecond, time.Millisecond)
 	recorder := httptest.NewRecorder()
-	require.NoError(t, stream.CopyResponse(t.Context(), recorder))
+	require.NoError(t, copyAttemptResponse(stream, t.Context(), recorder))
 	<-stream.Done()
 	require.Len(t, recorder.Body.Bytes(), 1000)
 	queuedBytes, queuedStreams := w.stats()
@@ -413,15 +426,18 @@ func TestStreamCloseAbandonsUnclaimedSuccessfulResponse(t *testing.T) {
 	defer cancel()
 	w := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error { return nil })
 	session := &Session{generation: 1, limits: testLimits(1), ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now)}
-	stream := newStream(session, ctx, t.Context(), testStreamID(64), 0)
+	stream := newStream(session, ctx, testStreamID(64), 0, "")
 	stream.receivePhase = receiveCommitted
 	stream.receiveSeq = 2
 	go stream.run()
 	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameHeaders, Sequence: 3, StreamID: stream.id,
 		Payload: mustMetadata(t, wire.Headers{StatusCode: http.StatusOK}, session.limits)}
-	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, Sequence: 4, StreamID: stream.id}
+	resultPayload, err := attemptwire.EncodeResultJSON(attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded})
+	require.NoError(t, err)
+	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameAttemptResult, Sequence: 4, StreamID: stream.id, Payload: resultPayload}
+	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, Sequence: 5, StreamID: stream.id}
 	require.Eventually(t, stream.isTerminalSuccess, time.Second, time.Millisecond)
 	require.Never(t, func() bool {
 		select {
@@ -433,7 +449,7 @@ func TestStreamCloseAbandonsUnclaimedSuccessfulResponse(t *testing.T) {
 	}, 20*time.Millisecond, time.Millisecond)
 	require.NoError(t, stream.Close())
 	recorder := httptest.NewRecorder()
-	require.Error(t, stream.CopyResponse(t.Context(), recorder))
+	require.Error(t, copyAttemptResponse(stream, t.Context(), recorder))
 	require.Zero(t, recorder.Body.Len())
 }
 
@@ -442,19 +458,19 @@ func TestStreamCopyCallerCancelJoinsDoneAndRejectsSecondConsumer(t *testing.T) {
 	defer cancelSession()
 	w := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error { return nil })
 	session := &Session{generation: 1, limits: testLimits(1), ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now)}
-	stream := newStream(session, ctx, t.Context(), testStreamID(65), 0)
+	stream := newStream(session, ctx, testStreamID(65), 0, "")
 	go stream.run()
 	caller, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- stream.CopyResponse(caller, httptest.NewRecorder()) }()
+	go func() { done <- copyAttemptResponse(stream, caller, httptest.NewRecorder()) }()
 	require.Eventually(t, func() bool {
 		stream.responseOwner.mu.Lock()
 		defer stream.responseOwner.mu.Unlock()
 		return stream.responseOwner.claimed
 	}, time.Second, time.Millisecond)
-	require.ErrorIs(t, stream.CopyResponse(t.Context(), httptest.NewRecorder()), errCopyStarted)
+	require.ErrorIs(t, copyAttemptResponse(stream, t.Context(), httptest.NewRecorder()), errCopyStarted)
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 	select {
@@ -464,11 +480,11 @@ func TestStreamCopyCallerCancelJoinsDoneAndRejectsSecondConsumer(t *testing.T) {
 	}
 }
 
-func TestStreamCopyResponseQueueWaitHonorsCallerCancel(t *testing.T) {
+func TestStreamCopyResponseQueueCancelDrainsAttemptResult(t *testing.T) {
 	session, writer, release, cancelSession := blockedWriterSession(t, 20*time.Millisecond)
 	defer cancelSession()
 	defer release()
-	stream := newStream(session, session.ctx, t.Context(), testStreamID(51), 0)
+	stream := newStream(session, session.ctx, testStreamID(51), 0, "")
 	stream.receivePhase = receiveCommitted
 	stream.receiveSeq = 2
 	go stream.run()
@@ -480,20 +496,31 @@ func TestStreamCopyResponseQueueWaitHonorsCallerCancel(t *testing.T) {
 		Version: wire.ProtocolVersion, Type: wire.FrameResponseData, Sequence: 4, StreamID: stream.id, Payload: []byte("abc"),
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
+	done := make(chan attemptCopyResult, 1)
 	recorder := newWriteNotifyingRecorder()
-	go func() { done <- stream.CopyResponse(ctx, recorder) }()
+	go func() {
+		result, err := stream.CopyAttemptResponse(ctx, recorder)
+		done <- attemptCopyResult{result: result, err: err}
+	}()
 	select {
 	case <-recorder.wrote:
 	case <-time.After(time.Second):
 		t.Fatal("CopyResponse did not write response DATA")
 	}
 	cancel()
+	want := attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded, ProviderResultKnown: true}
+	payload, err := attemptwire.EncodeResultJSON(want)
+	require.NoError(t, err)
+	stream.inbound <- wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameAttemptResult, Sequence: 5, StreamID: stream.id, Payload: payload,
+	}
+	stream.inbound <- wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, Sequence: 6, StreamID: stream.id}
 	select {
-	case err := <-done:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("WINDOW_UPDATE queue wait ignored caller cancellation")
+	case got := <-done:
+		require.Equal(t, want, got.result)
+		require.NoError(t, got.err)
+	case <-time.After(time.Second):
+		t.Fatal("attempt result drain did not finish after Result and End")
 	}
 	stream.Cancel(context.Canceled)
 	_ = writer
@@ -503,7 +530,7 @@ func TestStreamCancelBoundedWhenControlQueueIsFull(t *testing.T) {
 	session, _, release, cancelSession := blockedWriterSession(t, 20*time.Millisecond)
 	defer cancelSession()
 	defer release()
-	stream := newStream(session, session.ctx, t.Context(), testStreamID(52), 0)
+	stream := newStream(session, session.ctx, testStreamID(52), 0, "")
 	go stream.run()
 	stream.Cancel(context.Canceled)
 	select {
@@ -534,7 +561,7 @@ func blockedWriterSession(t *testing.T, writeTimeout time.Duration) (*Session, *
 	limits := testLimits(2)
 	session := &Session{
 		generation: 1, limits: limits, ctx: ctx, writer: w,
-		opts:       defaultSessionOptions(SessionOptions{WriteTimeout: writeTimeout, OpenCommitTimeout: time.Second}),
+		opts:       defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay, WriteTimeout: writeTimeout, OpenCommitTimeout: time.Second}),
 		streams:    make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now),
 	}
@@ -549,7 +576,7 @@ func blockedWriterSession(t *testing.T, writeTimeout time.Duration) (*Session, *
 
 func committedTestStream(t *testing.T, session *Session, peer *websocket.Conn, limits wire.Limits, requestWindow int64) (*Stream, wire.Frame) {
 	t.Helper()
-	stream, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	stream, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
 	open := readPeerFrame(t, peer, limits)
 	writePeerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameReady, StreamID: open.StreamID,
@@ -586,7 +613,7 @@ type blockingReadCloser struct {
 
 func TestStreamCopyResponseAppliesFinalTrailersFromEnd(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	stream, open := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 	writePeerFrame(t, peer, limits, wire.Frame{
 		Version: wire.ProtocolVersion, Type: wire.FrameHeaders, StreamID: open.StreamID,
@@ -597,17 +624,17 @@ func TestStreamCopyResponseAppliesFinalTrailersFromEnd(t *testing.T) {
 		Payload: mustMetadata(t, wire.Trailers{Header: http.Header{"X-Usage": {"tokens=7"}}}, limits),
 	})
 	recorder := httptest.NewRecorder()
-	require.NoError(t, stream.CopyResponse(t.Context(), recorder))
+	require.NoError(t, copyAttemptResponse(stream, t.Context(), recorder))
 	require.Equal(t, "tokens=7", recorder.Result().Trailer.Get("X-Usage"))
 }
 
 func TestStreamCopiesLateDynamicFinalTrailerOverHTTP(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	stream, open := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 	copyDone := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		copyDone <- stream.CopyResponse(t.Context(), w)
+		copyDone <- copyAttemptResponse(stream, t.Context(), w)
 	}))
 	defer server.Close()
 	type clientResult struct {
@@ -652,11 +679,11 @@ func TestStreamCopiesLateDynamicFinalTrailerOverHTTP(t *testing.T) {
 
 func TestStreamRejectsUndeclaredFinalTrailerWithoutDynamicMarker(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	stream, open := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 	recorder := httptest.NewRecorder()
 	copyDone := make(chan error, 1)
-	go func() { copyDone <- stream.CopyResponse(t.Context(), recorder) }()
+	go func() { copyDone <- copyAttemptResponse(stream, t.Context(), recorder) }()
 	require.Eventually(t, func() bool {
 		stream.responseOwner.mu.Lock()
 		defer stream.responseOwner.mu.Unlock()
@@ -705,11 +732,11 @@ func TestStreamRejectsInvalidDynamicFinalTrailerMetadata(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			limits := testLimits(1)
-			session, peer := startTestSession(t, limits, SessionOptions{})
+			session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 			stream, open := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 			recorder := httptest.NewRecorder()
 			copyDone := make(chan error, 1)
-			go func() { copyDone <- stream.CopyResponse(t.Context(), recorder) }()
+			go func() { copyDone <- copyAttemptResponse(stream, t.Context(), recorder) }()
 			require.Eventually(t, func() bool {
 				stream.responseOwner.mu.Lock()
 				defer stream.responseOwner.mu.Unlock()
@@ -731,11 +758,11 @@ func TestStreamRejectsInvalidDynamicFinalTrailerMetadata(t *testing.T) {
 
 func TestStreamRejectsInvalidFinalTrailersWithoutInjection(t *testing.T) {
 	limits := testLimits(1)
-	session, peer := startTestSession(t, limits, SessionOptions{})
+	session, peer := startTestSession(t, limits, SessionOptions{Direction: SessionDirectionRelay})
 	stream, open := committedTestStream(t, session, peer, limits, limits.InitialStreamWindow)
 	recorder := httptest.NewRecorder()
 	copyDone := make(chan error, 1)
-	go func() { copyDone <- stream.CopyResponse(t.Context(), recorder) }()
+	go func() { copyDone <- copyAttemptResponse(stream, t.Context(), recorder) }()
 	require.Eventually(t, func() bool {
 		stream.responseOwner.mu.Lock()
 		defer stream.responseOwner.mu.Unlock()

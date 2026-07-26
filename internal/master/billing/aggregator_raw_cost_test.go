@@ -11,15 +11,15 @@ func TestAggregator_AccumulatesRawCost(t *testing.T) {
 	a := newAggregatorForTest(t)
 
 	// 免费渠道行:TotalCost 清零,但 Raw* 桶保留原价
-	free := &models.UsageLog{
+	free := &models.BillingLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin",
 		ChannelID: 3, ChannelName: "c", ChannelType: 1,
-		ModelName: "m", AgentID: "x", Status: 1, CreatedAt: 1700000000,
+		ModelName: "m", Status: 1, CreatedAt: 1700000000,
 		TotalCost:    0,
 		RawInputCost: ptrI64(40), RawOutputCost: ptrI64(60),
 	}
-	a.Submit(free)
-	a.Submit(free) // 同 key 累加
+	a.SubmitBilling(free)
+	a.SubmitBilling(free) // 同 key 累加
 
 	_, channels, _ := a.Snapshot()
 	require.Len(t, channels, 1)

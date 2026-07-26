@@ -123,7 +123,7 @@ describe("AgentConnectionStatus", () => {
     render(
       <AgentConnectionStatus
         kind="direct"
-        value={{ state: "checking", reachable: 3, degraded: 1, unreachable: 1, stale: 0, total: 5 }}
+        value={{ state: "checking", disabled: 0, reachable: 3, degraded: 1, unreachable: 1, stale: 0, total: 5 }}
       />,
     );
 

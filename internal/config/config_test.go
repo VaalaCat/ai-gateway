@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func writeTempYAML(t *testing.T, content string) string {
@@ -50,7 +52,7 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Relay.Timeout != 300 {
 		t.Errorf("expected default timeout 300, got %d", cfg.Relay.Timeout)
 	}
-	if cfg.Master.DBPath != "./data/master.db?_pragma=journal_mode(WAL)" {
+	if cfg.Master.DBPath != "./data/core.db?_pragma=journal_mode(WAL)" {
 		t.Errorf("expected default db_path with WAL pragma, got %s", cfg.Master.DBPath)
 	}
 	if cfg.Agent.Cache.TokenCapacity != 20000 {
@@ -139,6 +141,398 @@ master:
 	}
 	if cfg.Runtime.RelayTimeout != 300 {
 		t.Fatalf("runtime.relay_timeout = %d, want 300", cfg.Runtime.RelayTimeout)
+	}
+	if cfg.Master.DBPath != "./data/core.db" {
+		t.Fatalf("master.db_path = %q, want ./data/core.db", cfg.Master.DBPath)
+	}
+	if cfg.Master.LogDBPath != "data/log.db" {
+		t.Fatalf("master.log_db_path = %q, want data/log.db", cfg.Master.LogDBPath)
+	}
+	if cfg.Master.LegacyDBPath != "data/master.db" {
+		t.Fatalf("master.legacy_db_path = %q, want data/master.db", cfg.Master.LegacyDBPath)
+	}
+}
+
+func TestLoadMaster_DeprecatedDBPathBecomesLegacyAndDerivesSplitPaths(t *testing.T) {
+	validSecret := strings.Repeat("x", 32)
+	path := writeTempYAML(t, fmt.Sprintf(`
+master:
+  db_path: "/data/master.db?cache=shared&_pragma=journal_mode(WAL)"
+  jwt_secret: %s
+  admin_password: secure-password-123
+`, validSecret))
+
+	cfg, err := LoadMaster(path)
+	if err != nil {
+		t.Fatalf("LoadMaster: %v", err)
+	}
+	wantQuery := "?cache=shared&_pragma=journal_mode(WAL)"
+	if cfg.Master.DBPath != "/data/core.db"+wantQuery {
+		t.Fatalf("master core path = %q, want %q", cfg.Master.DBPath, "/data/core.db"+wantQuery)
+	}
+	if cfg.Master.LogDBPath != "/data/log.db"+wantQuery {
+		t.Fatalf("master.log_db_path = %q, want %q", cfg.Master.LogDBPath, "/data/log.db"+wantQuery)
+	}
+	if cfg.Master.LegacyDBPath != "/data/master.db"+wantQuery {
+		t.Fatalf("master legacy path = %q, want %q", cfg.Master.LegacyDBPath, "/data/master.db"+wantQuery)
+	}
+}
+
+func TestLoadMaster_ExplicitSplitDatabaseKeysOverrideDeprecatedAlias(t *testing.T) {
+	validSecret := strings.Repeat("x", 32)
+	path := writeTempYAML(t, fmt.Sprintf(`
+master:
+  core_db_path: "/core/live.db?cache=private"
+  log_db_path: "/logs/events.db?cache=private"
+  legacy_db_path: "/archive/master.db?cache=private"
+  jwt_secret: %s
+  admin_password: secure-password-123
+`, validSecret))
+
+	cfg, err := LoadMaster(path)
+	if err != nil {
+		t.Fatalf("LoadMaster: %v", err)
+	}
+	if cfg.Master.DBPath != "/core/live.db?cache=private" {
+		t.Fatalf("master core path = %q", cfg.Master.DBPath)
+	}
+	if cfg.Master.LogDBPath != "/logs/events.db?cache=private" {
+		t.Fatalf("master log path = %q", cfg.Master.LogDBPath)
+	}
+	if cfg.Master.LegacyDBPath != "/archive/master.db?cache=private" {
+		t.Fatalf("master legacy path = %q", cfg.Master.LegacyDBPath)
+	}
+}
+
+func TestLoadMaster_RejectsConflictingDeprecatedAndLegacyPaths(t *testing.T) {
+	validSecret := strings.Repeat("x", 32)
+	path := writeTempYAML(t, fmt.Sprintf(`
+master:
+  db_path: "/data/old.db"
+  legacy_db_path: "/archive/master.db"
+  jwt_secret: %s
+  admin_password: secure-password-123
+`, validSecret))
+
+	_, err := LoadMaster(path)
+	if err == nil || !strings.Contains(err.Error(), "master.db_path and master.legacy_db_path") {
+		t.Fatalf("LoadMaster error = %v, want deprecated/legacy path conflict", err)
+	}
+}
+
+func TestMasterDatabasePathsDefaultsFromCorePath(t *testing.T) {
+	cfg := MasterConfig{DBPath: "/data/core.db"}
+
+	if err := prepareMasterDatabaseConfig(&cfg); err != nil {
+		t.Fatalf("prepareMasterDatabaseConfig: %v", err)
+	}
+	if cfg.DBPath != "/data/core.db" {
+		t.Fatalf("master.db_path = %q, want /data/core.db", cfg.DBPath)
+	}
+	if cfg.LogDBPath != "/data/log.db" {
+		t.Fatalf("master.log_db_path = %q, want /data/log.db", cfg.LogDBPath)
+	}
+	if cfg.LegacyDBPath != "/data/master.db" {
+		t.Fatalf("master.legacy_db_path = %q, want /data/master.db", cfg.LegacyDBPath)
+	}
+}
+
+func TestMasterDatabasePathsRejectDuplicateFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  MasterConfig
+	}{
+		{
+			name: "core and log",
+			cfg:  MasterConfig{DBPath: "/data/core.db", LogDBPath: "/data/./core.db", LegacyDBPath: "/data/master.db"},
+		},
+		{
+			name: "core and legacy",
+			cfg:  MasterConfig{DBPath: "file:/data/core.db?cache=shared", LogDBPath: "/data/log.db", LegacyDBPath: "/data/core.db"},
+		},
+		{
+			name: "log and legacy",
+			cfg:  MasterConfig{DBPath: "/data/core.db", LogDBPath: "/data/log.db", LegacyDBPath: "file:/data/log.db?mode=rw"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := prepareMasterDatabaseConfig(&tt.cfg)
+			if err == nil || !strings.Contains(err.Error(), "different SQLite files") {
+				t.Fatalf("prepareMasterDatabaseConfig error = %v, want different SQLite files", err)
+			}
+		})
+	}
+}
+
+func TestMasterDatabasePathsAcceptIndependentMemoryConnections(t *testing.T) {
+	cfg := MasterConfig{DBPath: ":memory:", LogDBPath: ":memory:", LegacyDBPath: ":memory:"}
+
+	if err := prepareMasterDatabaseConfig(&cfg); err != nil {
+		t.Fatalf("prepareMasterDatabaseConfig: %v", err)
+	}
+	if cfg.DBPath != ":memory:" || cfg.LogDBPath != ":memory:" || cfg.LegacyDBPath != ":memory:" {
+		t.Fatalf("memory paths changed: %+v", cfg)
+	}
+}
+
+func TestMasterDatabasePathsRejectFileAliases(t *testing.T) {
+	dir := t.TempDir()
+	corePath := filepath.Join(dir, "core.db")
+	if err := os.WriteFile(corePath, []byte("sqlite fixture"), 0o600); err != nil {
+		t.Fatalf("write core fixture: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		makeAlias func(string) error
+	}{
+		{
+			name: "symbolic link",
+			makeAlias: func(aliasPath string) error {
+				return os.Symlink(corePath, aliasPath)
+			},
+		},
+		{
+			name: "hard link",
+			makeAlias: func(aliasPath string) error {
+				return os.Link(corePath, aliasPath)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aliasPath := filepath.Join(t.TempDir(), "core-alias.db")
+			if err := tt.makeAlias(aliasPath); err != nil {
+				t.Skipf("file alias is not supported: %v", err)
+			}
+			cfg := MasterConfig{
+				DBPath:       corePath,
+				LogDBPath:    aliasPath,
+				LegacyDBPath: filepath.Join(dir, "master.db"),
+			}
+
+			err := prepareMasterDatabaseConfig(&cfg)
+			if err == nil || !strings.Contains(err.Error(), "different SQLite files") {
+				t.Fatalf("prepareMasterDatabaseConfig error = %v, want different SQLite files", err)
+			}
+		})
+	}
+}
+
+func TestMasterDatabasePathsRuntimeDefaults(t *testing.T) {
+	tests := []struct {
+		name       string
+		load       func() MasterConfig
+		wantCore   string
+		wantLog    string
+		wantLegacy string
+	}{
+		{
+			name: "combined runtime config",
+			load: func() MasterConfig {
+				return (&Config{}).ToMasterRuntimeConfig().Master
+			},
+			wantCore:   "./data/core.db?_pragma=journal_mode(WAL)",
+			wantLog:    "data/log.db?_pragma=journal_mode(WAL)",
+			wantLegacy: "data/master.db?_pragma=journal_mode(WAL)",
+		},
+		{
+			name: "master runtime config",
+			load: func() MasterConfig {
+				return (&MasterRuntimeConfig{}).ToMasterRuntimeConfig().Master
+			},
+			wantCore:   "./data/core.db",
+			wantLog:    "data/log.db",
+			wantLegacy: "data/master.db",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.load()
+			if got.DBPath != tt.wantCore || got.LogDBPath != tt.wantLog || got.LegacyDBPath != tt.wantLegacy {
+				t.Fatalf("database paths = (%q, %q, %q), want (%q, %q, %q)", got.DBPath, got.LogDBPath, got.LegacyDBPath, tt.wantCore, tt.wantLog, tt.wantLegacy)
+			}
+		})
+	}
+}
+
+func TestLoadMaster_LogDatabaseConfig(t *testing.T) {
+	validSecret := strings.Repeat("x", 32)
+
+	tests := []struct {
+		name           string
+		databaseYAML   string
+		wantLogPath    string
+		wantLegacyPath string
+	}{
+		{
+			name:           "default sibling paths preserve core DSN query",
+			databaseYAML:   "  core_db_path: ./state/core.db?cache=shared&_pragma=journal_mode(WAL)\n",
+			wantLogPath:    "state/log.db?cache=shared&_pragma=journal_mode(WAL)",
+			wantLegacyPath: "state/master.db?cache=shared&_pragma=journal_mode(WAL)",
+		},
+		{
+			name:           "explicit independent paths",
+			databaseYAML:   "  core_db_path: ./state/core.db\n  log_db_path: ./logs/history.db\n  legacy_db_path: ./legacy/master.db\n",
+			wantLogPath:    "./logs/history.db",
+			wantLegacyPath: "./legacy/master.db",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempYAML(t, fmt.Sprintf("master:\n  jwt_secret: %s\n  admin_password: secure-password-123\n%s", validSecret, tt.databaseYAML))
+			cfg, err := LoadMaster(path)
+			if err != nil {
+				t.Fatalf("LoadMaster: %v", err)
+			}
+			if cfg.Master.LogDBPath != tt.wantLogPath {
+				t.Fatalf("master.log_db_path = %q, want %q", cfg.Master.LogDBPath, tt.wantLogPath)
+			}
+			if cfg.Master.LegacyDBPath != tt.wantLegacyPath {
+				t.Fatalf("master.legacy_db_path = %q, want %q", cfg.Master.LegacyDBPath, tt.wantLegacyPath)
+			}
+		})
+	}
+}
+
+func TestDefaultLogDBPathMemoryDSNs(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{name: "memory sentinel", dsn: ":memory:", want: ":memory:"},
+		{name: "memory URI sentinel", dsn: "file::memory:?cache=shared", want: ":memory:"},
+		{name: "named memory URI", dsn: "file:core?mode=memory", want: ":memory:"},
+		{name: "mode substring in another value", dsn: "./state/core.db?label=mode=memory", want: "state/log.db?label=mode=memory"},
+		{name: "mode value prefix", dsn: "./state/core.db?mode=memory_backup", want: "state/log.db?mode=memory_backup"},
+		{name: "percent encoded file URI", dsn: "file:/tmp/state%20dir/core.db?cache=shared", want: "file:/tmp/state%20dir/log.db?cache=shared"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := defaultLogDBPath(tt.dsn)
+			if err != nil {
+				t.Fatalf("defaultLogDBPath(%q): %v", tt.dsn, err)
+			}
+			if got != tt.want {
+				t.Fatalf("defaultLogDBPath(%q) = %q, want %q", tt.dsn, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultLogDBPathRejectsEmptySQLiteFileURI(t *testing.T) {
+	for _, dsn := range []string{"file:", "file:?cache=shared", "?cache=shared"} {
+		t.Run(dsn, func(t *testing.T) {
+			_, err := defaultLogDBPath(dsn)
+			if err == nil || !strings.Contains(err.Error(), "file path is empty") {
+				t.Fatalf("defaultLogDBPath(%q) error = %v, want file path is empty", dsn, err)
+			}
+		})
+	}
+}
+
+func TestLoadMasterRejectsEmptySQLiteFileURI(t *testing.T) {
+	for _, dsn := range []string{"file:", "file:?cache=shared", "?cache=shared"} {
+		t.Run(dsn, func(t *testing.T) {
+			path := writeTempYAML(t, fmt.Sprintf(`
+master:
+  core_db_path: %q
+  jwt_secret: %s
+  admin_password: secure-password-123
+`, dsn, strings.Repeat("x", 32)))
+			_, err := LoadMaster(path)
+			if err == nil {
+				t.Fatalf("LoadMaster accepted core_db_path %q", dsn)
+			}
+			if !strings.Contains(err.Error(), "master.core_db_path") || !strings.Contains(err.Error(), "file path is empty") {
+				t.Fatalf("LoadMaster error = %v, want actionable master.core_db_path file path error", err)
+			}
+		})
+	}
+}
+
+func TestConfigLoadersRejectExplicitEmptyLogDatabasePaths(t *testing.T) {
+	loaders := map[string]func(string) error{
+		"Load": func(path string) error {
+			_, err := Load(path)
+			return err
+		},
+		"LoadMaster": func(path string) error {
+			_, err := LoadMaster(path)
+			return err
+		},
+	}
+
+	for loaderName, load := range loaders {
+		for _, dsn := range []string{"file:", "file:?cache=shared", "?cache=shared"} {
+			t.Run(loaderName+"/"+dsn, func(t *testing.T) {
+				viper.Reset()
+				t.Cleanup(viper.Reset)
+				path := writeTempYAML(t, fmt.Sprintf(`
+master:
+  core_db_path: ./data/core.db
+  log_db_path: %q
+  jwt_secret: %s
+  admin_password: secure-password-123
+`, dsn, strings.Repeat("x", 32)))
+				err := load(path)
+				if err == nil {
+					t.Fatalf("%s accepted log_db_path %q", loaderName, dsn)
+				}
+				if !strings.Contains(err.Error(), "master.log_db_path") || !strings.Contains(err.Error(), "SQLite DSN file path is empty") {
+					t.Fatalf("%s error = %v, want actionable master.log_db_path error", loaderName, err)
+				}
+			})
+		}
+	}
+}
+
+func TestConfigLoadersAcceptExplicitMemoryLogDatabasePaths(t *testing.T) {
+	loaders := map[string]func(string) (string, error){
+		"Load": func(path string) (string, error) {
+			cfg, err := Load(path)
+			if err != nil {
+				return "", err
+			}
+			return cfg.Master.LogDBPath, nil
+		},
+		"LoadMaster": func(path string) (string, error) {
+			cfg, err := LoadMaster(path)
+			if err != nil {
+				return "", err
+			}
+			return cfg.Master.LogDBPath, nil
+		},
+	}
+
+	for loaderName, load := range loaders {
+		for _, dsn := range []string{":memory:", "file::memory:?cache=shared", "file:log?mode=memory"} {
+			t.Run(loaderName+"/"+dsn, func(t *testing.T) {
+				viper.Reset()
+				t.Cleanup(viper.Reset)
+				path := writeTempYAML(t, fmt.Sprintf(`
+master:
+  core_db_path: ./data/core.db
+  log_db_path: %q
+  jwt_secret: %s
+  admin_password: secure-password-123
+`, dsn, strings.Repeat("x", 32)))
+				got, err := load(path)
+				if err != nil {
+					t.Fatalf("%s: %v", loaderName, err)
+				}
+				if got != dsn {
+					t.Fatalf("%s log_db_path = %q, want %q", loaderName, got, dsn)
+				}
+			})
+		}
 	}
 }
 

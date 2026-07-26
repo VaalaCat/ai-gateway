@@ -2,6 +2,7 @@
 package common
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -46,7 +47,53 @@ func ParseProviderErrorType(body []byte) string {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &v); err != nil {
-		return ""
+		return parseProviderErrorTypePrefix(body)
 	}
 	return v.Error.Type
+}
+
+func parseProviderErrorTypePrefix(body []byte) string {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return ""
+	}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		if key != "error" {
+			if err := skipJSONValue(decoder); err != nil {
+				return ""
+			}
+			continue
+		}
+		if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+			return ""
+		}
+		for decoder.More() {
+			errorKey, err := decoder.Token()
+			if err != nil {
+				return ""
+			}
+			if errorKey == "type" {
+				value, err := decoder.Token()
+				if err != nil {
+					return ""
+				}
+				typeName, _ := value.(string)
+				return typeName
+			}
+			if err := skipJSONValue(decoder); err != nil {
+				return ""
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+func skipJSONValue(decoder *json.Decoder) error {
+	var value json.RawMessage
+	return decoder.Decode(&value)
 }

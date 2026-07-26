@@ -4,10 +4,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/legacy"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/native"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/passthrough"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 )
@@ -118,7 +118,7 @@ func TestDispatcherUnknownMode(t *testing.T) {
 	d := NewDispatcher(nil)
 	rctx := &state.RelayContext{
 		Input: state.RelayInput{Body: []byte(`{"model":"x"}`)},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	res := d.Dispatch(rctx, state.Attempt{Mode: state.RelayMode("bogus"), RealModel: "gpt-4"})
 	if res.Err == nil {
@@ -134,7 +134,7 @@ func TestDispatcherFinalizesTokenCounts(t *testing.T) {
 	d := &Dispatcher{Backends: map[state.RelayMode]Backend{state.ModeNative: fake}}
 	rctx := &state.RelayContext{
 		Input: state.RelayInput{Body: []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	res := d.Dispatch(rctx, state.Attempt{Mode: state.ModeNative, RealModel: "gpt-4"})
 	if res.TokenSource == "" {

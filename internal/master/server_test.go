@@ -400,12 +400,12 @@ func TestNewForwardTicketBootstrapEnablesSourceCache(t *testing.T) {
 	})
 	require.Equal(t, []string{
 		protocol.AgentCapabilityForwardV1,
-		protocol.AgentCapabilityTunnelV1,
+		protocol.AgentCapabilityTunnelV2,
 	}, cache.Bootstrap().Capabilities)
 	var ticket agentauth.ForwardTicket
 	require.Eventually(t, func() bool {
-		var cachedErr error
-		ticket, cachedErr = cache.CachedForwardTicket()
+		credential, cachedErr := cache.CachedForwardCredential()
+		ticket = credential.Ticket
 		return cachedErr == nil
 	}, time.Second, time.Millisecond)
 	claims, err := agentauth.NewVerifier(serverSigningKeySource{key: srv.Signer.PublicKey()}).VerifyForward(ticket)

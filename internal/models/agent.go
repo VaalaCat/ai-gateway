@@ -15,5 +15,9 @@ type Agent struct {
 	ProxyURL      string `gorm:"size:256" json:"proxy_url"`
 	RelayMode     string `gorm:"size:16;not null;default:inherit" json:"relay_mode"`
 	RelayURI      string `gorm:"size:2048" json:"relay_uri"`
-	PeerRouteMode string `gorm:"size:16;not null;default:direct_first" json:"peer_route_mode"`
+
+	DirectInboundEnabled  bool `gorm:"not null;default:true" json:"direct_inbound_enabled"`
+	DirectOutboundEnabled bool `gorm:"not null;default:true" json:"direct_outbound_enabled"`
+	RelayInboundEnabled   bool `gorm:"not null;default:true" json:"relay_inbound_enabled"`
+	RelayOutboundEnabled  bool `gorm:"not null;default:true" json:"relay_outbound_enabled"`
 }

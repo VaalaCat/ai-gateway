@@ -11,6 +11,7 @@ import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -43,18 +44,14 @@ export default function ScriptsPage() {
   const tc = useTranslations("common");
   const router = useRouter();
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
 
   const filterSpec = useMemo(
     () => ({ search: { kind: "text", placeholder: t("searchName") } } satisfies FilterSpec),
     [t],
   );
-  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
-  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
-    setPage(1);
-    setFilterValuesRaw(next);
-  };
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+
   const search = filterValues.search ? String(filterValues.search) : undefined;
 
   const { data, isLoading } = useScripts({ page, page_size: pageSize, ...(search ? { search } : {}) });
@@ -67,12 +64,7 @@ export default function ScriptsPage() {
   const pageCount = Math.ceil(total / pageSize) || 1;
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
-    if (newPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(newPageSize);
-    } else {
-      setPage(newPage);
-    }
+    setPagination(newPageSize === pageSize ? newPage : 1, newPageSize);
   };
 
   const handleToggle = (row: AdminScript, enabled: boolean) => {

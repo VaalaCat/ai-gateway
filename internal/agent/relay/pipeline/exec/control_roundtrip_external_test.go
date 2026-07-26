@@ -18,7 +18,6 @@ import (
 	relayexec "github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/exec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -26,7 +25,7 @@ import (
 )
 
 // behavior change: oversized verbose trace must not turn a known provider
-// failure into attempt_result_missing at the source.
+// failure into an interrupted transport outcome at the source.
 func TestOversizedControlTracePreservesProviderFailureRoundTrip(t *testing.T) {
 	provider := roundTripProvider(func(*state.RelayContext, state.Attempt) attemptexec.ProviderResult {
 		return attemptexec.ProviderResult{
@@ -37,7 +36,6 @@ func TestOversizedControlTracePreservesProviderFailureRoundTrip(t *testing.T) {
 	direct := &roundTripDirect{provider: provider}
 	executor := relayexec.NewRemoteAttemptExecutor(relayexec.RemoteAttemptExecutorOptions{
 		SourceAgentID: "source", Direct: direct, Targets: roundTripTargets{},
-		CachedForwardTicket: func() (agentauth.ForwardTicket, error) { return "ticket", nil },
 	})
 	rctx, client := newRoundTripSourceContext(t)
 
@@ -61,24 +59,36 @@ type roundTripDirect struct {
 	provider attemptexec.ProviderAttemptExecutor
 }
 
-func (d *roundTripDirect) Forward(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
+func (d *roundTripDirect) Forward(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 	c, _ := gin.CreateTestContext(dst)
 	c.Request = httptest.NewRequest(http.MethodPost, attemptwire.EndpointPath, nil)
-	recorder := trace.NewRecorder(true, 2*attemptwire.MaxResultWireBytes)
+	resultWriter := &roundTripResultWriter{}
+	c.Request = c.Request.WithContext(attemptwire.WithAttemptResultWriter(c.Request.Context(), resultWriter))
+	recorder := trace.NewRecorder(trace.CaptureFull, 2*attemptwire.MaxResultWireBytes)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	request.Header.Set("X-Oversized-Trace", strings.Repeat("h", attemptwire.MaxResultWireBytes))
 	recorder.WithInbound(request, []byte(strings.Repeat("b", attemptwire.MaxResultWireBytes)))
 	rctx := &state.RelayContext{Context: c, State: &state.RelayState{Recorder: recorder}}
 
 	agentattemptproxy.NewResponseExecutor().Execute(rctx, state.Attempt{}, d.provider)
-	return agentproxy.DirectOutcome{Commit: tunnel.Committed}
+	return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, AttemptResult: resultWriter.result}
+}
+
+type roundTripResultWriter struct {
+	result *attemptwire.AttemptProxyResult
+}
+
+func (w *roundTripResultWriter) WriteAttemptResult(result attemptwire.AttemptProxyResult) error {
+	w.result = &result
+	return nil
 }
 
 type roundTripTargets struct{}
 
 func (roundTripTargets) SnapshotRemoteTarget(string) (relayexec.RemoteTargetSnapshot, bool) {
 	return relayexec.RemoteTargetSnapshot{
-		Enabled: true, HTTPAddresses: `[{"url":"http://target.invalid:8139","tag":"direct"}]`, AddressTag: "direct",
+		Enabled: true, DirectInboundEnabled: true, RelayInboundEnabled: true,
+		HTTPAddresses: `[{"url":"http://target.invalid:8139","tag":"direct"}]`, AddressTag: "direct",
 	}, true
 }
 

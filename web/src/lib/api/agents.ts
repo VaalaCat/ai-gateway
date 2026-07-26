@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
+  keepPreviousData,
   useInfiniteQuery,
   useMutation,
   useQuery,
@@ -167,12 +168,26 @@ export interface GoroutineDump {
   dump: string;
 }
 
-export function useAgents(params: PaginatedParams = {}) {
-  return useQuery({
+export function useAgents(
+  params: PaginatedParams = {},
+  options: { retainPreviousData?: boolean } = {},
+) {
+  const [retainedData, setRetainedData] = useState<PaginatedResponse<AgentListItem>>();
+  const query = useQuery({
     queryKey: agentQueryKeys.list(params),
     queryFn: ({ signal }) => fetchAgents(params, signal),
+    placeholderData: options.retainPreviousData ? keepPreviousData : undefined,
     refetchInterval: (query) => agentListPollInterval(query.state.data?.data),
   });
+  useEffect(() => {
+    if (options.retainPreviousData && query.data !== undefined) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- retain list rows after a keyed refresh fails
+      setRetainedData(query.data);
+    }
+  }, [options.retainPreviousData, query.data]);
+  return options.retainPreviousData && query.data === undefined && retainedData !== undefined
+    ? { ...query, data: retainedData }
+    : query;
 }
 
 export function useAgent(id: number) {

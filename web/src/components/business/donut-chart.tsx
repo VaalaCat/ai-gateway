@@ -4,12 +4,15 @@ import { useMemo } from "react";
 import { Cell, Pie, PieChart } from "recharts";
 
 import { ChartCard } from "@/components/business/chart-card";
+import { BoundedChartTooltip } from "@/components/business/bounded-chart-tooltip";
+import { Button } from "@/components/ui/button";
+import { useHiddenSeries } from "@/components/business/toggleable-chart-legend";
 import {
   ChartContainer,
   ChartTooltip,
-  ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
+import { chartColorForSeries } from "@/lib/chart-colors";
 
 export interface DonutSlice {
   name: string;
@@ -25,53 +28,22 @@ interface DonutChartProps {
   centerLabel?: string;
   centerSublabel?: string;
   className?: string;
+  error?: React.ReactNode;
   /** 超过 topN 后续 slice 合并为 "others"。默认 5。 */
   topN?: number;
   /** 折叠 slice 的显示名。默认 "others"。 */
   othersLabel?: string;
+  legendLabel?: string;
 }
 
-const CHART_COLORS = [
-  "var(--chart-1)",
-  "var(--chart-2)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--chart-5)",
-  "var(--muted-foreground)", // others 用 muted 色, 与 top-N 区分
-];
+interface DisplayDonutSlice extends DonutSlice {
+  label: string;
+}
 
-function DonutLegend({
-  slices,
-  total,
-}: {
-  slices: DonutSlice[];
-  total: number;
-}) {
-  if (total === 0) return null;
-  return (
-    <ul className="flex min-w-0 flex-col gap-2">
-      {slices.map((s, i) => {
-        const pct = (s.value / total) * 100;
-        return (
-          <li
-            key={s.name}
-            className="flex min-w-0 items-center gap-2 text-meta"
-          >
-            <span
-              className="size-2.5 shrink-0 rounded-[2px]"
-              style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
-            />
-            <span className="truncate text-muted-foreground" title={s.name}>
-              {s.name}
-            </span>
-            <span className="ml-auto shrink-0 tabular-nums text-foreground">
-              {pct.toFixed(1)}%
-            </span>
-          </li>
-        );
-      })}
-    </ul>
-  );
+const OTHERS_KEY = "others";
+
+function isReservedAggregate(name: string) {
+  return name === OTHERS_KEY;
 }
 
 export function DonutChart({
@@ -82,52 +54,88 @@ export function DonutChart({
   centerLabel,
   centerSublabel,
   className,
+  error,
   topN = 5,
   othersLabel = "others",
+  legendLabel = title,
 }: DonutChartProps) {
-  // top-N 收敛: 排序后前 N 直接出, 剩余合并为 others
-  const displaySlices = useMemo<DonutSlice[]>(() => {
-    if (slices.length <= topN) return slices;
-    const sorted = [...slices].sort((a, b) => b.value - a.value);
-    const head = sorted.slice(0, topN);
-    const rest = sorted.slice(topN);
-    const sumRest = rest.reduce((acc, s) => acc + s.value, 0);
-    return [...head, { name: othersLabel, value: sumRest }];
+  const displaySlices = useMemo<DisplayDonutSlice[]>(() => {
+    const limit = Math.max(0, Math.floor(topN));
+    const indexedSlices = slices.map((slice, index) => ({ slice, index }));
+    const entities = indexedSlices
+      .filter(({ slice }) => !isReservedAggregate(slice.name))
+      .sort((a, b) => b.slice.value - a.slice.value || a.index - b.index);
+    const head = entities.slice(0, limit).map(({ slice }) => ({ ...slice, label: slice.name }));
+    const aggregateValue = indexedSlices
+      .filter(({ slice }) => isReservedAggregate(slice.name))
+      .reduce((sum, { slice }) => sum + slice.value, 0)
+      + entities.slice(limit).reduce((sum, { slice }) => sum + slice.value, 0);
+    return aggregateValue > 0
+      ? [...head, { name: OTHERS_KEY, label: othersLabel, value: aggregateValue }]
+      : head;
   }, [slices, topN, othersLabel]);
 
   const total = useMemo(
     () => displaySlices.reduce((acc, s) => acc + s.value, 0),
     [displaySlices],
   );
+  const { hidden, toggle } = useHiddenSeries(displaySlices.map((slice) => slice.name));
 
   const config = useMemo<ChartConfig>(() => {
     const cfg: ChartConfig = {};
-    displaySlices.forEach((s, i) => {
+    displaySlices.forEach((s) => {
       cfg[s.name] = {
-        label: s.name,
-        color: CHART_COLORS[i % CHART_COLORS.length],
+        label: s.label,
+        color: chartColorForSeries(s.name),
       };
     });
     return cfg;
   }, [displaySlices]);
 
   const isEmpty = empty ?? displaySlices.length === 0;
+  const legend = total > 0 ? (
+    <div
+      role="region"
+      aria-label={legendLabel}
+      className="max-h-44 min-w-0 overflow-y-auto overscroll-contain pr-1 lg:max-h-[17.5rem]"
+    >
+      <ul className="space-y-1" role="list">
+        {displaySlices.map((slice) => (
+          <li key={slice.name}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-pressed={!hidden.has(slice.name)}
+              onClick={() => toggle(slice.name)}
+              className="grid h-auto w-full grid-cols-[auto_minmax(0,1fr)_auto] gap-2 px-2 py-1.5 text-muted-foreground"
+            >
+              <span className="size-2.5 rounded-[2px]" style={{ backgroundColor: chartColorForSeries(slice.name) }} />
+              <span className="truncate text-left" title={slice.label}>{slice.label}</span>
+              <span className="tabular-nums text-foreground">{((slice.value / total) * 100).toFixed(1)}%</span>
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  ) : undefined;
 
   return (
     <ChartCard
       title={title}
       loading={loading}
       empty={isEmpty}
+      error={error}
       className={className}
+      chartFrame={{ minHeight: 280, aspect: "1/1", legendPlacement: "responsive-side", legend }}
     >
-      <div className="flex flex-col items-center gap-4 lg:grid lg:grid-cols-2 lg:items-center lg:gap-6">
-        <div className="relative w-full max-w-[240px]">
+        <div className="relative h-full w-full max-w-[240px]">
           <ChartContainer
             config={config}
-            className="aspect-square w-full"
+            className="h-full w-full"
           >
             <PieChart>
-              <ChartTooltip content={<ChartTooltipContent hideLabel />} />
+              <ChartTooltip content={<BoundedChartTooltip hideLabel />} />
               <Pie
                 data={displaySlices}
                 dataKey="value"
@@ -136,10 +144,11 @@ export function DonutChart({
                 outerRadius="80%"
                 strokeWidth={2}
               >
-                {displaySlices.map((s, i) => (
+                {displaySlices.map((s) => (
                   <Cell
                     key={s.name}
-                    fill={CHART_COLORS[i % CHART_COLORS.length]}
+                    fill={chartColorForSeries(s.name)}
+                    opacity={hidden.has(s.name) ? 0 : 1}
                   />
                 ))}
               </Pie>
@@ -158,11 +167,6 @@ export function DonutChart({
             </div>
           )}
         </div>
-
-        <div className="w-full">
-          <DonutLegend slices={displaySlices} total={total} />
-        </div>
-      </div>
     </ChartCard>
   );
 }

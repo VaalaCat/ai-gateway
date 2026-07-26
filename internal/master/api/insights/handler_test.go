@@ -2,11 +2,14 @@ package insights
 
 import (
 	"errors"
+	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -17,6 +20,170 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestPerformanceOnlyHandlersReturn503WhenLogDatabaseUnavailable(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	application.SetLogDB(nil)
+	start, end := insightsDayRange()
+	seedAgentRow(t, db, "ag-1", "Agent One", 1, start+1800)
+
+	_, err := h.Get(makeInsightsCtx(t, application, 1, true), GetRequest{Type: "agent", ID: "ag-1", Start: start, End: end, Gran: "day"})
+	if err == nil {
+		t.Fatal("expected log database unavailable error")
+	}
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (%T), want *api.APIError", err, err)
+	}
+	if apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != "LogDatabaseUnavailable" {
+		t.Fatalf("api error = %+v, want 503 LogDatabaseUnavailable", apiErr)
+	}
+}
+
+func TestGetAgentReadsRequestRowsFromSplitLogDatabase(t *testing.T) {
+	h, core, logDB, application := newSplitInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	date := time.Unix(start, 0).UTC().Format("2006-01-02")
+	seedAgentRow(t, core, "ag-split", "Split Agent", 1, start)
+	seedAgentBucket(t, logDB, date, 10, 5, "ag-split", "gpt-5", 2, 1, 20, 10, 50, 1, 120, 1000, 10)
+	requireCreateRequestLog(t, logDB, models.UsageLog{
+		UserID: 1, ChannelID: 5, ChannelName: "split-channel", ModelName: "gpt-5", AgentID: "ag-split",
+		Status: 1, IsStream: true, FirstResponseMs: 120, CompletionTokens: 10,
+		RequestID: "split-success", CreatedAt: start + 10,
+	})
+	requireCreateRequestLog(t, logDB, models.UsageLog{
+		UserID: 1, ChannelID: 5, ChannelName: "split-channel", ModelName: "gpt-5", AgentID: "ag-split",
+		Status: 0, ErrorStage: "upstream_dispatch", ErrorMessage: "split failure",
+		RequestID: "split-error", CreatedAt: start + 20,
+	})
+
+	resp, err := h.Get(makeInsightsCtx(t, application, 1, true), GetRequest{Type: "agent", ID: "ag-split", Start: start, End: end, Gran: "day"})
+	if err != nil {
+		t.Fatalf("Get split agent: %v", err)
+	}
+	if resp.Summary.TTFTP95Ms != 120 {
+		t.Fatalf("TTFTP95Ms = %d, want 120 from request_logs", resp.Summary.TTFTP95Ms)
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0].Message != "split failure" {
+		t.Fatalf("Errors = %+v, want request_logs failure", resp.Errors)
+	}
+}
+
+func TestGetAgentReturns503WhenSplitLogDatabaseClosesAfterReadiness(t *testing.T) {
+	h, core, logDB, application := newSplitInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	seedAgentRow(t, core, "ag-closed", "Closed Agent", 1, start)
+	sqlDB, err := logDB.DB()
+	if err != nil {
+		t.Fatalf("log DB handle: %v", err)
+	}
+	if err := sqlDB.Close(); err != nil {
+		t.Fatalf("close log DB: %v", err)
+	}
+
+	_, err = h.Get(makeInsightsCtx(t, application, 1, true), GetRequest{Type: "agent", ID: "ag-closed", Start: start, End: end, Gran: "day"})
+	requireInsightsLogDatabaseUnavailable(t, err)
+}
+
+type failingInsightProvider struct {
+	failAt string
+}
+
+func (p failingInsightProvider) Meta(Context, string) (EntityMeta, error) {
+	return EntityMeta{ID: "ag-test", Name: "Agent Test"}, nil
+}
+
+func (p failingInsightProvider) Summary(Context, string, dao.ObsRange) (SummaryKpis, error) {
+	if p.failAt == "summary" {
+		return SummaryKpis{}, dao.ErrLogDatabaseUnavailable
+	}
+	return SummaryKpis{}, nil
+}
+
+func (p failingInsightProvider) Trend(Context, string, dao.ObsRange) ([]dao.TimeBucket, error) {
+	if p.failAt == "trend" {
+		return nil, dao.ErrLogDatabaseUnavailable
+	}
+	return nil, nil
+}
+
+func (p failingInsightProvider) StageLatency(Context, string, dao.ObsRange) (*dao.StageLatency, error) {
+	if p.failAt == "stage" {
+		return nil, dao.ErrLogDatabaseUnavailable
+	}
+	return nil, nil
+}
+
+func (p failingInsightProvider) Breakdown(Context, string, dao.ObsRange) (Breakdown, error) {
+	if p.failAt == "breakdown" {
+		return Breakdown{}, dao.ErrLogDatabaseUnavailable
+	}
+	return Breakdown{}, nil
+}
+
+func (p failingInsightProvider) RecentErrors(Context, string, dao.ObsRange, int) ([]ErrorSample, error) {
+	if p.failAt == "errors" {
+		return nil, dao.ErrLogDatabaseUnavailable
+	}
+	return nil, nil
+}
+
+func TestGetReturns503ForEveryMidQueryProviderDisconnect(t *testing.T) {
+	for _, failAt := range []string{"summary", "trend", "stage", "breakdown", "errors"} {
+		t.Run(failAt, func(t *testing.T) {
+			h, _, application := newInsightsTestCtx(t)
+			h.InsightProviderFinder = func(string) (InsightProvider, bool) {
+				return failingInsightProvider{failAt: failAt}, true
+			}
+			start, end := insightsDayRange()
+
+			_, err := h.Get(makeInsightsCtx(t, application, 1, true), GetRequest{Type: "agent", ID: "ag-test", Start: start, End: end})
+			requireInsightsLogDatabaseUnavailable(t, err)
+		})
+	}
+}
+
+func newSplitInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, *gorm.DB, app.Application) {
+	t.Helper()
+	h, core, application := newInsightsTestCtx(t)
+	logPath := filepath.Join(t.TempDir(), "log.db")
+	logDB, err := gorm.Open(sqlite.Open(logPath), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("open split log DB: %v", err)
+	}
+	if err := models.MigrateLogDB(logDB); err != nil {
+		t.Fatalf("migrate split log DB: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, sqlErr := logDB.DB()
+		if sqlErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	application.SetLogDB(logDB)
+	return h, core, logDB, application
+}
+
+func requireCreateRequestLog(t *testing.T, db *gorm.DB, usage models.UsageLog) {
+	t.Helper()
+	request := models.RequestLog(usage)
+	if err := db.Select("*").Create(&request).Error; err != nil {
+		t.Fatalf("seed request log: %v", err)
+	}
+}
+
+func requireInsightsLogDatabaseUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected log database unavailable error")
+	}
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != "LogDatabaseUnavailable" {
+		t.Fatalf("err = %+v, want 503 LogDatabaseUnavailable", err)
+	}
+}
 
 // newInsightsTestCtx 构造 Handler + DB + Application 三件套,与 monitoring/log/billing 测试同形。
 func newInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
@@ -35,7 +202,7 @@ func newInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 		t.Fatalf("seed user: %v", err)
 	}
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	application.SetEventBus(eventbus.NewMemoryBus())
 	return &Handler{}, db, application
 }

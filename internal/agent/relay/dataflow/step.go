@@ -35,10 +35,11 @@ type StepInfo struct {
 // 也要求 Agent 非 nil(经 Agent.GetCache().Settings() 读抓取参数);其余 Step 不读它们。
 // 注:仅 Describe() 的装配路径(master dataflow.go)可传 Agent==nil——它不跑 Apply。
 type StepDeps struct {
-	Agent  app.AgentApplication // StepUpstreamScript / StepInlineImages 用
-	GinCtx *gin.Context         // StepUpstreamScript 用(写回 reject 响应)
-	RCtx   *state.RelayContext  // StepUpstreamScript 用(取 UserInfo / Header)
-	Logger *zap.Logger          // StepEncode / StepParamOverride 用;可能为 nil
+	Agent   app.AgentApplication // StepUpstreamScript / StepInlineImages 用
+	GinCtx  *gin.Context         // StepUpstreamScript 用(写回 reject 响应)
+	RCtx    *state.RelayContext  // StepUpstreamScript 用(取 UserInfo / Header)
+	Attempt state.Attempt        // StepUpstreamScript 用(取完整 channel 来源和真实模型)
+	Logger  *zap.Logger          // StepEncode / StepParamOverride 用;可能为 nil
 	// 注:StepHeaderOverride 故意不取 logger——它只走 ApplyOverrides 的 header 分支
 	// (paramOverride=nil),该分支不可能返回错误(对齐原先单次合并 override 调用,
 	// 那次唯一的 warn 也只发生在 param 分支)。

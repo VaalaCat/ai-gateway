@@ -41,7 +41,12 @@ func (h *Handler) Online(c *app.Context, _ api.EmptyRequest) ([]OnlineAgentInfo,
 	}
 	ids := h.GetOnlineAgentIDs()
 	if len(ids) == 0 {
-		h.Connections.BuildMany(nil)
+		if _, err := h.Connections.BuildManyContext(c.RequestContext(), nil); err != nil {
+			if apiErr := requestContextAPIError(c); apiErr != nil {
+				return nil, apiErr
+			}
+			return nil, api.InternalError("build connection snapshot failed", err)
+		}
 		return []OnlineAgentInfo{}, nil
 	}
 
@@ -54,7 +59,13 @@ func (h *Handler) Online(c *app.Context, _ api.EmptyRequest) ([]OnlineAgentInfo,
 	}
 
 	h.enrichLastSeen(agents)
-	batch := h.Connections.BuildMany(agents)
+	batch, err := h.Connections.BuildManyContext(c.RequestContext(), agents)
+	if err != nil {
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return nil, apiErr
+		}
+		return nil, api.InternalError("build connection snapshot failed", err)
+	}
 	isAdmin := c.UserInfo != nil && c.UserInfo.Role == 2
 
 	result := make([]OnlineAgentInfo, 0, len(agents))

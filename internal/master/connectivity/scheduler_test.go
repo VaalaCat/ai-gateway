@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/sourcegraph/conc"
 	"github.com/sourcegraph/conc/pool"
@@ -47,6 +48,15 @@ func (f schedulerFinder) FindEnabledProbeTargets(context.Context, []string) ([]P
 	return append([]ProbeTarget(nil), f.targets...), nil
 }
 
+func (f schedulerFinder) FindEnabledProbeSource(_ context.Context, sourceID string) (ProbeTarget, error) {
+	for _, target := range f.targets {
+		if target.AgentID == sourceID {
+			return cloneProbeTarget(target), nil
+		}
+	}
+	return probeSourceForScheduler(sourceID), nil
+}
+
 type failingSchedulerFinder struct {
 	err   error
 	calls int
@@ -80,6 +90,10 @@ func (f *recordingSchedulerFinder) FindEnabledProbeTargets(_ context.Context, ta
 	return result, nil
 }
 
+func (f *recordingSchedulerFinder) FindEnabledProbeSource(_ context.Context, sourceID string) (ProbeTarget, error) {
+	return probeSourceForScheduler(sourceID), nil
+}
+
 type blockingSchedulerFinder struct {
 	mu      sync.Mutex
 	calls   int
@@ -104,6 +118,10 @@ func (f *blockingSchedulerFinder) FindEnabledProbeTargets(context.Context, []str
 		<-f.release
 	}
 	return append([]ProbeTarget(nil), f.targets...), nil
+}
+
+func (f *blockingSchedulerFinder) FindEnabledProbeSource(_ context.Context, sourceID string) (ProbeTarget, error) {
+	return probeSourceForScheduler(sourceID), nil
 }
 
 func (f *blockingSchedulerFinder) callCount() int {
@@ -136,9 +154,9 @@ func (c *generationCheckingSchedulerCaller) CallDirectProbe(_ context.Context, s
 	c.mu.Unlock()
 	current, ok := c.control.GetControlSession(sourceID)
 	if !ok || current.Generation != generation {
-		return protocol.DirectProbeResult{}, ErrConnectionGenerationChanged
+		return protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy}, ErrConnectionGenerationChanged
 	}
-	return protocol.DirectProbeResult{Eligible: true}, nil
+	return protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy, Eligible: true}, nil
 }
 
 func (c *generationCheckingSchedulerCaller) generations() []uint64 {
@@ -150,13 +168,13 @@ func (c *generationCheckingSchedulerCaller) generations() []uint64 {
 type failingProbeCaller struct{ err error }
 
 func (c failingProbeCaller) CallDirectProbe(context.Context, string, uint64, protocol.DirectProbeTarget) (protocol.DirectProbeResult, error) {
-	return protocol.DirectProbeResult{}, c.err
+	return protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy}, c.err
 }
 
 type typedCancelledProbeCaller struct{}
 
 func (typedCancelledProbeCaller) CallDirectProbe(context.Context, string, uint64, protocol.DirectProbeTarget) (protocol.DirectProbeResult, error) {
-	return protocol.DirectProbeResult{Network: "reachable", Identity: "unknown", ReasonCode: "cancelled"}, nil
+	return protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy, Network: "reachable", Identity: "unknown", ReasonCode: "cancelled"}, nil
 }
 
 type schedulerCall struct {
@@ -186,7 +204,7 @@ func (c *schedulerCaller) CallDirectProbe(ctx context.Context, sourceID string, 
 		select {
 		case <-ctx.Done():
 			c.finish(sourceID)
-			return protocol.DirectProbeResult{}, context.Cause(ctx)
+			return protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy}, context.Cause(ctx)
 		case <-c.block:
 		}
 	}
@@ -216,7 +234,7 @@ func (c *schedulerCaller) snapshot() ([]schedulerCall, int, map[string]int) {
 func TestSchedulerManualScopesExcludeSourceAndKeepProbeIDsIndependent(t *testing.T) {
 	caller := &schedulerCaller{}
 	service := NewService("master-a", Sources{Control: schedulerControlSource{"source": 11}}, Options{})
-	directCapability := []string{protocol.AgentCapabilityDirectIngressV1}
+	directCapability := []string{protocol.AgentCapabilityDirectTunnelV1}
 	targets := []ProbeTarget{
 		{AgentID: "source", Tags: []string{"gpu"}, ControlGeneration: 11, Addresses: []protocol.Address{{URL: "http://source"}}, Capabilities: directCapability},
 		{AgentID: "a", Tags: []string{"gpu"}, ControlGeneration: 21, Addresses: []protocol.Address{{URL: "http://a"}}, Capabilities: directCapability},
@@ -274,7 +292,7 @@ func TestSchedulerHonorsGlobalAndPerSourceConcurrency(t *testing.T) {
 	for _, id := range []string{"t1", "t2", "t3", "t4"} {
 		targets = append(targets, ProbeTarget{
 			AgentID: id, ControlGeneration: 10, Addresses: []protocol.Address{{URL: "http://" + id}},
-			Capabilities: []string{protocol.AgentCapabilityDirectIngressV1},
+			Capabilities: []string{protocol.AgentCapabilityDirectTunnelV1},
 		})
 	}
 	scheduler := NewScheduler(caller, service, SchedulerOptions{
@@ -328,7 +346,7 @@ func TestSchedulerAutomaticCandidatesComeOnlyFromActualRouteEdges(t *testing.T) 
 	scheduler := NewScheduler(caller, service, SchedulerOptions{
 		Now: func() time.Time { return now },
 		ProbeTargetFinder: schedulerFinder{targets: []ProbeTarget{
-			probeTargetForScheduler("actual"), probeTargetForScheduler("unrelated"),
+			probeSourceForScheduler("source"), probeTargetForScheduler("actual"), probeTargetForScheduler("unrelated"),
 		}},
 	})
 	require.NoError(t, scheduler.enqueueAutomatic(t.Context()))
@@ -354,12 +372,13 @@ func TestSchedulerAutomaticFinderUsesOnlyStableUniqueRouteTargets(t *testing.T) 
 		{TargetAgentID: "target-b", RouteID: 3, SelectorKind: "agent_id", PathKind: "relay", Result: "error", ObservedAt: now.Unix(), Sequence: 1},
 	}}))
 	finder := &recordingSchedulerFinder{targets: []ProbeTarget{
+		probeSourceForScheduler("source-a"), probeSourceForScheduler("source-b"),
 		probeTargetForScheduler("target-a"), probeTargetForScheduler("target-b"), probeTargetForScheduler("unrelated"),
 	}}
 	scheduler := NewScheduler(&schedulerCaller{}, service, SchedulerOptions{ProbeTargetFinder: finder})
 
 	require.NoError(t, scheduler.enqueueAutomatic(t.Context()))
-	require.Equal(t, [][]string{{"target-a", "target-b"}}, finder.calls)
+	require.Equal(t, [][]string{{"source-a", "source-b", "target-a", "target-b"}}, finder.calls)
 }
 
 func TestSchedulerAutomaticSkipsFinderWithoutRouteEdges(t *testing.T) {
@@ -440,10 +459,10 @@ func TestSchedulerAutomaticPriorityUsesCurrentProbeFingerprintAndFailures(t *tes
 		wantPriority probePriority
 	}{
 		{name: "recent successful edge without probe result is stale", wantPriority: probePriorityStale},
-		{name: "successful edge with matching successful probe is stale", directResult: &protocol.DirectProbeResult{Network: "reachable", Identity: "verified", Eligible: true}, wantPriority: probePriorityStale},
+		{name: "successful edge with matching successful probe is stale", directResult: &protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy, Network: "reachable", Identity: "verified", Eligible: true}, wantPriority: probePriorityStale},
 		{name: "failed edge is recovery", edgeFailure: true, wantPriority: probePriorityRecovery},
-		{name: "matching failed probe is recovery", directResult: &protocol.DirectProbeResult{Network: "unreachable", Identity: "unknown", ReasonCode: "direct_connect"}, wantPriority: probePriorityRecovery},
-		{name: "changed probe fingerprint is recovery", directResult: &protocol.DirectProbeResult{AddressFingerprint: "old-probe-fingerprint", Network: "reachable", Identity: "verified", Eligible: true}, wantPriority: probePriorityRecovery},
+		{name: "matching failed probe is recovery", directResult: &protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy, Network: "unreachable", Identity: "unknown", ReasonCode: "direct_connect"}, wantPriority: probePriorityRecovery},
+		{name: "changed probe fingerprint is recovery", directResult: &protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy, AddressFingerprint: "old-probe-fingerprint", Network: "reachable", Identity: "verified", Eligible: true}, wantPriority: probePriorityRecovery},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -460,6 +479,7 @@ func TestSchedulerAutomaticPriorityUsesCurrentProbeFingerprintAndFailures(t *tes
 			fingerprint := CanonicalProbeFingerprint("source", 7, target)
 			if test.directResult != nil {
 				result := *test.directResult
+				result.Policy = protocol.ProbeRespectBusinessPolicy
 				result.TargetAgentID = target.AgentID
 				if result.AddressFingerprint == "" {
 					result.AddressFingerprint = fingerprint
@@ -469,10 +489,13 @@ func TestSchedulerAutomaticPriorityUsesCurrentProbeFingerprintAndFailures(t *tes
 				service.ApplyDirectProbeResult("source", 7, target, result, 1)
 			}
 			scheduler := NewScheduler(&schedulerCaller{}, service, SchedulerOptions{
-				Now: func() time.Time { return now }, ProbeTargetFinder: schedulerFinder{targets: []ProbeTarget{target}},
+				Now: func() time.Time { return now }, ProbeTargetFinder: schedulerFinder{targets: []ProbeTarget{probeSourceForScheduler("source"), target}},
 			})
 			require.NoError(t, scheduler.enqueueAutomatic(t.Context()))
-			key := probeJobKey{sourceID: "source", targetAgentID: target.AgentID, fingerprint: fingerprint}
+			key := probeJobKey{
+				sourceID: "source", targetAgentID: target.AgentID, fingerprint: fingerprint,
+				policy: protocol.ProbeRespectBusinessPolicy,
+			}
 			scheduler.mu.Lock()
 			job := scheduler.jobs[key]
 			scheduler.mu.Unlock()
@@ -557,7 +580,7 @@ func TestSchedulerCancelledCallPreservesPreviousDirectSnapshot(t *testing.T) {
 	service := NewService("master", Sources{}, Options{Now: func() time.Time { return now }})
 	target := probeTargetForScheduler("target")
 	fingerprint := CanonicalProbeFingerprint("source", 1, target)
-	previous := protocol.DirectProbeResult{
+	previous := protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: fingerprint, Network: "unreachable",
 		Identity: "unknown", CheckedAt: now.Add(-time.Minute).Unix(), LatencyMS: 9, ReasonCode: "direct_connect",
 	}
@@ -604,7 +627,7 @@ func TestSchedulerTypedCancelledResultPreservesPreviousDirectSnapshot(t *testing
 	service := NewService("master", Sources{}, Options{Now: func() time.Time { return now }})
 	target := probeTargetForScheduler("target")
 	fingerprint := CanonicalProbeFingerprint("source", 1, target)
-	previous := protocol.DirectProbeResult{
+	previous := protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: fingerprint, Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: now.Add(-time.Minute).Unix(), LatencyMS: 7,
 	}
@@ -755,7 +778,7 @@ func TestSchedulerCompletionRacingCloseKeepsManualProgressCancelled(t *testing.T
 	scheduler.mu.Lock()
 	scheduler.closing = true
 	scheduler.mu.Unlock()
-	scheduler.completeJob(job, protocol.DirectProbeResult{}, context.Canceled)
+	scheduler.completeJob(job, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy}, context.Canceled)
 
 	progress, ok := scheduler.Progress(probeID)
 	require.True(t, ok)
@@ -1016,9 +1039,17 @@ func TestSchedulerManualSessionKeepsExpectedGenerationAfterEnqueue(t *testing.T)
 func probeTargetForScheduler(id string) ProbeTarget {
 	return ProbeTarget{
 		AgentID: id, Tags: []string{"gpu"}, ControlGeneration: 10,
-		Addresses:    []protocol.Address{{URL: "http://" + id}},
-		Capabilities: []string{protocol.AgentCapabilityDirectIngressV1},
+		Addresses:            []protocol.Address{{URL: "http://" + id}},
+		Capabilities:         []string{protocol.AgentCapabilityDirectTunnelV1},
+		DirectInboundEnabled: true, DirectOutboundEnabled: true,
+		RelayInboundEnabled: true, RelayOutboundEnabled: true, RelayMode: consts.RelayModeInherit,
 	}
+}
+
+func probeSourceForScheduler(id string) ProbeTarget {
+	target := probeTargetForScheduler(id)
+	target.Addresses = nil
+	return target
 }
 
 func enqueueProbeForTest(scheduler *Scheduler, priority probePriority, sourceID string, target ProbeTarget, probeID string) {
@@ -1028,7 +1059,7 @@ func enqueueProbeForTest(scheduler *Scheduler, priority probePriority, sourceID 
 }
 
 func completeProbeForTest(scheduler *Scheduler, job probeJob) {
-	scheduler.completeJob(job, protocol.DirectProbeResult{Eligible: true}, nil)
+	scheduler.completeJob(job, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy, Eligible: true}, nil)
 }
 
 func runScheduler(t *testing.T, scheduler *Scheduler) {

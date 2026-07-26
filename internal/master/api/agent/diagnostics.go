@@ -70,7 +70,13 @@ func (h *Handler) ConnectionDiagnostics(c *app.Context, req DiagnosticsRequest) 
 	}
 	agents := []models.Agent{agent}
 	h.enrichLastSeen(agents)
-	snapshot := h.Connections.Build(agents[0])
+	snapshot, err := h.Connections.BuildContext(c.RequestContext(), agents[0])
+	if err != nil {
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return ConnectionDiagnosticsResponse{}, apiErr
+		}
+		return ConnectionDiagnosticsResponse{}, api.InternalError("build connection snapshot failed", err)
+	}
 
 	controlErrors := make([]connectivity.RecentError, 0)
 	if h.ControlSessions != nil {

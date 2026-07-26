@@ -17,7 +17,7 @@ func TestCopyResponseDeliversHTTPResponseTrailers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		stream := frozenTrailerStream(t, wire.Headers{StatusCode: http.StatusCreated,
 			Header: http.Header{"X-Regular": {"value"}}, Trailer: http.Header{"x-checksum": {"lower"}, "X-Checksum": {"upper"}}}, "body")
-		require.NoError(t, stream.CopyResponse(t.Context(), w))
+		require.NoError(t, copyAttemptResponse(stream, t.Context(), w))
 	}))
 	defer server.Close()
 	response, err := server.Client().Get(server.URL)
@@ -35,7 +35,7 @@ func TestCopyResponseRejectsForbiddenTrailerBeforeWrite(t *testing.T) {
 	for _, key := range []string{"Trailer", "transfer-encoding", "Content-Length"} {
 		stream := frozenTrailerStream(t, wire.Headers{StatusCode: http.StatusOK, Trailer: http.Header{key: {"bad"}}}, "body")
 		recorder := httptest.NewRecorder()
-		require.ErrorIs(t, stream.CopyResponse(t.Context(), recorder), errStreamProtocol)
+		require.ErrorIs(t, copyAttemptResponse(stream, t.Context(), recorder), errStreamProtocol)
 		require.Zero(t, recorder.Body.Len())
 		require.False(t, recorder.Flushed)
 	}
@@ -46,7 +46,7 @@ func TestCopyResponseCanonicalizesAndMergesTrailerValues(t *testing.T) {
 		"x-checksum": {"lower"}, "X-Checksum": {"upper"},
 	}}, "")
 	recorder := httptest.NewRecorder()
-	require.NoError(t, stream.CopyResponse(t.Context(), recorder))
+	require.NoError(t, copyAttemptResponse(stream, t.Context(), recorder))
 	result := recorder.Result()
 	require.ElementsMatch(t, []string{"lower", "upper"}, result.Trailer.Values("X-Checksum"))
 }
@@ -56,10 +56,12 @@ func TestCopyResponseStripsReservedResponseHeadersAndDeclaredTrailers(t *testing
 		Header: http.Header{
 			"X-Business": {"ok"}, consts.HeaderXAgentForwardTicket: {"header-secret"}, consts.HeaderXAgentRouteID: {"999"},
 		},
-		Trailer: http.Header{"X-Usage": {"tokens=7"}, consts.HeaderXAgentForwardTicket: {"trailer-secret"}},
+		Trailer: http.Header{
+			"X-Usage": {"tokens=7"}, consts.HeaderXAgentForwardTicket: {"trailer-secret"},
+		},
 	}, "")
 	recorder := httptest.NewRecorder()
-	require.NoError(t, stream.CopyResponse(t.Context(), recorder))
+	require.NoError(t, copyAttemptResponse(stream, t.Context(), recorder))
 	result := recorder.Result()
 	require.Equal(t, "ok", result.Header.Get("X-Business"))
 	require.Empty(t, result.Header.Get(consts.HeaderXAgentForwardTicket))
@@ -89,7 +91,7 @@ func TestCopyResponseRejectsInvalidTrailerWithoutResponseWriterMutation(t *testi
 	for _, trailer := range tests {
 		stream := frozenTrailerStream(t, wire.Headers{StatusCode: 200, Trailer: trailer}, "")
 		writer := &mutationTrackingWriter{header: make(http.Header)}
-		require.ErrorIs(t, stream.CopyResponse(t.Context(), writer), errStreamProtocol)
+		require.ErrorIs(t, copyAttemptResponse(stream, t.Context(), writer), errStreamProtocol)
 		require.Zero(t, writer.headerCalls)
 		require.Zero(t, writer.writeCalls)
 	}
@@ -116,9 +118,9 @@ func frozenTrailerStream(t *testing.T, headers wire.Headers, body string) *Strea
 	limits := testLimits(1)
 	limits.InitialStreamWindow = int64(max(1, len(body)))
 	session := &Session{generation: 1, limits: limits, ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now)}
-	stream := newStream(session, ctx, t.Context(), testStreamID(92), 0)
+	stream := newStream(session, ctx, testStreamID(92), 0, "")
 	stream.signalHeaders(headersResult{headers: headers})
 	if body != "" {
 		require.NoError(t, session.reserveIncoming(int64(len(body))))

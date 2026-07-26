@@ -38,13 +38,13 @@ type adminSettingMutation struct{ ctx *baseContext }
 
 func (q *adminSettingQuery) Get(key string) (*models.Setting, error) {
 	var s models.Setting
-	err := q.ctx.GetDB().Where("key = ?", key).First(&s).Error
+	err := q.ctx.GetCoreDB().Where("key = ?", key).First(&s).Error
 	return &s, err
 }
 
 func (q *adminSettingQuery) Lookup(key string) (*models.Setting, bool, error) {
 	var s models.Setting
-	tx := q.ctx.GetDB().Where("key = ?", key).Limit(1).Find(&s)
+	tx := q.ctx.GetCoreDB().Where("key = ?", key).Limit(1).Find(&s)
 	if tx.Error != nil {
 		return nil, false, tx.Error
 	}
@@ -56,7 +56,7 @@ func (q *adminSettingQuery) Lookup(key string) (*models.Setting, bool, error) {
 
 func (q *adminSettingQuery) GetAll() ([]models.Setting, error) {
 	var settings []models.Setting
-	err := q.ctx.GetDB().Find(&settings).Error
+	err := q.ctx.GetCoreDB().Find(&settings).Error
 	return settings, err
 }
 
@@ -120,11 +120,11 @@ func (q *adminSettingQuery) LookupFloat(key string, fallback float64) float64 {
 func (m *adminSettingMutation) Set(key string, value string) error {
 	setting := models.Setting{Key: key}
 	// Use map for Assign to ensure zero-value fields (e.g. empty string) are persisted.
-	return m.ctx.GetDB().Where("key = ?", key).
+	return m.ctx.GetCoreDB().Where("key = ?", key).
 		Assign(map[string]any{"value": value}).
 		FirstOrCreate(&setting).Error
 }
 
 func (m *adminSettingMutation) Delete(key string) error {
-	return m.ctx.GetDB().Where("key = ?", key).Delete(&models.Setting{}).Error
+	return m.ctx.GetCoreDB().Where("key = ?", key).Delete(&models.Setting{}).Error
 }

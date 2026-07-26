@@ -50,7 +50,13 @@ func (h *Handler) Detail(c *app.Context, req DetailRequest) (AgentDetailResponse
 	agents := []models.Agent{agent}
 	h.enrichLastSeen(agents)
 	agent = agents[0]
-	snapshot := h.Connections.Build(agent)
+	snapshot, err := h.Connections.BuildContext(c.RequestContext(), agent)
+	if err != nil {
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return AgentDetailResponse{}, apiErr
+		}
+		return AgentDetailResponse{}, api.InternalError("build connection snapshot failed", err)
+	}
 	routeTargets, err := h.routeTargetsPage(snapshot, "", defaultRouteTargetsLimit)
 	if err != nil {
 		return AgentDetailResponse{}, err

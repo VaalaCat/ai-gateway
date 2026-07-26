@@ -99,7 +99,7 @@ func TestAuthBootstrapAndTicketMessagesJSONRoundTrip(t *testing.T) {
 	t.Run("bootstrap response", func(t *testing.T) {
 		want := AuthBootstrapResponse{
 			MasterInstanceID: "master-a",
-			Capabilities:     []string{"agent_tunnel_v1", "future.short"},
+			Capabilities:     []string{"agent_tunnel_v2", "future.short"},
 			SigningKeys: []agentauth.PublicKey{{
 				KeyID:     "key-a",
 				Algorithm: "EdDSA",
@@ -137,7 +137,7 @@ func TestAuthBootstrapAndTicketMessagesJSONRoundTrip(t *testing.T) {
 	t.Run("agent capabilities", func(t *testing.T) {
 		want := AgentCapabilitiesUpdate{
 			AgentID:      "agent-a",
-			Capabilities: []string{"agent_tunnel_v1", "future.short"},
+			Capabilities: []string{"agent_tunnel_v2", "future.short"},
 		}
 		var got AgentCapabilitiesUpdate
 		requireJSONRoundTrip(t, want, &got)
@@ -160,7 +160,7 @@ func TestHeartbeatCapabilitiesJSONCompatibility(t *testing.T) {
 		t.Fatalf("nil heartbeat capabilities must be omitted: %s", empty)
 	}
 
-	want := []string{"agent_tunnel_v1", "future.short"}
+	want := []string{"agent_tunnel_v2", "future.short"}
 	data, err := json.Marshal(HeartbeatParams{Capabilities: want})
 	if err != nil {
 		t.Fatalf("marshal heartbeat capabilities: %v", err)

@@ -388,6 +388,62 @@ func TestTokenCRUD(t *testing.T) {
 	}
 }
 
+func TestTokenTraceModeMigrateDefaultsFull(t *testing.T) {
+	db := setupTestDB(t)
+
+	defaultMode := Token{Key: "sk-trace-default", Name: "default", Status: 1}
+	if err := db.Create(&defaultMode).Error; err != nil {
+		t.Fatal(err)
+	}
+	var got Token
+	if err := db.First(&got, defaultMode.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.TraceMode != TokenTraceModeFull {
+		t.Fatalf("TraceMode=%q want=%q", got.TraceMode, TokenTraceModeFull)
+	}
+
+	headers := Token{Key: "sk-trace-headers", Name: "headers", Status: 1, TraceMode: TokenTraceModeHeaders}
+	if err := db.Create(&headers).Error; err != nil {
+		t.Fatal(err)
+	}
+	got = Token{}
+	if err := db.First(&got, headers.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.TraceMode != TokenTraceModeHeaders {
+		t.Fatalf("TraceMode=%q want=%q", got.TraceMode, TokenTraceModeHeaders)
+	}
+}
+
+func TestTokenTraceModeMigrateBackfillsLegacyRows(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	if err := db.Exec(`CREATE TABLE tokens (id integer primary key, key text, name text, status integer)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO tokens (id, key, name, status) VALUES (1, 'sk-legacy', 'legacy', 1)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var got Token
+	if err := db.First(&got, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.TraceMode != TokenTraceModeFull {
+		t.Fatalf("TraceMode=%q want=%q", got.TraceMode, TokenTraceModeFull)
+	}
+}
+
 func TestTokenTemplate_AllowedChannelIDs_Roundtrip(t *testing.T) {
 	db := setupTestDB(t)
 

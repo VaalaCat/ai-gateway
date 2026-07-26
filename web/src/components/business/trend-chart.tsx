@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
   CartesianGrid,
   Line,
@@ -10,11 +11,11 @@ import {
 } from "recharts";
 
 import { ChartCard } from "@/components/business/chart-card";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { BoundedChartTooltip } from "@/components/business/bounded-chart-tooltip";
+import { ChartOptionSelect } from "@/components/business/chart-option-select";
 import {
   ChartContainer,
   ChartTooltip,
-  ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
 import {
@@ -26,6 +27,7 @@ import {
   formatTokensExact,
 } from "@/lib/utils/format";
 import type { TimeBucket } from "@/lib/types/observability";
+import { chartColorForSeries } from "@/lib/chart-colors";
 
 export type { TimeBucket };
 export type TrendMetric = "cost" | "requests" | "tokens";
@@ -39,12 +41,6 @@ interface TrendChartProps {
   onMetricChange?: (m: TrendMetric) => void;
   className?: string;
 }
-
-const METRIC_LABELS: Record<TrendMetric, string> = {
-  cost: "Cost",
-  requests: "Requests",
-  tokens: "Tokens",
-};
 
 // 策略表: metric → (axis formatter, tooltip formatter, ChartCard 副标单位)
 const METRIC_FORMATTERS: Record<TrendMetric, {
@@ -70,6 +66,7 @@ export function TrendChart({
   onMetricChange,
   className,
 }: TrendChartProps) {
+  const t = useTranslations("charts");
   const [internalMetric, setInternalMetric] = useState<TrendMetric>(
     metricProp ?? "requests",
   );
@@ -83,22 +80,27 @@ export function TrendChart({
 
   const config = useMemo<ChartConfig>(
     () => ({
-      [metric]: { label: METRIC_LABELS[metric], color: "var(--chart-1)" },
+      [metric]: { label: t(`metric.${metric}`), color: chartColorForSeries(metric) },
     }),
-    [metric],
+    [metric, t],
   );
 
   const isEmpty = empty ?? buckets.length === 0;
   const fmt = METRIC_FORMATTERS[metric];
+  // behavior change: keep a one-bucket trend visible when no line path can be drawn.
+  const showSinglePoint = buckets.length === 1;
 
   const action = (
-    <Tabs value={metric} onValueChange={handleChange}>
-      <TabsList>
-        <TabsTrigger value="cost">Cost</TabsTrigger>
-        <TabsTrigger value="requests">Requests</TabsTrigger>
-        <TabsTrigger value="tokens">Tokens</TabsTrigger>
-      </TabsList>
-    </Tabs>
+    <ChartOptionSelect
+      value={metric}
+      onValueChange={handleChange}
+      label={t("prefix.metric")}
+      options={[
+        { value: "cost", label: t("metric.cost") },
+        { value: "requests", label: t("metric.requests") },
+        { value: "tokens", label: t("metric.tokens") },
+      ]}
+    />
   );
 
   return (
@@ -109,8 +111,9 @@ export function TrendChart({
       empty={isEmpty}
       action={action}
       className={className}
+      chartFrame={{}}
     >
-      <ChartContainer config={config} className="h-[260px] w-full">
+      <ChartContainer config={config} className="h-full w-full">
         <LineChart data={buckets} accessibilityLayer>
           <CartesianGrid vertical={false} />
           <XAxis dataKey="label" tickLine={false} axisLine={false} />
@@ -121,7 +124,7 @@ export function TrendChart({
           />
           <ChartTooltip
             content={
-              <ChartTooltipContent
+              <BoundedChartTooltip
                 formatter={(value) => (
                   <span className="font-mono tabular-nums">
                     {fmt.tooltip(Number(value))}
@@ -135,7 +138,7 @@ export function TrendChart({
             dataKey={metric}
             stroke={`var(--color-${metric})`}
             strokeWidth={2}
-            dot={false}
+            dot={showSinglePoint}
           />
         </LineChart>
       </ChartContainer>

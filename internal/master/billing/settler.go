@@ -9,60 +9,82 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 	"gorm.io/datatypes"
-	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var _ app.Settler = (*Settler)(nil)
 
 const quotaPerDollar = 100_000 // 1 dollar = 100,000 internal units
 
-// UsageAggregator is the narrow contract settler uses to hand off post-commit
-// aggregation. Production implementation is *billing.Aggregator; tests inject
-// mocks. Submit is called AFTER the settler transaction commits; never call
-// it before commit (a rollback would leave the aggregator with phantom counts).
-type UsageAggregator interface {
-	Submit(log *models.UsageLog)
+// CoreAggregator is the narrow post-commit contract implemented by Aggregator.
+// Submitting before commit would create phantom rollup counts after rollback.
+type CoreAggregator interface {
+	SubmitBilling(log *models.BillingLog)
 }
 
-// noopAggregator is the zero-value backing for NewSettler (T2.8 legacy
-// callers that haven't migrated to NewSettlerWithAggregator). Production
-// always supplies a real aggregator via NewSettlerWithAggregator in
-// master/server.go (T2.9).
-type noopAggregator struct{}
+type pendingCoreAggregator interface {
+	SubmitPendingBilling(log *models.BillingLog)
+}
 
-func (noopAggregator) Submit(*models.UsageLog) {}
+type noopCoreAggregator struct{}
+
+func (noopCoreAggregator) SubmitBilling(*models.BillingLog) {}
+
+type LogBatchQueue interface {
+	Enqueue(logqueue.LogBatch) deliveryqueue.EnqueueResult
+}
+
+type noopLogBatchQueue struct{}
+
+func (noopLogBatchQueue) Enqueue(logqueue.LogBatch) deliveryqueue.EnqueueResult {
+	return deliveryqueue.EnqueueResult{Dropped: true, Error: "log queue is not configured"}
+}
 
 type Settler struct {
 	App        dao.AppProvider
 	Bus        app.EventBus
 	Logger     *zap.Logger
-	Aggregator UsageAggregator
+	Aggregator CoreAggregator
+	LogQueue   LogBatchQueue
+	coreFacts  bool
 }
 
 func NewSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger) *Settler {
-	return NewSettlerWithAggregator(application, bus, logger, noopAggregator{})
+	return newSettler(application, bus, logger, noopCoreAggregator{}, noopLogBatchQueue{}, false)
 }
 
-// NewSettlerWithAggregator constructs a Settler that hands off post-commit
-// aggregation to the supplied UsageAggregator. agg MUST be non-nil; callers
-// that want to disable aggregation should use NewSettler (which wires
-// noopAggregator).
-func NewSettlerWithAggregator(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg UsageAggregator) *Settler {
+// NewCoreFactSettler is the split-schema settler activated together with the
+// log worker and strict dual-database startup in Task 3B.
+func NewCoreFactSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg CoreAggregator, queue LogBatchQueue) *Settler {
+	return newSettler(application, bus, logger, agg, queue, true)
+}
+
+func newSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg CoreAggregator, queue LogBatchQueue, coreFacts bool) *Settler {
 	if agg == nil {
-		agg = noopAggregator{}
+		agg = noopCoreAggregator{}
+	}
+	if queue == nil {
+		queue = noopLogBatchQueue{}
+	}
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 	return &Settler{
 		App:        application,
 		Bus:        bus,
 		Logger:     logger,
 		Aggregator: agg,
+		LogQueue:   queue,
+		coreFacts:  coreFacts,
 	}
 }
 
@@ -136,17 +158,6 @@ func (s *Settler) publishQuotaSync(ctx context.Context, agentID string, logs []p
 func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.UsageLogEntry) error {
 	daoCtx := dao.NewContext(s.App)
 	q := dao.NewAdminQuery(daoCtx)
-
-	// Deduplicate by request_id
-	exists, err := q.UsageLog().ExistsByRequestID(entry.RequestID)
-	if err != nil {
-		return err
-	}
-	if exists {
-		s.Logger.Debug("usage settle dedup hit (retransmit correctly ignored)",
-			zap.String("request_id", entry.RequestID), zap.String("agent_id", agentID))
-		return nil // already processed
-	}
 
 	// Look up model pricing
 	var mc models.ModelConfig
@@ -269,97 +280,19 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		RateLimitHits:      datatypes.NewJSONSlice(entry.RateLimitHits),
 	}
 
-	var depleted bool
-	var inserted bool
-	err = dao.RunInTx(daoCtx, func(txCtx dao.Context) error {
-		m := dao.NewAdminMutation(txCtx)
-		if err := m.UsageLog().Create(&log); err != nil {
-			if isDuplicateRequestIDError(err) {
-				// inserted stays false; do NOT Submit a duplicate to aggregator.
-				return nil
-			}
-			return err
-		}
-		inserted = true
-
-		// Write trace data if present (any request with trace enabled or errors).
-		// New path: AttemptTraces carries one row per candidate attempt.
-		// Backward-compat path: if AttemptTraces is empty but legacy TraceData is
-		// non-empty, write a single trace row at attempt_index=0.
-		if len(entry.AttemptTraces) > 0 {
-			wroteTrace := false
-			for _, tr := range entry.AttemptTraces {
-				tr := tr // avoid loop-variable aliasing
-				tr.RequestID = entry.RequestID
-				// AttemptIndex 由 agent 端按真实候选序号填好(可能不连续:空快照被跳过),
-				// 这里不再按切片位置重排,以免与链路 seq 错位。
-				if err := m.UsageLog().CreateTrace(&tr); err != nil {
-					s.Logger.Warn("failed to write attempt trace",
-						zap.String("request_id", entry.RequestID),
-						zap.Int("attempt_index", tr.AttemptIndex),
-						zap.Error(err),
-					)
-				} else {
-					wroteTrace = true
-				}
-			}
-			if wroteTrace {
-				txCtx.GetDB().Model(&log).Update("has_trace", true)
-			}
-		} else if entry.TraceData != "" {
-			// Legacy single-trace path (backward compat for old agents).
-			var trace models.UsageLogTrace
-			if err := json.Unmarshal([]byte(entry.TraceData), &trace); err == nil {
-				trace.RequestID = entry.RequestID
-				trace.AttemptIndex = 0
-				if err := m.UsageLog().CreateTrace(&trace); err != nil {
-					s.Logger.Warn("failed to write trace data",
-						zap.String("request_id", entry.RequestID),
-						zap.Error(err),
-					)
-				} else {
-					// Mark the usage log as having trace data
-					txCtx.GetDB().Model(&log).Update("has_trace", true)
-				}
-			}
-		}
-
-		if entry.UserID == 0 {
-			logFields := []zap.Field{
-				zap.String("request_id", entry.RequestID),
-				zap.String("token_name", entry.TokenName),
-				zap.Int64("total_cost", totalCost),
-			}
-			if entry.TokenName == "__system_test__" {
-				s.Logger.Info("skipping quota deduction for ownerless system test usage", logFields...)
-			} else {
-				s.Logger.Warn("skipping quota deduction for ownerless usage with no owner", logFields...)
-			}
-			return nil
-		}
-
-		// Deduct user quota. BYOK free mode lands here with totalCost=0 and
-		// naturally short-circuits.
-		if totalCost > 0 {
-			remaining, err := m.User().DeductQuota(entry.UserID, totalCost)
-			if err != nil {
-				return err
-			}
-			depleted = remaining < 0
-		}
-		return nil
-	})
+	var inserted, depleted bool
+	var err error
+	if s.coreFacts {
+		inserted, depleted, err = s.commitCoreFact(ctx, daoCtx, &log, entry)
+	} else {
+		inserted, depleted, err = s.commitLegacyUsage(daoCtx, &log, entry)
+	}
 	if err != nil {
 		return err
 	}
-
-	// Aggregation moves OUT of the tx: settler's tx is now UsageLog + trace +
-	// DeductQuota only. Hand the committed log to the in-memory aggregator
-	// for batched 3-table upsert. Must be after commit so a rollback can't
-	// leave the aggregator double-counting. Skip on duplicate-request-id
-	// short-circuit (inserted=false) to avoid over-counting retries.
-	if inserted {
-		s.Aggregator.Submit(&log)
+	if !inserted {
+		s.Logger.Debug("settle dedup hit",
+			zap.String("request_id", entry.RequestID), zap.String("agent_id", agentID))
 	}
 
 	// Event OUTSIDE transaction
@@ -369,6 +302,140 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		}
 	}
 	return nil
+}
+
+func (s *Settler) commitCoreFact(ctx context.Context, daoCtx dao.Context, log *models.UsageLog, entry protocol.UsageLogEntry) (bool, bool, error) {
+	fact := billingLogFromUsage(log)
+	inserted, depleted, err := s.commitUsageCharge(daoCtx, entry, log.TotalCost, func(txCtx dao.Context) (bool, error) {
+		result := txCtx.GetCoreDB().Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "request_id"}}, DoNothing: true,
+		}).Create(&fact)
+		if result.Error != nil || result.RowsAffected == 0 {
+			return false, result.Error
+		}
+		if err := RegisterPendingBillingProjectionInTx(ctx, txCtx.GetCoreDB(), &fact); err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	if err != nil || !inserted {
+		return inserted, depleted, err
+	}
+	log.CreatedAt = fact.CreatedAt
+	if durable, ok := s.Aggregator.(pendingCoreAggregator); ok {
+		durable.SubmitPendingBilling(&fact)
+	} else {
+		s.Aggregator.SubmitBilling(&fact)
+	}
+	s.enqueueRequestLog(*log, entry)
+	return true, depleted, nil
+}
+
+func (s *Settler) commitLegacyUsage(daoCtx dao.Context, log *models.UsageLog, entry protocol.UsageLogEntry) (bool, bool, error) {
+	inserted, depleted, err := s.commitUsageCharge(daoCtx, entry, log.TotalCost, func(txCtx dao.Context) (bool, error) {
+		result := txCtx.GetCoreDB().Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "request_id"}}, DoNothing: true,
+		}).Create(log)
+		if result.Error != nil || result.RowsAffected == 0 {
+			return false, result.Error
+		}
+		s.writeLegacyTraces(txCtx, log, entry)
+		return true, nil
+	})
+	if err != nil || !inserted {
+		return inserted, depleted, err
+	}
+	s.submitLegacyRollups(log)
+	return true, depleted, nil
+}
+
+func (s *Settler) commitUsageCharge(daoCtx dao.Context, entry protocol.UsageLogEntry, totalCost int64, insert func(dao.Context) (bool, error)) (bool, bool, error) {
+	var inserted, depleted bool
+	err := dao.RunInTx(daoCtx, func(txCtx dao.Context) error {
+		var err error
+		inserted, err = insert(txCtx)
+		if err != nil || !inserted {
+			return err
+		}
+		depleted, err = s.applyQuota(txCtx, entry, totalCost)
+		return err
+	})
+	return inserted, depleted, err
+}
+
+func (s *Settler) applyQuota(txCtx dao.Context, entry protocol.UsageLogEntry, totalCost int64) (bool, error) {
+	if entry.UserID == 0 {
+		fields := []zap.Field{zap.String("request_id", entry.RequestID), zap.String("token_name", entry.TokenName)}
+		if entry.TokenName == "__system_test__" {
+			s.Logger.Info("skipping quota deduction for ownerless system test usage", fields...)
+		} else {
+			s.Logger.Warn("skipping quota deduction for ownerless usage with no owner", fields...)
+		}
+		return false, nil
+	}
+	if totalCost <= 0 {
+		return false, nil
+	}
+	remaining, err := dao.NewAdminMutation(txCtx).User().DeductQuota(entry.UserID, totalCost)
+	return remaining < 0, err
+}
+
+func (s *Settler) enqueueRequestLog(log models.UsageLog, entry protocol.UsageLogEntry) {
+	batch, err := buildLogBatch(log, entry)
+	if err != nil {
+		s.Logger.Warn("build request log batch failed", zap.String("request_id", entry.RequestID), zap.Error(err))
+		return
+	}
+	result := s.LogQueue.Enqueue(batch)
+	if !result.Accepted {
+		s.Logger.Warn("request log delivery not accepted",
+			zap.String("request_id", entry.RequestID),
+			zap.Bool("dropped", result.Dropped), zap.String("reason", result.Error))
+	}
+}
+
+func (s *Settler) writeLegacyTraces(txCtx dao.Context, log *models.UsageLog, entry protocol.UsageLogEntry) {
+	traces, err := requestTraces(entry)
+	if err != nil {
+		s.Logger.Warn("decode legacy trace failed", zap.String("request_id", entry.RequestID), zap.Error(err))
+		return
+	}
+	wrote := false
+	for _, source := range traces {
+		trace := models.UsageLogTrace(source)
+		trace.ID = 0
+		if err := txCtx.GetCoreDB().Create(&trace).Error; err != nil {
+			s.Logger.Warn("write legacy request trace failed", zap.String("request_id", entry.RequestID), zap.Error(err))
+			continue
+		}
+		wrote = true
+	}
+	if wrote {
+		log.HasTrace = true
+		if err := txCtx.GetCoreDB().Model(log).Update("has_trace", true).Error; err != nil {
+			s.Logger.Warn("mark legacy request trace failed", zap.String("request_id", entry.RequestID), zap.Error(err))
+		}
+	}
+}
+
+func (s *Settler) submitLegacyRollups(log *models.UsageLog) {
+	mutation := dao.NewAdminMutation(dao.NewContext(s.App)).Billing()
+	writes := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "token_daily", run: func() error { return mutation.UpsertTokenDaily(log) }},
+		{name: "channel_daily", run: func() error { return mutation.UpsertChannelDaily(log) }},
+		{name: "usage_hourly", run: func() error { return mutation.UpsertHourlyBucket(log) }},
+		{name: "duration_histogram", run: func() error { return mutation.UpsertDurationHistogram(log) }},
+		{name: "ttft_histogram", run: func() error { return mutation.UpsertTTFTHistogram(log) }},
+		{name: "tps_histogram", run: func() error { return mutation.UpsertTPSHistogram(log) }},
+	}
+	for _, write := range writes {
+		if err := write.run(); err != nil {
+			s.Logger.Warn("legacy usage aggregation failed", zap.String("projection", write.name), zap.Error(err))
+		}
+	}
 }
 
 type channelSnapshot struct {
@@ -386,19 +453,6 @@ func parseChannelSnapshot(other string) (string, int) {
 		return "", 0
 	}
 	return snapshot.ChannelName, snapshot.ChannelType
-}
-
-func isDuplicateRequestIDError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, gorm.ErrDuplicatedKey) {
-		return true
-	}
-	// Fallback: string matching for drivers that don't map to ErrDuplicatedKey
-	lower := strings.ToLower(err.Error())
-	return (strings.Contains(lower, "unique") || strings.Contains(lower, "duplicate")) &&
-		(strings.Contains(lower, "request_id") || strings.Contains(lower, "idx_usage_logs_request_id"))
 }
 
 // applyByokBillingMode adjusts per-bucket costs by the configured BYOK billing

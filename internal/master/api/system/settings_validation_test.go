@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
@@ -92,7 +91,7 @@ func newSettingsContextWithBus(t *testing.T) (*app.Context, *settingsRecordingBu
 	ginCtx, _ := gin.CreateTestContext(w)
 	ginCtx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/system/settings", nil)
 	testApp := app.NewApplication()
-	testApp.SetDB(db)
+	testApp.SetCoreDB(db)
 	bus := newSettingsRecordingBus()
 	testApp.SetEventBus(bus)
 	t.Cleanup(func() { require.NoError(t, bus.Close()) })
@@ -135,7 +134,7 @@ func TestUpdateSettings_RelayDefaultURIRejectsInvalidBeforeWritesOrPublishes(t *
 			require.NotContains(t, err.Error(), secret)
 			require.NotContains(t, err.Error(), raw)
 			var count int64
-			require.NoError(t, c.App.GetDB().Model(&models.Setting{}).Count(&count).Error)
+			require.NoError(t, c.App.GetCoreDB().Model(&models.Setting{}).Count(&count).Error)
 			require.Zero(t, count)
 			require.Empty(t, bus.events)
 		})
@@ -169,7 +168,7 @@ func TestUpdateSettings_RelayDefaultURIAcceptsAndStoresEmptyWSAndWSS(t *testing.
 			require.Equal(t, tt.want, response.Settings[relayDefaultURIKey])
 
 			var stored models.Setting
-			require.NoError(t, c.App.GetDB().Where("key = ?", relayDefaultURIKey).First(&stored).Error)
+			require.NoError(t, c.App.GetCoreDB().Where("key = ?", relayDefaultURIKey).First(&stored).Error)
 			require.Equal(t, tt.want, stored.Value)
 			require.LessOrEqual(t, len(stored.Value), 2048)
 			require.Len(t, bus.events, 1)
@@ -196,222 +195,12 @@ func TestUpdateSettings_PublishesWithRequestContext(t *testing.T) {
 	require.Equal(t, marker, bus.contexts[0].Value(settingsContextKey{}))
 }
 
-type recordingRelayAdmission struct {
-	values  []bool
-	current bool
-}
-
-func (g *recordingRelayAdmission) Set(enabled bool) {
-	g.current = enabled
-	g.values = append(g.values, enabled)
-}
-
-func TestUpdateSettingsRouteFallbackKillSwitchUpdatesMasterBeforePublishing(t *testing.T) {
-	c, bus := newSettingsContextWithBus(t)
-	gate := &recordingRelayAdmission{}
-	h := &Handler{RelayAdmission: gate}
-
-	_, err := h.UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{
-		consts.SettingAgentRelayFallbackEnabled: "1",
-	}})
-	require.NoError(t, err)
-	require.Equal(t, []bool{true}, gate.values)
-	require.Len(t, bus.contexts, 1)
-
-	_, err = h.UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{
-		consts.SettingAgentRelayFallbackEnabled: "0",
-	}})
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, false}, gate.values)
-}
-
-func TestUpdateSettingsRelaySettingsValidateTogetherBeforeAtomicApply(t *testing.T) {
-	t.Run("valid default and switch apply in one request context", func(t *testing.T) {
-		c, bus := newSettingsContextWithBus(t)
-		const marker = "relay-settings-atomic-request"
-		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), settingsContextKey{}, marker))
-		gate := &recordingRelayAdmission{}
-		gateStatesAtPublish := make([]bool, 0, 40)
-		bus.onPublish = func() { gateStatesAtPublish = append(gateStatesAtPublish, gate.current) }
-
-		var response SettingsResponse
-		for range 20 {
-			gate.current = false
-			var err error
-			response, err = (&Handler{RelayAdmission: gate}).UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{
-				consts.SettingAgentRelayDefaultURI:      "  WSS://relay.example/tunnel?region=jp  ",
-				consts.SettingAgentRelayFallbackEnabled: "1",
-			}})
-			require.NoError(t, err)
-		}
-		require.Equal(t, "wss://relay.example/tunnel?region=jp", response.Settings[consts.SettingAgentRelayDefaultURI])
-		require.Equal(t, "1", response.Settings[consts.SettingAgentRelayFallbackEnabled])
-		require.Len(t, gate.values, 20)
-		require.Len(t, bus.events, 40)
-		require.NotContains(t, gateStatesAtPublish, false, "the Master gate must update before either setting event is published")
-		for _, publishContext := range bus.contexts {
-			require.Equal(t, marker, publishContext.Value(settingsContextKey{}))
-		}
-	})
-
-	t.Run("invalid default prevents switch gate writes and publishes", func(t *testing.T) {
-		c, bus := newSettingsContextWithBus(t)
-		gate := &recordingRelayAdmission{}
-
-		_, err := (&Handler{RelayAdmission: gate}).UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{
-			consts.SettingAgentRelayDefaultURI:      "https://relay.example/tunnel",
-			consts.SettingAgentRelayFallbackEnabled: "1",
-		}})
-		require.True(t, isBadRequest(err), "error = %v", err)
-		require.Empty(t, gate.values)
-		require.Empty(t, bus.events)
-		var count int64
-		require.NoError(t, c.App.GetDB().Model(&models.Setting{}).Count(&count).Error)
-		require.Zero(t, count)
-	})
-}
-
-type blockingRelayAdmission struct {
-	mu             sync.Mutex
-	current        bool
-	enableEntered  chan struct{}
-	releaseEnable  chan struct{}
-	disableEntered chan struct{}
-	enableOnce     sync.Once
-	disableOnce    sync.Once
-}
-
-func newBlockingRelayAdmission() *blockingRelayAdmission {
-	return &blockingRelayAdmission{
-		enableEntered: make(chan struct{}), releaseEnable: make(chan struct{}), disableEntered: make(chan struct{}),
-	}
-}
-
-func (g *blockingRelayAdmission) Set(enabled bool) {
-	if enabled {
-		g.enableOnce.Do(func() { close(g.enableEntered) })
-		<-g.releaseEnable
-	} else {
-		g.disableOnce.Do(func() { close(g.disableEntered) })
-	}
-	g.mu.Lock()
-	g.current = enabled
-	g.mu.Unlock()
-}
-
-func (g *blockingRelayAdmission) Current() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.current
-}
-
-func settingsContextForRequest(t *testing.T, source *app.Context, requestContext context.Context) *app.Context {
-	t.Helper()
-	w := httptest.NewRecorder()
-	ginCtx, _ := gin.CreateTestContext(w)
-	ginCtx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/system/settings", nil).WithContext(requestContext)
-	return &app.Context{Context: ginCtx, App: source.App, Logger: source.Logger, OwnerContext: requestContext}
-}
-
-func TestUpdateSettingsSerializesCommitGateAndPublish(t *testing.T) {
-	c, bus := newSettingsContextWithBus(t)
-	sqlDB, err := c.App.GetDB().DB()
-	require.NoError(t, err)
-	sqlDB.SetMaxOpenConns(1)
-	gate := newBlockingRelayAdmission()
-	h := &Handler{RelayAdmission: gate}
-
-	firstDone := make(chan error, 1)
-	go func() {
-		_, updateErr := h.UpdateSettings(settingsContextForRequest(t, c, t.Context()), UpdateSettingsRequest{Settings: map[string]string{
-			consts.SettingAgentRelayFallbackEnabled: "1",
-		}})
-		firstDone <- updateErr
-	}()
-	select {
-	case <-gate.enableEntered:
-	case <-time.After(time.Second):
-		t.Fatal("enable update did not reach admission gate")
-	}
-
-	secondDone := make(chan error, 1)
-	go func() {
-		_, updateErr := h.UpdateSettings(settingsContextForRequest(t, c, t.Context()), UpdateSettingsRequest{Settings: map[string]string{
-			consts.SettingAgentRelayFallbackEnabled: "0",
-		}})
-		secondDone <- updateErr
-	}()
-	secondOvertook := false
-	select {
-	case <-gate.disableEntered:
-		secondOvertook = true
-	case <-time.After(50 * time.Millisecond):
-	}
-	close(gate.releaseEnable)
-	require.NoError(t, <-firstDone)
-	require.NoError(t, <-secondDone)
-	require.False(t, secondOvertook, "the later update must wait through commit, gate, and publish")
-
-	var stored models.Setting
-	require.NoError(t, c.App.GetDB().Where("key = ?", consts.SettingAgentRelayFallbackEnabled).First(&stored).Error)
-	require.Equal(t, "0", stored.Value)
-	require.False(t, gate.Current())
-	require.Len(t, bus.events, 2)
-	var last models.Setting
-	require.NoError(t, json.Unmarshal(bus.events[1].Payload, &last))
-	require.Equal(t, models.Setting{Key: consts.SettingAgentRelayFallbackEnabled, Value: "0"}, last)
-}
-
-func TestUpdateSettingsCanceledWhileWaitingForSerialization(t *testing.T) {
-	c, bus := newSettingsContextWithBus(t)
-	gate := newBlockingRelayAdmission()
-	h := &Handler{RelayAdmission: gate}
-
-	firstDone := make(chan error, 1)
-	go func() {
-		_, updateErr := h.UpdateSettings(settingsContextForRequest(t, c, t.Context()), UpdateSettingsRequest{Settings: map[string]string{
-			consts.SettingAgentRelayFallbackEnabled: "1",
-		}})
-		firstDone <- updateErr
-	}()
-	select {
-	case <-gate.enableEntered:
-	case <-time.After(time.Second):
-		t.Fatal("enable update did not reach admission gate")
-	}
-
-	waitContext, cancel := context.WithCancel(t.Context())
-	waiterDone := make(chan error, 1)
-	waiterStarted := make(chan struct{})
-	go func() {
-		close(waiterStarted)
-		_, updateErr := h.UpdateSettings(settingsContextForRequest(t, c, waitContext), UpdateSettingsRequest{Settings: map[string]string{
-			consts.SettingAgentRelayFallbackEnabled: "0",
-		}})
-		waiterDone <- updateErr
-	}()
-	<-waiterStarted
-	cancel()
-	select {
-	case waitErr := <-waiterDone:
-		require.ErrorIs(t, waitErr, context.Canceled)
-	case <-time.After(time.Second):
-		t.Fatal("canceled settings update did not stop waiting")
-	}
-	require.Len(t, bus.events, 0)
-
-	close(gate.releaseEnable)
-	require.NoError(t, <-firstDone)
-	require.Len(t, bus.events, 1)
-}
-
 func TestUpdateSettingsEmptyRequestsReleaseSerialization(t *testing.T) {
 	c, bus := newSettingsContextWithBus(t)
 	h := &Handler{}
 	for _, empty := range []map[string]string{nil, {}} {
-		response, err := h.UpdateSettings(c, UpdateSettingsRequest{Settings: empty})
+		_, err := h.UpdateSettings(c, UpdateSettingsRequest{Settings: empty})
 		require.NoError(t, err)
-		require.Equal(t, "0", response.Settings[consts.SettingAgentRelayFallbackEnabled])
 	}
 	_, err := h.UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{"fallback_sleep_ms": "0"}})
 	require.NoError(t, err)
@@ -426,18 +215,15 @@ func TestUpdateSettingsCommittedPublishFailuresReturnAuthoritativeSuccess(t *tes
 			bus.failAt = map[int]error{failureIndex: errors.New("publish failed with " + secret)}
 			core, observed := observer.New(zap.WarnLevel)
 			c.Logger = zap.New(core)
-			gate := &recordingRelayAdmission{}
-
-			response, err := (&Handler{RelayAdmission: gate}).UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{
-				consts.SettingAgentRelayDefaultURI:      "wss://relay.example/tunnel?token=" + secret,
-				consts.SettingAgentRelayFallbackEnabled: "1",
-				"fallback_sleep_ms":                     "0",
+			response, err := (&Handler{}).UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{
+				consts.SettingAgentRelayDefaultURI: "wss://relay.example/tunnel?token=" + secret,
+				"affinity_enabled":                 "0",
+				"fallback_sleep_ms":                "0",
 			}})
 			require.NoError(t, err)
 			require.Equal(t, "wss://relay.example/tunnel?token="+secret, response.Settings[consts.SettingAgentRelayDefaultURI])
-			require.Equal(t, "1", response.Settings[consts.SettingAgentRelayFallbackEnabled])
+			require.Equal(t, "0", response.Settings["affinity_enabled"])
 			require.Equal(t, "0", response.Settings["fallback_sleep_ms"])
-			require.Equal(t, []bool{true}, gate.values)
 
 			require.Len(t, bus.events, 3)
 			publishedKeys := make([]string, 0, 3)
@@ -447,13 +233,13 @@ func TestUpdateSettingsCommittedPublishFailuresReturnAuthoritativeSuccess(t *tes
 				publishedKeys = append(publishedKeys, setting.Key)
 			}
 			require.Equal(t, []string{
+				"affinity_enabled",
 				consts.SettingAgentRelayDefaultURI,
-				consts.SettingAgentRelayFallbackEnabled,
 				"fallback_sleep_ms",
 			}, publishedKeys)
 
 			var count int64
-			require.NoError(t, c.App.GetDB().Model(&models.Setting{}).Where("key IN ?", publishedKeys).Count(&count).Error)
+			require.NoError(t, c.App.GetCoreDB().Model(&models.Setting{}).Where("key IN ?", publishedKeys).Count(&count).Error)
 			require.EqualValues(t, 3, count)
 			require.Equal(t, 1, observed.Len())
 			logText := observed.All()[0].Message + observed.All()[0].ContextMap()["code"].(string)

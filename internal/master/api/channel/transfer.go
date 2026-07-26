@@ -54,9 +54,7 @@ func (h *Handler) ImportHTTP(adapter *api.Adapter) gin.HandlerFunc {
 			api.WriteMappedError(adapter, ginCtx, err)
 			return
 		}
-		envelope, err := channelfile.Decode[channelfile.AdminChannel](
-			ginCtx.Request.Body, channelfile.KindAdminChannels,
-		)
+		envelope, err := channelfile.DecodeAdminChannelImport(ginCtx.Request.Body)
 		if err != nil {
 			api.WriteMappedError(adapter, ginCtx, api.MapChannelFileError(err))
 			return
@@ -137,7 +135,7 @@ func selectAdminChannels(
 			return nil, api.ErrorWithCode(http.StatusBadRequest, "too_many_channels", "too many channels", nil)
 		}
 		var rows []models.Channel
-		if err := daoCtx.GetDB().Where("id IN ?", selection.IDs).Order("id ASC").Find(&rows).Error; err != nil {
+		if err := daoCtx.GetCoreDB().Where("id IN ?", selection.IDs).Order("id ASC").Find(&rows).Error; err != nil {
 			return nil, api.InternalError("list channels", err)
 		}
 		if len(rows) != len(uniqueIDs(selection.IDs)) {
@@ -217,7 +215,7 @@ func previewAdminChannelImport(
 		Items: make([]channelfile.PreviewItem, 0, len(files)),
 	}
 	var existing []string
-	if err := c.App.GetDB().WithContext(c.RequestContext()).Model(&models.Channel{}).Pluck("name", &existing).Error; err != nil {
+	if err := c.App.GetCoreDB().WithContext(c.RequestContext()).Model(&models.Channel{}).Pluck("name", &existing).Error; err != nil {
 		return preview, nil, api.InternalError("list channel names", err)
 	}
 	allocator := channelfile.NewNameAllocator(existing)

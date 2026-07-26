@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   AgentListItem,
   AgentRecord,
+  AgentTransportPolicySnapshot,
   ConnectionSnapshot,
   ConnectionSummary,
   RouteTargetsPage,
@@ -13,6 +14,18 @@ import {
   mergeConnectionSnapshot,
   type SnapshotMergeState,
 } from "./agent-connection-snapshot";
+
+function transportPolicy(
+  overrides: Partial<AgentTransportPolicySnapshot> = {},
+): AgentTransportPolicySnapshot {
+  return {
+    direct_inbound: { configured: true, effective: true },
+    direct_outbound: { configured: true, effective: true },
+    relay_inbound: { configured: true, effective: true },
+    relay_outbound: { configured: true, effective: true },
+    ...overrides,
+  };
+}
 
 function snapshot(
   epoch: string,
@@ -27,6 +40,7 @@ function snapshot(
     observed_at: observedAt,
     agent_id: "agent-a",
     admin_status: 1,
+    transport_policy: transportPolicy(),
     control: {
       state: "connected",
       health: "healthy",
@@ -62,6 +76,7 @@ function snapshot(
     direct: {
       summary: {
         state: "reachable",
+        disabled: 0,
         reachable: 1,
         degraded: 0,
         unreachable: 0,
@@ -88,6 +103,7 @@ function snapshot(
     target_summaries: {
       direct: {
         state: "reachable",
+        disabled: 0,
         reachable: 1,
         degraded: 0,
         unreachable: 0,
@@ -96,6 +112,7 @@ function snapshot(
       },
       relay: {
         state: "reachable",
+        disabled: 0,
         reachable: 1,
         unreachable: 0,
         unavailable: 0,
@@ -230,6 +247,7 @@ describe("mergeConnectionSnapshot", () => {
     expect(result.current?.direct.targets).toEqual(current.direct.targets);
     expect(result.current?.relay.desired).toEqual(current.relay.desired);
     expect(result.current?.allowed_operations).toEqual(current.allowed_operations);
+    expect(result.current?.transport_policy).toEqual(current.transport_policy);
   });
 
   it("lets a same-sequence payload add missing target detail", () => {
@@ -250,6 +268,13 @@ describe("mergeConnectionSnapshot", () => {
       snapshot_epoch: "epoch-a",
       snapshot_seq: 3,
       observed_at: 3,
+      transport_policy: transportPolicy({
+        relay_outbound: {
+          configured: true,
+          effective: false,
+          reason_code: "relay_connection_disabled",
+        },
+      }),
       control: { ...current.control, heartbeat_at: 30 },
       relay: {
         support: "supported",
@@ -270,9 +295,64 @@ describe("mergeConnectionSnapshot", () => {
       control: { heartbeat_at: 30 },
       relay: { active: { streams: 8 } },
       direct: { summary: { reachable: 2, total: 2 } },
+      transport_policy: {
+        relay_outbound: {
+          configured: true,
+          effective: false,
+          reason_code: "relay_connection_disabled",
+        },
+      },
     });
     expect(result.current?.direct.targets).toEqual(current.direct.targets);
     expect(result.current?.relay.desired).toEqual(current.relay.desired);
+  });
+
+  it("keeps a full snapshot transport policy at the equal-sequence boundary", () => {
+    const current = snapshot("epoch-a", 2);
+    const incoming = snapshot("epoch-a", 2, 2, {
+      transport_policy: transportPolicy({
+        direct_inbound: {
+          configured: false,
+          effective: false,
+          reason_code: "target_direct_inbound_disabled",
+        },
+      }),
+    });
+
+    const result = mergeConnectionSnapshot(state(current), incoming);
+
+    expect(result.current?.transport_policy).toEqual(incoming.transport_policy);
+  });
+
+  it("does not let a stale list summary overwrite the current transport policy", () => {
+    const current = snapshot("epoch-a", 3, 3, {
+      transport_policy: transportPolicy({
+        relay_inbound: { configured: false, effective: false },
+      }),
+    });
+    const stale: ConnectionSummary = {
+      version: "v1",
+      snapshot_epoch: "epoch-a",
+      snapshot_seq: 2,
+      observed_at: 2,
+      transport_policy: transportPolicy(),
+      control: current.control,
+      relay: {
+        support: current.relay.support,
+        config: current.relay.config,
+        availability: current.relay.availability,
+        accepting_new_streams: current.relay.accepting_new_streams,
+        convergence: current.relay.convergence,
+        streams: current.relay.active.streams,
+      },
+      direct: current.direct.summary,
+      targets: current.target_summaries,
+    };
+
+    const result = mergeConnectionSnapshot(state(current), stale);
+
+    expect(result.current).toBe(current);
+    expect(result.current?.transport_policy.relay_inbound.configured).toBe(false);
   });
 });
 
@@ -363,7 +443,10 @@ describe("agent wire records", () => {
       proxy_url: "",
       relay_mode: "custom",
       relay_uri: "wss://relay.example/ws",
-      peer_route_mode: "direct_first",
+      direct_inbound_enabled: true,
+      direct_outbound_enabled: false,
+      relay_inbound_enabled: false,
+      relay_outbound_enabled: true,
       last_seen: 10,
       created_at: 1,
     } satisfies AgentRecord;
@@ -376,7 +459,10 @@ describe("agent wire records", () => {
       tags: "wan",
       proxy_url: "",
       relay_mode: "custom",
-      peer_route_mode: "direct_first",
+      direct_inbound_enabled: true,
+      direct_outbound_enabled: false,
+      relay_inbound_enabled: false,
+      relay_outbound_enabled: true,
       last_seen: 10,
       created_at: 1,
       connection: {
@@ -384,6 +470,7 @@ describe("agent wire records", () => {
         snapshot_epoch: value.snapshot_epoch,
         snapshot_seq: value.snapshot_seq,
         observed_at: value.observed_at,
+        transport_policy: value.transport_policy,
         control: value.control,
         relay: {
           support: value.relay.support,

@@ -71,7 +71,7 @@ func runResetRepro(results []state.AttemptResult) *state.RelayContext {
 		Context: nil,
 		Agent:   &stubExecAgent{},
 		Input:   state.RelayInput{Body: []byte(`{"model":"x"}`), UserInfo: &app.UserInfo{TokenID: 1}},
-		State:   &state.RelayState{Recorder: trace.NewRecorder(false, 0), Plan: plan}, // 关 trace
+		State:   &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0), Plan: plan}, // 关 trace
 	}
 	e.Run(rctx)
 	return rctx

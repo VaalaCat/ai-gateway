@@ -43,7 +43,10 @@ export function ScriptForm({ mode }: { mode: Mode }) {
   const [enabled, setEnabled] = useState(true);
   const [priority, setPriority] = useState("0");
   const [channelIds, setChannelIds] = useState<number[]>([]);
+  const [privateChannelIds, setPrivateChannelIds] = useState<number[]>([]);
   const [modelNames, setModelNames] = useState<string[]>([]);
+  const [groupIds, setGroupIds] = useState<number[]>([]);
+  const [userIds, setUserIds] = useState<number[]>([]);
 
   // prefilled 守卫：只在首次拿到 existing 时回填一次，避免后台 refetch
   // （staleTime/refetchOnWindowFocus）用服务端旧值覆盖用户正在编辑的输入。
@@ -56,7 +59,10 @@ export function ScriptForm({ mode }: { mode: Mode }) {
       setEnabled(existing.enabled);
       setPriority(String(existing.priority));
       setChannelIds(existing.scope?.channel_ids ?? []);
+      setPrivateChannelIds(existing.scope?.private_channel_ids ?? []);
       setModelNames(existing.scope?.model_names ?? []);
+      setGroupIds(existing.scope?.group_ids ?? []);
+      setUserIds(existing.scope?.user_ids ?? []);
     }
   }, [mode.kind, existing]);
 
@@ -68,7 +74,13 @@ export function ScriptForm({ mode }: { mode: Mode }) {
       code,
       enabled,
       priority: Number(priority) || 0,
-      scope: { channel_ids: channelIds, model_names: modelNames },
+      scope: {
+        channel_ids: channelIds,
+        private_channel_ids: privateChannelIds,
+        model_names: modelNames,
+        group_ids: groupIds,
+        user_ids: userIds,
+      },
     };
     try {
       if (mode.kind === "edit") {
@@ -85,7 +97,7 @@ export function ScriptForm({ mode }: { mode: Mode }) {
 
   return (
     <div className="space-y-6">
-      {/* 紧凑 meta/作用域：名称 / 优先级 / 启用 / 频道 / 模型 一行（移动端堆叠） */}
+      {/* 紧凑 meta/作用域；移动端自然纵向排列。 */}
       <div className="rounded-lg border bg-card p-4 shadow-sm">
         <div className="flex flex-col gap-4 md:flex-row md:flex-wrap md:items-end">
           <div className="grid gap-1.5 md:min-w-[14rem] md:flex-1">
@@ -138,8 +150,44 @@ export function ScriptForm({ mode }: { mode: Mode }) {
           </div>
 
           <div className="grid gap-1.5 md:min-w-[12rem] md:flex-1">
+            <FieldLabel>{t("scopePrivateChannels")}</FieldLabel>
+            <EntityMultiPicker
+              entity="byok-channel"
+              scope="all"
+              value={privateChannelIds.map(String)}
+              onChange={(vals) => setPrivateChannelIds(vals.map(Number))}
+              placeholder={t("selectPrivateChannels")}
+            />
+          </div>
+
+          <div className="grid gap-1.5 md:min-w-[12rem] md:flex-1">
             <FieldLabel>{t("scopeModels")}</FieldLabel>
-            <ModelSelector mode="multi" value={modelNames} onChange={setModelNames} placeholder={t("selectModels")} />
+            <ModelSelector
+              mode="multi"
+              value={modelNames}
+              onChange={setModelNames}
+              placeholder={t("selectModels")}
+            />
+          </div>
+
+          <div className="grid gap-1.5 md:min-w-[12rem] md:flex-1">
+            <FieldLabel>{t("scopeGroups")}</FieldLabel>
+            <EntityMultiPicker
+              entity="user-group"
+              value={groupIds.map(String)}
+              onChange={(vals) => setGroupIds(vals.map(Number))}
+              placeholder={t("selectGroups")}
+            />
+          </div>
+
+          <div className="grid gap-1.5 md:min-w-[12rem] md:flex-1">
+            <FieldLabel>{t("scopeUsers")}</FieldLabel>
+            <EntityMultiPicker
+              entity="user"
+              value={userIds.map(String)}
+              onChange={(vals) => setUserIds(vals.map(Number))}
+              placeholder={t("selectUsers")}
+            />
           </div>
         </div>
       </div>

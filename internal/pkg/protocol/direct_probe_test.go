@@ -12,11 +12,10 @@ import (
 
 func TestDirectProbeProtocolJSONExact(t *testing.T) {
 	require.Equal(t, "agent.directProbe", consts.RPCAgentDirectProbe)
-	require.Equal(t, "agent_direct_ingress_v1", protocol.AgentCapabilityDirectIngressV1)
+	require.Equal(t, "agent_direct_tunnel_v1", protocol.AgentCapabilityDirectTunnelV1)
+	require.Equal(t, "agent_tunnel_v2", protocol.AgentCapabilityTunnelV2)
 	require.Equal(t, "agent.relayProbe", consts.RPCAgentRelayProbe)
 	require.Equal(t, "agent_relay_http_ping_v1", protocol.AgentCapabilityRelayHTTPPingV1)
-	require.Equal(t, "direct_ingress_v1", protocol.DirectIngressContractV1)
-	require.Equal(t, "/v1/direct-ingress/identity", protocol.DirectIngressIdentityPath)
 
 	tests := []struct {
 		name  string
@@ -28,15 +27,9 @@ func TestDirectProbeProtocolJSONExact(t *testing.T) {
 			value: protocol.DirectProbeTarget{
 				TargetAgentID: "agent-b", Addresses: []agentproxy.Address{{URL: "https://b.example", Tag: "wan"}},
 				EffectiveProxy: "http://proxy.example", AddressFingerprint: "fp-b", TargetGeneration: 12,
+				Policy: protocol.ProbeRespectBusinessPolicy,
 			},
-			want: `{"target_agent_id":"agent-b","addresses":[{"url":"https://b.example","tag":"wan"}],"effective_proxy":"http://proxy.example","address_fingerprint":"fp-b","target_generation":12}`,
-		},
-		{
-			name: "direct ingress identity",
-			value: protocol.DirectIngressIdentity{
-				Contract: protocol.DirectIngressContractV1, Role: "agent", AgentID: "agent-b",
-			},
-			want: `{"contract":"direct_ingress_v1","role":"agent","agent_id":"agent-b"}`,
+			want: `{"target_agent_id":"agent-b","addresses":[{"url":"https://b.example","tag":"wan"}],"effective_proxy":"http://proxy.example","address_fingerprint":"fp-b","target_generation":12,"policy":"respect_business_policy"}`,
 		},
 		{
 			name: "ordered direct addresses update",
@@ -58,9 +51,18 @@ func TestDirectProbeProtocolJSONExact(t *testing.T) {
 			name: "result omits empty reason",
 			value: protocol.DirectProbeResult{
 				TargetAgentID: "agent-b", AddressFingerprint: "fp-b", Network: "reachable", Identity: "verified",
-				Eligible: true, LatencyMS: 19, CheckedAt: 123,
+				Eligible: true, LatencyMS: 19, CheckedAt: 123, Policy: protocol.ProbeRespectBusinessPolicy,
 			},
-			want: `{"target_agent_id":"agent-b","address_fingerprint":"fp-b","network":"reachable","identity":"verified","eligible":true,"latency_ms":19,"checked_at":123}`,
+			want: `{"target_agent_id":"agent-b","address_fingerprint":"fp-b","network":"reachable","identity":"verified","eligible":true,"latency_ms":19,"checked_at":123,"policy":"respect_business_policy","policy_disabled":false}`,
+		},
+		{
+			name: "manual policy disabled result",
+			value: protocol.DirectProbeResult{
+				TargetAgentID: "agent-b", AddressFingerprint: "fp-b", Network: "reachable", Identity: "verified",
+				CheckedAt: 123, Policy: protocol.ProbeBypassBusinessPolicy,
+				PolicyDisabled: true, PolicyReasonCode: consts.RouteErrorSourceDirectOutboundDisabled,
+			},
+			want: `{"target_agent_id":"agent-b","address_fingerprint":"fp-b","network":"reachable","identity":"verified","eligible":false,"latency_ms":0,"checked_at":123,"policy":"bypass_business_policy","policy_disabled":true,"policy_reason_code":"source_direct_outbound_disabled"}`,
 		},
 		{
 			name:  "scope omits optional fields",

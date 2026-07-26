@@ -6,8 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // resetCmdFlags resets all flags in the command tree to their default values
@@ -65,6 +69,30 @@ func TestMasterHelp(t *testing.T) {
 	for _, flag := range []string{"--config", "--listen", "--log-level"} {
 		if !strings.Contains(out, flag) {
 			t.Errorf("master help missing flag %q", flag)
+		}
+	}
+}
+
+func TestWarnDeprecatedMasterDBPathIncludesResolvedSplitPaths(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+	cfg := config.MasterConfig{
+		DBPath: "/data/core.db", LogDBPath: "/data/log.db", LegacyDBPath: "/data/master.db",
+		UsesDeprecatedDBPath: true,
+	}
+
+	warnDeprecatedMasterDBPath(logger, cfg)
+
+	entries := logs.All()
+	if len(entries) != 1 {
+		t.Fatalf("warning entries = %d, want 1", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	for key, want := range map[string]string{
+		"core_db_path": cfg.DBPath, "log_db_path": cfg.LogDBPath, "legacy_db_path": cfg.LegacyDBPath,
+	} {
+		if got := fields[key]; got != want {
+			t.Fatalf("warning %s = %v, want %q", key, got, want)
 		}
 	}
 }

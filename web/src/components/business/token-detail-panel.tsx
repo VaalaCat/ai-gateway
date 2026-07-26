@@ -1,13 +1,13 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { Badge } from "@/components/ui/badge";
 import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
 import { EntityLabel } from "@/components/business/entity-label";
 import { StatusBadge } from "@/components/business/status-badge";
 import { TokenAvailableModels } from "@/components/business/token-available-models";
 import { TokenModelRoutings } from "@/components/business/token-model-routings";
+import { TokenTraceBadge } from "@/components/business/token-trace-fields";
 import { Separator } from "@/components/ui/separator";
 import { useAuth } from "@/lib/auth";
 import { parseModels } from "@/lib/parse-models";
@@ -19,7 +19,6 @@ interface TokenDetailPanelProps {
 
 export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
   const t = useTranslations("tokenDetail");
-  const tCommon = useTranslations("common");
   const { isAdmin } = useAuth();
 
   const filterRules = parseModels(token.models ?? "");
@@ -61,11 +60,9 @@ export function TokenDetailPanel({ token }: TokenDetailPanelProps) {
               ? <span className="font-mono">#{token.template_id}</span>
               : <span className="text-muted-foreground">-</span>}
           </Field>
-          {token.trace_enabled && (
-            <Field label={t("fieldTrace")}>
-              <Badge variant="secondary">{tCommon("enabled")}</Badge>
-            </Field>
-          )}
+          <Field label={t("fieldTrace")}>
+            <TokenTraceBadge enabled={token.trace_enabled} mode={token.trace_mode} />
+          </Field>
           {channelIds.length > 0 && (
             <Field label={t("fieldChannels")}>
               <span className="flex flex-wrap gap-x-2 gap-y-1">

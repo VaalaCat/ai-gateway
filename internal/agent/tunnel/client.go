@@ -207,7 +207,7 @@ func (d *ClientDialer) Dial(
 	if json.Unmarshal(payload, &welcome) != nil || welcome.MasterInstanceID != bootstrap.MasterInstanceID || welcome.SessionGeneration == 0 {
 		return nil, errors.New("agent tunnel: invalid WELCOME")
 	}
-	if _, err := wire.NormalizeV1Limits(welcome.Limits); err != nil {
+	if _, err := wire.NormalizeV2Limits(welcome.Limits); err != nil {
 		return nil, errors.New("agent tunnel: invalid WELCOME limits")
 	}
 	if d.opts.Limits != nil && !sessionLimitsAllowed(welcome.Limits, d.opts.Limits()) {
@@ -266,7 +266,9 @@ func (d *ClientDialer) Dial(
 		return nil, errors.New("agent tunnel: handshake stopped")
 	}
 	succeeded = true
-	return newSession(conn, welcome.SessionGeneration, welcome.Limits, SessionOptions{TargetHandler: d.opts.TargetHandler, Logger: d.opts.Logger}), nil
+	return newSession(conn, welcome.SessionGeneration, welcome.Limits, SessionOptions{
+		Direction: SessionDirectionRelay, TargetHandler: d.opts.TargetHandler, Logger: d.opts.Logger,
+	}), nil
 }
 
 type bootstrapKeySource []agentauth.PublicKey

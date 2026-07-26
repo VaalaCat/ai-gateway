@@ -61,7 +61,7 @@ func TestSettleOne_AdminChannelRatio_Discounted(t *testing.T) {
 	db.Create(&models.User{Username: "alice", Password: "x", Role: 1, Status: 1, Quota: 1000000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 5.0, OutputPrice: 15.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{{
 		RequestID: "ratio-req-1", UserID: 1, OwnerType: "admin", ChannelID: 5,
 		ModelName: "gpt-4o", PromptTokens: 100, CompletionTokens: 50,
@@ -91,7 +91,7 @@ func TestSettleOne_AdminChannelRatio_ZeroIsFullPrice(t *testing.T) {
 	db.Create(&models.User{Username: "bob", Password: "x", Role: 1, Status: 1, Quota: 1000000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 5.0, OutputPrice: 15.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	// 不设 PriceRatio,零值 0 → 全价(与旧 agent 行为一致)。
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{{
 		RequestID: "ratio-zero-1", UserID: 1, OwnerType: "admin", ChannelID: 5,

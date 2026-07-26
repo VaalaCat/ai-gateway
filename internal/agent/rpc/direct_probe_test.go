@@ -1,310 +1,313 @@
 package rpc
 
 import (
-	"bufio"
 	"context"
-	"crypto/tls"
-	"encoding/json"
-	"fmt"
-	"net"
+	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/stretchr/testify/require"
 )
 
-type directProbeMetric struct{ results []pkgmetrics.ProbeResult }
-
-func (m *directProbeMetric) IncDirectProbe(result pkgmetrics.ProbeResult) {
-	m.results = append(m.results, result)
+type directProbePoolStub struct {
+	targets  []agentproxy.DirectSessionTarget
+	requests []app.ProbeStreamRequest
+	stream   app.ProbeStream
+	err      error
 }
 
-func TestDirectProbeMetricRecordsOneBoundedResultPerProbe(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"contract":"direct_ingress_v1","role":"agent","agent_id":"agent-b"}`))
-	}))
-	t.Cleanup(server.Close)
-	metric := &directProbeMetric{}
-	prober := NewDirectProber(DirectProberOptions{Metrics: metric})
-
-	prober.Probe(t.Context(), directProbeTarget(server.URL, "agent-b"))
-	prober.Probe(t.Context(), protocol.DirectProbeTarget{})
-	cancelled, cancel := context.WithCancel(t.Context())
-	cancel()
-	prober.Probe(cancelled, directProbeTarget(server.URL, "agent-b"))
-
-	require.Equal(t, []pkgmetrics.ProbeResult{
-		pkgmetrics.ProbeVerified, pkgmetrics.ProbeInvalid, pkgmetrics.ProbeCancelled,
-	}, metric.results)
+func (p *directProbePoolStub) OpenProbeStream(
+	_ context.Context,
+	target agentproxy.DirectSessionTarget,
+	request app.ProbeStreamRequest,
+) (app.ProbeStream, error) {
+	p.targets = append(p.targets, target)
+	p.requests = append(p.requests, request)
+	return p.stream, p.err
 }
 
-type directProbeRoundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f directProbeRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return f(request)
+type directProbeStreamStub struct {
+	status      int
+	body        string
+	commitState wire.CommitState
+	commitErr   error
+	uploadErr   error
+	responseErr error
+	ops         []string
+	cancelled   bool
 }
 
-type cancellingDirectProbeBody struct {
-	ctx     context.Context
-	started chan struct{}
+func (s *directProbeStreamStub) Commit(context.Context) error {
+	s.ops = append(s.ops, "commit")
+	return s.commitErr
 }
 
-func (b *cancellingDirectProbeBody) Read([]byte) (int, error) {
-	close(b.started)
-	<-b.ctx.Done()
-	return 0, context.Cause(b.ctx)
+func (s *directProbeStreamStub) Upload(_ context.Context, src io.Reader) error {
+	s.ops = append(s.ops, "upload")
+	body, _ := io.ReadAll(src)
+	if len(body) != 0 {
+		return errors.New("probe upload must be empty")
+	}
+	return s.uploadErr
 }
 
-func (*cancellingDirectProbeBody) Close() error { return nil }
+func (s *directProbeStreamStub) CopyResponse(_ context.Context, dst http.ResponseWriter) error {
+	s.ops = append(s.ops, "response")
+	if s.responseErr != nil {
+		return s.responseErr
+	}
+	status := s.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	dst.WriteHeader(status)
+	_, err := io.WriteString(dst, s.body)
+	return err
+}
 
-func TestDirectProbeVerifiesAgentIdentityWithoutBusinessHeaders(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, protocol.DirectIngressIdentityPath, r.URL.Path)
-		require.Equal(t, "agent-b", r.URL.Query().Get("target_agent_id"))
-		require.Len(t, r.URL.Query(), 1)
-		for _, header := range []string{"Authorization", "X-API-Key", "X-Vaala-Forward-Ticket"} {
-			require.Empty(t, r.Header.Get(header), header)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"contract":"direct_ingress_v1","role":"agent","agent_id":"agent-b"}`))
-	}))
-	t.Cleanup(server.Close)
+func (s *directProbeStreamStub) CommitState() wire.CommitState { return s.commitState }
+func (s *directProbeStreamStub) Cancel(error) {
+	s.cancelled = true
+	s.ops = append(s.ops, "cancel")
+}
+func (s *directProbeStreamStub) Close() error {
+	s.ops = append(s.ops, "close")
+	return nil
+}
 
-	result := NewDirectProber(DirectProberOptions{}).Probe(t.Context(), protocol.DirectProbeTarget{
-		TargetAgentID: "agent-b", AddressFingerprint: "fp-b",
-		Addresses: []protocol.Address{{URL: server.URL + "/ignored/base?stale=value#fragment"}},
+type directProbeOpenFailure struct {
+	stage  string
+	reason string
+}
+
+func (e directProbeOpenFailure) Error() string          { return "typed direct open failure" }
+func (e directProbeOpenFailure) Stage() string          { return e.stage }
+func (e directProbeOpenFailure) ReasonCode() string     { return e.reason }
+func (e directProbeOpenFailure) CountsForCircuit() bool { return true }
+
+type directProbeResetError struct{ code string }
+
+func (e directProbeResetError) Error() string     { return "direct reset" }
+func (e directProbeResetError) ResetCode() string { return e.code }
+
+func TestDirectProbeUsesP2PSessionAndPassesPolicy(t *testing.T) {
+	stream := &directProbeStreamStub{commitState: wire.Committed, body: `{"status":"ok"}`}
+	pool := &directProbePoolStub{stream: stream}
+	now := time.Unix(100, 0)
+	prober := NewDirectProber(DirectProberOptions{
+		Pool: pool,
+		Now: func() time.Time {
+			now = now.Add(7 * time.Millisecond)
+			return now
+		},
+		Timeout: time.Second,
 	})
-	require.Equal(t, protocol.DirectProbeResult{
-		TargetAgentID: "agent-b", AddressFingerprint: "fp-b", Network: "reachable",
-		Identity: "verified", Eligible: true, CheckedAt: result.CheckedAt, LatencyMS: result.LatencyMS,
-	}, result)
-	require.Positive(t, result.CheckedAt)
-	require.GreaterOrEqual(t, result.LatencyMS, int64(0))
+
+	result := prober.Probe(t.Context(), protocol.DirectProbeTarget{
+		TargetAgentID: "agent-b", AddressFingerprint: "probe-fp", TargetGeneration: 12,
+		Addresses:      []protocol.Address{{URL: "https://agent-b.example/base", Tag: "wan"}},
+		EffectiveProxy: "http://proxy.example:8080",
+		Policy:         protocol.ProbeRespectBusinessPolicy,
+	})
+
+	require.Equal(t, "reachable", result.Network)
+	require.Equal(t, "verified", result.Identity)
+	require.True(t, result.Eligible)
+	require.Equal(t, protocol.ProbeRespectBusinessPolicy, result.Policy)
+	require.False(t, result.PolicyDisabled)
+	require.Empty(t, result.PolicyReasonCode)
+	require.Equal(t, []string{"commit", "upload", "response", "close"}, stream.ops)
+	require.Len(t, pool.targets, 1)
+	require.Equal(t, "agent-b", pool.targets[0].TargetAgentID)
+	require.Equal(t, "probe-fp", pool.targets[0].AddressFingerprint)
+	require.Equal(t, "https://agent-b.example/base", pool.targets[0].WebSocketURL.String())
+	require.Equal(t, "http://proxy.example:8080", pool.targets[0].ProxyURL.String())
+	require.Equal(t, []app.ProbeStreamRequest{{
+		TargetAgentID: "agent-b", RequestID: "direct-connectivity-probe",
+		Remaining: pool.requests[0].Remaining, Policy: app.ProbeRespectBusinessPolicy,
+	}}, pool.requests)
+	require.Positive(t, pool.requests[0].Remaining)
 }
 
-func TestDirectProbeAnyHTTPResponseIsNetworkReachable(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	}))
-	t.Cleanup(server.Close)
+func TestDirectProbePassesManualBypassPolicy(t *testing.T) {
+	pool := &directProbePoolStub{stream: &directProbeStreamStub{commitState: wire.Committed, body: `{"status":"ok"}`}}
+	result := NewDirectProber(DirectProberOptions{Pool: pool}).Probe(t.Context(), directProbeTargetForTest(protocol.ProbeBypassBusinessPolicy))
+	require.True(t, result.Eligible)
+	require.Equal(t, app.ProbeBypassBusinessPolicy, pool.requests[0].Policy)
+	require.Equal(t, protocol.ProbeBypassBusinessPolicy, result.Policy)
+}
 
-	result := directProbeForTest(t, server.URL, "agent-b")
-	require.Equal(t, "reachable", result.Network)
-	require.Equal(t, "unverified", result.Identity)
+func TestDirectProbeClassifiesTypedOpenFailure(t *testing.T) {
+	pool := &directProbePoolStub{err: directProbeOpenFailure{stage: "credentials", reason: "invalid"}}
+	result := NewDirectProber(DirectProberOptions{Pool: pool}).Probe(t.Context(), directProbeTargetForTest(protocol.ProbeRespectBusinessPolicy))
+	require.Equal(t, "unreachable", result.Network)
+	require.Equal(t, "unknown", result.Identity)
 	require.False(t, result.Eligible)
-	require.Equal(t, "http_status", result.ReasonCode)
+	require.Equal(t, "credentials", result.Stage)
+	require.Equal(t, consts.RouteErrorDirectAuthUnavailable, result.ReasonCode)
 }
 
-func TestDirectProbeRejectsWrongOrInvalidIdentity(t *testing.T) {
+func TestDirectProbeFailsClosedAtPoolBoundary(t *testing.T) {
 	tests := []struct {
-		name, body, identity, reason string
+		name string
+		pool agentproxy.DirectProbeStreamOpener
 	}{
-		{name: "wrong contract", body: `{"contract":"other","role":"agent","agent_id":"agent-b"}`, identity: "mismatch", reason: "identity_contract_mismatch"},
-		{name: "wrong role", body: `{"contract":"direct_ingress_v1","role":"master","agent_id":"agent-b"}`, identity: "mismatch", reason: "identity_role_mismatch"},
-		{name: "wrong id", body: `{"contract":"direct_ingress_v1","role":"agent","agent_id":"agent-c"}`, identity: "mismatch", reason: "identity_agent_mismatch"},
-		{name: "malformed", body: `{`, identity: "invalid", reason: "identity_malformed"},
-		{name: "oversized", body: strings.Repeat("x", (64<<10)+1), identity: "invalid", reason: "identity_too_large"},
+		{name: "nil pool"},
+		{name: "nil stream", pool: &directProbePoolStub{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(test.body))
-			}))
-			defer server.Close()
-			result := directProbeForTest(t, server.URL, "agent-b")
-			require.Equal(t, "reachable", result.Network)
-			require.Equal(t, test.identity, result.Identity)
-			require.False(t, result.Eligible)
-			require.Equal(t, test.reason, result.ReasonCode)
-		})
-	}
-}
-
-func TestDirectProbeRejectsInterruptedBody(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close()
-		_, _ = bufio.NewReader(conn).ReadString('\n')
-		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n{")
-	}()
-
-	result := directProbeForTest(t, "http://"+listener.Addr().String(), "agent-b")
-	<-done
-	require.Equal(t, "reachable", result.Network)
-	require.Equal(t, "invalid", result.Identity)
-	require.Equal(t, "identity_interrupted", result.ReasonCode)
-}
-
-func TestDirectProbeClassifiesDNSConnectAndTLSFailures(t *testing.T) {
-	dnsTransport := http.DefaultTransport.(*http.Transport).Clone()
-	dnsTransport.DialContext = func(context.Context, string, string) (net.Conn, error) {
-		return nil, &net.DNSError{Err: "no such host", Name: "direct-probe.invalid", IsNotFound: true}
-	}
-	dns := NewDirectProber(DirectProberOptions{Transport: dnsTransport}).Probe(
-		t.Context(), directProbeTarget("http://direct-probe.invalid", "agent-b"),
-	)
-	require.Equal(t, "unreachable", dns.Network)
-	require.Equal(t, "direct_dns", dns.ReasonCode)
-
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	closedAddress := closed.Addr().String()
-	require.NoError(t, closed.Close())
-
-	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	t.Cleanup(tlsServer.Close)
-
-	tests := []struct {
-		name, address, reason string
-	}{
-		{name: "connect", address: "http://" + closedAddress, reason: "direct_connect"},
-		{name: "tls", address: tlsServer.URL, reason: "direct_tls"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			result := directProbeForTest(t, test.address, "agent-b")
+			var result protocol.DirectProbeResult
+			require.NotPanics(t, func() {
+				result = NewDirectProber(DirectProberOptions{Pool: test.pool}).Probe(
+					t.Context(), directProbeTargetForTest(protocol.ProbeRespectBusinessPolicy),
+				)
+			})
 			require.Equal(t, "unreachable", result.Network)
 			require.Equal(t, "unknown", result.Identity)
 			require.False(t, result.Eligible)
+			require.Equal(t, "pool", result.Stage)
+			require.Equal(t, consts.RouteErrorDirectDisabled, result.ReasonCode)
+		})
+	}
+}
+
+func TestDirectProbeProjectsRespectTargetPolicyReset(t *testing.T) {
+	tests := []struct {
+		name           string
+		policy         protocol.ProbePolicy
+		pool           *directProbePoolStub
+		wantDisabled   bool
+		wantNetwork    string
+		wantIdentity   string
+		wantReasonCode string
+	}{
+		{
+			name: "open reset", policy: protocol.ProbeRespectBusinessPolicy,
+			pool:         &directProbePoolStub{err: directProbeResetError{code: consts.RouteErrorTargetDirectInboundDisabled}},
+			wantDisabled: true, wantNetwork: "reachable", wantIdentity: "verified",
+		},
+		{
+			name: "commit reset", policy: protocol.ProbeRespectBusinessPolicy,
+			pool: &directProbePoolStub{stream: &directProbeStreamStub{
+				commitState: wire.PreCommit, commitErr: directProbeResetError{code: consts.RouteErrorTargetDirectInboundDisabled},
+			}},
+			wantDisabled: true, wantNetwork: "reachable", wantIdentity: "verified",
+		},
+		{
+			name: "bypass does not project policy", policy: protocol.ProbeBypassBusinessPolicy,
+			pool: &directProbePoolStub{stream: &directProbeStreamStub{
+				commitState: wire.PreCommit, commitErr: directProbeResetError{code: consts.RouteErrorTargetDirectInboundDisabled},
+			}},
+			wantNetwork: "unreachable", wantIdentity: "unknown",
+			wantReasonCode: consts.RouteErrorTargetDirectInboundDisabled,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := NewDirectProber(DirectProberOptions{Pool: test.pool}).Probe(
+				t.Context(), directProbeTargetForTest(test.policy),
+			)
+			require.Equal(t, test.wantNetwork, result.Network)
+			require.Equal(t, test.wantIdentity, result.Identity)
+			require.False(t, result.Eligible)
+			require.Equal(t, test.wantDisabled, result.PolicyDisabled)
+			if test.wantDisabled {
+				require.Equal(t, consts.RouteErrorTargetDirectInboundDisabled, result.PolicyReasonCode)
+				require.Empty(t, result.ReasonCode)
+			} else {
+				require.Empty(t, result.PolicyReasonCode)
+				require.Equal(t, test.wantReasonCode, result.ReasonCode)
+			}
+		})
+	}
+}
+
+func TestDirectProbeMetricUsesPhysicalVerificationResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		result protocol.DirectProbeResult
+		want   pkgmetrics.ProbeResult
+	}{
+		{name: "eligible verified", result: protocol.DirectProbeResult{Network: "reachable", Identity: "verified", Eligible: true}, want: pkgmetrics.ProbeVerified},
+		{name: "policy disabled verified", result: protocol.DirectProbeResult{
+			Network: "reachable", Identity: "verified", PolicyDisabled: true,
+			PolicyReasonCode: consts.RouteErrorTargetDirectInboundDisabled,
+		}, want: pkgmetrics.ProbeVerified},
+		{name: "cancelled", result: protocol.DirectProbeResult{ReasonCode: consts.RouteErrorRequestCancelled}, want: pkgmetrics.ProbeCancelled},
+		{name: "unreachable", result: protocol.DirectProbeResult{Network: "unreachable", ReasonCode: consts.RouteErrorDirectConnect}, want: pkgmetrics.ProbeUnreachable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, directProbeMetricResult(test.result))
+		})
+	}
+}
+
+func TestDirectProbeBoundsAndValidatesPingResponse(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		reason string
+	}{
+		{name: "http status", status: http.StatusBadGateway, body: `{"status":"ok"}`, reason: consts.RouteErrorDirectProbeHTTPStatus},
+		{name: "malformed", body: `{`, reason: consts.RouteErrorDirectProbeInvalidResponse},
+		{name: "wrong status", body: `{"status":"warming"}`, reason: consts.RouteErrorDirectProbeInvalidResponse},
+		{name: "too large", body: strings.Repeat("x", directProbeBodyLimit+1), reason: consts.RouteErrorDirectProbeBodyTooLarge},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pool := &directProbePoolStub{stream: &directProbeStreamStub{
+				commitState: wire.Committed, status: test.status, body: test.body,
+			}}
+			result := NewDirectProber(DirectProberOptions{Pool: pool}).Probe(t.Context(), directProbeTargetForTest(protocol.ProbeRespectBusinessPolicy))
+			require.Equal(t, "reachable", result.Network)
+			require.Equal(t, "verified", result.Identity)
+			require.False(t, result.Eligible)
 			require.Equal(t, test.reason, result.ReasonCode)
 		})
 	}
 }
 
-func TestDirectProbeUsesTLSAndEffectiveProxy(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"contract":"direct_ingress_v1","role":"agent","agent_id":"agent-b"}`))
-	}))
-	t.Cleanup(server.Close)
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec -- test TLS endpoint
-	prober := NewDirectProber(DirectProberOptions{Transport: transport})
-	result := prober.Probe(t.Context(), protocol.DirectProbeTarget{
-		TargetAgentID: "agent-b", Addresses: []protocol.Address{{URL: server.URL}},
-	})
-	require.True(t, result.Eligible)
-}
-
-func TestDirectProbeHonorsContextCancellation(t *testing.T) {
-	started := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-		close(started)
-		<-request.Context().Done()
-	}))
-	t.Cleanup(server.Close)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan protocol.DirectProbeResult, 1)
-	go func() {
-		done <- NewDirectProber(DirectProberOptions{}).Probe(ctx, directProbeTarget(server.URL, "agent-b"))
-	}()
-	<-started
-	cancel()
-	select {
-	case result := <-done:
-		require.Equal(t, "unreachable", result.Network)
-		require.Equal(t, "cancelled", result.ReasonCode)
-	case <-time.After(time.Second):
-		t.Fatal("direct probe ignored context cancellation")
+func TestDirectProbeRejectsInvalidInputsWithoutOpeningPool(t *testing.T) {
+	pool := &directProbePoolStub{}
+	prober := NewDirectProber(DirectProberOptions{Pool: pool})
+	tests := []struct {
+		name   string
+		ctx    context.Context
+		target protocol.DirectProbeTarget
+	}{
+		{name: "nil context", target: directProbeTargetForTest(protocol.ProbeRespectBusinessPolicy)},
+		{name: "empty target", ctx: t.Context(), target: protocol.DirectProbeTarget{Policy: protocol.ProbeRespectBusinessPolicy}},
+		{name: "invalid policy", ctx: t.Context(), target: directProbeTargetForTest(protocol.ProbePolicy("invalid"))},
+		{name: "invalid address", ctx: t.Context(), target: protocol.DirectProbeTarget{
+			TargetAgentID: "agent-b", AddressFingerprint: "fp", Policy: protocol.ProbeRespectBusinessPolicy,
+			Addresses: []protocol.Address{{URL: "file:///tmp/socket"}},
+		}},
 	}
-}
-
-func TestDirectProbeCancellationWhileReadingBodyRemainsUnknown(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	readStarted := make(chan struct{})
-	client := &http.Client{Transport: directProbeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK, Header: make(http.Header), Request: request,
-			Body: &cancellingDirectProbeBody{ctx: request.Context(), started: readStarted},
-		}, nil
-	})}
-	prober := NewDirectProber(DirectProberOptions{})
-	target := directProbeTarget("http://agent-b", "agent-b")
-	done := make(chan protocol.DirectProbeResult, 1)
-	go func() {
-		done <- prober.probeAddress(ctx, client, target, target.Addresses[0], time.Now())
-	}()
-	<-readStarted
-	cancel()
-	select {
-	case result := <-done:
-		require.Equal(t, "reachable", result.Network)
-		require.Equal(t, "unknown", result.Identity)
-		require.Equal(t, "cancelled", result.ReasonCode)
-	case <-time.After(time.Second):
-		t.Fatal("direct probe body read ignored context cancellation")
-	}
-}
-
-func TestDirectProbeOverallTimeoutInterruptsBodyAndReleasesServerHandler(t *testing.T) {
-	var active atomic.Int64
-	var finished atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		active.Add(1)
-		defer finished.Add(1)
-		w.WriteHeader(http.StatusOK)
-		w.(http.Flusher).Flush()
-		<-request.Context().Done()
-	}))
-	t.Cleanup(server.Close)
-
-	prober := NewDirectProber(DirectProberOptions{Timeout: 40 * time.Millisecond})
-	for range 3 {
-		startedAt := time.Now()
-		result := prober.Probe(t.Context(), directProbeTarget(server.URL, "agent-b"))
-		require.Less(t, time.Since(startedAt), time.Second)
-		require.Equal(t, "reachable", result.Network)
-		require.Equal(t, "invalid", result.Identity)
-		require.Equal(t, "identity_interrupted", result.ReasonCode)
-	}
-	require.Eventually(t, func() bool {
-		return active.Load() == 3 && finished.Load() == active.Load()
-	}, time.Second, 10*time.Millisecond)
-}
-
-func TestDirectProbeUsesDefaultTimeoutForNonPositiveOption(t *testing.T) {
-	for _, timeout := range []time.Duration{0, -time.Second} {
-		prober := NewDirectProber(DirectProberOptions{Timeout: timeout})
-		require.Equal(t, 10*time.Second, prober.timeout)
-	}
-}
-
-func TestHandleDirectProbeUsesTypedTarget(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(protocol.DirectIngressIdentity{
-			Contract: protocol.DirectIngressContractV1, Role: "agent", AgentID: "agent-b",
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := prober.Probe(test.ctx, test.target)
+			require.False(t, result.Eligible)
+			require.NotEmpty(t, result.ReasonCode)
 		})
-	}))
-	t.Cleanup(server.Close)
-	raw, err := json.Marshal(directProbeTarget(server.URL, "agent-b"))
-	require.NoError(t, err)
-	got, err := HandleDirectProbe(t.Context(), raw, NewDirectProber(DirectProberOptions{}), nil)
-	require.NoError(t, err)
-	result, ok := got.(protocol.DirectProbeResult)
-	require.True(t, ok)
-	require.True(t, result.Eligible)
+	}
+	require.Empty(t, pool.requests)
 }
 
-func directProbeForTest(t *testing.T, address, agentID string) protocol.DirectProbeResult {
-	t.Helper()
-	return NewDirectProber(DirectProberOptions{}).Probe(t.Context(), directProbeTarget(address, agentID))
-}
-
-func directProbeTarget(address, agentID string) protocol.DirectProbeTarget {
-	return protocol.DirectProbeTarget{TargetAgentID: agentID, AddressFingerprint: "fp", Addresses: []protocol.Address{{URL: address}}}
+func directProbeTargetForTest(policy protocol.ProbePolicy) protocol.DirectProbeTarget {
+	return protocol.DirectProbeTarget{
+		TargetAgentID: "agent-b", AddressFingerprint: "fp", TargetGeneration: 12,
+		Addresses: []protocol.Address{{URL: "http://agent-b.example"}}, Policy: policy,
+	}
 }

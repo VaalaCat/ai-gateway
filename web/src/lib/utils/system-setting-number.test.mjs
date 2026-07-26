@@ -132,87 +132,94 @@ test("wires raw system setting units to human-readable number hints", () => {
   const mappings = [
     {
       label: "fallbackSleep",
-      value: "displayFallbackSleep",
+      value: "draft.fallbackSleep.value",
       unit: 'unit="ms"',
       humanizeAs: "milliseconds",
-      onChange: "setFallbackSleepInput",
+      onChange: "draft.fallbackSleep.change",
     },
     {
       label: "retryBackoffBase",
-      value: "displayRetryBackoffBase",
+      value: "draft.retryBackoffBase.value",
       unit: 'unit="ms"',
       humanizeAs: "milliseconds",
-      onChange: "setRetryBackoffBaseInput",
+      onChange: "draft.retryBackoffBase.change",
     },
     {
       label: "retryBackoffMax",
-      value: "displayRetryBackoffMax",
+      value: "draft.retryBackoffMax.value",
       unit: 'unit="ms"',
       humanizeAs: "milliseconds",
-      onChange: "setRetryBackoffMaxInput",
+      onChange: "draft.retryBackoffMax.change",
     },
     {
       label: "breakerCooldown",
-      value: "displayBreakerCooldown",
+      value: "draft.breakerCooldown.value",
       unit: 'unit="ms"',
       humanizeAs: "milliseconds",
-      onChange: "setBreakerCooldownInput",
+      onChange: "draft.breakerCooldown.change",
     },
     {
       label: "sseKeepalive",
-      value: "displaySseKeepalive",
+      value: "draft.sseKeepalive.value",
       unit: 'unit="ms"',
       humanizeAs: "milliseconds",
-      onChange: "setSseKeepaliveInput",
+      onChange: "draft.sseKeepalive.change",
     },
     {
       label: "queueTime",
-      value: "displayQueueTime",
+      value: "draft.queueTime.value",
       unit: 'unit="ms"',
       humanizeAs: "milliseconds",
-      onChange: "setQueueTimeInput",
+      onChange: "draft.queueTime.change",
     },
     {
       label: "affinityTTL",
-      value: "displayAffinityTTL",
+      value: "draft.affinityTTL.value",
       unit: 'unit="s"',
       humanizeAs: "seconds",
-      onChange: "setAffinityTTLInput",
+      onChange: "draft.affinityTTL.change",
     },
     {
       label: "traceMaxBodySize",
-      value: "String(displayKB)",
+      value: "String(draft.traceMaxBodyKB.value)",
       unit: 'unit={t("traceMaxBodySizeUnit")}',
       humanizeAs: "kilobytes",
-      onChange: "(value) => setTraceMaxBodyKB(Number(value))",
+      onChange: "(value) => draft.traceMaxBodyKB.change(Number(value))",
     },
     {
       label: "imageInlineFetchTimeoutSec",
-      value: "displayImageInlineFetchTimeoutSec",
+      value: "draft.imageInlineFetchTimeoutSec.value",
       unit: 'unit="s"',
       humanizeAs: "seconds",
-      onChange: "setImageInlineFetchTimeoutSecInput",
+      onChange: "draft.imageInlineFetchTimeoutSec.change",
     },
     {
       label: "imageInlineMaxBytes",
-      value: "displayImageInlineMaxBytes",
+      value: "draft.imageInlineMaxBytes.value",
       unit: 'unit="bytes"',
       humanizeAs: "bytes",
-      onChange: "setImageInlineMaxBytesInput",
+      onChange: "draft.imageInlineMaxBytes.change",
     },
     {
       label: "minQuotaReserve",
-      value: "displayMinQuotaReserve",
+      value: "draft.minQuotaReserve.value",
       unit: 'unit="quota"',
       humanizeAs: "quota",
-      onChange: "setMinQuotaReserveInput",
+      onChange: "draft.minQuotaReserve.change",
     },
     {
       label: "pricingDisagreementThreshold",
-      value: "displayPricingThreshold",
+      value: "draft.pricingThreshold.value",
       unit: null,
       humanizeAs: "ratio",
-      onChange: "setPricingThresholdInput",
+      onChange: "draft.pricingThreshold.change",
+    },
+    {
+      label: "rebuildSliceSleep",
+      value: "draft.rebuildSliceSleep.value",
+      unit: 'unit="ms"',
+      humanizeAs: "milliseconds",
+      onChange: "draft.rebuildSliceSleep.change",
     },
   ];
   for (const mapping of mappings) {
@@ -270,6 +277,9 @@ test("wires raw system setting units to human-readable number hints", () => {
     handleSaveStart,
     handlePreviewStart,
   );
+  const compactHandleSaveSettings = handleSaveSettings
+    .replace(/,\s*\)/g, ")")
+    .replace(/\s+/g, "");
   assert.doesNotMatch(handleSaveSettings, /humanizeSettingNumber/);
 
   assert.match(
@@ -291,7 +301,7 @@ test("wires raw system setting units to human-readable number hints", () => {
     "updates.pricing_disagreement_threshold = displayPricingThreshold",
   ]) {
     assert.ok(
-      handleSaveSettings.includes(rawSaveStatement),
+      compactHandleSaveSettings.includes(rawSaveStatement.replace(/\s+/g, "")),
       `${rawSaveStatement} should preserve its raw save contract`,
     );
   }
@@ -299,17 +309,17 @@ test("wires raw system setting units to human-readable number hints", () => {
   const traceField = findJSXBlock(
     systemPageSource,
     "NumField",
-    "value={String(displayKB)}",
+    "value={String(draft.traceMaxBodyKB.value)}",
   );
   assert.ok(traceField.includes("min={4}"));
   assert.ok(traceField.includes("max={16384}"));
-  assert.ok(traceField.includes("onChange={(value) => setTraceMaxBodyKB(Number(value))}"));
+  assert.ok(traceField.includes("onChange={(value) => draft.traceMaxBodyKB.change(Number(value))}"));
   assert.ok(systemPageSource.includes('{t("traceMaxBodySizeRange")}'));
 
   const imageBytesField = findJSXBlock(
     systemPageSource,
     "NumField",
-    "value={displayImageInlineMaxBytes}",
+    "value={draft.imageInlineMaxBytes.value}",
   );
   assert.ok(imageBytesField.includes("min={1024}"));
   assert.ok(imageBytesField.includes("max={104857600}"));
@@ -321,7 +331,7 @@ test("wires raw system setting units to human-readable number hints", () => {
   const pricingThresholdField = findJSXBlock(
     systemPageSource,
     "NumField",
-    "value={displayPricingThreshold}",
+    "value={draft.pricingThreshold.value}",
   );
   assert.ok(
     pricingThresholdField.includes(

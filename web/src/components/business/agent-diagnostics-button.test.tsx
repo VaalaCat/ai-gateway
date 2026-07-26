@@ -37,7 +37,7 @@ function diagnosticsResponse() {
     observed_at: 100,
     control: { state: "connected", health: "healthy", reason_codes: [], session_generation: 1, connected_at: 1, heartbeat_at: 1, runtime_reported_at: 1, last_seen: 1, recent_errors: [] },
     relay: { support: "supported", config: "configured", availability: "ready", accepting_new_streams: true, convergence: "converged", desired: { mode: "inherit", configured_uri: "", effective_uri: "wss://relay.example/ws", desired_generation: 1 }, active: { uri: "wss://relay.example/ws", active_generation: 1, session_generation: 1, connected_at: 1, streams: 0, retry_at: 0 }, recent_errors: [] },
-    direct: { summary: { state: "reachable", reachable: 1, degraded: 0, unreachable: 0, stale: 0, total: 1 }, recent_errors: [] },
+    direct: { summary: { state: "reachable", disabled: 0, reachable: 1, degraded: 0, unreachable: 0, stale: 0, total: 1 }, recent_errors: [] },
     route_failures: [{ request_id: "request-7", source_agent_id: "source", target_agent_id: "target", route_id: 42, path_kind: "relay", stage: "commit", commit_state: "commit_uncertain", reason_code: "relay_commit_uncertain", occurred_at: 99 }],
   };
 }

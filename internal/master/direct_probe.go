@@ -115,7 +115,10 @@ func (f masterProbeTargetFinder) FindEnabledProbeTargets(ctx context.Context, ta
 		targets = append(targets, connectivity.ProbeTarget{
 			AgentID: agent.AgentID, Name: agent.Name, Tags: splitProbeTags(agent.Tags),
 			Addresses: addresses, EffectiveProxy: agentproxy.ResolveProxyURL(agent.ProxyURL, f.globalProxy),
-			ControlGeneration: generation, Capabilities: capabilities, PeerRouteMode: agent.PeerRouteMode,
+			ControlGeneration: generation, Capabilities: capabilities,
+			DirectInboundEnabled: agent.DirectInboundEnabled, DirectOutboundEnabled: agent.DirectOutboundEnabled,
+			RelayInboundEnabled: agent.RelayInboundEnabled, RelayOutboundEnabled: agent.RelayOutboundEnabled,
+			RelayMode: agent.RelayMode,
 		})
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].AgentID < targets[j].AgentID })

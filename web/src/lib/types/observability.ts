@@ -17,17 +17,24 @@ export interface ObsRangeParams {
   gran: ObsGranularity;
 }
 
-/** 单指标时间序列桶,含展示用 label。tokens 含 cache(= 4 个分量之和)。 */
+/**
+ * 单指标时间序列桶,含展示用 label。tokens 含 cache(= 4 个分量之和)。
+ * ttft_ms/tps/cache_hit_rate 是派生序列,仅部分聚合路径(hourly bucket)可算,
+ * 其余路径恒为 0,故设为 optional。cache_hit_rate 是 0-100 百分比。
+ */
 export interface TimeBucket {
   ts: number;
   label: string;
   cost: number;
   requests: number;
   tokens: number;
-  prompt_tokens: number;
-  completion_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  ttft_ms?: number;
+  tps?: number;
+  cache_hit_rate?: number;
 }
 
 /** 多系列堆叠桶，含展示用 label */

@@ -257,7 +257,9 @@ func TestEndToEndFlow(t *testing.T) {
 
 	// Check usage log on master
 	var logCount int64
-	srv.DB.Model(&models.UsageLog{}).Count(&logCount)
+	if err := requestLogDB(t, srv).Count(&logCount).Error; err != nil {
+		t.Fatalf("count request logs: %v", err)
+	}
 	if logCount == 0 {
 		t.Error("no usage logs created on master")
 	} else {

@@ -13,6 +13,7 @@
     "noData": "暂无数据",
     "success": "操作成功",
     "error": "操作失败",
+    "filters": "筛选",
     "status": "状态",
     "enabled": "启用",
     "disabled": "禁用",
@@ -32,6 +33,7 @@
     "selectDate": "选择日期",
     "dateRangeError": "开始日期不能晚于结束日期",
     "shared": "共享",
+    "all": "全部",
     "relayStage": {
       "inbound_decode": "入站解码",
       "outbound_encode": "出站编码",
@@ -109,6 +111,9 @@
       "requests": "请求数",
       "cost": "费用",
       "tokens": "Tokens",
+      "cacheHitRate": "缓存命中率",
+      "ttftAvg": "TTFT 均值",
+      "tpsAvg": "TPS 均值",
       "users": "用户",
       "successRate": "成功率",
       "quota": "额度"
@@ -139,7 +144,29 @@
     },
     "speed": {
       "modelTitle": "模型速度",
-      "channelTitle": "渠道速度"
+      "channelTitle": "渠道速度",
+      "col": {
+        "name": "名称",
+        "ttft": "TTFT(均值 / p95)",
+        "tps": "TPS(均值 / p5)"
+      }
+    },
+    "speedRanking": {
+      "ttftTitle": "TTFT 最快榜",
+      "tpsTitle": "TPS 最快榜",
+      "rank": "排名",
+      "name": "名称",
+      "ttftP95": "TTFT p95",
+      "tpsP5": "TPS p5",
+      "empty": "暂无数据"
+    },
+    "marketShare": {
+      "title": "市场份额",
+      "dimModel": "模型",
+      "dimChannel": "渠道",
+      "percent": "占比 %",
+      "absolute": "绝对量",
+      "others": "其他"
     }
   },
   "users": {
@@ -262,6 +289,16 @@
       "model": "选择模型",
       "agent": "选择节点",
       "token-template": "选择模板"
+    },
+    "label": {
+      "token": "令牌",
+      "user": "用户",
+      "user-group": "用户组",
+      "byok-channel": "BYOK 渠道",
+      "channel": "渠道",
+      "model": "模型",
+      "agent": "节点",
+      "token-template": "模板"
     }
   },
   "tokens": {
@@ -285,6 +322,10 @@
     "weakKeyWarningTitle": "密钥强度较弱",
     "weakKeyWarningDesc": "当前密钥可能较易被猜测，建议提高复杂度。是否仍继续保存？",
     "traceEnabled": "启用追踪",
+    "traceContent": "追踪内容",
+    "traceModeFull": "完整",
+    "traceModeHeaders": "仅 Header",
+    "traceDisabled": "已关闭",
     "template": "模板",
     "selectTemplate": "请选择模板",
     "templateRequired": "请选择模板",
@@ -313,6 +354,15 @@
     "channel": "渠道",
     "channelId": "渠道 ID",
     "channelType": "渠道类型",
+    "filterSearchToken": "搜索令牌名",
+    "filterSearchChannel": "搜索渠道名",
+    "filterMinTokens": "最小总 token",
+    "filterChannelType": "渠道类型",
+    "filterAllTypes": "全部类型",
+    "filterTokenPick": "选择令牌",
+    "filterLabelToken": "令牌",
+    "filterLabelSearch": "名称搜索",
+    "filterLabelChannel": "渠道",
     "totalCost": "累计费用",
     "requestCount": "请求数",
     "successRate": "成功率",
@@ -357,7 +407,13 @@
       "cacheSubFull": "已省 {n} · read {r} · write {w}"
     },
     "spark24h": "24h",
-    "usageTrend": "用量趋势"
+    "usageTrend": "用量趋势",
+    "channelModelBreakdown": {
+      "model": "模型",
+      "billedCost": "实付费用",
+      "rawCost": "原价费用",
+      "empty": "该渠道在此时间范围内无用量数据"
+    }
   },
   "channelTransfer": {
     "importAction": "导入",
@@ -743,6 +799,13 @@
     "stageResilienceDesc": "重试 / 熔断 / 超时覆盖",
     "stageResponse": "响应计费",
     "stageResponseDesc": "状态码映射与计费",
+    "stageUsage": "用量",
+    "stageUsageDesc": "该渠道近期的用量与成本",
+    "usageSavedPlaceholder": "保存渠道后可查看用量",
+    "usageWindow7d": "近 7 天",
+    "usageWindow30d": "近 30 天",
+    "usageSummary": "用量汇总",
+    "usageTotalTokens": "总 Token 数",
     "encodeEndpointsRequired": "至少选择一个端点",
     "dataflowResolvedProtocol": "出站协议:{protocol}",
     "dataflowDetailMappings": "{count} 条映射",
@@ -853,6 +916,10 @@
   "agents": {
     "title": "节点管理",
     "description": "管理分布式代理节点。Agent 连接后自动同步配置并处理 API 请求。",
+    "loadingAgents": "正在加载节点...",
+    "listLoadFailed": "无法加载节点列表",
+    "refreshing": "正在刷新节点...",
+    "dataStale": "刷新失败，正在显示上次加载的数据。",
     "connection": {
       "agent": "Agent",
       "admin": "Admin",
@@ -918,6 +985,9 @@
       "operationDenied": "当前不允许执行此操作",
       "operationFailed": "连接操作失败",
       "loadingDetail": "正在加载连接详情",
+      "detailLoadFailed": "无法加载连接详情",
+      "retry": "重试",
+      "refreshingDetail": "正在刷新连接详情",
       "configuration": "配置",
       "relayRuntime": "运行状态",
       "recentErrors": "最近错误",
@@ -932,7 +1002,27 @@
       "activeStreams": "{count} 个活跃流",
       "relayUriRequired": "自定义模式必须填写 Relay URI。",
       "relayUriTooLong": "Relay URI 最长为 2048 字节。",
-      "relayUriInvalid": "请输入不含凭据和片段的有效 ws:// 或 wss:// URI。"
+      "relayUriInvalid": "请输入不含凭据和片段的有效 ws:// 或 wss:// URI。",
+      "sourceDirectOutboundDisabled": "来源 Agent 已禁用 Direct 出站。",
+      "targetDirectInboundDisabled": "目标 Agent 已禁用 Direct 入站。",
+      "sourceRelayOutboundDisabled": "来源 Agent 已禁用 Relay 出站。",
+      "targetRelayInboundDisabled": "目标 Agent 已禁用 Relay 入站。",
+      "relayConnectionDisabled": "Relay 连接已禁用。"
+    },
+    "transportPolicy": {
+      "title": "传输策略",
+      "inbound": "入站",
+      "outbound": "出站",
+      "direct": "Direct",
+      "relay": "Relay",
+      "direct_inbound_enabled": "允许 Direct 入站流量",
+      "direct_outbound_enabled": "允许 Direct 出站流量",
+      "relay_inbound_enabled": "允许 Relay 入站流量",
+      "relay_outbound_enabled": "允许 Relay 出站流量",
+      "configured": "配置值",
+      "effective": "生效值",
+      "on": "开启",
+      "off": "关闭"
     },
     "agentId": "节点 ID",
     "secret": "密钥",
@@ -960,10 +1050,6 @@
     "addressTag": "标签",
     "addressTagPlaceholder": "如 internal",
     "proxyUrl": "代理地址",
-    "peerRouteMode": "出站路由模式",
-    "peerRouteModeDescription": "控制此 Agent 发往其他 Agent 的新请求使用 Direct 优先，或仅使用 Relay。",
-    "peerRouteDirectFirst": "Direct 优先",
-    "peerRouteRelayOnly": "仅 Relay",
     "proxyUrlPlaceholder": "如 http://proxy:8080",
     "detail": "详情",
     "overview": "总览",
@@ -1075,7 +1161,8 @@
     "filterByModel": "按模型筛选",
     "tokenName": "令牌名称",
     "upstreamModel": "上游模型",
-    "firstResponseMs": "首字延迟",
+    "firstResponseMs": "首字延迟 (TTFT)",
+    "tps": "TPS",
     "cacheReadTokens": "缓存读取",
     "cacheWriteTokens": "缓存写入",
     "inboundProtocol": "入站协议",
@@ -1089,6 +1176,11 @@
     "allStatus": "全部状态",
     "refresh": "刷新",
     "refreshing": "刷新中...",
+    "loadFailed": "无法加载用量日志",
+    "loadFailedDescription": "日志数据请求失败，请重试加载当前结果。",
+    "logDatabaseUnavailable": "日志数据库不可用",
+    "logDatabaseUnavailableDescription": "日志数据库离线期间，用量日志暂不可用。",
+    "retry": "重试",
     "autoRefreshOff": "自动刷新:关",
     "autoRefreshEvery": "自动刷新:{seconds} 秒",
     "rawJson": "原始 JSON",
@@ -1499,6 +1591,14 @@
   },
   "system": {
     "title": "系统维护",
+    "tabs": {
+      "label": "系统维护分类",
+      "overview": "概览",
+      "requestPath": "请求链路",
+      "policyBilling": "策略与计费",
+      "byok": "BYOK",
+      "dataMaintenance": "数据维护"
+    },
     "refresh": "刷新",
     "systemInfo": "系统信息",
     "version": "版本",
@@ -1510,6 +1610,98 @@
     "gcCount": "GC 次数",
     "goroutines": "Goroutine 数",
     "databaseStats": "数据库统计",
+    "logStorage": {
+      "title": "存储投递",
+      "description": "数据库可用性与日志队列投递状态。",
+      "coreDatabase": "核心数据库",
+      "logDatabase": "日志数据库",
+      "legacyDatabase": "旧版数据库",
+      "legacyArtifact": "旧拆分产物",
+      "available": "可用",
+      "unavailable": "不可用",
+      "exists": "存在",
+      "missing": "不存在",
+      "path": "路径",
+      "size": "大小",
+      "schemaVersion": "Schema",
+      "openConnections": "打开连接",
+      "queue": "日志投递队列",
+      "pending": "待投递",
+      "retry": "待重试",
+      "inflight": "投递中",
+      "bytes": "占用空间",
+      "oldest": "最早等待",
+      "dropped": "已丢弃",
+      "lastError": "最近错误",
+      "retryQueue": "立即重试日志队列",
+      "retryQueueSuccess": "已安排队列日志重试",
+      "retryQueueError": "无法重试日志队列",
+      "clearBacklog": "清空积压",
+      "confirmClearTitle": "清空日志队列积压？",
+      "confirmClearDescription": "将永久丢弃 {count} 条待投递或待重试日志；投递中的记录会保留。",
+      "confirmClearBacklog": "确认清空积压",
+      "clearBacklogSuccess": "日志队列积压已清空",
+      "clearBacklogError": "无法清空日志队列积压",
+      "history": "历史数据回填",
+      "historyState": {
+        "pending": "等待中",
+        "copying": "回填中",
+        "caught_up": "已追平",
+        "degraded": "需要重试",
+        "completed": "已完成并保留旧库",
+        "source_deleted": "旧库已删除"
+      },
+      "sourceKind": {
+        "none": "无旧数据源",
+        "monolith": "单体数据库",
+        "v5_core": "V5 核心数据库"
+      },
+      "historyBilling": "计费记录",
+      "historyRequests": "请求日志",
+      "historyTraces": "Trace",
+      "historySpeed": "处理速度",
+      "historySourceKind": "源类型",
+      "historySourcePath": "源路径",
+      "historySourceSize": "源大小",
+      "historyLastSuccess": "最近成功轮次",
+      "historyCursor": "源游标",
+      "historyProcessed": "已处理",
+      "active": "继续回填",
+      "skipped": "已跳过",
+      "retryHistory": "立即重试历史回填",
+      "retryHistorySuccess": "已安排历史回填重试",
+      "retryHistoryError": "无法重试历史回填",
+      "skipHistory": "跳过剩余日志",
+      "confirmSkipHistoryTitle": "跳过剩余历史日志？",
+      "confirmSkipHistoryDescription": "已回填的数据会保留，剩余请求日志和 Trace 将不再迁移；计费历史仍会继续回填到追平。",
+      "confirmSkipHistory": "确认跳过日志",
+      "skipHistorySuccess": "已跳过剩余历史日志",
+      "skipHistoryError": "无法跳过剩余日志",
+      "completeHistory": "完成并保留旧库",
+      "confirmCompleteHistoryTitle": "完成历史回填？",
+      "confirmCompleteHistoryDescription": "系统会先执行最后一轮回填，再关闭旧数据源。旧库文件将保留用于回滚。",
+      "confirmCompleteHistory": "完成回填",
+      "completeHistorySuccess": "历史回填已完成",
+      "completeHistoryError": "无法完成历史回填",
+      "deleteLegacySource": "清理旧库",
+      "confirmDeleteSourceTitle": "删除旧版数据库？",
+      "confirmDeleteSourceDescription": "这会永久删除旧版数据库及其 WAL 文件，之后无法回滚到依赖旧库的版本。",
+      "deleteSourceConfirmation": "确认文本（DELETE）",
+      "confirmDeleteLegacySource": "删除旧库",
+      "deleteLegacySourceSuccess": "旧版数据库已删除",
+      "deleteLegacySourceError": "无法删除旧版数据库",
+      "artifactUse": "迁移用途",
+      "inUse": "使用中",
+      "notInUse": "独立产物",
+      "deleteLegacyArtifact": "清理拆分产物",
+      "confirmDeleteArtifactTitle": "删除旧拆分产物？",
+      "confirmDeleteArtifactDescription": "这只会永久删除 manifest 记录的拆分前备份，不影响当前旧数据源。",
+      "deleteArtifactConfirmation": "确认文本（DELETE）",
+      "confirmDeleteLegacyArtifact": "删除拆分产物",
+      "deleteLegacyArtifactSuccess": "旧拆分产物已删除",
+      "deleteLegacyArtifactError": "无法删除旧拆分产物",
+      "cancel": "取消"
+    },
     "tableName": "表名",
     "rowCount": "记录数",
     "dataCleanup": "数据清理",
@@ -1530,16 +1722,15 @@
     "confirm": "确认",
     "cleanupSuccess": "成功删除 {count} 条记录",
     "cleanupFailed": "清理失败",
+    "cleanupPreviewExpired": "清理预览已过期，请检查刷新后的数量再重新确认。",
     "settings": "系统设置",
     "settingsDesc": "配置全局系统参数",
     "agentRelay": {
       "title": "Agent 中继",
-      "description": "配置共享 Relay 入口，以及请求能否在 Direct 不可用时降级到 Relay。",
+      "description": "配置共享 Relay 入口和连通性探测时序。",
       "defaultUri": "默认 Relay URI",
       "defaultUriDescription": "继承模式 Agent 使用此地址；留空则按每个 Agent 的 Master URL 自动推导。",
       "defaultUriPlaceholder": "wss://relay.example.com/ws/agent-relay",
-      "fallbackEnabled": "Relay 降级",
-      "fallbackEnabledDescription": "Direct 不可用时允许新请求使用 Relay。关闭后停止接收新的 Relay Stream，已提交的 Stream 会继续排空。",
       "probeSuccessTtl": "成功结果有效期",
       "probeSuccessTtlDescription": "自动重新检查前保留成功结果的秒数。",
       "probeRetryMin": "失败重试最短间隔",
@@ -1649,7 +1840,11 @@
     "pricingSyncSettings": "价格同步",
     "pricingSourcePriority": "源优先级（逗号分隔）",
     "pricingDisagreementThreshold": "跨源分歧阈值（0-1）",
-    "pricingDisagreementThresholdDesc": "比较 models.dev 与 basellm 的输入价+输出价总和；相对差 abs(A-B)/max(A,B) 超过此 0..1 阈值时，仅将推荐标记为需要复核，不改变来源优先级和最终选价规则。"
+    "pricingDisagreementThresholdDesc": "比较 models.dev 与 basellm 的输入价+输出价总和；相对差 abs(A-B)/max(A,B) 超过此 0..1 阈值时，仅将推荐标记为需要复核，不改变来源优先级和最终选价规则。",
+    "secBillingRebuild": "计费重建",
+    "rebuildSliceSleep": "片间暂停",
+    "rebuildSliceSleepDesc": "后台计费重建回放每个按小时分片之间的暂停时长,让回填细水长流,不与高峰期数据库 IO 抢资源;0 表示不暂停。需重启 master 后生效,范围 0..60000 毫秒。",
+    "rebuildSliceSleepRangeError": "片间暂停需在 0 到 60000 毫秒之间"
   },
   "tokenDetail": {
     "tokenInfo": "Token 信息",
@@ -1769,20 +1964,23 @@
       "tps": "TPS",
       "requests": "请求数"
     },
+    "metrics": {
+      "ttft": "TTFT(avg/p95)",
+      "tps": "TPS(avg/p5)",
+      "latencyP95": "延迟 P95"
+    },
     "channels": {
       "title": "渠道",
       "name": "名称",
       "requests": "请求",
       "errorRatio": "错误率",
-      "ttft": "TTFT",
-      "tps": "TPS",
-      "p95": "P95",
       "spark24h": "24h"
     },
     "agents": {
       "title": "Agents",
       "online": "在线",
-      "offline": "离线"
+      "offline": "离线",
+      "requests": "请求"
     },
     "errors": {
       "title": "错误",
@@ -2223,11 +2421,17 @@
     "enabled": "启用",
     "disabled": "停用",
     "scopeAll": "全部",
-    "scopeChannels": "生效频道（留空 = 全部）",
-    "scopeModels": "生效模型（留空 = 全部）",
-    "scopeHint": "频道作用域仅在出站(onUpstreamRequest)阶段生效；onRequest 在路由前执行、此时频道未定。只写 onRequest 的脚本请用模型作用域或全局。",
-    "selectChannels": "选择频道",
+    "scopeChannels": "管理渠道",
+    "scopePrivateChannels": "BYOK 渠道",
+    "scopeModels": "模型",
+    "scopeGroups": "用户组",
+    "scopeUsers": "用户",
+    "scopeHint": "任意条件命中即执行；全部留空时全局生效。渠道条件仅在 onUpstreamRequest 阶段生效。",
+    "selectChannels": "选择管理渠道",
+    "selectPrivateChannels": "选择 BYOK 渠道",
     "selectModels": "选择模型",
+    "selectGroups": "选择用户组",
+    "selectUsers": "选择用户",
     "code": "脚本代码",
     "codeHint": "定义 onRequest(ctx) 与 onUpstreamRequest(ctx) 钩子，改写 ctx.body 或调用下方 API。",
     "editorRich": "富编辑器",
@@ -2280,7 +2484,23 @@
     "metric": {
       "cost": "成本",
       "requests": "请求",
-      "tokens": "Tokens"
+      "tokens": "Tokens",
+      "ttft": "TTFT",
+      "tps": "TPS",
+      "cache_hit_rate": "缓存命中率"
+    },
+    "prefix": {
+      "dim": "维度",
+      "metric": "指标",
+      "view": "视图",
+      "mode": "口径",
+      "topN": "前 N 项",
+      "stat": "统计口径"
+    },
+    "stat": {
+      "avg": "平均值",
+      "p95": "P95（估算）",
+      "p5": "P5（估算）"
     },
     "view": {
       "total": "总量",
@@ -2296,6 +2516,17 @@
     "filter": {
       "model": "模型",
       "user": "用户"
+    },
+    "legend": {
+      "series": "图表系列",
+      "allHidden": "所有系列均已隐藏"
+    },
+    "trend": {
+      "dimOff": "关闭",
+      "dimModel": "按模型",
+      "dimChannel": "按渠道",
+      "others": "其他",
+      "logUnavailable": "日志数据库离线，性能指标暂不可用。"
     }
   },
   "entityHover": {

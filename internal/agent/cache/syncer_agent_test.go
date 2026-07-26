@@ -16,6 +16,38 @@ import (
 
 const testAgentFullSyncContractV1 = "agent_full_sync_v1"
 
+func TestAgentTransportPolicySurvivesPushAndFullSync(t *testing.T) {
+	client := &agentRouteSyncClient{}
+	syncer := newAgentRouteTestSyncer(client)
+	created := models.Agent{
+		AgentID: "policy-sync-agent", Name: "created",
+		DirectInboundEnabled: true, DirectOutboundEnabled: false,
+		RelayInboundEnabled: false, RelayOutboundEnabled: true,
+	}
+	require.NoError(t, syncer.applySyncPush(testAgentPush(events.ActionCreate, created, 1)))
+	assertCachedAgentTransportPolicy(t, syncer.Store.GetAgent(created.AgentID), [4]bool{true, false, false, true})
+
+	updated := created
+	updated.Name = "updated"
+	updated.DirectInboundEnabled = false
+	updated.DirectOutboundEnabled = true
+	updated.RelayInboundEnabled = true
+	updated.RelayOutboundEnabled = false
+	require.NoError(t, syncer.applySyncPush(testAgentPush(events.ActionUpdate, updated, 2)))
+	assertCachedAgentTransportPolicy(t, syncer.Store.GetAgent(created.AgentID), [4]bool{false, true, true, false})
+	require.NoError(t, syncer.applySyncPush(testAgentPush(events.ActionDelete, updated, 3)))
+	require.Nil(t, syncer.Store.GetAgent(created.AgentID))
+
+	client.respond = func(_ context.Context, call agentRouteSyncCall, _ int) (json.RawMessage, error) {
+		require.Equal(t, events.EntityAgent, call.Request.Entity)
+		return marshalAgentFullSync([]models.Agent{created}, protocol.FullSyncResponse{
+			Total: 1, Version: 4, LastID: 1, SnapshotMaxID: 1, BaseVersion: 4,
+		}), nil
+	}
+	require.NoError(t, syncer.fullSyncEntity(context.Background(), events.EntityAgent))
+	assertCachedAgentTransportPolicy(t, syncer.Store.GetAgent(created.AgentID), [4]bool{true, false, false, true})
+}
+
 func TestAgentFullSyncRetainsAll501KeysetRows(t *testing.T) {
 	firstPage := make([]models.Agent, 500)
 	for i := range firstPage {

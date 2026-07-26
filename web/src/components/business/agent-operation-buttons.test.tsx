@@ -55,16 +55,22 @@ vi.mock("next-intl", () => ({
 function snapshot(allowed = true): ConnectionSnapshot {
   return {
     version: "v1", snapshot_epoch: "epoch", snapshot_seq: 2, observed_at: 3, agent_id: "a", admin_status: 1,
+    transport_policy: {
+      direct_inbound: { configured: true, effective: true },
+      direct_outbound: { configured: true, effective: true },
+      relay_inbound: { configured: true, effective: true },
+      relay_outbound: { configured: true, effective: true },
+    },
     control: { state: "connected", health: "healthy", reason_codes: [], session_generation: 4, connected_at: 1, heartbeat_at: 2, runtime_reported_at: 2, last_seen: 2 },
     relay: {
       support: "supported", config: "configured", availability: "ready", accepting_new_streams: true, convergence: "converged",
       desired: { mode: "inherit", configured_uri: "", effective_uri: "wss://relay", desired_generation: 5 },
       active: { uri: "wss://relay", active_generation: 5, session_generation: 6, connected_at: 1, streams: 0, retry_at: 0 }, recent_errors: [],
     },
-    direct: { summary: { state: "reachable", reachable: 1, degraded: 0, unreachable: 0, stale: 0, total: 1 }, targets: {} },
+    direct: { summary: { state: "reachable", disabled: 0, reachable: 1, degraded: 0, unreachable: 0, stale: 0, total: 1 }, targets: {} },
     target_summaries: {
-      direct: { state: "reachable", reachable: 1, degraded: 0, unreachable: 0, stale: 0, total: 1 },
-      relay: { state: "reachable", reachable: 1, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 1 },
+      direct: { state: "reachable", disabled: 0, reachable: 1, degraded: 0, unreachable: 0, stale: 0, total: 1 },
+      relay: { state: "reachable", disabled: 0, reachable: 1, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 1 },
     },
     allowed_operations: ["probe", "relay_reconnect", "relay_drain", "relay_disconnect"].map((operation) => ({ operation: operation as never, allowed, denial_code: allowed ? undefined : "control_disconnected" })),
   };

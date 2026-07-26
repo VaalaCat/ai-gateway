@@ -5,6 +5,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { EntityLabel } from "@/components/business/entity-label";
 import { cn } from "@/lib/utils";
 import type { EntityName } from "@/components/business/entity-picker/registry";
+import type { AdminScope } from "@/components/business/entity-picker/types";
 
 interface EntityChipListProps {
   entity: EntityName;
@@ -14,17 +15,32 @@ interface EntityChipListProps {
   /** ids 为空时展示的文案（如"所有组"）。 */
   emptyLabel?: string;
   className?: string;
+  scope?: AdminScope;
 }
 
-function chip(entity: EntityName, id: number | string) {
+function chip(entity: EntityName, id: number | string, scope: AdminScope) {
   return (
     <Badge key={String(id)} variant="secondary" className="font-normal">
-      <EntityLabel entity={entity} id={String(id)} showId={false} hover={false} className="truncate" />
+      <EntityLabel
+        entity={entity}
+        id={String(id)}
+        scope={scope}
+        showId={false}
+        hover={false}
+        className="truncate"
+      />
     </Badge>
   );
 }
 
-export function EntityChipList({ entity, ids, max = 2, emptyLabel, className }: EntityChipListProps) {
+export function EntityChipList({
+  entity,
+  ids,
+  max = 2,
+  emptyLabel,
+  className,
+  scope = "self",
+}: EntityChipListProps) {
   if (!ids || ids.length === 0) {
     return (
       <Badge variant="outline" className="font-normal text-muted-foreground">
@@ -38,7 +54,7 @@ export function EntityChipList({ entity, ids, max = 2, emptyLabel, className }: 
 
   return (
     <div className={cn("flex flex-wrap items-center gap-1", className)}>
-      {shown.map((id) => chip(entity, id))}
+      {shown.map((id) => chip(entity, id, scope))}
       {rest.length > 0 && (
         <Popover>
           <PopoverTrigger asChild>
@@ -47,7 +63,9 @@ export function EntityChipList({ entity, ids, max = 2, emptyLabel, className }: 
             </Badge>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-56 p-2">
-            <div className="flex flex-wrap gap-1">{ids.map((id) => chip(entity, id))}</div>
+            <div className="flex flex-wrap gap-1">
+              {ids.map((id) => chip(entity, id, scope))}
+            </div>
           </PopoverContent>
         </Popover>
       )}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/stretchr/testify/require"
 )
@@ -15,6 +16,42 @@ import (
 type capturedTargetFrame struct {
 	type_   wire.Type
 	payload []byte
+}
+
+func TestTunnelResponseWriterDoesNotMixExplicitResultWithHTTPMetadata(t *testing.T) {
+	frames := make([]capturedTargetFrame, 0, 3)
+	writer := newTunnelResponseWriter(t.Context(), wire.MaxMetadataBytes, wire.MaxV2PayloadBytes, func(_ context.Context, typ wire.Type, payload []byte) error {
+		frames = append(frames, capturedTargetFrame{type_: typ, payload: append([]byte(nil), payload...)})
+		return nil
+	})
+	writer.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
+	_, err := writer.Write([]byte("provider response"))
+	require.NoError(t, err)
+	require.NoError(t, writer.finish(attemptResultState{required: true, written: true}))
+
+	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData, wire.FrameEnd}, frameTypes(frames))
+	require.NotContains(t, frameTypes(frames), wire.FrameAttemptResult)
+	var headers wire.Headers
+	require.NoError(t, wire.DecodeMetadata(frames[0].payload, &headers, wire.MaxMetadataBytes))
+	require.Equal(t, attemptwire.ModeResponse, http.Header(headers.Header).Get(attemptwire.HeaderMode))
+	require.Empty(t, http.Header(headers.Trailer).Values(attemptwire.HeaderMode))
+}
+
+func TestTunnelResponseWriterRejectsInvalidExplicitResultStateWithoutEnd(t *testing.T) {
+	for _, state := range []attemptResultState{
+		{required: true},
+		{required: true, written: true, err: errAttemptResultAlreadyWritten},
+		{required: true, written: true, err: attemptwire.ErrResultTooLarge},
+		{required: true, written: true, err: errQueueFrameTooLarge},
+	} {
+		frames := make([]capturedTargetFrame, 0, 1)
+		writer := newTunnelResponseWriter(t.Context(), wire.MaxMetadataBytes, wire.MaxV2PayloadBytes, func(_ context.Context, typ wire.Type, payload []byte) error {
+			frames = append(frames, capturedTargetFrame{type_: typ, payload: append([]byte(nil), payload...)})
+			return nil
+		})
+		require.Error(t, writer.finish(state))
+		require.NotContains(t, frameTypes(frames), wire.FrameEnd)
+	}
 }
 
 func TestTunnelResponseWriterPreservesOrderedBinaryPayloads(t *testing.T) {
@@ -34,7 +71,7 @@ func TestTunnelResponseWriterPreservesOrderedBinaryPayloads(t *testing.T) {
 			n, err := writer.Write(bytes)
 			require.NoError(t, err)
 			require.Equal(t, len(bytes), n)
-			require.NoError(t, writer.finish())
+			require.NoError(t, writer.finish(attemptResultState{}))
 
 			require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData, wire.FrameResponseData, wire.FrameEnd}, frameTypes(frames))
 			var headers wire.Headers
@@ -56,7 +93,7 @@ func TestTunnelResponseWriterFlushAndTrailers(t *testing.T) {
 	writer.Header().Set("X-Usage", "tokens=3")
 	writer.Header().Set("Connection", "keep-alive")
 	writer.Flush()
-	require.NoError(t, writer.finish())
+	require.NoError(t, writer.finish(attemptResultState{}))
 
 	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameEnd}, frameTypes(frames))
 	var headers wire.Headers
@@ -77,7 +114,7 @@ func TestTunnelResponseWriterIgnoresInformationalStatusUntilFinalResponse(t *tes
 	writer.WriteHeader(http.StatusCreated)
 	_, err := writer.Write([]byte("body"))
 	require.NoError(t, err)
-	require.NoError(t, writer.finish())
+	require.NoError(t, writer.finish(attemptResultState{}))
 
 	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData, wire.FrameEnd}, frameTypes(frames))
 	var headers wire.Headers
@@ -93,7 +130,7 @@ func TestTunnelResponseWriterRejectsSwitchingProtocolsWithoutHeaders(t *testing.
 		return nil
 	})
 	writer.WriteHeader(http.StatusSwitchingProtocols)
-	require.Error(t, writer.finish())
+	require.Error(t, writer.finish(attemptResultState{}))
 	require.Error(t, writer.resetError())
 	require.Empty(t, frames)
 	require.False(t, writer.wroteHeader)
@@ -114,7 +151,7 @@ func TestTunnelResponseWriterValidatesCanonicalizesAndStripsResponseHeaders(t *t
 	writer.Header().Set(consts.HeaderXAgentForwardTicket, "must-not-escape")
 	writer.Header().Set(consts.HeaderXAgentRouteID, "999")
 	writer.WriteHeader(http.StatusOK)
-	require.NoError(t, writer.finish())
+	require.NoError(t, writer.finish(attemptResultState{}))
 
 	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameEnd}, frameTypes(frames))
 	var headers wire.Headers
@@ -141,7 +178,7 @@ func TestTunnelResponseWriterStripsDeclaredAndDynamicReservedTrailers(t *testing
 	writer.Header().Set("X-Usage", "tokens=7")
 	writer.Header().Set(consts.HeaderXAgentForwardTicket, "declared-secret")
 	writer.Header().Set(http.TrailerPrefix+consts.HeaderXAgentRouteID, "dynamic-secret")
-	require.NoError(t, writer.finish())
+	require.NoError(t, writer.finish(attemptResultState{}))
 
 	var initial wire.Headers
 	require.NoError(t, wire.DecodeMetadata(frames[0].payload, &initial, 4096))
@@ -197,7 +234,7 @@ func TestTunnelResponseWriterSendsFinalTrailerValuesAtEnd(t *testing.T) {
 	_, err := writer.Write([]byte("event"))
 	require.NoError(t, err)
 	writer.Header().Set("X-Usage", "tokens=7")
-	require.NoError(t, writer.finish())
+	require.NoError(t, writer.finish(attemptResultState{}))
 
 	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData, wire.FrameEnd}, frameTypes(frames))
 	var initial wire.Headers
@@ -217,7 +254,7 @@ func TestTunnelResponseWriterSendsLateTrailerPrefixAtEnd(t *testing.T) {
 	_, err := writer.Write([]byte("event"))
 	require.NoError(t, err)
 	writer.Header()[http.TrailerPrefix+"X-Usage"] = []string{"tokens=7"}
-	require.NoError(t, writer.finish())
+	require.NoError(t, writer.finish(attemptResultState{}))
 
 	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData, wire.FrameEnd}, frameTypes(frames))
 	var initial wire.Headers
@@ -248,7 +285,7 @@ func TestTunnelResponseWriterRejectsInvalidLateTrailerPrefixWithoutEnd(t *testin
 			_, err := writer.Write([]byte("event"))
 			require.NoError(t, err)
 			writer.Header()[http.TrailerPrefix+tt.key] = []string{tt.value}
-			require.ErrorIs(t, writer.finish(), errStreamProtocol)
+			require.ErrorIs(t, writer.finish(attemptResultState{}), errStreamProtocol)
 			require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData}, frameTypes(frames))
 		})
 	}
@@ -263,7 +300,7 @@ func TestTunnelResponseWriterDoesNotPromoteLateOrdinaryHeaderToTrailer(t *testin
 	_, err := writer.Write([]byte("event"))
 	require.NoError(t, err)
 	writer.Header().Set("X-Usage", "tokens=7")
-	require.NoError(t, writer.finish())
+	require.NoError(t, writer.finish(attemptResultState{}))
 
 	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData, wire.FrameEnd}, frameTypes(frames))
 	require.Empty(t, frames[2].payload)
@@ -293,7 +330,7 @@ func TestTunnelResponseWriterRejectsLateInvalidTrailerValueWithoutEnd(t *testing
 	_, err := writer.Write([]byte("event"))
 	require.NoError(t, err)
 	writer.Header().Set("X-Usage", "bad\r\nvalue")
-	require.ErrorIs(t, writer.finish(), errStreamProtocol)
+	require.ErrorIs(t, writer.finish(attemptResultState{}), errStreamProtocol)
 	require.Equal(t, []wire.Type{wire.FrameHeaders, wire.FrameResponseData}, frameTypes(frames))
 }
 
@@ -311,7 +348,7 @@ func TestTunnelResponseWriterStopsOnCancellationAndSenderError(t *testing.T) {
 	writer = newTunnelResponseWriter(t.Context(), 4096, 16, func(context.Context, wire.Type, []byte) error { return want })
 	_, err = writer.Write([]byte("x"))
 	require.ErrorIs(t, err, want)
-	require.ErrorIs(t, writer.finish(), want)
+	require.ErrorIs(t, writer.finish(attemptResultState{}), want)
 }
 
 func TestTunnelResponseWriterBlockedSendDoesNotHoldStateLock(t *testing.T) {

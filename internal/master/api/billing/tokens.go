@@ -30,10 +30,12 @@ func (h *Handler) ListTokens(c *app.Context, req ListTokensRequest) (api.Paginat
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	items, total, err := q.Billing().ListTokenBilling(dao.ListOptions{Page: page, PageSize: pageSize}, dao.TokenBillingListFilter{
-		UserID:    filterUserID,
-		TokenID:   tokenID,
-		StartDate: startDate,
-		EndDate:   endDate,
+		UserID:     filterUserID,
+		TokenID:    tokenID,
+		StartDate:  startDate,
+		EndDate:    endDate,
+		NameSearch: req.Search,
+		MinTokens:  req.MinTokens,
 	})
 	if err != nil {
 		return api.PaginatedResponse[dao.TokenBillingListItem]{}, api.InternalError("list token billing failed", err)

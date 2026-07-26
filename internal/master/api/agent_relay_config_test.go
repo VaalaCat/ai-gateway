@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	apiagent "github.com/VaalaCat/ai-gateway/internal/master/api/agent"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,6 +30,48 @@ func TestSetupTestMasterClosesOwnedDatabaseAfterTestCleanup(t *testing.T) {
 
 	require.NotNil(t, ping)
 	require.Error(t, ping())
+}
+
+func TestAgentMutationHTTPIgnoresOrdinaryUnknownFields(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("unknown-field-admin", "admin123"))
+	token := loginAsAdmin(t, srv, "unknown-field-admin", "admin123")
+	createEvents := 0
+	sub, err := events.Subscribe(srv.Bus, events.AgentCreateTopic, func(context.Context, models.Agent) error {
+		createEvents++
+		return nil
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sub.Unsubscribe()) })
+
+	w := requestAgentMutation(t, srv.Router, token, http.MethodPost, "/api/admin/agents", map[string]any{
+		"agent_id":              "unknown-field-agent",
+		"name":                  "created agent",
+		"future_transport_hint": "ignored",
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	var stored models.Agent
+	require.NoError(t, srv.DB.Where("agent_id = ?", "unknown-field-agent").Take(&stored).Error)
+	require.Equal(t, "created agent", stored.Name)
+	require.Equal(t, 1, createEvents)
+}
+
+func requestAgentMutation(
+	t *testing.T,
+	handler http.Handler,
+	token, method, path string,
+	body map[string]any,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(w, req)
+	return w
 }
 
 func TestAgentUpdateRouteUsesTypedPatchAndPreservesOmittedProxy(t *testing.T) {

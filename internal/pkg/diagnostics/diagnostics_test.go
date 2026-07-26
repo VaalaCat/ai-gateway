@@ -222,9 +222,11 @@ func TestPublicRouteErrorCodeSetIsExact(t *testing.T) {
 		"selector_invalid", "target_not_found", "target_disabled", "tag_no_candidate",
 		"direct_disabled", "direct_ingress_unsupported", "direct_circuit_open", "direct_auth_unavailable", "direct_dns", "direct_connect", "direct_tls",
 		"direct_identity_mismatch", "direct_probe_invalid_response", "direct_commit_uncertain", "direct_response_interrupted",
-		"relay_unsupported", "relay_not_configured", "relay_disabled", "relay_fallback_disabled", "relay_not_ready", "relay_overloaded",
+		"relay_unsupported", "relay_not_configured", "relay_disabled", "relay_not_ready", "relay_overloaded",
 		"relay_protocol", "relay_auth", "relay_commit_uncertain", "relay_response_interrupted",
 		"request_cancelled", "request_deadline", "body_too_large", "body_store_failed", "stream_window_timeout", "session_closed", "drain_timeout",
+		"source_direct_outbound_disabled", "target_direct_inbound_disabled", "source_relay_outbound_disabled", "target_relay_inbound_disabled",
+		"relay_connection_disabled",
 	}
 	require.Equal(t, want, consts.PublicRouteErrorCodes())
 	for _, code := range want {

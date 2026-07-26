@@ -109,14 +109,13 @@ export function useAgentConnections(
 
   const acceptedSnapshot = query.data?.current;
   const acceptedRouteTargetsPage = query.data?.routeTargetsPage;
-  const routeTargetsPage = acceptedSnapshot && acceptedRouteTargetsPage &&
-    routeTargetsPageMatchesSnapshot(acceptedRouteTargetsPage, acceptedSnapshot)
-    ? acceptedRouteTargetsPage
-    : undefined;
+  const routeTargetsCurrent = !!acceptedSnapshot && !!acceptedRouteTargetsPage &&
+    routeTargetsPageMatchesSnapshot(acceptedRouteTargetsPage, acceptedSnapshot);
   return {
     ...query,
     data: acceptedSnapshot as ConnectionSnapshot | undefined,
-    routeTargetsPage,
+    routeTargetsPage: acceptedRouteTargetsPage,
+    routeTargetsCurrent,
     stale: query.data?.stale ?? (query.isError && !isAbortError(query.error)),
   };
 }

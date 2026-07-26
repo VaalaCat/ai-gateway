@@ -115,49 +115,49 @@ func TestBuildRejectsBothHardSelectorsAsBadRequest(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, status)
 }
 
-func TestTraceEnabledTrue(t *testing.T) {
+func TestTraceCaptureModeLegacyEnabledIsFull(t *testing.T) {
 	c := newGinCtxForTest(func(c *gin.Context) {
 		c.Set(consts.CtxKeyUserInfo, &app.UserInfo{TraceEnabled: true})
 	})
-	if !trace.Enabled(c) {
-		t.Error("should be true")
+	if got := trace.CaptureModeFromContext(c); got != trace.CaptureFull {
+		t.Fatalf("mode=%v want full", got)
 	}
 }
 
-func TestTraceEnabledFalseExplicit(t *testing.T) {
+func TestTraceCaptureModeDisabledIsOff(t *testing.T) {
 	c := newGinCtxForTest(func(c *gin.Context) {
 		c.Set(consts.CtxKeyUserInfo, &app.UserInfo{TraceEnabled: false})
 	})
-	if trace.Enabled(c) {
-		t.Error("should be false")
+	if got := trace.CaptureModeFromContext(c); got != trace.CaptureOff {
+		t.Fatalf("mode=%v want off", got)
 	}
 }
 
-func TestTraceEnabledMissingUserInfo(t *testing.T) {
+func TestTraceCaptureModeMissingUserInfoIsOff(t *testing.T) {
 	c := newGinCtxForTest(nil) // no UserInfo set
-	if trace.Enabled(c) {
-		t.Error("should be false when UserInfo missing")
+	if got := trace.CaptureModeFromContext(c); got != trace.CaptureOff {
+		t.Fatalf("mode=%v want off", got)
 	}
 }
 
-func TestTraceEnabledNilUserInfo(t *testing.T) {
+func TestTraceCaptureModeNilUserInfoIsOff(t *testing.T) {
 	// boundary: key set but value is nil
 	c := newGinCtxForTest(func(c *gin.Context) {
 		var nilUI *app.UserInfo
 		c.Set(consts.CtxKeyUserInfo, nilUI)
 	})
-	if trace.Enabled(c) {
-		t.Error("should be false for nil UserInfo")
+	if got := trace.CaptureModeFromContext(c); got != trace.CaptureOff {
+		t.Fatalf("mode=%v want off", got)
 	}
 }
 
-func TestTraceEnabledWrongType(t *testing.T) {
+func TestTraceCaptureModeWrongTypeIsOff(t *testing.T) {
 	// boundary: key set but wrong type
 	c := newGinCtxForTest(func(c *gin.Context) {
 		c.Set(consts.CtxKeyUserInfo, "not-a-userinfo")
 	})
-	if trace.Enabled(c) {
-		t.Error("should be false for wrong type")
+	if got := trace.CaptureModeFromContext(c); got != trace.CaptureOff {
+		t.Fatalf("mode=%v want off", got)
 	}
 }
 
@@ -175,7 +175,7 @@ func newTestRelayCtx(t *testing.T, c *gin.Context) *state.RelayContext {
 	}}
 	rctx := &state.RelayContext{
 		Context: c,
-		State:   &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State:   &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 		Agent:   &ctxbuildAgent{cache: cache, bodyStore: spy},
 	}
 	t.Cleanup(func() {
@@ -1009,7 +1009,7 @@ func newMultipartFaultRelayContextWithHardLimit(
 	bodyStore := &ctxbuildMultipartFaultStore{readerFactory: readerFactory}
 	rctx := &state.RelayContext{
 		Context: c,
-		State:   &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State:   &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 		Agent: &ctxbuildAgent{
 			cache: &settingsCache{settings: settings.AgentSettings{
 				BodyMemoryThresholdBytes: min(bodypkg.DefaultMemoryThreshold, hardLimit),

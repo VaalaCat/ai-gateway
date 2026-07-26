@@ -8,9 +8,12 @@ import (
 
 type ListChannelsRequest struct {
 	api.PaginationQuery
-	StartDate string `form:"start_date"`
-	EndDate   string `form:"end_date"`
-	ChannelID string `form:"channel_id"`
+	StartDate   string `form:"start_date"`
+	EndDate     string `form:"end_date"`
+	ChannelID   string `form:"channel_id"`
+	Search      string `form:"search"`
+	ChannelType string `form:"channel_type"`
+	MinTokens   int64  `form:"min_tokens"`
 }
 
 type ChannelDailyRequest struct {
@@ -28,6 +31,10 @@ func (h *Handler) ListChannels(c *app.Context, req ListChannelsRequest) (api.Pag
 	if err != nil {
 		return api.PaginatedResponse[dao.ChannelBillingListItem]{}, api.BadRequestError("invalid channel_id", err)
 	}
+	channelType, err := parseOptionalInt(req.ChannelType)
+	if err != nil {
+		return api.PaginatedResponse[dao.ChannelBillingListItem]{}, api.BadRequestError("invalid channel_type", err)
+	}
 	startDate, endDate, err := normalizeDateRange(req.StartDate, req.EndDate)
 	if err != nil {
 		return api.PaginatedResponse[dao.ChannelBillingListItem]{}, api.BadRequestError("invalid date range", err)
@@ -36,9 +43,12 @@ func (h *Handler) ListChannels(c *app.Context, req ListChannelsRequest) (api.Pag
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	items, total, err := q.Billing().ListChannelBilling(dao.ListOptions{Page: page, PageSize: pageSize}, dao.ChannelBillingListFilter{
-		ChannelID: channelID,
-		StartDate: startDate,
-		EndDate:   endDate,
+		ChannelID:   channelID,
+		StartDate:   startDate,
+		EndDate:     endDate,
+		NameSearch:  req.Search,
+		ChannelType: channelType,
+		MinTokens:   req.MinTokens,
 	})
 	if err != nil {
 		return api.PaginatedResponse[dao.ChannelBillingListItem]{}, api.InternalError("list channel billing failed", err)

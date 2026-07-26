@@ -5,10 +5,12 @@
   "scripts": {
     "dev": "next dev --port 8141",
     "build": "next build",
+    "test:e2e": "playwright test --config playwright.config.ts && playwright test --config playwright.degraded.config.ts",
     "test:unit": "tsx --test src/lib/utils/*.test.mjs && vitest run",
     "start": "next start",
-    "lint": "eslint && npm run check:i18n && npm run check:downsample",
+    "lint": "eslint && npm run check:i18n && npm run check:agent-transport-i18n && npm run check:downsample",
     "check:i18n": "node scripts/check-i18n.mjs",
+    "check:agent-transport-i18n": "node scripts/check-agent-transport-i18n.mjs",
     "check:downsample": "node scripts/verify-data-glyph-downsample.mjs"
   },
   "dependencies": {
@@ -40,6 +42,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

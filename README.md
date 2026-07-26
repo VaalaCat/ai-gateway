@@ -98,6 +98,49 @@ The configuration file accepts these top-level keys:
 
 See [`config.example.yaml`](config.example.yaml) for a complete template.
 
+### Core and Log Databases
+
+The master stores application and billing-critical state in `core.db`, request,
+trace, and analytics history in `log.db`, and uses `master.db` as the legacy
+single-database source during an upgrade. These paths are configured with
+`master.core_db_path`, `master.log_db_path`, and `master.legacy_db_path` and
+must resolve to different SQLite files. The deprecated `master.db_path` key is
+treated as the legacy source so existing deployments can upgrade without a
+configuration rewrite; sibling `core.db` and `log.db` paths inherit its SQLite
+DSN options.
+
+An unavailable log database degrades log-backed pages and metrics without
+stopping quota settlement or billing facts. New non-critical logs enter a
+simple bounded delivery queue. When its configured entry or byte limit is
+reached, the oldest pending log may be dropped; billing data is never put in
+that queue. The System page reports the database and queue state and provides
+explicit retry and clear-backlog actions.
+
+There is no automatic log retention. Administrators can manually clear the six
+derived analytics tables from the System page:
+
+- `usage_hourly_buckets`
+- `usage_duration_histograms`
+- `usage_ttft_histograms`
+- `usage_tps_histograms`
+- `usage_user_ttft_histograms`
+- `usage_user_tps_histograms`
+
+During an online upgrade, the existing `/data/master.db` keeps its name and is
+opened as the read-only legacy source. The new targets are `core.db` and
+`log.db`. Background backfill may reach `caught_up`, but migration becomes
+`completed` only after an administrator runs the final pass. Do not delete the
+legacy source before completion.
+
+Older v5 installations may also leave a `*.pre-split.bak`. This is an
+independent legacy artifact: it is not an input to the new backfill and must not
+overwrite or be restored as `core.db`. After validation and migration
+completion, an administrator may retain or clean it up separately.
+
+Rolling back to an older image does not automatically merge new state written
+to `core.db` or `log.db` back into the legacy database. Evaluate that data
+window before a rollback.
+
 ## Deployment
 
 ### Single Node (Docker Compose)

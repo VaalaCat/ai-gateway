@@ -25,25 +25,68 @@ var (
 )
 
 type TargetHandler struct {
-	agentID string
-	enabled func() bool
-	router  http.Handler
+	agentID              string
+	directInboundEnabled func() bool
+	relayInboundEnabled  func() bool
+	sourceEnabled        func(string) bool
+	router               http.Handler
+	directPathDisabled   agentproxy.DirectPathDisabledRecorder
 }
 
-func NewTargetHandler(agentID string, enabled func() bool, router http.Handler) *TargetHandler {
-	return &TargetHandler{agentID: strings.TrimSpace(agentID), enabled: enabled, router: router}
+type TargetHandlerOptions struct {
+	TargetAgentID        string
+	DirectInboundEnabled func() bool
+	RelayInboundEnabled  func() bool
+	SourceEnabled        func(string) bool
+	Router               http.Handler
+	DirectPathDisabled   agentproxy.DirectPathDisabledRecorder
 }
 
-func (h *TargetHandler) ValidateOpen(open wire.Open) error {
-	if h == nil || h.router == nil || h.enabled == nil {
+func NewTargetHandler(opts TargetHandlerOptions) *TargetHandler {
+	if opts.DirectInboundEnabled == nil {
+		opts.DirectInboundEnabled = func() bool { return true }
+	}
+	if opts.RelayInboundEnabled == nil {
+		opts.RelayInboundEnabled = func() bool { return true }
+	}
+	if opts.SourceEnabled == nil {
+		opts.SourceEnabled = func(string) bool { return true }
+	}
+	return &TargetHandler{
+		agentID: strings.TrimSpace(opts.TargetAgentID), directInboundEnabled: opts.DirectInboundEnabled,
+		relayInboundEnabled: opts.RelayInboundEnabled, sourceEnabled: opts.SourceEnabled, router: opts.Router,
+		directPathDisabled: opts.DirectPathDisabled,
+	}
+}
+
+func (h *TargetHandler) ValidateOpen(open wire.Open, ingressKind string) error {
+	if h == nil || h.router == nil || h.directInboundEnabled == nil || h.relayInboundEnabled == nil || h.sourceEnabled == nil {
 		return errTargetUnavailable
 	}
-	// behavior change: diagnostics stay available while the production Relay ingress gate is disabled.
-	if !h.enabled() && !open.IsConnectivityProbe() {
+	if !validTunnelIngressKind(ingressKind) {
+		return errTargetMetadata
+	}
+	if _, err := h.validateCommittedOpen(open); err != nil {
+		return err
+	}
+	if !h.sourceEnabled(open.SourceAgentID) {
 		return errTargetUnavailable
 	}
-	_, err := h.validateCommittedOpen(open)
-	return err
+	if open.ProbePolicy != wire.ProbeBypassBusinessPolicy {
+		if ingressKind == agentproxy.IngressKindDirectTunnel && !h.directInboundEnabled() {
+			if h.directPathDisabled != nil {
+				h.directPathDisabled.RecordDirectPathDisabled(agentproxy.DirectPathDisabledEvent{
+					SourceAgentID: open.SourceAgentID, TargetAgentID: h.agentID,
+					Reason: agentproxy.DirectPathDisabledTargetInbound,
+				})
+			}
+			return newPathPolicyError(consts.RouteErrorTargetDirectInboundDisabled)
+		}
+		if ingressKind == agentproxy.IngressKindRelayTunnel && !h.relayInboundEnabled() {
+			return newPathPolicyError(consts.RouteErrorTargetRelayInboundDisabled)
+		}
+	}
+	return nil
 }
 
 func (h *TargetHandler) validateCommittedOpen(open wire.Open) (http.Header, error) {
@@ -76,7 +119,7 @@ func validateAttemptOrProbeOpen(open wire.Open) error {
 		}
 		return errTargetPath
 	}
-	if open.Purpose != "" || open.Hop != 1 {
+	if open.ProbePolicy != "" || open.Hop != 1 {
 		return errTargetMetadata
 	}
 	if open.Method != http.MethodPost {
@@ -115,8 +158,11 @@ func normalizeOpenHeaders(source map[string][]string) (http.Header, error) {
 	return header, nil
 }
 
-func (h *TargetHandler) BuildRequest(ctx context.Context, open wire.Open, streamID wire.StreamID, body io.ReadCloser) (*http.Request, error) {
+func (h *TargetHandler) BuildRequest(ctx context.Context, open wire.Open, streamID wire.StreamID, body io.ReadCloser, ingressKind string) (*http.Request, error) {
 	if ctx == nil || body == nil {
+		return nil, errTargetMetadata
+	}
+	if !validTunnelIngressKind(ingressKind) {
 		return nil, errTargetMetadata
 	}
 	header, err := h.validateCommittedOpen(open)
@@ -132,7 +178,7 @@ func (h *TargetHandler) BuildRequest(ctx context.Context, open wire.Open, stream
 	req.Host = ""
 	req.RequestURI = ""
 	meta := agentproxy.IngressMeta{
-		Kind: agentproxy.IngressKindTunnel, SourceAgentID: open.SourceAgentID, RouteID: open.RouteID,
+		Kind: ingressKind, SourceAgentID: open.SourceAgentID, RouteID: open.RouteID,
 		StreamID: streamID, Hop: open.Hop,
 	}
 	if open.Attempt != nil {
@@ -144,6 +190,10 @@ func (h *TargetHandler) BuildRequest(ctx context.Context, open wire.Open, stream
 		requestCtx = attemptwire.WithMeta(requestCtx, *meta.Attempt)
 	}
 	return req.WithContext(requestCtx), nil
+}
+
+func validTunnelIngressKind(kind string) bool {
+	return kind == agentproxy.IngressKindRelayTunnel || kind == agentproxy.IngressKindDirectTunnel
 }
 
 func (h *TargetHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -164,7 +214,6 @@ func cloneEndToEndHeaders(source http.Header) http.Header {
 		consts.HeaderXAgentID, consts.HeaderXAgentSecret, consts.HeaderXAgentTag,
 		consts.HeaderXAgentAddressTag, consts.HeaderXAgentHop,
 		consts.HeaderXAgentForwardTicket, consts.HeaderXAgentRouteID,
-		attemptwire.HeaderMeta,
 	} {
 		header.Del(key)
 	}

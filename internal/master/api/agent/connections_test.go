@@ -30,11 +30,60 @@ type apiControlSource struct {
 	facts map[string]connectivity.ControlSessionFact
 }
 
+func TestAgentTransportPolicyListAndDetailPreserveMixedDirections(t *testing.T) {
+	db := setupTestDB(t)
+	agent := models.Agent{AgentID: "policy-projection", Name: "policy", Status: consts.StatusEnabled}
+	require.NoError(t, db.Create(&agent).Error)
+	require.NoError(t, db.Model(&models.Agent{}).Where("id = ?", agent.ID).Updates(map[string]any{
+		"direct_inbound_enabled":  true,
+		"direct_outbound_enabled": false,
+		"relay_inbound_enabled":   false,
+		"relay_outbound_enabled":  true,
+	}).Error)
+
+	h := &Handler{Connections: connectivity.NewService("policy-epoch", connectivity.Sources{}, connectivity.Options{})}
+	ctx := newTestContext(t, db)
+	list, err := h.List(ctx, ListRequest{})
+	require.NoError(t, err)
+	require.Len(t, list.Data, 1)
+	require.True(t, list.Data[0].DirectInboundEnabled)
+	require.False(t, list.Data[0].DirectOutboundEnabled)
+	require.False(t, list.Data[0].RelayInboundEnabled)
+	require.True(t, list.Data[0].RelayOutboundEnabled)
+	wantPolicy := connectivity.AgentTransportPolicySnapshot{
+		DirectInbound:  connectivity.TransportDirectionSnapshot{Configured: true, Effective: true},
+		DirectOutbound: connectivity.TransportDirectionSnapshot{Configured: false, Effective: false},
+		RelayInbound:   connectivity.TransportDirectionSnapshot{Configured: false, Effective: false},
+		RelayOutbound:  connectivity.TransportDirectionSnapshot{Configured: true, Effective: true},
+	}
+	require.Equal(t, wantPolicy, list.Data[0].Connection.TransportPolicy)
+
+	detail, err := h.Detail(ctx, DetailRequest{ID: strconv.Itoa(int(agent.ID))})
+	require.NoError(t, err)
+	assertAgentTransportPolicy(t, detail.Agent, [4]bool{true, false, false, true})
+	require.Equal(t, wantPolicy, detail.Connection.TransportPolicy)
+}
+
+func TestConnectionSummaryCopiesTransportPolicy(t *testing.T) {
+	t.Parallel()
+	want := connectivity.AgentTransportPolicySnapshot{
+		DirectInbound:  connectivity.TransportDirectionSnapshot{Configured: true, Effective: true},
+		DirectOutbound: connectivity.TransportDirectionSnapshot{Configured: false, Effective: false},
+		RelayInbound: connectivity.TransportDirectionSnapshot{
+			Configured: true, Effective: false, ReasonCode: consts.RouteErrorRelayConnectionDisabled,
+		},
+		RelayOutbound: connectivity.TransportDirectionSnapshot{Configured: false, Effective: false},
+	}
+
+	summary := connectionSummary(connectivity.ConnectionSnapshot{TransportPolicy: want})
+	require.Equal(t, want, summary.TransportPolicy)
+}
+
 type apiDatabaseOperationFinder struct{ application app.Application }
 
 func (f apiDatabaseOperationFinder) FindAgent(ctx context.Context, agentID string) (models.Agent, error) {
 	var agent models.Agent
-	err := f.application.GetDB().WithContext(ctx).Where("agent_id = ?", agentID).First(&agent).Error
+	err := f.application.GetCoreDB().WithContext(ctx).Where("agent_id = ?", agentID).First(&agent).Error
 	return agent, err
 }
 
@@ -337,7 +386,7 @@ func newFullSyncFixture(t *testing.T, count int) (*Handler, *app.Context, []stri
 func TestOperationGuardFullSyncPreauthorizesDeduplicatesAndUsesLease(t *testing.T) {
 	t.Run("denial prevents every rpc", func(t *testing.T) {
 		h, ctx, ids, _ := newFullSyncFixture(t, 2)
-		require.NoError(t, ctx.App.GetDB().Model(&models.Agent{}).
+		require.NoError(t, ctx.App.GetCoreDB().Model(&models.Agent{}).
 			Where("agent_id = ?", ids[1]).Update("status", consts.StatusDisabled).Error)
 		h.GetOnlineAgentIDs = func() []string { return append([]string{}, ids...) }
 		var calls atomic.Int32

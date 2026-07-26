@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"sort"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 )
@@ -105,7 +106,8 @@ func normalizeDirectProbeResult(result protocol.DirectProbeResult) protocol.Dire
 
 	identity, identityValid := normalizedDirectIdentity(result.Identity)
 	result.Identity = identity
-	valid = valid && identityValid && isKnownDirectProbeReasonCode(result.ReasonCode)
+	valid = valid && identityValid && isKnownDirectProbeReasonCode(result.ReasonCode) &&
+		validDirectProbePolicyResult(result)
 	if result.Eligible && (result.Network != "reachable" || identity != "verified" || result.ReasonCode != "") {
 		valid = false
 	}
@@ -113,6 +115,8 @@ func normalizeDirectProbeResult(result protocol.DirectProbeResult) protocol.Dire
 		result.Identity = "invalid_response"
 		result.Eligible = false
 		result.ReasonCode = "direct_probe_invalid_response"
+		result.PolicyDisabled = false
+		result.PolicyReasonCode = ""
 		return result
 	}
 	if result.Network != "reachable" || identity != "verified" {
@@ -155,11 +159,40 @@ func isKnownDirectProbeReasonCode(code string) bool {
 		"request_cancelled",
 		"probe_unavailable",
 		"probe_call_failed",
-		"direct_probe_invalid_response":
+		"direct_probe_invalid_response",
+		consts.RouteErrorDirectDisabled,
+		consts.RouteErrorDirectAuthUnavailable,
+		consts.RouteErrorDirectProbeHTTPStatus,
+		consts.RouteErrorDirectProbeBodyTooLarge,
+		consts.RouteErrorDirectCommitUncertain,
+		consts.RouteErrorDirectResponseInterrupted,
+		consts.RouteErrorRequestDeadline:
 		return true
 	default:
 		return false
 	}
+}
+
+func validDirectProbePolicyResult(result protocol.DirectProbeResult) bool {
+	if !validConnectivityProbePolicy(result.Policy) {
+		return false
+	}
+	if !result.PolicyDisabled {
+		return result.PolicyReasonCode == ""
+	}
+	if result.Eligible {
+		return false
+	}
+	switch result.PolicyReasonCode {
+	case consts.RouteErrorSourceDirectOutboundDisabled, consts.RouteErrorTargetDirectInboundDisabled:
+		return true
+	default:
+		return false
+	}
+}
+
+func validConnectivityProbePolicy(policy protocol.ProbePolicy) bool {
+	return policy == protocol.ProbeRespectBusinessPolicy || policy == protocol.ProbeBypassBusinessPolicy
 }
 
 func publicDirectIdentity(identity string) string {

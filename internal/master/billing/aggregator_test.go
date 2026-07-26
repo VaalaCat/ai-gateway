@@ -26,11 +26,11 @@ func newAggregatorForTest(t *testing.T) *Aggregator {
 func TestAggregator_SubmitAccumulatesByKey(t *testing.T) {
 	a := newAggregatorForTest(t)
 
-	log := &models.UsageLog{
+	log := &models.BillingLog{
 		UserID: 1, TokenID: 2, TokenName: "k",
 		ChannelID: 3, PrivateChannelID: 0, OwnerType: "admin",
 		ChannelName: "c", ChannelType: 1,
-		ModelName: "gpt-4o", AgentID: "agent-x",
+		ModelName:    "gpt-4o",
 		PromptTokens: 100, CompletionTokens: 50,
 		InputCost: 10, OutputCost: 20, TotalCost: 30,
 		Status:    1,
@@ -38,13 +38,13 @@ func TestAggregator_SubmitAccumulatesByKey(t *testing.T) {
 	}
 
 	// success: 单次 Submit → tokens + channels 各 1 行
-	a.Submit(log)
+	a.SubmitBilling(log)
 	tokens, channels, _ := a.Snapshot()
 	require.Len(t, tokens, 1)
 	require.Len(t, channels, 1)
 
 	// success: 同 key 累加
-	a.Submit(log)
+	a.SubmitBilling(log)
 	tokens, channels, _ = a.Snapshot()
 	require.Len(t, tokens, 1)
 	for _, d := range tokens {
@@ -56,23 +56,23 @@ func TestAggregator_SubmitAccumulatesByKey(t *testing.T) {
 	}
 
 	// boundary: nil log 安全跳过
-	a.Submit(nil)
+	a.SubmitBilling(nil)
 	tokens, _, _ = a.Snapshot()
 	require.Len(t, tokens, 1, "nil log 不应增加 key")
 }
 
 func TestAggregator_SubmitDifferentKeys(t *testing.T) {
 	a := newAggregatorForTest(t)
-	base := &models.UsageLog{
+	base := &models.BillingLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
-		PromptTokens: 10, Status: 1, ModelName: "m", AgentID: "x",
+		PromptTokens: 10, Status: 1, ModelName: "m",
 		CreatedAt: 1700000000,
 	}
 	another := *base
 	another.TokenID = 99
 
-	a.Submit(base)
-	a.Submit(&another)
+	a.SubmitBilling(base)
+	a.SubmitBilling(&another)
 
 	tokens, _, _ := a.Snapshot()
 	require.Len(t, tokens, 2, "不同 TokenID 应产生 2 个 delta")
@@ -81,12 +81,12 @@ func TestAggregator_SubmitDifferentKeys(t *testing.T) {
 func TestAggregator_FailedStatusCounts(t *testing.T) {
 	// failure case: Status=0 应进入 FailedCount，不进 SuccessCount
 	a := newAggregatorForTest(t)
-	failedLog := &models.UsageLog{
+	failedLog := &models.BillingLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
-		Status: 0, ModelName: "m", AgentID: "x",
+		Status: 0, ModelName: "m",
 		CreatedAt: 1700000000,
 	}
-	a.Submit(failedLog)
+	a.SubmitBilling(failedLog)
 	tokens, channels, _ := a.Snapshot()
 	for _, d := range tokens {
 		require.Equal(t, int64(1), d.RequestCount)
@@ -99,84 +99,17 @@ func TestAggregator_FailedStatusCounts(t *testing.T) {
 	}
 }
 
-func TestAggregator_HourlyBucketStreamSuccess(t *testing.T) {
-	a := newAggregatorForTest(t)
-
-	streamSuccess := &models.UsageLog{
-		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
-		ModelName: "m", AgentID: "x",
-		PromptTokens: 100, CompletionTokens: 50,
-		Status: 1, IsStream: true,
-		FirstResponseMs: 300, Duration: 2200,
-		InboundDecodeMs: 5, UpstreamDispatchMs: 6, UpstreamDecodeMs: 7,
-		OutboundEncodeMs: 8, ClientEncodeMs: 9,
-		CreatedAt: 1700000000,
-	}
-	failed := *streamSuccess
-	failed.Status = 0
-	nonStream := *streamSuccess
-	nonStream.IsStream = false
-
-	a.Submit(streamSuccess)
-	a.Submit(&failed)
-	a.Submit(&nonStream)
-
-	_, _, hourly := a.Snapshot()
-	require.Len(t, hourly, 1)
-	for _, d := range hourly {
-		require.Equal(t, int64(3), d.RequestCount)
-		require.Equal(t, int64(2), d.SuccessCount)
-		require.Equal(t, int64(1), d.FailedCount)
-
-		// 速度累加: 仅 streamSuccess (IsStream && Status==1 && CompletionTokens>0)
-		require.Equal(t, int64(1), d.StreamRequestCount, "仅 streamSuccess 进 stream counters")
-		require.Equal(t, int64(300), d.SumFirstResponseMs)
-		require.Equal(t, int64(2200-300), d.SumGenerationMs, "SumGenerationMs = Duration - FirstResponseMs")
-		require.Equal(t, int64(50), d.SumStreamCompletionTokens)
-
-		// 五段延迟: 仅 Status==1 (streamSuccess + nonStream)
-		require.Equal(t, int64(10), d.SumInboundDecodeMs, "5*2")
-		require.Equal(t, int64(12), d.SumUpstreamDispatchMs)
-		require.Equal(t, int64(14), d.SumUpstreamDecodeMs)
-		require.Equal(t, int64(16), d.SumOutboundEncodeMs)
-		require.Equal(t, int64(18), d.SumClientEncodeMs)
-	}
-}
-
-func TestAggregator_HourlyBucket_StreamWithoutCompletionExcludedFromStreamCounters(t *testing.T) {
-	a := newAggregatorForTest(t)
-	// boundary: stream + success but CompletionTokens=0 → 不进 stream counters
-	emptyStream := &models.UsageLog{
-		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
-		ModelName: "m", AgentID: "x",
-		Status: 1, IsStream: true,
-		PromptTokens: 50, CompletionTokens: 0,
-		FirstResponseMs: 100, Duration: 200,
-		InboundDecodeMs: 1,
-		CreatedAt:       1700000000,
-	}
-	a.Submit(emptyStream)
-
-	_, _, hourly := a.Snapshot()
-	for _, d := range hourly {
-		require.Equal(t, int64(0), d.StreamRequestCount, "无 completion 不进 stream")
-		require.Equal(t, int64(0), d.SumStreamCompletionTokens)
-		// 但五段延迟仍累加（Status==1）
-		require.Equal(t, int64(1), d.SumInboundDecodeMs)
-	}
-}
-
 func TestAggregator_OwnerTypeDefaultsToAdmin(t *testing.T) {
 	// success: OwnerType="" 在 channelDelta + hourlyDelta 上应回填 "admin"
 	a := newAggregatorForTest(t)
-	noOwner := &models.UsageLog{
+	noOwner := &models.BillingLog{
 		UserID: 1, TokenID: 2,
 		ChannelID: 3, PrivateChannelID: 0,
 		OwnerType: "", // 空 → 默认 admin
-		Status:    1, ModelName: "m", AgentID: "x",
+		Status:    1, ModelName: "m",
 		CreatedAt: 1700000000,
 	}
-	a.Submit(noOwner)
+	a.SubmitBilling(noOwner)
 
 	_, channels, hourly := a.Snapshot()
 	require.Len(t, channels, 1)
@@ -184,24 +117,24 @@ func TestAggregator_OwnerTypeDefaultsToAdmin(t *testing.T) {
 		require.Equal(t, "admin", d.OwnerType)
 	}
 	require.Len(t, hourly, 1)
-	for _, d := range hourly {
-		require.Equal(t, "admin", d.OwnerType)
+	for key := range hourly {
+		require.Equal(t, "admin", key.OwnerType)
 	}
 }
 
 func TestAggregator_LastUsedAtMaxGuard(t *testing.T) {
 	// boundary: 同 key 第二次 Submit 用更小的 ts，LastUsedAt 应保留较大值
 	a := newAggregatorForTest(t)
-	base := &models.UsageLog{
+	base := &models.BillingLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
-		ModelName: "m", AgentID: "x",
-		Status: 1, CreatedAt: 1700001000,
+		ModelName: "m",
+		Status:    1, CreatedAt: 1700001000,
 	}
 	older := *base
 	older.CreatedAt = 1700000000 // earlier
 
-	a.Submit(base)   // ts=1700001000
-	a.Submit(&older) // ts=1700000000，不应回退 LastUsedAt
+	a.SubmitBilling(base)   // ts=1700001000
+	a.SubmitBilling(&older) // ts=1700000000，不应回退 LastUsedAt
 
 	tokens, channels, hourly := a.Snapshot()
 	for _, d := range tokens {
@@ -215,11 +148,31 @@ func TestAggregator_LastUsedAtMaxGuard(t *testing.T) {
 	}
 }
 
+func TestCoreAggregatorKeepsLatestBillingHourlyNames(t *testing.T) {
+	a := newAggregatorForTest(t)
+	newer := &models.BillingLog{UserID: 1, TokenID: 2, TokenName: "new-token", ChannelID: 3, ChannelName: "new-channel", OwnerType: "admin", ModelName: "m", Status: 1, CreatedAt: 1700001000}
+	older := *newer
+	older.TokenName = "old-token"
+	older.ChannelName = "old-channel"
+	older.CreatedAt = 1700000000
+
+	a.SubmitBilling(newer)
+	a.SubmitBilling(&older)
+
+	_, _, hourly := a.Snapshot()
+	require.Len(t, hourly, 1)
+	for _, delta := range hourly {
+		require.Equal(t, "new-token", delta.TokenName)
+		require.Equal(t, "new-channel", delta.ChannelName)
+		require.Equal(t, int64(1700001000), delta.UpdatedAt)
+	}
+}
+
 type fakeBillingMutator struct {
 	mu       sync.Mutex
 	tokens   [][]dao.TokenDailyRow
 	channels [][]dao.ChannelDailyRow
-	hourly   [][]dao.HourlyBucketRow
+	hourly   [][]dao.BillingHourlyRow
 	err      error
 }
 
@@ -247,13 +200,13 @@ func (f *fakeBillingMutator) submitChannels(rows []dao.ChannelDailyRow) error {
 	return nil
 }
 
-func (f *fakeBillingMutator) submitHourly(rows []dao.HourlyBucketRow) error {
+func (f *fakeBillingMutator) submitHourly(rows []dao.BillingHourlyRow) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
-	cp := make([]dao.HourlyBucketRow, len(rows))
+	cp := make([]dao.BillingHourlyRow, len(rows))
 	copy(cp, rows)
 	f.hourly = append(f.hourly, cp)
 	return nil
@@ -271,17 +224,17 @@ func (f *fakeBillingMutator) snapshotTokens() [][]dao.TokenDailyRow {
 func TestAggregator_FlushSnapshotsAndPersists(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 
-	log := &models.UsageLog{
+	log := &models.BillingLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
-		ModelName: "m", AgentID: "x",
+		ModelName:    "m",
 		PromptTokens: 10, Status: 1, CreatedAt: 1700000000,
 	}
 
 	// success: 5 次 Submit 同 key → flush 后 token 行 RequestCount=5
 	for i := 0; i < 5; i++ {
-		a.Submit(log)
+		a.SubmitBilling(log)
 	}
 	require.NoError(t, a.Flush())
 	require.Len(t, fake.tokens, 1)
@@ -299,7 +252,7 @@ func TestAggregator_FlushSnapshotsAndPersists(t *testing.T) {
 func TestAggregator_FlushEmptyBufferNoOp(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 
 	// boundary: 无 Submit 的 Flush 不发起调用
 	require.NoError(t, a.Flush())
@@ -308,16 +261,42 @@ func TestAggregator_FlushEmptyBufferNoOp(t *testing.T) {
 	require.Empty(t, fake.hourly)
 }
 
+func TestAggregatorProjectionFlushRetainsUniqueFactsAcrossFailure(t *testing.T) {
+	a := newAggregatorForTest(t)
+	var calls [][]models.BillingLog
+	fail := true
+	a.SetProjectionFlushContextFn(func(_ context.Context, facts []models.BillingLog) error {
+		calls = append(calls, append([]models.BillingLog(nil), facts...))
+		if fail {
+			return assert.AnError
+		}
+		return nil
+	})
+	first := &models.BillingLog{RequestID: "request-1", Status: 1, CreatedAt: 1_800_000_000}
+	second := &models.BillingLog{RequestID: "request-2", Status: 1, CreatedAt: 1_800_000_001}
+	a.SubmitBilling(first)
+	a.SubmitBilling(first)
+	a.SubmitBilling(second)
+
+	require.ErrorIs(t, a.Flush(), assert.AnError)
+	require.Len(t, calls, 1)
+	require.Len(t, calls[0], 2)
+	fail = false
+	require.NoError(t, a.Flush())
+	require.Len(t, calls, 2)
+	require.ElementsMatch(t, []string{"request-1", "request-2"}, []string{calls[1][0].RequestID, calls[1][1].RequestID})
+}
+
 func TestAggregator_FlushFailureClearsBufferAnyway(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{err: assert.AnError}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 
-	log := &models.UsageLog{
+	log := &models.BillingLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
 		Status: 1, CreatedAt: 1700000000,
 	}
-	a.Submit(log)
+	a.SubmitBilling(log)
 
 	// failure: dao 返回 error → Flush 返回 error，但 buffer 仍清空（rebuild 兜底）
 	require.Error(t, a.Flush())
@@ -325,33 +304,79 @@ func TestAggregator_FlushFailureClearsBufferAnyway(t *testing.T) {
 	require.Empty(t, tokens, "Flush 失败也清空，由 rebuild 兜底")
 }
 
-func TestAggregator_FlushHourlyBucketRoundTrip(t *testing.T) {
+func TestCoreAggregatorUpsertsBillingHourlyDimensions(t *testing.T) {
 	a := newAggregatorForTest(t)
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 
-	streamLog := &models.UsageLog{
+	streamLog := &models.BillingLog{
 		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
-		ModelName: "m", AgentID: "x",
+		ModelName: "m", TokenName: "token", ChannelName: "channel",
 		PromptTokens: 100, CompletionTokens: 50,
-		Status: 1, IsStream: true,
-		FirstResponseMs: 300, Duration: 2200,
-		InboundDecodeMs: 5,
-		CreatedAt:       1700000000,
+		Status: 1, CreatedAt: 1700000000,
 	}
-	a.Submit(streamLog)
-	a.Submit(streamLog) // 累加 2 次
+	a.SubmitBilling(streamLog)
+	a.SubmitBilling(streamLog) // 累加 2 次
 
 	require.NoError(t, a.Flush())
 	require.Len(t, fake.hourly, 1)
 	require.Len(t, fake.hourly[0], 1)
 	row := fake.hourly[0][0]
 	require.Equal(t, int64(2), row.RequestCount)
-	require.Equal(t, int64(2), row.StreamRequestCount)
-	require.Equal(t, int64(600), row.SumFirstResponseMs)
-	require.Equal(t, int64((2200-300)*2), row.SumGenerationMs)
-	require.Equal(t, int64(100), row.SumStreamCompletionTokens)
-	require.Equal(t, int64(10), row.SumInboundDecodeMs)
+	require.Equal(t, uint(1), row.UserID)
+	require.Equal(t, uint(2), row.TokenID)
+	require.Equal(t, uint(3), row.ChannelID)
+	require.Equal(t, "admin", row.OwnerType)
+	require.Equal(t, "m", row.ModelName)
+	require.Equal(t, "token", row.TokenName)
+	require.Equal(t, "channel", row.ChannelName)
+}
+
+func TestAggregator_FlushHourlyBucket_RawCost(t *testing.T) {
+	a := newAggregatorForTest(t)
+	fake := &fakeBillingMutator{}
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+
+	// success: 折前原价(RawInputCost+RawOutputCost) != 折后 TotalCost(渠道打折)，
+	// hourly row 的 RawCost 应取 log.RawTotal() 而非 TotalCost。
+	log := &models.BillingLog{
+		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
+		ModelName: "m", Status: 1, CreatedAt: 1700000000,
+		TotalCost:    30,
+		RawInputCost: ptrI64(40), RawOutputCost: ptrI64(60),
+	}
+	// 同 key 累加两次: RawCost 应是单条 RawTotal() 的 2 倍
+	a.SubmitBilling(log)
+	a.SubmitBilling(log)
+
+	require.NoError(t, a.Flush())
+	require.Len(t, fake.hourly, 1)
+	require.Len(t, fake.hourly[0], 1)
+	row := fake.hourly[0][0]
+	require.Equal(t, log.RawTotal()*2, row.RawCost, "hourly RawCost 应累加两条 log.RawTotal()")
+	require.Equal(t, int64(200), row.RawCost)
+	require.Equal(t, int64(60), row.TotalCost, "TotalCost 折后成本不受影响")
+}
+
+// boundary: 无 Raw* 桶的旧行 → RawTotal() 回退 TotalCost，hourly RawCost == TotalCost。
+func TestAggregator_FlushHourlyBucket_RawCostFallbackToTotalCost(t *testing.T) {
+	a := newAggregatorForTest(t)
+	fake := &fakeBillingMutator{}
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
+
+	log := &models.BillingLog{
+		UserID: 1, TokenID: 2, OwnerType: "admin", ChannelID: 3,
+		ModelName: "m", Status: 1, CreatedAt: 1700000000,
+		TotalCost: 75,
+	}
+	a.SubmitBilling(log)
+
+	require.NoError(t, a.Flush())
+	require.Len(t, fake.hourly, 1)
+	require.Len(t, fake.hourly[0], 1)
+	row := fake.hourly[0][0]
+	require.Equal(t, int64(75), row.RawCost)
+	require.Equal(t, int64(75), row.TotalCost)
 }
 
 func TestAggregator_TickerFlushesPeriodically(t *testing.T) {
@@ -360,18 +385,18 @@ func TestAggregator_TickerFlushesPeriodically(t *testing.T) {
 		MaxRows:    0, // disable maxRows for this test
 	})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.Start(ctx)
 
 	// success: Submit 后等 ticker 自动 flush
-	a.Submit(&models.UsageLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
+	a.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
 	require.Eventually(t, func() bool { return len(fake.snapshotTokens()) >= 1 }, time.Second, 5*time.Millisecond, "ticker 应在 20ms 内 flush")
 
 	// success: Stop force-flush 最后一批
-	a.Submit(&models.UsageLog{UserID: 1, TokenID: 99, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
+	a.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 99, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
 	_ = a.Stop(context.Background())
 	found := false
 	for _, batch := range fake.snapshotTokens() {
@@ -390,7 +415,7 @@ func TestAggregator_MaxRowsTriggersEarlyFlush(t *testing.T) {
 		MaxRows:    3,
 	})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -399,10 +424,10 @@ func TestAggregator_MaxRowsTriggersEarlyFlush(t *testing.T) {
 
 	// 同一 UsageLog 触发 1 token + 1 channel + 1 hourly = 3 distinct keys
 	// 累积 1 个 Submit 后 total = 3 = maxRows 阈值 → 应触发 flush
-	a.Submit(&models.UsageLog{
+	a.SubmitBilling(&models.BillingLog{
 		UserID: 1, TokenID: 1, OwnerType: "admin", ChannelID: 1,
-		ModelName: "m", AgentID: "x",
-		Status: 1, CreatedAt: 1700000000,
+		ModelName: "m",
+		Status:    1, CreatedAt: 1700000000,
 	})
 
 	require.Eventually(t, func() bool {
@@ -413,12 +438,12 @@ func TestAggregator_MaxRowsTriggersEarlyFlush(t *testing.T) {
 func TestAggregator_NoTickerWhenFlushEveryZero(t *testing.T) {
 	a := NewAggregator(nil, zap.NewNop(), AggregatorOptions{FlushEvery: 0, MaxRows: 0})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	a.Start(ctx)
-	a.Submit(&models.UsageLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
+	a.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
 	time.Sleep(40 * time.Millisecond)
 	require.Empty(t, fake.snapshotTokens(), "flushEvery=0 不应触发自动 flush")
 	_ = a.Stop(context.Background())
@@ -427,7 +452,7 @@ func TestAggregator_NoTickerWhenFlushEveryZero(t *testing.T) {
 func TestAggregator_StopConcurrentSafe(t *testing.T) {
 	a := NewAggregator(nil, zap.NewNop(), AggregatorOptions{FlushEvery: 10 * time.Millisecond})
 	fake := &fakeBillingMutator{}
-	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly, nil)
+	a.SetFlushFns(fake.submitTokens, fake.submitChannels, fake.submitHourly)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.Start(ctx)
@@ -445,45 +470,6 @@ func TestAggregator_StopConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
-func TestAggregatorHistogramAccumulateAndFlush(t *testing.T) {
-	a := NewAggregator(nil, nil, AggregatorOptions{FlushEvery: 0, MaxRows: 0})
-	var got []dao.DurationHistogramRow
-	a.SetFlushFns(nil, nil, nil, func(rows []dao.DurationHistogramRow) error {
-		got = append(got, rows...)
-		return nil
-	})
-
-	// 同 (date,hour,channel,model,agent) 两条成功 + 一条失败
-	base := &models.UsageLog{Status: 1, Duration: 9500, ChannelID: 5, ModelName: "gpt-4o", AgentID: "a1", CreatedAt: 1783497600}
-	a.Submit(base)
-	second := *base
-	second.Duration = 58000
-	a.Submit(&second)
-	failed := *base
-	failed.Status = 0
-	failed.Duration = 999999
-	a.Submit(&failed)
-
-	a.Flush() // 或本包测试用的手动触发方式(对照既有测试 :280-290)
-	if len(got) != 1 {
-		t.Fatalf("rows = %d, want 1(同维度合并)", len(got))
-	}
-	r := got[0]
-	if r.Hist[6] != 1 || r.Hist[11] != 1 { // 9500→slot6, 58000→slot11
-		t.Fatalf("hist = %v, want slot6=1 slot11=1", r.Hist)
-	}
-	if r.MaxDurationMs != 58000 {
-		t.Fatalf("max = %d, want 58000(失败请求 999999 不参与)", r.MaxDurationMs)
-	}
-	var total int64
-	for _, c := range r.Hist {
-		total += c
-	}
-	if total != 2 {
-		t.Fatalf("hist total = %d, want 2(status=0 不入)", total)
-	}
-}
-
 func TestAggregatorCloseDeadlineCancelsFinalFlushAndRejectsRestart(t *testing.T) {
 	a := NewAggregator(nil, zap.NewNop(), AggregatorOptions{FlushEvery: time.Hour})
 	flushEntered := make(chan struct{})
@@ -491,8 +477,8 @@ func TestAggregatorCloseDeadlineCancelsFinalFlushAndRejectsRestart(t *testing.T)
 		close(flushEntered)
 		<-ctx.Done()
 		return context.Cause(ctx)
-	}, nil, nil, nil)
-	a.Submit(&models.UsageLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
+	}, nil, nil)
+	a.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1700000000})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	err := a.Close(ctx)
@@ -511,5 +497,22 @@ func TestAggregatorCloseDeadlineCancelsFinalFlushAndRejectsRestart(t *testing.T)
 	a.Start(context.Background())
 	if got := a.ResourceCounts(); got != (app.ResourceCounts{}) {
 		t.Fatalf("Start after Close created resources: %+v", got)
+	}
+}
+
+func TestAggregatorCloseReturnsFinalFlushErrorIdempotently(t *testing.T) {
+	flushErr := errors.New("final flush failed")
+	a := NewAggregator(nil, zap.NewNop(), AggregatorOptions{})
+	a.SetCoreFlushContextFn(func(context.Context, []dao.TokenDailyRow, []dao.ChannelDailyRow, []dao.BillingHourlyRow) error {
+		return flushErr
+	})
+	a.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1})
+
+	require.ErrorIs(t, a.Close(t.Context()), flushErr)
+	require.ErrorIs(t, a.Close(t.Context()), flushErr)
+	select {
+	case <-a.Done():
+	default:
+		t.Fatal("Aggregator Done remains open after final flush failure")
 	}
 }

@@ -25,6 +25,7 @@ import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { StatusBadge } from "@/components/business/status-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
@@ -48,8 +49,7 @@ function AdminBYOKPageInner() {
   const tByok = useTranslations("byok");
   const tc = useTranslations("common");
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
   const [confirmDisableId, setConfirmDisableId] = useState<number | null>(null);
 
   const { data: typesData } = useBYOKSupportedTypes();
@@ -73,12 +73,7 @@ function AdminBYOKPageInner() {
     },
   } satisfies FilterSpec), [t, tByok, byokTypes]);
 
-  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
-
-  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
-    setPage(1);
-    setFilterValuesRaw(next);
-  };
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading } = useAdminBYOKChannels({
     page,
@@ -96,12 +91,7 @@ function AdminBYOKPageInner() {
   const disableMut = useDisableBYOKChannel();
 
   const handlePaginationChange = (nextPage: number, nextPageSize: number) => {
-    if (nextPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(nextPageSize);
-    } else {
-      setPage(nextPage);
-    }
+    setPagination(nextPageSize === pageSize ? nextPage : 1, nextPageSize);
   };
 
   const handleDisable = async (id: number) => {

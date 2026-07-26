@@ -25,7 +25,7 @@ func TestLegacyProviderRequestHonorsCanceledContext(t *testing.T) {
 	rctx := &state.RelayContext{
 		Context: c,
 		Input:   state.RelayInput{Body: body, Model: "gpt-4", StartTime: time.Now()},
-		State:   &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State:   &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	ch := &models.Channel{
 		ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: "http://10.255.255.1:9"},
@@ -63,7 +63,7 @@ func TestLegacyProviderRequestCancelsInFlight(t *testing.T) {
 	rctx := &state.RelayContext{
 		Context: c,
 		Input:   state.RelayInput{Body: body, Model: "gpt-4", StartTime: time.Now()},
-		State:   &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State:   &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	ch := &models.Channel{
 		ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: provider.URL},

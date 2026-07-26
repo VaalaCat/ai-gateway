@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
+	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -39,6 +41,18 @@ var (
 	errUnknownStreamData = errors.New("agent tunnel: DATA for unknown stream")
 	errNilContext        = errors.New("agent tunnel: nil context")
 	errNilConnection     = errors.New("agent tunnel: nil connection")
+	ErrSessionDirection  = errors.New("agent tunnel: session direction violation")
+	errSessionDirection  = ErrSessionDirection
+	errSessionOptions    = errors.New("agent tunnel: invalid session options")
+)
+
+type SessionDirection uint8
+
+const (
+	// behavior change: zero no longer defaults to a relay session.
+	SessionDirectionRelay SessionDirection = iota + 1
+	SessionDirectionDirectOutgoing
+	SessionDirectionDirectIncoming
 )
 
 type sessionState uint8
@@ -50,17 +64,27 @@ const (
 )
 
 type SessionOptions struct {
-	Logger             *zap.Logger
-	PingInterval       time.Duration
-	PongTimeout        time.Duration
-	WriteTimeout       time.Duration
-	OpenCommitTimeout  time.Duration
-	WindowStallTimeout time.Duration
-	TombstoneTTL       time.Duration
-	TombstoneLimit     int
-	TargetHandler      *TargetHandler
-	Now                func() time.Time
-	clock              sessionClock
+	Logger              *zap.Logger
+	Metrics             *pkgmetrics.AgentRelayMetrics
+	PingInterval        time.Duration
+	PongTimeout         time.Duration
+	WriteTimeout        time.Duration
+	OpenCommitTimeout   time.Duration
+	WindowStallTimeout  time.Duration
+	TombstoneTTL        time.Duration
+	TombstoneLimit      int
+	TargetHandler       *TargetHandler
+	Direction           SessionDirection
+	IngressKind         string
+	BoundSourceAgentID  string
+	AdmissionDeadline   time.Time
+	SourceEnabled       func(string) bool
+	TargetStatusEnabled func() bool
+	Now                 func() time.Time
+	clock               sessionClock
+	directLogs          *directLogs
+	directSourceAgentID string
+	directTargetAgentID string
 }
 
 type sessionConn interface {
@@ -101,15 +125,20 @@ type Session struct {
 	targets    map[wire.StreamID]*targetStream
 	tombstones *tombstoneStore
 
-	unknownDataTimes []time.Time
-	incomingMu       sync.Mutex
-	incomingBytes    int64
+	unknownDataTimes  []time.Time
+	bufferMu          sync.Mutex
+	incomingBytes     int64
+	queuedBytes       int64
+	peakBufferedBytes int64
 
-	admissionMu  sync.Mutex
-	accepting    bool
-	borrows      int
-	activity     chan struct{}
-	recentErrors *diagnostics.Ring
+	admissionMu   sync.Mutex
+	accepting     bool
+	borrows       int
+	activeStreams int
+	idleSince     time.Time
+	activityNow   func() time.Time
+	activity      chan struct{}
+	recentErrors  *diagnostics.Ring
 }
 
 func NewSession(conn *websocket.Conn, generation uint64, limits wire.Limits, opts SessionOptions) *Session {
@@ -123,20 +152,29 @@ func newSession(conn sessionConn, generation uint64, limits wire.Limits, opts Se
 	if conn == nil {
 		return newTerminalSession(nil, generation, limits, opts, errNilConnection)
 	}
-	normalized, err := wire.NormalizeV1Limits(limits)
+	normalized, err := wire.NormalizeV2Limits(limits)
 	if err != nil {
 		return newTerminalSession(conn, generation, limits, opts, err)
+	}
+	opts = defaultSessionOptions(opts)
+	if generation == 0 {
+		return newTerminalSession(conn, generation, normalized, opts, errSessionOptions)
+	}
+	opts, err = validateSessionOptions(opts)
+	if err != nil {
+		return newTerminalSession(conn, generation, normalized, opts, err)
 	}
 	return newSessionValue(conn, generation, normalized, opts)
 }
 
 func newSessionValue(conn sessionConn, generation uint64, limits wire.Limits, opts SessionOptions) *Session {
 	opts = defaultSessionOptions(opts)
+	now := opts.Now()
 	return &Session{
 		conn: conn, generation: generation, limits: limits, opts: opts,
 		started: make(chan struct{}), done: make(chan struct{}), streams: make(map[wire.StreamID]*Stream),
 		connCloseDone: make(chan struct{}),
-		targets:       make(map[wire.StreamID]*targetStream), accepting: true, activity: make(chan struct{}, 1),
+		targets:       make(map[wire.StreamID]*targetStream), accepting: true, idleSince: now, activityNow: opts.Now, activity: make(chan struct{}, 1),
 		tombstones:   newTombstoneStore(opts.TombstoneLimit, opts.TombstoneTTL, opts.clock.Now),
 		recentErrors: diagnostics.NewRing(diagnostics.DefaultRingCapacity),
 	}
@@ -156,10 +194,18 @@ func (s *Session) setAccepting(accepting bool) {
 	s.admissionMu.Unlock()
 }
 
+func (s *Session) isRunning() bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.state == sessionStateRunning && s.ctx != nil
+}
+
 func (s *Session) tryActivate() bool {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	if s.state != sessionStateRunning || s.cancelCause != nil || context.Cause(s.ctx) != nil {
+	// behavior change: ingress may publish an active Session between Run's
+	// running-state transition and its context initialization.
+	if s.state != sessionStateRunning || s.cancelCause != nil || s.ctx == nil || context.Cause(s.ctx) != nil {
 		return false
 	}
 	s.admissionMu.Lock()
@@ -175,6 +221,7 @@ func (s *Session) acquireAdmission() bool {
 		return false
 	}
 	s.borrows++
+	s.idleSince = time.Time{}
 	return true
 }
 
@@ -189,15 +236,55 @@ func (s *Session) releaseAdmission() {
 	if s.borrows > 0 {
 		s.borrows--
 	}
+	s.startIdleLocked()
 	s.admissionMu.Unlock()
 	s.signalActivity()
 }
 
 func (s *Session) idle() bool {
 	s.admissionMu.Lock()
-	borrows := s.borrows
+	defer s.admissionMu.Unlock()
+	return s.borrows == 0 && s.activeStreams == 0
+}
+
+func (s *Session) idleSinceTime() (time.Time, bool) {
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	if s.borrows != 0 || s.activeStreams != 0 {
+		return time.Time{}, false
+	}
+	if s.idleSince.IsZero() {
+		s.idleSince = s.activityTimeLocked()
+	}
+	return s.idleSince, true
+}
+
+func (s *Session) setActivityNow(now func() time.Time, current time.Time) {
+	if now == nil {
+		now = time.Now
+	}
+	s.admissionMu.Lock()
+	s.activityNow = now
+	if s.borrows == 0 && s.activeStreams == 0 {
+		s.idleSince = current
+	}
 	s.admissionMu.Unlock()
-	return borrows == 0 && s.StreamCount() == 0
+}
+
+func (s *Session) startIdleLocked() {
+	if s.borrows == 0 && s.activeStreams == 0 && s.idleSince.IsZero() {
+		s.idleSince = s.activityTimeLocked()
+	}
+}
+
+func (s *Session) activityTimeLocked() time.Time {
+	if s.activityNow != nil {
+		return s.activityNow()
+	}
+	if s.opts.Now != nil {
+		return s.opts.Now()
+	}
+	return time.Now()
 }
 
 func (s *Session) Activity() <-chan struct{} { return s.activity }
@@ -264,6 +351,41 @@ func defaultSessionOptions(opts SessionOptions) SessionOptions {
 	return opts
 }
 
+func validateSessionOptions(opts SessionOptions) (SessionOptions, error) {
+	switch opts.Direction {
+	case SessionDirectionRelay:
+		if opts.IngressKind == "" {
+			opts.IngressKind = agentproxy.IngressKindRelayTunnel
+		}
+		if opts.IngressKind != agentproxy.IngressKindRelayTunnel || opts.BoundSourceAgentID != "" ||
+			!opts.AdmissionDeadline.IsZero() || opts.SourceEnabled != nil || opts.TargetStatusEnabled != nil {
+			return opts, errSessionOptions
+		}
+	case SessionDirectionDirectOutgoing:
+		if opts.IngressKind == "" {
+			opts.IngressKind = agentproxy.IngressKindDirectTunnel
+		}
+		if opts.IngressKind != agentproxy.IngressKindDirectTunnel || opts.TargetHandler != nil ||
+			opts.BoundSourceAgentID != "" || !opts.AdmissionDeadline.IsZero() || opts.SourceEnabled != nil ||
+			opts.TargetStatusEnabled != nil {
+			return opts, errSessionOptions
+		}
+	case SessionDirectionDirectIncoming:
+		if opts.IngressKind == "" {
+			opts.IngressKind = agentproxy.IngressKindDirectTunnel
+		}
+		boundSource := strings.TrimSpace(opts.BoundSourceAgentID)
+		if opts.IngressKind != agentproxy.IngressKindDirectTunnel || opts.TargetHandler == nil ||
+			boundSource == "" || boundSource != opts.BoundSourceAgentID || opts.AdmissionDeadline.IsZero() ||
+			opts.SourceEnabled == nil || opts.TargetStatusEnabled == nil {
+			return opts, errSessionOptions
+		}
+	default:
+		return opts, errSessionOptions
+	}
+	return opts, nil
+}
+
 func (s *Session) Run(ctx context.Context) error {
 	if ctx == nil {
 		return errNilContext
@@ -281,6 +403,10 @@ func (s *Session) Run(ctx context.Context) error {
 }
 
 func (s *Session) run(parent context.Context) {
+	startedAt := s.opts.Now()
+	if s.isDirect() {
+		defer func() { s.opts.Metrics.ObserveDirectSessionDuration(s.opts.Now().Sub(startedAt)) }()
+	}
 	ctx, cancel := context.WithCancelCause(parent)
 	s.stateMu.Lock()
 	s.ctx = ctx
@@ -291,6 +417,7 @@ func (s *Session) run(parent context.Context) {
 	w.pingInterval = s.opts.PingInterval
 	w.ping = s.writePing
 	w.onError = s.Cancel
+	w.onQueuedBytesChanged = s.adjustQueuedBytes
 	s.writer = w
 	s.stateMu.Unlock()
 
@@ -321,9 +448,12 @@ func (s *Session) configureReader() {
 }
 
 func sessionMessageReadLimit(limits wire.Limits) int64 {
-	payloadLimit := limits.MaxMetadataBytes
-	if limits.MaxDataBytes > payloadLimit {
-		payloadLimit = limits.MaxDataBytes
+	payloadLimit := int64(0)
+	for _, frameType := range []wire.Type{wire.FrameOpen, wire.FrameRequestData, wire.FrameAttemptResult} {
+		limit, err := wire.FramePayloadLimit(frameType, limits)
+		if err == nil && limit > payloadLimit {
+			payloadLimit = limit
+		}
 	}
 	return int64(wire.HeaderSize) + payloadLimit
 }
@@ -342,7 +472,7 @@ func (s *Session) readLoop(ctx context.Context) error {
 		}
 		frame, err := wire.Decode(message, s.limits)
 		if err != nil {
-			return fmt.Errorf("%w: %v", errProtocol, err)
+			return fmt.Errorf("%w: %w", errProtocol, err)
 		}
 		if err := s.dispatch(ctx, frame); err != nil {
 			return err
@@ -461,13 +591,23 @@ func (s *Session) RecentErrors() []diagnostics.Event {
 }
 
 func sessionDiagnosticCode(err error) string {
+	if errors.Is(err, wire.ErrUnsupportedVersion) {
+		return wire.ErrorCodeUnsupportedProtocolVersion
+	}
 	if errors.Is(err, errProtocol) || errors.Is(err, errUnexpectedMessage) || errors.Is(err, errUnknownStreamData) {
 		return wire.ErrorCodeRelayProtocol
 	}
 	return wire.ErrorCodeSessionClosed
 }
 
-func (s *Session) OpenStream(ctx context.Context, req agentproxy.RelayRequest) (*Stream, error) {
+func (s *Session) OpenAttemptStream(ctx context.Context, req agentproxy.AttemptStreamRequest) (*Stream, error) {
+	if s != nil && s.opts.Direction == SessionDirectionDirectIncoming {
+		return nil, errSessionDirection
+	}
+	return s.openAttemptStream(ctx, req)
+}
+
+func (s *Session) openAttemptStream(ctx context.Context, req agentproxy.AttemptStreamRequest) (*Stream, error) {
 	if ctx == nil {
 		return nil, errNilContext
 	}
@@ -481,7 +621,44 @@ func (s *Session) OpenStream(ctx context.Context, req agentproxy.RelayRequest) (
 	return s.openStream(ctx, id, req)
 }
 
-func (s *Session) openStream(ctx context.Context, id wire.StreamID, req agentproxy.RelayRequest) (*Stream, error) {
+func (s *Session) OpenProbeStream(ctx context.Context, req agentproxy.ProbeStreamRequest) (*Stream, error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if err := s.initializationError(); err != nil {
+		return nil, err
+	}
+	if s.opts.Direction == SessionDirectionDirectIncoming {
+		return nil, errSessionDirection
+	}
+	open := wire.Open{
+		ProbePolicy: req.Policy, Method: http.MethodGet, Path: "/ping", Header: map[string][]string{},
+		RemainingNanos: durationNanos(req.Remaining), RequestID: req.RequestID, TargetAgentID: req.TargetAgentID,
+		ResponseWindow: s.limits.InitialStreamWindow,
+	}
+	if !open.IsConnectivityProbe() {
+		return nil, errProtocol
+	}
+	id, err := wire.NewStreamID()
+	if err != nil {
+		return nil, err
+	}
+	return s.openPreparedStream(ctx, id, open, req.Remaining, streamKindProbe)
+}
+
+func (s *Session) openStream(ctx context.Context, id wire.StreamID, req agentproxy.AttemptStreamRequest) (*Stream, error) {
+	frame, err := s.openFrame(id, req)
+	if err != nil {
+		return nil, err
+	}
+	var open wire.Open
+	if err := wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes); err != nil {
+		return nil, err
+	}
+	return s.openPreparedStream(ctx, id, open, req.Remaining, streamKindAttempt)
+}
+
+func (s *Session) openPreparedStream(ctx context.Context, id wire.StreamID, open wire.Open, remaining time.Duration, kind streamKind) (*Stream, error) {
 	if err := s.waitStarted(ctx); err != nil {
 		return nil, err
 	}
@@ -492,17 +669,21 @@ func (s *Session) openStream(ctx context.Context, id wire.StreamID, req agentpro
 	if sessionCtx == nil || sessionCtx.Err() != nil {
 		return nil, errSessionClosed
 	}
-	frame, err := s.openFrame(id, req)
+	payload, err := wire.EncodeMetadata(open, s.limits.MaxMetadataBytes)
 	if err != nil {
 		return nil, err
 	}
-	stream := newStream(s, sessionCtx, ctx, id, req.Remaining)
+	frame := wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: id, Sequence: 1, Payload: payload}
+	stream := newStream(s, sessionCtx, id, remaining, open.RequestID)
+	stream.kind = kind
 	if err := s.admitStream(stream); err != nil {
 		stream.abortBeforeRun(err)
 		return nil, err
 	}
 	go stream.run()
-	err = w.Enqueue(stream.ctx, frame, nil)
+	enqueueCtx, stopEnqueue := stream.operationContext(ctx)
+	err = w.Enqueue(enqueueCtx, frame, nil)
+	stopEnqueue()
 	if err == nil && (!s.isCurrentStream(stream) || stream.closed.Load()) {
 		err = errOpenAborted
 	}
@@ -520,24 +701,16 @@ func (s *Session) isCurrentStream(stream *Stream) bool {
 	return current == stream && current.generation == stream.generation
 }
 
-func (s *Session) openFrame(id wire.StreamID, req agentproxy.RelayRequest) (wire.Frame, error) {
+func (s *Session) openFrame(id wire.StreamID, req agentproxy.AttemptStreamRequest) (wire.Frame, error) {
 	header := req.Header.Clone()
-	var attempt *attemptwire.AttemptProxyMeta
-	if req.Attempt != nil {
-		if req.Method != http.MethodPost || req.Path != attemptwire.EndpointPath {
-			return wire.Frame{}, errProtocol
-		}
-		copied := *req.Attempt
-		attempt = &copied
+	if req.Method != http.MethodPost || req.Path != attemptwire.EndpointPath || req.Attempt.Validate() != nil {
+		return wire.Frame{}, errProtocol
 	}
-	remainingNanos := int64(0)
-	if req.Remaining > 0 {
-		remainingNanos = req.Remaining.Nanoseconds()
-	}
+	attempt := req.Attempt
 	open := wire.Open{
-		Purpose: req.Purpose, Method: req.Method, Path: req.Path, Header: map[string][]string(header), BodyLength: req.BodyLength,
-		RemainingNanos: remainingNanos, RequestID: req.RequestID, SourceAgentID: "", TargetAgentID: req.TargetAgentID,
-		RouteID: req.RouteID, Hop: req.Hop, ResponseWindow: s.limits.InitialStreamWindow, Attempt: attempt,
+		Method: req.Method, Path: req.Path, Header: map[string][]string(header), BodyLength: req.BodyLength,
+		RemainingNanos: durationNanos(req.Remaining), RequestID: req.RequestID, SourceAgentID: "", TargetAgentID: req.TargetAgentID,
+		RouteID: req.RouteID, Hop: req.Hop, ResponseWindow: s.limits.InitialStreamWindow, Attempt: &attempt,
 	}
 	if err := validateAttemptOrProbeOpen(open); err != nil {
 		return wire.Frame{}, fmt.Errorf("%w: %v", errProtocol, err)
@@ -549,16 +722,34 @@ func (s *Session) openFrame(id wire.StreamID, req agentproxy.RelayRequest) (wire
 	return wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: id, Sequence: 1, Payload: payload}, nil
 }
 
+func durationNanos(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	return duration.Nanoseconds()
+}
+
 func (s *Session) admitStream(stream *Stream) error {
+	s.admissionMu.Lock()
 	s.streamsMu.Lock()
-	defer s.streamsMu.Unlock()
 	if _, exists := s.streams[stream.id]; exists || s.targets[stream.id] != nil {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
 		return errDuplicateStreamID
 	}
 	if s.limits.MaxConcurrentStreams <= 0 || len(s.streams)+len(s.targets) >= s.limits.MaxConcurrentStreams {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
 		return errStreamLimit
 	}
 	s.streams[stream.id] = stream
+	s.activeStreams++
+	s.idleSince = time.Time{}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() {
+		s.opts.Metrics.AddDirectStreams(1)
+	}
 	return nil
 }
 
@@ -575,27 +766,50 @@ func (s *Session) lookupTarget(id wire.StreamID) *targetStream {
 }
 
 func (s *Session) admitTarget(target *targetStream) error {
+	s.admissionMu.Lock()
+	// behavior change: incoming OPEN admission is atomic with replacement/drain shutdown.
+	if !s.accepting {
+		s.admissionMu.Unlock()
+		return errSessionClosed
+	}
 	s.streamsMu.Lock()
-	defer s.streamsMu.Unlock()
 	if s.streams[target.id] != nil || s.targets[target.id] != nil {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
 		return errDuplicateStreamID
 	}
 	if s.limits.MaxConcurrentStreams <= 0 || len(s.streams)+len(s.targets) >= s.limits.MaxConcurrentStreams {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
 		return errStreamLimit
 	}
 	s.targets[target.id] = target
+	s.activeStreams++
+	s.idleSince = time.Time{}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() {
+		s.opts.Metrics.AddDirectStreams(1)
+	}
 	return nil
 }
 
 func (s *Session) removeTarget(target *targetStream) {
 	removed := false
+	s.admissionMu.Lock()
 	s.streamsMu.Lock()
 	if current := s.targets[target.id]; current == target {
 		delete(s.targets, target.id)
 		removed = true
+		s.activeStreams--
+		s.startIdleLocked()
 	}
 	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
 	if removed {
+		if s.isDirect() {
+			s.opts.Metrics.AddDirectStreams(-1)
+		}
 		s.tombstones.Add(target.id)
 		s.signalActivity()
 	}
@@ -603,13 +817,20 @@ func (s *Session) removeTarget(target *targetStream) {
 
 func (s *Session) removeStream(stream *Stream) {
 	removed := false
+	s.admissionMu.Lock()
 	s.streamsMu.Lock()
 	if current := s.streams[stream.id]; current == stream && current.generation == stream.generation {
 		delete(s.streams, stream.id)
 		removed = true
+		s.activeStreams--
+		s.startIdleLocked()
 	}
 	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
 	if removed {
+		if s.isDirect() {
+			s.opts.Metrics.AddDirectStreams(-1)
+		}
 		s.tombstones.Add(stream.id)
 		s.signalActivity()
 	}
@@ -709,25 +930,43 @@ func (s *Session) finalize(w *fairWriter) {
 }
 
 func (s *Session) clearTargets() []*targetStream {
+	s.admissionMu.Lock()
 	s.streamsMu.Lock()
 	targets := make([]*targetStream, 0, len(s.targets))
 	for _, target := range s.targets {
 		targets = append(targets, target)
 	}
 	clear(s.targets)
+	s.activeStreams -= len(targets)
+	s.startIdleLocked()
 	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() && len(targets) > 0 {
+		s.opts.Metrics.AddDirectStreams(-float64(len(targets)))
+	}
 	return targets
 }
 
 func (s *Session) clearStreams() []*Stream {
+	s.admissionMu.Lock()
 	s.streamsMu.Lock()
 	streams := make([]*Stream, 0, len(s.streams))
 	for _, stream := range s.streams {
 		streams = append(streams, stream)
 	}
 	clear(s.streams)
+	s.activeStreams -= len(streams)
+	s.startIdleLocked()
 	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() && len(streams) > 0 {
+		s.opts.Metrics.AddDirectStreams(-float64(len(streams)))
+	}
 	return streams
+}
+
+func (s *Session) isDirect() bool {
+	return s != nil && (s.opts.Direction == SessionDirectionDirectOutgoing || s.opts.Direction == SessionDirectionDirectIncoming)
 }
 
 func (s *Session) cause() error {
@@ -762,12 +1001,13 @@ func (s *Session) reserveIncoming(bytes int64) error {
 	if bytes <= 0 {
 		return errIncomingBudget
 	}
-	s.incomingMu.Lock()
-	defer s.incomingMu.Unlock()
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
 	if bytes > s.limits.MaxQueuedSessionBytes-s.incomingBytes {
 		return errIncomingBudget
 	}
 	s.incomingBytes += bytes
+	s.recordBufferedPeakLocked()
 	return nil
 }
 
@@ -775,8 +1015,8 @@ func (s *Session) releaseIncoming(bytes int64) error {
 	if bytes < 0 {
 		return errIncomingBudget
 	}
-	s.incomingMu.Lock()
-	defer s.incomingMu.Unlock()
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
 	if bytes > s.incomingBytes {
 		return errIncomingBudget
 	}
@@ -785,9 +1025,29 @@ func (s *Session) releaseIncoming(bytes int64) error {
 }
 
 func (s *Session) incomingSize() int64 {
-	s.incomingMu.Lock()
-	defer s.incomingMu.Unlock()
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
 	return s.incomingBytes
+}
+
+func (s *Session) bufferedByteSnapshot() (current, peak int64) {
+	if s == nil {
+		return 0, 0
+	}
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
+	return s.incomingBytes + s.queuedBytes, s.peakBufferedBytes
+}
+
+func (s *Session) adjustQueuedBytes(delta int64) {
+	s.bufferMu.Lock()
+	s.queuedBytes += delta
+	s.recordBufferedPeakLocked()
+	s.bufferMu.Unlock()
+}
+
+func (s *Session) recordBufferedPeakLocked() {
+	s.peakBufferedBytes = max(s.peakBufferedBytes, s.incomingBytes+s.queuedBytes)
 }
 
 func (s *Session) writeFrame(frame wire.Frame) error {

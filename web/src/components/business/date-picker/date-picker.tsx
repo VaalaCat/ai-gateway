@@ -26,6 +26,8 @@ interface DatePickerProps {
   disabledRange?: DateBefore | DateAfter;
   disabled?: boolean;
   className?: string;
+  /** sm = 工具栏紧凑档(h-8, sm:w-[150px]);默认档不变。 */
+  size?: "sm" | "default";
 }
 
 export function DatePicker({
@@ -35,6 +37,7 @@ export function DatePicker({
   disabledRange,
   disabled,
   className,
+  size = "default",
 }: DatePickerProps) {
   const selected = parseDateStr(value);
   return (
@@ -46,6 +49,7 @@ export function DatePicker({
             disabled={disabled}
             className={cn(
               "w-full sm:w-[160px] justify-start text-left font-normal text-body",
+              size === "sm" && "h-8 sm:w-[150px]",
               !selected && "text-muted-foreground",
             )}
           >

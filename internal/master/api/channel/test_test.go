@@ -36,7 +36,7 @@ func newTestContext(t *testing.T, db *gorm.DB, requestHost string) *app.Context 
 	}
 	ginCtx.Request = req
 	testApp := app.NewApplication()
-	testApp.SetDB(db)
+	testApp.SetCoreDB(db)
 	return &app.Context{Context: ginCtx, App: testApp}
 }
 

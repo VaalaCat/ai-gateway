@@ -16,6 +16,7 @@ export function isStageConfigured(id: SectionId, form: ChannelForm): boolean {
     case "meta":
     case "routing":
     case "processing":
+    case "usage":
       return true;
     case "affinity":
       return form.affinity !== "";

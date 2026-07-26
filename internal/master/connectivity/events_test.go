@@ -25,17 +25,17 @@ func TestDirectProbeStateTransitionsLogInfoOnceWithoutEndpointDetails(t *testing
 		service.MarkDirectProbeChecking("source", 1, target, "sensitive-fingerprint", generation)
 		service.ApplyDirectProbeResult("source", 1, target, result, generation)
 	}
-	failure := protocol.DirectProbeResult{
+	failure := protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "sensitive-fingerprint",
 		Network: "unreachable", Identity: "unknown", ReasonCode: "direct_connect",
 	}
 	apply(1, failure)
 	apply(2, failure)
-	apply(3, protocol.DirectProbeResult{
+	apply(3, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "sensitive-fingerprint",
 		Network: "reachable", Identity: "verified", Eligible: true,
 	})
-	apply(4, protocol.DirectProbeResult{
+	apply(4, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "sensitive-fingerprint",
 		Network: "reachable", Identity: "verified", Eligible: true,
 	})
@@ -64,7 +64,7 @@ func TestDirectEdgeErrorRingCapsAtTwentyAndCopiesSnapshots(t *testing.T) {
 	target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 	for generation := uint64(1); generation <= 25; generation++ {
 		service.MarkDirectProbeChecking("source", 1, target, "fp", generation)
-		service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+		service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 			TargetAgentID: target.AgentID, AddressFingerprint: "fp", Network: "unreachable", Identity: "unknown",
 			CheckedAt: int64(generation), ReasonCode: "direct_connect",
 		}, generation)
@@ -85,12 +85,12 @@ func TestDirectEdgeSuccessDoesNotEnterOrClearErrorRing(t *testing.T) {
 	service := NewService("master", Sources{}, Options{})
 	target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 	service.MarkDirectProbeChecking("source", 1, target, "fp", 1)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "fp", Network: "unreachable", Identity: "unknown",
 		CheckedAt: 1, ReasonCode: "direct_connect",
 	}, 1)
 	service.MarkDirectProbeChecking("source", 1, target, "fp", 2)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "fp", Network: "reachable", Identity: "verified",
 		Eligible: true, CheckedAt: 2,
 	}, 2)
@@ -106,11 +106,11 @@ func TestDirectEdgeReplacementRejectsOldGenerationErrors(t *testing.T) {
 	target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 	service.MarkDirectProbeChecking("source", 1, target, "old", 1)
 	service.MarkDirectProbeChecking("source", 2, target, "current", 1)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "old", Network: "unreachable", Identity: "unknown",
 		CheckedAt: 1, ReasonCode: "direct_dns",
 	}, 1)
-	service.ApplyDirectProbeResult("source", 2, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 2, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "current", Network: "unreachable", Identity: "unknown",
 		CheckedAt: 2, ReasonCode: "direct_connect",
 	}, 1)

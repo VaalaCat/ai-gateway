@@ -19,7 +19,7 @@ import (
 // 不写 AttemptIndex 字段——该字段由 Task 5 添加到 models；settler 按切片顺序赋值。
 //
 // 单候选 / 无快照兜底（Attempts() 为空）：回退到旧行为——Finalize() 单条 →
-// record.HasBody() 时 JSON 序列化进 e.TraceData。保证既有单次请求行为不变。
+// record.HasTraceData() 时 JSON 序列化进 e.TraceData。保证既有单次请求行为不变。
 //
 // 显式接收 *Recorder 取代之前从 gin.Context 取 Recorder 的隐式 API。
 func attachTraceData(e *protocol.UsageLogEntry, rec *trace.Recorder) {
@@ -48,10 +48,10 @@ func attachTraceData(e *protocol.UsageLogEntry, rec *trace.Recorder) {
 		e.AttemptTraces = append(e.AttemptTraces, tr)
 	}
 
-	// TraceData = 被采纳（最后一次）attempt 的 trace，HasBody() 决定填不填。
+	// TraceData = 被采纳（最后一次）attempt 的 trace，HasTraceData() 决定填不填。
 	// 与 AttemptTraces 并存：保持既有单条 trace 契约（含老集成测试与旧消费方），
 	// settler 在 AttemptTraces 非空时优先写每候选行、TraceData 仅作旧 agent 兜底，不会双写。
-	if record.HasBody() {
+	if record.HasTraceData() {
 		if b, err := record.MarshalJSON(); err == nil {
 			e.TraceData = string(b)
 		}

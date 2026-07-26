@@ -51,7 +51,7 @@ func TestAuthBootstrapAndTicketClaimsUseAuthenticatedAgent(t *testing.T) {
 	require.Equal(t, srv.InstanceID, bootstrap.MasterInstanceID)
 	wantCapabilities := []string{
 		protocol.AgentCapabilityForwardV1,
-		protocol.AgentCapabilityTunnelV1,
+		protocol.AgentCapabilityTunnelV2,
 	}
 	require.Equal(t, wantCapabilities, bootstrap.Capabilities)
 	require.Equal(t, []agentauth.PublicKey{srv.Signer.PublicKey()}, bootstrap.SigningKeys)
@@ -109,9 +109,9 @@ func TestCapabilitiesUpdateOverridesForgedAgentIDAndBroadcastsBoundedSnapshot(t 
 	actual := connectAgentAuthClient(t, srv.DB, ts.URL, "actual-agent", "actual-secret")
 	input := []string{
 		" future.short ",
-		"agent_tunnel_v1",
+		"agent_tunnel_v2",
 		"",
-		"agent_tunnel_v1",
+		"agent_tunnel_v2",
 		strings.Repeat("x", protocol.AgentCapabilityMaxLength+1),
 		"agent_forward_ticket_v1",
 	}
@@ -120,7 +120,7 @@ func TestCapabilitiesUpdateOverridesForgedAgentIDAndBroadcastsBoundedSnapshot(t 
 		Capabilities: input,
 	})
 	require.NoError(t, err)
-	want := []string{"agent_forward_ticket_v1", "agent_tunnel_v1", "future.short"}
+	want := []string{"agent_forward_ticket_v1", "agent_tunnel_v2", "future.short"}
 	require.Equal(t, want, srv.Hub.Capabilities("actual-agent"))
 	require.Nil(t, srv.Hub.Capabilities("forged-victim"))
 	requireCapabilityUpdate(t, updates, protocol.AgentCapabilitiesUpdate{
@@ -363,14 +363,14 @@ func TestAuthBootstrapAndTicketHandlersFailClosedWithoutLeakingSignerErrors(t *t
 	t.Run("signing errors", func(t *testing.T) {
 		_, client := startAgentAuthHub(t, sync.HubOptions{
 			MasterInstanceID:  "master-a",
-			Capabilities:      []string{" agent_tunnel_v1 ", "future.short", "future.short"},
+			Capabilities:      []string{" agent_tunnel_v2 ", "future.short", "future.short"},
 			AgentTicketSigner: failingAgentTicketSigner{key: key, marker: marker},
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		bootstrap := callAuthBootstrap(t, ctx, client)
-		require.Equal(t, []string{"agent_tunnel_v1", "future.short"}, bootstrap.Capabilities)
+		require.Equal(t, []string{"agent_tunnel_v2", "future.short"}, bootstrap.Capabilities)
 		require.Equal(t, []agentauth.PublicKey{key}, bootstrap.SigningKeys)
 
 		_, err := client.Call(ctx, consts.RPCAgentIssueRelayTicket, protocol.RelayTicketRequest{DesiredGeneration: 0})
@@ -511,7 +511,7 @@ func startAgentAuthHub(t *testing.T, opts sync.HubOptions) (*sync.Hub, *ws.Clien
 	}).Error)
 
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	hub := sync.NewHub(application, zap.NewNop(), nil, func() int64 { return 0 }, nil, opts)
 	router := gin.New()
 	router.GET("/ws/agent", hub.HandleWS)

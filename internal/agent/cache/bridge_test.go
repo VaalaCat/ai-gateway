@@ -63,8 +63,8 @@ func TestWSBridgeAgentCapabilitiesApplyBoundedInlineUpdates(t *testing.T) {
 		AgentID: "agent-a",
 		Capabilities: []string{
 			" future.short ",
-			protocol.AgentCapabilityTunnelV1,
-			protocol.AgentCapabilityTunnelV1,
+			protocol.AgentCapabilityTunnelV2,
+			protocol.AgentCapabilityTunnelV2,
 			"",
 		},
 	})
@@ -74,7 +74,7 @@ func TestWSBridgeAgentCapabilitiesApplyBoundedInlineUpdates(t *testing.T) {
 	if _, err := handler(context.Background(), raw); err != nil {
 		t.Fatalf("valid capability update: %v", err)
 	}
-	want := []string{protocol.AgentCapabilityTunnelV1, "future.short"}
+	want := []string{protocol.AgentCapabilityTunnelV2, "future.short"}
 	if got := store.GetAgentCapabilities("agent-a"); !slices.Equal(got, want) {
 		t.Fatalf("stored capabilities = %#v, want %#v", got, want)
 	}

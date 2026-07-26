@@ -24,6 +24,7 @@ type CreateRequest struct {
 	ExpiredAt         int64   `json:"expired_at"`
 	Models            string  `json:"models"`
 	TraceEnabled      bool    `json:"trace_enabled"`
+	TraceMode         string  `json:"trace_mode"`
 	BYOKOnly          bool    `json:"byok_only"`
 	AllowedChannelIDs *[]uint `json:"allowed_channel_ids"`
 }

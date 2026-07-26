@@ -13,6 +13,7 @@
     "noData": "No data",
     "success": "Success",
     "error": "Error",
+    "filters": "Filters",
     "status": "Status",
     "enabled": "Enabled",
     "disabled": "Disabled",
@@ -32,6 +33,7 @@
     "selectDate": "Select date",
     "dateRangeError": "Start date must be before end date",
     "shared": "Shared",
+    "all": "All",
     "relayStage": {
       "inbound_decode": "Inbound decode",
       "outbound_encode": "Outbound encode",
@@ -109,6 +111,9 @@
       "requests": "Requests",
       "cost": "Cost",
       "tokens": "Tokens",
+      "cacheHitRate": "Cache Hit Rate",
+      "ttftAvg": "TTFT Avg",
+      "tpsAvg": "TPS Avg",
       "users": "Users",
       "successRate": "Success rate",
       "quota": "Quota"
@@ -139,7 +144,29 @@
     },
     "speed": {
       "modelTitle": "Model speed",
-      "channelTitle": "Channel speed"
+      "channelTitle": "Channel speed",
+      "col": {
+        "name": "Name",
+        "ttft": "TTFT (avg / p95)",
+        "tps": "TPS (avg / p5)"
+      }
+    },
+    "speedRanking": {
+      "ttftTitle": "Fastest TTFT",
+      "tpsTitle": "Fastest TPS",
+      "rank": "Rank",
+      "name": "Name",
+      "ttftP95": "TTFT p95",
+      "tpsP5": "TPS p5",
+      "empty": "No data"
+    },
+    "marketShare": {
+      "title": "Market Share",
+      "dimModel": "Model",
+      "dimChannel": "Channel",
+      "percent": "Percent %",
+      "absolute": "Absolute",
+      "others": "Others"
     }
   },
   "users": {
@@ -262,6 +289,16 @@
       "model": "Select model",
       "agent": "Select agent",
       "token-template": "Select template"
+    },
+    "label": {
+      "token": "Token",
+      "user": "User",
+      "user-group": "User group",
+      "byok-channel": "BYOK channel",
+      "channel": "Channel",
+      "model": "Model",
+      "agent": "Agent",
+      "token-template": "Template"
     }
   },
   "tokens": {
@@ -285,6 +322,10 @@
     "weakKeyWarningTitle": "Weak token key detected",
     "weakKeyWarningDesc": "This key may be easy to guess. We recommend increasing complexity. Continue anyway?",
     "traceEnabled": "Trace Enabled",
+    "traceContent": "Trace content",
+    "traceModeFull": "Full",
+    "traceModeHeaders": "Headers only",
+    "traceDisabled": "Off",
     "template": "Template",
     "selectTemplate": "Select a template",
     "templateRequired": "Please select a template",
@@ -313,6 +354,15 @@
     "channel": "Channel",
     "channelId": "Channel ID",
     "channelType": "Channel Type",
+    "filterSearchToken": "Search token name",
+    "filterSearchChannel": "Search channel name",
+    "filterMinTokens": "Min total tokens",
+    "filterChannelType": "Channel type",
+    "filterAllTypes": "All types",
+    "filterTokenPick": "Pick token",
+    "filterLabelToken": "Token",
+    "filterLabelSearch": "Name search",
+    "filterLabelChannel": "Channel",
     "totalCost": "Total Cost",
     "requestCount": "Requests",
     "successRate": "Success Rate",
@@ -357,7 +407,13 @@
       "cacheSubFull": "Saved {n} · read {r} · write {w}"
     },
     "spark24h": "24h",
-    "usageTrend": "Usage Trend"
+    "usageTrend": "Usage Trend",
+    "channelModelBreakdown": {
+      "model": "Model",
+      "billedCost": "Billed cost",
+      "rawCost": "Raw cost",
+      "empty": "No usage data for this channel in the selected range"
+    }
   },
   "channelTransfer": {
     "importAction": "Import",
@@ -743,6 +799,13 @@
     "stageResilienceDesc": "Retry / circuit breaker / timeout overrides",
     "stageResponse": "Response & Billing",
     "stageResponseDesc": "Status-code mapping and billing",
+    "stageUsage": "Usage",
+    "stageUsageDesc": "Recent usage and cost for this channel",
+    "usageSavedPlaceholder": "Usage will be available after saving the channel",
+    "usageWindow7d": "Last 7 days",
+    "usageWindow30d": "Last 30 days",
+    "usageSummary": "Usage summary",
+    "usageTotalTokens": "Total tokens",
     "encodeEndpointsRequired": "Select at least one endpoint",
     "dataflowResolvedProtocol": "Outbound protocol: {protocol}",
     "dataflowDetailMappings": "{count} mappings",
@@ -853,6 +916,10 @@
   "agents": {
     "title": "Agent Management",
     "description": "Manage distributed agent nodes. Connected agents auto-sync configuration and process API requests.",
+    "loadingAgents": "Loading agents...",
+    "listLoadFailed": "Could not load agents",
+    "refreshing": "Refreshing agents...",
+    "dataStale": "Refresh failed. Showing the last loaded data.",
     "connection": {
       "agent": "Agent",
       "admin": "Admin",
@@ -918,6 +985,9 @@
       "operationDenied": "This operation is not allowed",
       "operationFailed": "Connection operation failed",
       "loadingDetail": "Loading connection details",
+      "detailLoadFailed": "Could not load connection details",
+      "retry": "Retry",
+      "refreshingDetail": "Refreshing connection details",
       "configuration": "Configuration",
       "relayRuntime": "Runtime",
       "recentErrors": "Recent errors",
@@ -932,7 +1002,27 @@
       "activeStreams": "{count, plural, one {# active stream} other {# active streams}}",
       "relayUriRequired": "Enter a Relay URI for Custom mode.",
       "relayUriTooLong": "Relay URI must be at most 2048 bytes.",
-      "relayUriInvalid": "Use a valid ws:// or wss:// URI without credentials or fragments."
+      "relayUriInvalid": "Use a valid ws:// or wss:// URI without credentials or fragments.",
+      "sourceDirectOutboundDisabled": "Source Agent has Direct outbound disabled.",
+      "targetDirectInboundDisabled": "Target Agent has Direct inbound disabled.",
+      "sourceRelayOutboundDisabled": "Source Agent has Relay outbound disabled.",
+      "targetRelayInboundDisabled": "Target Agent has Relay inbound disabled.",
+      "relayConnectionDisabled": "Relay connection is disabled."
+    },
+    "transportPolicy": {
+      "title": "Transport policy",
+      "inbound": "Inbound",
+      "outbound": "Outbound",
+      "direct": "Direct",
+      "relay": "Relay",
+      "direct_inbound_enabled": "Allow Direct inbound traffic",
+      "direct_outbound_enabled": "Allow Direct outbound traffic",
+      "relay_inbound_enabled": "Allow Relay inbound traffic",
+      "relay_outbound_enabled": "Allow Relay outbound traffic",
+      "configured": "Configured",
+      "effective": "Effective",
+      "on": "On",
+      "off": "Off"
     },
     "agentId": "Agent ID",
     "secret": "Secret",
@@ -960,10 +1050,6 @@
     "addressTag": "Tag",
     "addressTagPlaceholder": "e.g. internal",
     "proxyUrl": "Proxy URL",
-    "peerRouteMode": "Outbound route mode",
-    "peerRouteModeDescription": "Choose whether new requests from this Agent prefer Direct or use Relay only.",
-    "peerRouteDirectFirst": "Direct first",
-    "peerRouteRelayOnly": "Relay only",
     "proxyUrlPlaceholder": "e.g. http://proxy:8080",
     "detail": "Detail",
     "overview": "Overview",
@@ -1075,7 +1161,8 @@
     "filterByModel": "Filter by model",
     "tokenName": "Token Name",
     "upstreamModel": "Upstream Model",
-    "firstResponseMs": "First Response",
+    "firstResponseMs": "First Response (TTFT)",
+    "tps": "TPS",
     "cacheReadTokens": "Cache Read",
     "cacheWriteTokens": "Cache Write",
     "inboundProtocol": "Inbound Protocol",
@@ -1089,6 +1176,11 @@
     "allStatus": "All",
     "refresh": "Refresh",
     "refreshing": "Refreshing...",
+    "loadFailed": "Could not load usage logs",
+    "loadFailedDescription": "The log data request failed. Retry to load the current results.",
+    "logDatabaseUnavailable": "Log database unavailable",
+    "logDatabaseUnavailableDescription": "Usage logs are temporarily unavailable while the log database is offline.",
+    "retry": "Retry",
     "autoRefreshOff": "Auto refresh: off",
     "autoRefreshEvery": "Auto refresh: {seconds}s",
     "rawJson": "Raw JSON",
@@ -1499,6 +1591,14 @@
   },
   "system": {
     "title": "System Maintenance",
+    "tabs": {
+      "label": "System maintenance sections",
+      "overview": "Overview",
+      "requestPath": "Request path",
+      "policyBilling": "Policy & billing",
+      "byok": "BYOK",
+      "dataMaintenance": "Data maintenance"
+    },
     "refresh": "Refresh",
     "systemInfo": "System Info",
     "version": "Version",
@@ -1510,6 +1610,98 @@
     "gcCount": "GC Count",
     "goroutines": "Goroutines",
     "databaseStats": "Database Stats",
+    "logStorage": {
+      "title": "Storage delivery",
+      "description": "Database availability and queued log delivery.",
+      "coreDatabase": "Core database",
+      "logDatabase": "Log database",
+      "legacyDatabase": "Legacy database",
+      "legacyArtifact": "Legacy split artifact",
+      "available": "Available",
+      "unavailable": "Unavailable",
+      "exists": "Present",
+      "missing": "Not present",
+      "path": "Path",
+      "size": "Size",
+      "schemaVersion": "Schema",
+      "openConnections": "Open connections",
+      "queue": "Log delivery queue",
+      "pending": "Pending",
+      "retry": "Retry",
+      "inflight": "In flight",
+      "bytes": "Bytes",
+      "oldest": "Oldest",
+      "dropped": "Dropped",
+      "lastError": "Last error",
+      "retryQueue": "Retry queued logs",
+      "retryQueueSuccess": "Queued logs scheduled for retry",
+      "retryQueueError": "Could not retry queued logs",
+      "clearBacklog": "Clear backlog",
+      "confirmClearTitle": "Clear queued log backlog?",
+      "confirmClearDescription": "This permanently drops {count} pending and retrying log records. In-flight records are kept.",
+      "confirmClearBacklog": "Clear backlog now",
+      "clearBacklogSuccess": "Log backlog cleared",
+      "clearBacklogError": "Could not clear log backlog",
+      "history": "Historical data backfill",
+      "historyState": {
+        "pending": "Pending",
+        "copying": "Copying",
+        "caught_up": "Caught up",
+        "degraded": "Retry needed",
+        "completed": "Completed, source retained",
+        "source_deleted": "Source deleted"
+      },
+      "sourceKind": {
+        "none": "No legacy source",
+        "monolith": "Monolithic database",
+        "v5_core": "V5 core database"
+      },
+      "historyBilling": "Billing records",
+      "historyRequests": "Request logs",
+      "historyTraces": "Traces",
+      "historySpeed": "Processing speed",
+      "historySourceKind": "Source type",
+      "historySourcePath": "Source path",
+      "historySourceSize": "Source size",
+      "historyLastSuccess": "Last successful pass",
+      "historyCursor": "Source cursor",
+      "historyProcessed": "Processed",
+      "active": "Active",
+      "skipped": "Skipped",
+      "retryHistory": "Retry historical backfill",
+      "retryHistorySuccess": "Historical backfill scheduled for retry",
+      "retryHistoryError": "Could not retry historical backfill",
+      "skipHistory": "Skip remaining logs",
+      "confirmSkipHistoryTitle": "Skip remaining historical logs?",
+      "confirmSkipHistoryDescription": "Already copied data is kept. Remaining request logs and traces will not be migrated. Billing history continues until caught up.",
+      "confirmSkipHistory": "Skip remaining logs",
+      "skipHistorySuccess": "Remaining historical logs skipped",
+      "skipHistoryError": "Could not skip remaining logs",
+      "completeHistory": "Complete and retain source",
+      "confirmCompleteHistoryTitle": "Complete historical backfill?",
+      "confirmCompleteHistoryDescription": "A final pass will run before the legacy source is closed. The source file is retained for rollback.",
+      "confirmCompleteHistory": "Complete backfill",
+      "completeHistorySuccess": "Historical backfill completed",
+      "completeHistoryError": "Could not complete historical backfill",
+      "deleteLegacySource": "Delete legacy source",
+      "confirmDeleteSourceTitle": "Delete the legacy database?",
+      "confirmDeleteSourceDescription": "This permanently deletes the legacy database and its WAL files. Rolling back to a version that depends on the legacy database will no longer work.",
+      "deleteSourceConfirmation": "Confirmation (DELETE)",
+      "confirmDeleteLegacySource": "Delete legacy source",
+      "deleteLegacySourceSuccess": "Legacy database deleted",
+      "deleteLegacySourceError": "Could not delete the legacy database",
+      "artifactUse": "Migration use",
+      "inUse": "In use",
+      "notInUse": "Independent",
+      "deleteLegacyArtifact": "Delete split artifact",
+      "confirmDeleteArtifactTitle": "Delete the legacy split artifact?",
+      "confirmDeleteArtifactDescription": "This permanently deletes only the recorded pre-split backup. The active legacy source is unchanged.",
+      "deleteArtifactConfirmation": "Confirmation (DELETE)",
+      "confirmDeleteLegacyArtifact": "Delete split artifact",
+      "deleteLegacyArtifactSuccess": "Legacy split artifact deleted",
+      "deleteLegacyArtifactError": "Could not delete the legacy split artifact",
+      "cancel": "Cancel"
+    },
     "tableName": "Table",
     "rowCount": "Row Count",
     "dataCleanup": "Data Cleanup",
@@ -1530,16 +1722,15 @@
     "confirm": "Confirm",
     "cleanupSuccess": "Successfully deleted {count} records",
     "cleanupFailed": "Cleanup failed",
+    "cleanupPreviewExpired": "The cleanup preview expired. Review the refreshed counts before confirming again.",
     "settings": "System Settings",
     "settingsDesc": "Configure global system parameters",
     "agentRelay": {
       "title": "Agent relay",
-      "description": "Control the shared Relay endpoint and whether requests may fall back from Direct to Relay.",
+      "description": "Configure the shared Relay endpoint and connectivity probe timings.",
       "defaultUri": "Default Relay URI",
       "defaultUriDescription": "Agents in Inherit mode use this URI. Leave it empty to derive from each Agent's Master URL.",
       "defaultUriPlaceholder": "wss://relay.example.com/ws/agent-relay",
-      "fallbackEnabled": "Relay fallback",
-      "fallbackEnabledDescription": "Allow new requests to use Relay after Direct cannot be used. Turning this off stops new Relay streams while committed streams drain.",
       "probeSuccessTtl": "Success result TTL",
       "probeSuccessTtlDescription": "Seconds to keep a successful result before checking again.",
       "probeRetryMin": "Minimum failure retry",
@@ -1649,7 +1840,11 @@
     "pricingSyncSettings": "Pricing sync",
     "pricingSourcePriority": "Source priority (comma-separated)",
     "pricingDisagreementThreshold": "Cross-source disagreement threshold (0-1)",
-    "pricingDisagreementThresholdDesc": "Compares the input + output total price from models.dev and basellm. When abs(A-B)/max(A,B) exceeds this 0..1 threshold, the recommendation is only marked for review; source priority and final price selection are unchanged."
+    "pricingDisagreementThresholdDesc": "Compares the input + output total price from models.dev and basellm. When abs(A-B)/max(A,B) exceeds this 0..1 threshold, the recommendation is only marked for review; source priority and final price selection are unchanged.",
+    "secBillingRebuild": "Billing rebuild",
+    "rebuildSliceSleep": "Inter-slice pause",
+    "rebuildSliceSleepDesc": "Pause between per-hour slices while replaying a background billing rebuild, so it trickles instead of competing with peak DB I/O. 0 disables the pause. Takes effect after a master restart, range 0..60000 ms.",
+    "rebuildSliceSleepRangeError": "Inter-slice pause must be between 0 and 60000 ms"
   },
   "tokenDetail": {
     "tokenInfo": "Token info",
@@ -1769,20 +1964,23 @@
       "tps": "TPS",
       "requests": "Requests"
     },
+    "metrics": {
+      "ttft": "TTFT (avg/p95)",
+      "tps": "TPS (avg/p5)",
+      "latencyP95": "Latency P95"
+    },
     "channels": {
       "title": "Channels",
       "name": "Name",
       "requests": "Requests",
       "errorRatio": "Error %",
-      "ttft": "TTFT",
-      "tps": "TPS",
-      "p95": "P95",
       "spark24h": "24h"
     },
     "agents": {
       "title": "Agents",
       "online": "Online",
-      "offline": "Offline"
+      "offline": "Offline",
+      "requests": "Requests"
     },
     "errors": {
       "title": "Errors",
@@ -2223,11 +2421,17 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "scopeAll": "All",
-    "scopeChannels": "Channels (empty = all)",
-    "scopeModels": "Models (empty = all)",
-    "scopeHint": "Channel scope only applies at the outbound (onUpstreamRequest) stage; onRequest runs before routing when no channel is chosen. For onRequest-only scripts, use model scope or global.",
-    "selectChannels": "Select channels",
+    "scopeChannels": "Admin Channels",
+    "scopePrivateChannels": "BYOK Channels",
+    "scopeModels": "Models",
+    "scopeGroups": "User Groups",
+    "scopeUsers": "Users",
+    "scopeHint": "The script runs when any condition matches; leave all conditions empty to apply globally. Channel conditions only apply during onUpstreamRequest.",
+    "selectChannels": "Select admin channels",
+    "selectPrivateChannels": "Select BYOK channels",
     "selectModels": "Select models",
+    "selectGroups": "Select user groups",
+    "selectUsers": "Select users",
     "code": "Script Code",
     "codeHint": "Define onRequest(ctx) and/or onUpstreamRequest(ctx); mutate ctx.body or call the API below.",
     "editorRich": "Rich Editor",
@@ -2280,7 +2484,23 @@
     "metric": {
       "cost": "Cost",
       "requests": "Requests",
-      "tokens": "Tokens"
+      "tokens": "Tokens",
+      "ttft": "TTFT",
+      "tps": "TPS",
+      "cache_hit_rate": "Cache Hit Rate"
+    },
+    "prefix": {
+      "dim": "Group by",
+      "metric": "Metric",
+      "view": "View",
+      "mode": "Mode",
+      "topN": "Top N",
+      "stat": "Statistic"
+    },
+    "stat": {
+      "avg": "Average",
+      "p95": "P95 (estimated)",
+      "p5": "P5 (estimated)"
     },
     "view": {
       "total": "Total",
@@ -2296,6 +2516,17 @@
     "filter": {
       "model": "Model",
       "user": "User"
+    },
+    "legend": {
+      "series": "Chart series",
+      "allHidden": "All series hidden"
+    },
+    "trend": {
+      "dimOff": "Off",
+      "dimModel": "By Model",
+      "dimChannel": "By Channel",
+      "others": "Others",
+      "logUnavailable": "Performance metrics are temporarily unavailable because the log database is offline."
     }
   },
   "entityHover": {

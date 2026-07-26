@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
     data: {
       settings: {
         "agent.relay_default_uri": "",
-        "agent.relay_fallback_enabled": "0",
         "agent.connectivity_probe_success_ttl_seconds": "300",
         "agent.connectivity_probe_failure_retry_min_seconds": "30",
         "agent.connectivity_probe_failure_retry_max_seconds": "300",
@@ -34,12 +33,10 @@ vi.mock("@/lib/api/system", () => ({
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => ({
     title: "Agent relay",
-    description: "Control the default relay route and fallback admission.",
+    description: "Control the default Relay URI and connectivity probe timings.",
     defaultUri: "Default Relay URI",
     defaultUriDescription: "Inherited by Agents without a custom URI.",
     defaultUriPlaceholder: "wss://relay.example.com/ws/agent-relay",
-    fallbackEnabled: "Relay fallback",
-    fallbackEnabledDescription: "Allow new requests to use Relay after Direct fails.",
     probeSuccessTtl: "Success result TTL",
     probeSuccessTtlDescription: "Seconds to keep a successful result.",
     probeRetryMin: "Minimum failure retry",
@@ -67,13 +64,11 @@ vi.mock("next-intl", () => ({
 
 function setSettings(
   uri: string,
-  enabled: "0" | "1",
   timings = { successTTL: "300", retryMin: "30", retryMax: "300" },
 ) {
   mocks.query.data = {
     settings: {
       "agent.relay_default_uri": uri,
-      "agent.relay_fallback_enabled": enabled,
       "agent.connectivity_probe_success_ttl_seconds": timings.successTTL,
       "agent.connectivity_probe_failure_retry_min_seconds": timings.retryMin,
       "agent.connectivity_probe_failure_retry_max_seconds": timings.retryMax,
@@ -83,7 +78,7 @@ function setSettings(
 
 describe("AgentRelaySettings", () => {
   beforeEach(() => {
-    setSettings("", "0");
+    setSettings("");
     mocks.query.isPending = false;
     mocks.query.isError = false;
     mocks.query.isFetching = false;
@@ -91,8 +86,7 @@ describe("AgentRelaySettings", () => {
     mocks.mutateAsync.mockReset().mockResolvedValue({ settings: {} });
   });
 
-  it("keeps an unchanged form unsavable and sends only the changed switch", async () => {
-    const user = userEvent.setup();
+  it("reads only the Relay URI and three probe timings and keeps an unchanged form unsavable", () => {
     render(<AgentRelaySettings />);
 
     const save = screen.getByRole("button", { name: "Save relay settings" });
@@ -102,13 +96,8 @@ describe("AgentRelaySettings", () => {
     expect(screen.getByRole("spinbutton", { name: "Success result TTL" })).toHaveValue(300);
     expect(screen.getByRole("spinbutton", { name: "Minimum failure retry" })).toHaveValue(30);
     expect(screen.getByRole("spinbutton", { name: "Maximum failure retry" })).toHaveValue(300);
-
-    await user.click(screen.getByRole("switch", { name: "Relay fallback" }));
-    await user.click(save);
-
-    expect(mocks.mutateAsync).toHaveBeenCalledWith({
-      settings: { "agent.relay_fallback_enabled": "1" },
-    });
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(mocks.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("saves all changed Scheduler timings in one settings patch", async () => {
@@ -183,7 +172,7 @@ describe("AgentRelaySettings", () => {
   it("keeps cached values and a dirty draft through a background refetch error", async () => {
     const user = userEvent.setup();
 
-    setSettings("wss://relay.example.com/known", "1");
+    setSettings("wss://relay.example.com/known");
     const { rerender } = render(<AgentRelaySettings />);
     const input = screen.getByRole("textbox", { name: "Default Relay URI" });
     expect(input).toHaveValue("wss://relay.example.com/known");
@@ -200,7 +189,7 @@ describe("AgentRelaySettings", () => {
     expect(mocks.query.refetch).toHaveBeenCalledOnce();
   });
 
-  it("saves a valid URI and switch atomically while omitting unchanged fields", async () => {
+  it("saves a valid URI without writing any unsupported Relay setting", async () => {
     const user = userEvent.setup();
     render(<AgentRelaySettings />);
 
@@ -208,19 +197,20 @@ describe("AgentRelaySettings", () => {
       screen.getByRole("textbox", { name: "Default Relay URI" }),
       " wss://relay-jp.example.com/ws/agent-relay ",
     );
-    await user.click(screen.getByRole("switch", { name: "Relay fallback" }));
     await user.click(screen.getByRole("button", { name: "Save relay settings" }));
 
     expect(mocks.mutateAsync).toHaveBeenCalledWith({
       settings: {
         "agent.relay_default_uri": "wss://relay-jp.example.com/ws/agent-relay",
-        "agent.relay_fallback_enabled": "1",
       },
+    });
+    expect(mocks.mutateAsync.mock.calls[0][0].settings).toEqual({
+      "agent.relay_default_uri": "wss://relay-jp.example.com/ws/agent-relay",
     });
   });
 
-  it("sends only a changed URI when fallback admission is unchanged", async () => {
-    setSettings("wss://relay.example.com/old", "1");
+  it("sends only a changed URI when probe timings are unchanged", async () => {
+    setSettings("wss://relay.example.com/old");
     const user = userEvent.setup();
     render(<AgentRelaySettings />);
 
@@ -274,7 +264,7 @@ describe("AgentRelaySettings", () => {
     expect(input).toHaveAttribute("aria-invalid", "false");
 
     unmount();
-    setSettings(overflow, "0");
+    setSettings(overflow);
     render(<AgentRelaySettings />);
     expect(screen.getByRole("textbox", { name: "Default Relay URI" })).toHaveAttribute("aria-invalid", "true");
   });

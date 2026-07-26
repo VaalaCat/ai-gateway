@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,44 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSessionRejectsMalformedBypassProbeBeforeTargetLookup(t *testing.T) {
+	lookup := newMutableRelayAgentLookup("source", "target")
+	lookup.SetRelayDirections("source", true, false)
+	lookup.SetRelayDirections("target", false, true)
+	hub := NewHub(HubOptions{InstanceID: "master-a", Agents: lookup, Limits: testLimits()})
+	source, sourceConn := liveTestSession(hub, "source", 1)
+	target, targetConn := liveTestSession(hub, "target", 2)
+	hub.sessions["target"] = &AgentSessions{Active: target, Draining: make(map[uint64]*Session)}
+	t.Cleanup(func() {
+		source.Cancel(errors.New("cleanup"))
+		target.Cancel(errors.New("cleanup"))
+		require.NoError(t, hub.Close(context.Background()))
+	})
+
+	payload, err := wire.EncodeMetadata(wire.Open{
+		ProbePolicy: wire.ProbeBypassBusinessPolicy,
+		Method:      http.MethodGet, Path: "/not-ping", Header: map[string][]string{},
+		TargetAgentID: "target", RemainingNanos: int64(time.Second), ResponseWindow: testLimits().InitialStreamWindow,
+	}, testLimits().MaxMetadataBytes)
+	require.NoError(t, err)
+	require.NoError(t, source.handleOpen(wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: wire.StreamID{44}, Sequence: 1, Payload: payload,
+	}))
+
+	frame := decodeCapturedFrame(t, <-sourceConn.writes)
+	require.Equal(t, wire.FrameReset, frame.Type)
+	var reset wire.Reset
+	require.NoError(t, wire.DecodeMetadata(frame.Payload, &reset, testLimits().MaxMetadataBytes))
+	require.Equal(t, wire.ErrorCodeRelayProtocol, reset.Code)
+	require.Zero(t, lookup.CallCount("source"))
+	require.Zero(t, lookup.CallCount("target"))
+	select {
+	case raw := <-targetConn.writes:
+		t.Fatalf("malformed bypass probe reached target: %+v", decodeCapturedFrame(t, raw))
+	default:
+	}
+}
 
 func TestRelaySessionErrorRingIsBoundedAndCopyIsolated(t *testing.T) {
 	session := newTestSession(nil, "agent-a", 1)
@@ -298,6 +337,11 @@ func requireClosed(t *testing.T, ch <-chan struct{}, label string) {
 func newTestSession(h *Hub, agentID string, generation uint64) *Session {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	return newSession(h, nil, agentID, generation, generation, testLimits(), ctx, cancel)
+}
+
+func TestV2UnsupportedProtocolVersionUsesDedicatedDiagnosticCode(t *testing.T) {
+	err := fmt.Errorf("%w: %w", errProtocol, wire.ErrUnsupportedVersion)
+	require.Equal(t, wire.ErrorCodeUnsupportedProtocolVersion, masterSessionDiagnosticCode(err))
 }
 
 func TestSessionDuplicateStreamIDAndPointerGenerationRemoval(t *testing.T) {
@@ -610,13 +654,11 @@ func TestSessionDuplicateOpenResetsOffenderWithoutForwardingToUnopenedPeer(t *te
 func TestSessionStreamCapacityResetsAsOverloaded(t *testing.T) {
 	limits := testLimits()
 	limits.MaxConcurrentStreams = 1
-	gate := &AdmissionGate{}
-	gate.Set(true)
 	agents := fakeAgents{
 		agents: map[string]*models.Agent{"target": {AgentID: "target", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 	}
-	h := NewHub(HubOptions{InstanceID: "master-a", Agents: agents, Admission: gate, Limits: limits})
+	h := NewHub(HubOptions{InstanceID: "master-a", Agents: agents, Limits: limits})
 	targetCtx, targetCancel := context.WithCancelCause(context.Background())
 	target := newSession(h, nil, "target", 2, 2, limits, targetCtx, targetCancel)
 	require.NoError(t, h.register(target))
@@ -643,9 +685,7 @@ func TestSessionStreamCapacityResetsAsOverloaded(t *testing.T) {
 }
 
 func TestSessionMalformedOpenUsesProtocolErrorThreshold(t *testing.T) {
-	gate := &AdmissionGate{}
-	gate.Set(true)
-	h := NewHub(HubOptions{InstanceID: "master-a", Admission: gate, Limits: testLimits()})
+	h := NewHub(HubOptions{InstanceID: "master-a", Limits: testLimits()})
 	conn := newScriptedSessionConn()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	s := newSession(h, conn, "source", 1, 1, testLimits(), ctx, cancel)

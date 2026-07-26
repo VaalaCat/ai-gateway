@@ -1,35 +1,40 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useMemo } from "react";
+import { useTranslations } from "next-intl";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import { ChartCard } from "@/components/business/chart-card";
+import { BoundedChartTooltip } from "@/components/business/bounded-chart-tooltip";
+import { ResponsiveChartFrame } from "@/components/business/responsive-chart-frame";
+import { ScrollableChartLegend } from "@/components/business/scrollable-chart-legend";
 import {
   ChartContainer,
-  ChartLegend,
   ChartTooltip,
-  ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { cn } from "@/lib/utils";
+import {
+  useHiddenSeries,
+} from "@/components/business/toggleable-chart-legend";
+import { chartColorForSeries } from "@/lib/chart-colors";
 import type { StackedBucket } from "@/lib/types/observability";
 
 export type { StackedBucket };
 
-/** 堆叠/分项系列共用调色板 */
-export const CHART_COLORS = [
-  "var(--chart-1)",
-  "var(--chart-2)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--chart-5)",
-];
+/** 后端 top-N 折叠桶的字面量 key(与 market-share-chart/metric-trend-chart 的 OTHERS_KEY 同源约定) */
+const OTHERS_KEY = "others";
+/** "others" 固定中性灰，避免与真实系列的稳定色撞色。 */
+const OTHERS_COLOR = "var(--muted-foreground)";
 
 interface StackedAreaBodyProps {
   buckets: StackedBucket[];
   seriesOrder: string[];
   axisFormatter?: (v: number) => string;
   tooltipFormatter?: (v: number) => string;
+  /** "others" 折叠系列的本地化展示名;不传则回退到原始 key(英文字面量) */
+  othersLabel?: string;
+  legendLabel?: string;
+  allHiddenLabel?: string;
 }
 
 interface StackedAreaChartProps extends StackedAreaBodyProps {
@@ -40,36 +45,30 @@ interface StackedAreaChartProps extends StackedAreaBodyProps {
   unitLabel?: string;
 }
 
-function useToggleSet<K extends string>() {
-  const [hidden, setHidden] = useState<Set<K>>(new Set());
-  const toggle = useCallback((k: K) => {
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(k)) next.delete(k);
-      else next.add(k);
-      return next;
-    });
-  }, []);
-  const isHidden = useCallback((k: K) => hidden.has(k), [hidden]);
-  return { isHidden, toggle };
-}
-
 /** 仅渲染堆叠面积图体(不含 ChartCard),供需要自定义 header/action 的容器复用。 */
 export function StackedAreaBody({
   buckets,
   seriesOrder,
   axisFormatter,
   tooltipFormatter,
+  othersLabel,
+  legendLabel,
+  allHiddenLabel,
 }: StackedAreaBodyProps) {
-  const series = useToggleSet<string>();
+  const { hidden, toggle } = useHiddenSeries(seriesOrder);
 
   const config = useMemo<ChartConfig>(() => {
     const cfg: ChartConfig = {};
-    seriesOrder.forEach((key, i) => {
-      cfg[key] = { label: key, color: CHART_COLORS[i % CHART_COLORS.length] };
+    // "others" 固定中性灰，真实系列颜色按名称稳定映射。
+    // (同 market-share-chart / metric-trend-chart 的 LinesBody 处理)。
+    seriesOrder.forEach((key) => {
+      cfg[key] = {
+        label: key === OTHERS_KEY ? othersLabel ?? key : key,
+        color: key === OTHERS_KEY ? OTHERS_COLOR : chartColorForSeries(key),
+      };
     });
     return cfg;
-  }, [seriesOrder]);
+  }, [seriesOrder, othersLabel]);
 
   const data = useMemo(
     () =>
@@ -84,70 +83,56 @@ export function StackedAreaBody({
   );
 
   const tipFmt = tooltipFormatter ?? axisFormatter;
-  const allHidden = seriesOrder.length > 0 && seriesOrder.every((k) => series.isHidden(k));
+  const allHidden = seriesOrder.length > 0 && seriesOrder.every((k) => hidden.has(k));
 
   return (
-    <>
-      <ChartContainer config={config} className="h-[260px] w-full">
+    <ResponsiveChartFrame
+      legend={
+        <div className="space-y-1">
+          <ScrollableChartLegend
+            ariaLabel={legendLabel ?? ""}
+            items={seriesOrder.map((key) => ({
+              key,
+              label: config[key]?.label ?? key,
+              color: config[key]?.color ?? chartColorForSeries(key),
+              hidden: hidden.has(key),
+            }))}
+            onToggle={toggle}
+          />
+          {allHidden && allHiddenLabel && <p className="text-center text-xs text-muted-foreground">{allHiddenLabel}</p>}
+        </div>
+      }
+    >
+      <ChartContainer config={config} className="h-full w-full">
         <AreaChart data={data} accessibilityLayer>
           <CartesianGrid vertical={false} />
           <XAxis dataKey="label" tickLine={false} axisLine={false} />
           <YAxis tickLine={false} axisLine={false} tickFormatter={axisFormatter} />
           <ChartTooltip
             content={
-              <ChartTooltipContent
+              <BoundedChartTooltip
                 formatter={
                   tipFmt
-                    ? (value, name) => (
-                        <div className="flex w-full items-center justify-between gap-3">
-                          <span
-                            className="max-w-[10rem] truncate text-muted-foreground"
-                            title={String(name)}
-                          >
-                            {String(name)}
-                          </span>
-                          <span className="font-mono tabular-nums">
-                            {tipFmt(Number(value))}
-                          </span>
-                        </div>
-                      )
+                    ? (value, name) => {
+                        const label = config[String(name)]?.label ?? String(name);
+                        return (
+                          <div className="flex w-full items-center justify-between gap-3">
+                            <span
+                              className="max-w-[10rem] truncate text-muted-foreground"
+                              title={String(label)}
+                            >
+                              {String(label)}
+                            </span>
+                            <span className="font-mono tabular-nums">
+                              {tipFmt(Number(value))}
+                            </span>
+                          </div>
+                        );
+                      }
                     : undefined
                 }
               />
             }
-          />
-          <ChartLegend
-            content={({ payload }) => (
-              <ul className="flex flex-wrap items-center justify-center gap-3 pt-3 text-xs">
-                {payload?.map((entry) => {
-                  const key = String(entry.value);
-                  const hidden = series.isHidden(key);
-                  return (
-                    <li key={key}>
-                      <button
-                        type="button"
-                        onClick={() => series.toggle(key)}
-                        className={cn(
-                          "flex items-center gap-1.5 cursor-pointer transition-opacity",
-                          hidden && "opacity-40 line-through",
-                        )}
-                      >
-                        <span
-                          className="inline-block h-2.5 w-2.5 shrink-0 rounded-[2px]"
-                          style={{ backgroundColor: entry.color }}
-                        />
-                        <span
-                          className="max-w-[10rem] truncate text-muted-foreground"
-                          title={key}
-                        >
-                          {key}
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
           />
           {seriesOrder.map((key, i) => (
             <Area
@@ -155,18 +140,15 @@ export function StackedAreaBody({
               dataKey={key}
               stackId="a"
               type="monotone"
-              stroke={CHART_COLORS[i % CHART_COLORS.length]}
-              fill={CHART_COLORS[i % CHART_COLORS.length]}
+              stroke={config[key]?.color ?? chartColorForSeries(`${key}-${i}`)}
+              fill={config[key]?.color ?? chartColorForSeries(`${key}-${i}`)}
               fillOpacity={0.6}
-              hide={series.isHidden(key)}
+              hide={hidden.has(key)}
             />
           ))}
         </AreaChart>
       </ChartContainer>
-      {allHidden && (
-        <p className="mt-2 text-center text-xs text-muted-foreground">all series hidden</p>
-      )}
-    </>
+    </ResponsiveChartFrame>
   );
 }
 
@@ -180,7 +162,9 @@ export function StackedAreaChart({
   axisFormatter,
   tooltipFormatter,
   unitLabel,
+  othersLabel,
 }: StackedAreaChartProps) {
+  const t = useTranslations("charts.legend");
   const isEmpty = empty ?? buckets.length === 0;
   return (
     <ChartCard title={title} sub={unitLabel} loading={loading} empty={isEmpty} className={className}>
@@ -189,6 +173,9 @@ export function StackedAreaChart({
         seriesOrder={seriesOrder}
         axisFormatter={axisFormatter}
         tooltipFormatter={tooltipFormatter}
+        othersLabel={othersLabel}
+        legendLabel={t("series")}
+        allHiddenLabel={t("allHidden")}
       />
     </ChartCard>
   );

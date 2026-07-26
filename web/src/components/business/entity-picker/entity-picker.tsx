@@ -30,6 +30,10 @@ interface EntityPickerProps {
   placeholder?: string;
   className?: string;
   disabled?: boolean;
+  /** sm = 工具栏紧凑档(h-8);默认档保持 h-full 拉伸行为不变。 */
+  size?: "sm" | "default";
+  /** Token 等 owner-scoped entity 的显式所有者；设置后优先于 self/all scope。 */
+  ownerUserId?: number;
 }
 
 export function EntityPicker({
@@ -39,18 +43,20 @@ export function EntityPicker({
   placeholder,
   className,
   disabled,
+  size = "default",
+  ownerUserId,
 }: EntityPickerProps) {
   const t = useTranslations("entityPicker");
   // Cast to EntityAdapter<unknown> so adapter methods work with a single unknown item type
   const adapter = ENTITY_ADAPTERS[entity] as unknown as EntityAdapter<unknown>;
   const { isAdmin } = useAuth();
-  const showScope = Boolean(adapter.supportsAdminScope && isAdmin);
+  const showScope = Boolean(adapter.supportsAdminScope && isAdmin && ownerUserId === undefined);
 
   const [open, setOpen] = useState(false);
   const [scope, setScope] = useState<AdminScope>("self");
 
   const { search, setSearch, items, isLoading, getValue, renderItem } =
-    useEntityOptions(adapter, { scope, pageSize: PAGE_SIZE });
+    useEntityOptions(adapter, { scope, pageSize: PAGE_SIZE, ownerUserId });
   const one = adapter.useOne(value, { scope });
   const selectedLabel = one.data
     ? adapter.getLabel(one.data)
@@ -78,7 +84,10 @@ export function EntityPicker({
             role="combobox"
             aria-expanded={open}
             disabled={disabled}
-            className="w-full h-full justify-between font-normal text-body"
+            className={cn(
+              "w-full justify-between font-normal text-body",
+              size === "sm" ? "h-8" : "h-full",
+            )}
           >
             <span
               className={cn(

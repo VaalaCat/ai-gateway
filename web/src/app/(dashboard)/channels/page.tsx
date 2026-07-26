@@ -12,6 +12,7 @@ import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { createSelectionColumn } from "@/components/data-table/selection-column";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -45,8 +46,7 @@ export default function ChannelsPage() {
   const tt = useTranslations("channelTransfer");
   const router = useRouter();
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
 
   const { data: channelTypesData = [] } = useChannelTypes();
   const channelTypes = channelTypesData;
@@ -82,17 +82,12 @@ export default function ChannelsPage() {
     },
   } satisfies FilterSpec), [t, channelTypes]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
 
-  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
-    setPage(1);
-    setRowSelection({});
-    setFilterValuesRaw(next);
-  };
-
+  // 用 effect 而非在 onChange 里同步 setPage/setRowSelection：
   const { data, isLoading, refetch } = useChannels({
     page,
     page_size: pageSize,
@@ -109,13 +104,13 @@ export default function ChannelsPage() {
     .map(([id]) => Number(id));
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
-    if (newPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(newPageSize);
-    } else {
-      setPage(newPage);
-    }
+    setPagination(newPageSize === pageSize ? newPage : 1, newPageSize);
     setRowSelection({});
+  };
+
+  const handleFilterChange = (next: Parameters<typeof setFilterValues>[0]) => {
+    setRowSelection({});
+    setFilterValues(next);
   };
 
   const updateMutation = useUpdateChannel();
@@ -515,7 +510,7 @@ export default function ChannelsPage() {
           <FilterableToolbar
             spec={filterSpec}
             value={filterValues}
-            onChange={setFilterValues}
+            onChange={handleFilterChange}
             secondaryActions={[
               {
                 label: tt("importAction"),

@@ -6,9 +6,90 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestBillingQueryReadsOnlyCoreDatabase(t *testing.T) {
+	core := setupTestDB(t)
+	logDB := setupTestDB(t)
+	date := time.Now().UTC().Format("2006-01-02")
+	require.NoError(t, core.Create(&models.TokenDailyBilling{Date: date, UserID: 1, TokenID: 1, TotalCost: 11}).Error)
+	require.NoError(t, logDB.Create(&models.TokenDailyBilling{Date: date, UserID: 1, TokenID: 1, TotalCost: 99}).Error)
+	a := &testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit}
+	overview, err := NewAdminQuery(NewContext(a)).Billing().GetBillingOverview(TokenBillingListFilter{StartDate: date, EndDate: date})
+	require.NoError(t, err)
+	require.Equal(t, int64(11), overview.TotalCost)
+}
+
+func TestPrivateChannelByModelSplitReadsCoreBillingFacts(t *testing.T) {
+	core, logDB := setupStrictSplitDBs(t)
+	require.NoError(t, core.Exec("INSERT INTO private_channels (id, owner_id, name, type) VALUES (9, 7, 'byok', 1)").Error)
+	inside := time.Date(2026, 7, 23, 23, 59, 59, 0, time.UTC).Unix()
+	for _, row := range []models.BillingLog{
+		{RequestID: "inside", PrivateChannelID: 9, OwnerType: "private", ModelName: "core-model", Status: 1, PromptTokens: 10, TotalCost: 20, CreatedAt: inside},
+		{RequestID: "outside", PrivateChannelID: 9, OwnerType: "private", ModelName: "outside", Status: 0, TotalCost: 99, CreatedAt: inside + 1},
+		{RequestID: "admin", PrivateChannelID: 9, OwnerType: "admin", ModelName: "admin", Status: 1, TotalCost: 99, CreatedAt: inside},
+	} {
+		require.NoError(t, core.Create(&row).Error)
+	}
+	q := NewAdminQuery(NewContext(&testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit})).Billing()
+	got, err := q.ListPrivateChannelByModelByOwner(7, ChannelBillingListFilter{StartDate: "2026-07-23", EndDate: "2026-07-23"})
+	require.NoError(t, err)
+	require.Equal(t, []PrivateChannelByModelItem{{ModelName: "core-model", RequestCount: 1, SuccessCount: 1, PromptTokens: 10, TotalCost: 20}}, got)
+
+	empty, err := q.ListPrivateChannelByModelByOwner(8, ChannelBillingListFilter{})
+	require.NoError(t, err)
+	require.Empty(t, empty)
+}
+
+func TestPrivateChannelByModelLegacyKeepsReadingUsageLogs(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, db.Exec("INSERT INTO private_channels (id, owner_id, name, type) VALUES (9, 7, 'byok', 1)").Error)
+	require.NoError(t, db.Select("*").Create(&models.UsageLog{
+		RequestID: "legacy", PrivateChannelID: 9, OwnerType: "private",
+		ModelName: "legacy-model", Status: 1, TotalCost: 12, CreatedAt: time.Now().Unix(),
+	}).Error)
+	q := NewAdminQuery(NewContext(&testApp{db: db, logDB: db, layoutMode: app.DatabaseLayoutLegacySingle})).Billing()
+	got, err := q.ListPrivateChannelByModelByOwner(7, ChannelBillingListFilter{})
+	require.NoError(t, err)
+	require.Equal(t, "legacy-model", got[0].ModelName)
+}
+
+func TestUsageAggregateMutationWritesOnlyLogDatabase(t *testing.T) {
+	core := setupTestDB(t)
+	logDB := setupTestDB(t)
+	a := &testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit}
+	m := NewAdminMutation(NewContext(a)).Billing()
+	require.NoError(t, m.BatchUpsertHourlyBucket([]HourlyBucketRow{{Date: "2026-07-23", Hour: 1, ModelName: "log-only", RequestCount: 1}}))
+
+	var coreCount, logCount int64
+	require.NoError(t, core.Model(&models.UsageHourlyBucket{}).Where("model_name = ?", "log-only").Count(&coreCount).Error)
+	require.NoError(t, logDB.Model(&models.UsageHourlyBucket{}).Where("model_name = ?", "log-only").Count(&logCount).Error)
+	require.Zero(t, coreCount)
+	require.Equal(t, int64(1), logCount)
+
+	usage := &models.UsageLog{UserID: 1, TokenID: 2, ChannelID: 3, ModelName: "direct", Status: 1, IsStream: true, Duration: 1000, FirstResponseMs: 100, CompletionTokens: 10, CreatedAt: time.Now().Unix()}
+	require.NoError(t, m.UpsertTokenDaily(usage))
+	require.NoError(t, m.UpsertChannelDaily(usage))
+	require.NoError(t, m.UpsertHourlyBucket(usage))
+	require.NoError(t, m.UpsertDurationHistogram(usage))
+	require.NoError(t, m.UpsertTTFTHistogram(usage))
+	require.NoError(t, m.UpsertTPSHistogram(usage))
+	for _, model := range []any{&models.UsageHourlyBucket{}, &models.UsageDurationHistogram{}, &models.UsageTTFTHistogram{}, &models.UsageTPSHistogram{}} {
+		require.NoError(t, core.Model(model).Where("model_name = ?", "direct").Count(&coreCount).Error)
+		require.Zero(t, coreCount)
+		require.NoError(t, logDB.Model(model).Where("model_name = ?", "direct").Count(&logCount).Error)
+		require.Equal(t, int64(1), logCount)
+	}
+	for _, model := range []any{&models.TokenDailyBilling{}, &models.ChannelDailyBilling{}} {
+		require.NoError(t, core.Model(model).Count(&coreCount).Error)
+		require.Equal(t, int64(1), coreCount)
+		require.NoError(t, logDB.Model(model).Count(&logCount).Error)
+		require.Zero(t, logCount)
+	}
+}
 
 func TestAdminBillingMutationUpsert(t *testing.T) {
 	ctx, db := setupAdminContext(t)
@@ -496,6 +577,66 @@ func TestUpsertHourlyBucket_FailedRequestNotInStreamSums(t *testing.T) {
 	require.Equal(t, int64(0), row.SumStreamCompletionTokens)
 }
 
+func TestUpsertHourlyBucket_TTFTAndTPSEligibilityAreIndependent(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	m := NewAdminMutation(ctx)
+	ts := time.Date(2026, 5, 20, 13, 30, 0, 0, time.UTC).Unix()
+	logs := []models.UsageLog{
+		{RequestID: "ttft-only", UserID: 1, ChannelID: 5, ModelName: "m", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 200, Duration: 200, CreatedAt: ts},
+		{RequestID: "tps-only", UserID: 1, ChannelID: 5, ModelName: "m", AgentID: "a", IsStream: true, Status: 1, CompletionTokens: 20, Duration: 1000, CreatedAt: ts},
+		{RequestID: "zero-generation", UserID: 1, ChannelID: 5, ModelName: "m", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 1000, CompletionTokens: 30, Duration: 1000, CreatedAt: ts},
+	}
+	for i := range logs {
+		require.NoError(t, m.Billing().UpsertHourlyBucket(&logs[i]))
+	}
+	var row models.UsageHourlyBucket
+	require.NoError(t, db.First(&row).Error)
+	require.Equal(t, int64(2), row.StreamRequestCount)
+	require.Equal(t, int64(1200), row.SumFirstResponseMs)
+	require.Equal(t, int64(1000), row.SumGenerationMs)
+	require.Equal(t, int64(20), row.SumStreamCompletionTokens)
+}
+
+func TestLegacyRebuildsKeepGlobalAndUserSpeedStatisticsInSync(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	m := NewAdminMutation(ctx).Billing()
+	ts := time.Date(2026, 5, 20, 13, 5, 0, 0, time.UTC).Unix()
+	logs := make([]models.UsageLog, 0, 102)
+	for i := 0; i < 100; i++ {
+		logs = append(logs, models.UsageLog{RequestID: fmt.Sprintf("mixed-%03d", i), UserID: uint(i%2 + 1), ChannelID: 5, ModelName: "mixed", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 200, CompletionTokens: 20, Duration: 1200, CreatedAt: ts})
+	}
+	logs = append(logs,
+		models.UsageLog{RequestID: "anonymous", UserID: 0, ChannelID: 5, ModelName: "mixed", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 300, CompletionTokens: 30, Duration: 1300, CreatedAt: ts},
+		models.UsageLog{RequestID: "ttft-only", UserID: 1, ChannelID: 5, ModelName: "mixed", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 400, Duration: 400, CreatedAt: ts},
+	)
+	require.NoError(t, db.Create(&logs).Error)
+	targets := []string{RebuildTargetHourlyBucket, RebuildTargetTTFTHistogram, RebuildTargetTPSHistogram}
+	_, err := m.RebuildDailyRollups(BillingRebuildFilter{StartDate: "2026-05-20", EndDate: "2026-05-20", Targets: targets})
+	require.NoError(t, err)
+	var hourly models.UsageHourlyBucket
+	require.NoError(t, db.First(&hourly).Error)
+	require.Equal(t, int64(102), hourly.RequestCount)
+	require.Equal(t, int64(102), hourly.StreamRequestCount)
+	require.Equal(t, int64(20700), hourly.SumFirstResponseMs)
+	require.Equal(t, int64(101000), hourly.SumGenerationMs)
+	require.Equal(t, int64(2030), hourly.SumStreamCompletionTokens)
+	var globalTTFT, globalTPS, userTTFT, userTPS int64
+	require.NoError(t, db.Model(&models.UsageTTFTHistogram{}).Count(&globalTTFT).Error)
+	require.NoError(t, db.Model(&models.UsageTPSHistogram{}).Count(&globalTPS).Error)
+	require.NoError(t, db.Model(&models.UsageUserTTFTHistogram{}).Count(&userTTFT).Error)
+	require.NoError(t, db.Model(&models.UsageUserTPSHistogram{}).Count(&userTPS).Error)
+	require.Equal(t, int64(1), globalTTFT)
+	require.Equal(t, int64(1), globalTPS)
+	require.Equal(t, int64(2), userTTFT, "anonymous samples must not create user rows")
+	require.Equal(t, int64(2), userTPS)
+	require.NoError(t, db.Model(&models.UsageUserTTFTHistogram{}).Where("user_id = ?", 1).Update("h16", 999).Error)
+	_, err = m.RebuildHourSlice("2026-05-20", 13, targets, false)
+	require.NoError(t, err)
+	var rebuilt models.UsageUserTTFTHistogram
+	require.NoError(t, db.Where("user_id = ?", 1).First(&rebuilt).Error)
+	require.Zero(t, rebuilt.H16, "hour-slice rebuild must remove stale user histogram slots")
+}
+
 // TestRebuild_DefaultTargetsRebuildsAllThreeTables 验证默认（空 Targets）会重建全部三张表。
 func TestRebuild_DefaultTargetsRebuildsAllThreeTables(t *testing.T) {
 	ctx, db := setupAdminContext(t)
@@ -872,6 +1013,40 @@ func TestRebuildHourSlice_EquivalentToRebuildDailyRollups(t *testing.T) {
 		hB[i].UpdatedAt = 0
 		require.Equal(t, hB[i], hA[i], "hourly row %d", i)
 	}
+
+	// compare: ttft_histogram — must be non-empty (odd h%2==0 hours are
+	// streaming with completion_tokens>0 and positive generation time), else
+	// an empty-vs-empty compare would falsely pass.
+	var ttA, ttB []models.UsageTTFTHistogram
+	require.NoError(t, dbA.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&ttA).Error)
+	require.NoError(t, dbB.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&ttB).Error)
+	require.Greater(t, len(ttB), 0, "ttft_histogram should have rows for streaming requests")
+	require.Equal(t, len(ttB), len(ttA))
+	for i := range ttB {
+		ttA[i].ID = 0
+		ttA[i].CreatedAt = 0
+		ttA[i].UpdatedAt = 0
+		ttB[i].ID = 0
+		ttB[i].CreatedAt = 0
+		ttB[i].UpdatedAt = 0
+		require.Equal(t, ttB[i], ttA[i], "ttft_histogram row %d", i)
+	}
+
+	// compare: tps_histogram — same non-empty requirement as ttft_histogram.
+	var tpA, tpB []models.UsageTPSHistogram
+	require.NoError(t, dbA.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&tpA).Error)
+	require.NoError(t, dbB.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&tpB).Error)
+	require.Greater(t, len(tpB), 0, "tps_histogram should have rows for streaming requests")
+	require.Equal(t, len(tpB), len(tpA))
+	for i := range tpB {
+		tpA[i].ID = 0
+		tpA[i].CreatedAt = 0
+		tpA[i].UpdatedAt = 0
+		tpB[i].ID = 0
+		tpB[i].CreatedAt = 0
+		tpB[i].UpdatedAt = 0
+		require.Equal(t, tpB[i], tpA[i], "tps_histogram row %d", i)
+	}
 }
 
 func TestDeleteHourlyBucketsBefore_DeletesRowsBeforeCutoff(t *testing.T) {
@@ -963,4 +1138,111 @@ func TestGetBillingOverview_TotalTokensIncludeCache(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, int64(370), overview.TotalTokens, "100+200+30+40 含 cache")
+}
+
+func TestListTokenBilling_SortByTotalTokensAndFilters(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+
+	userID := uint(7)
+	// token 9: total_tokens = 10+5+0+0 = 15, cost 高
+	// token 8: total_tokens = 100+50+10+40 = 200, cost 低
+	// token 5: total_tokens = 1, 名称 "audit"
+	rows := []models.TokenDailyBilling{
+		{Date: "2026-04-01", UserID: userID, TokenID: 9, TokenName: "alpha",
+			PromptTokens: 10, CompletionTokens: 5, TotalCost: 999, RequestCount: 1, LastUsedAt: 100},
+		{Date: "2026-04-01", UserID: userID, TokenID: 8, TokenName: "beta",
+			PromptTokens: 100, CompletionTokens: 50, CacheReadTokens: 10, CacheWriteTokens: 40,
+			TotalCost: 1, RequestCount: 1, LastUsedAt: 200},
+		{Date: "2026-04-01", UserID: userID, TokenID: 5, TokenName: "audit",
+			PromptTokens: 1, TotalCost: 5, RequestCount: 1, LastUsedAt: 50},
+	}
+	require.NoError(t, db.Create(&rows).Error)
+
+	// success: 默认按总 token 降序 → token 8(200) 在 token 9(15) 前
+	items, total, err := q.Billing().ListTokenBilling(
+		ListOptions{Page: 1, PageSize: 10},
+		TokenBillingListFilter{UserID: &userID},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), total)
+	require.Equal(t, uint(8), items[0].TokenID, "highest total_tokens first")
+	require.Equal(t, uint(9), items[1].TokenID)
+
+	// filter: NameSearch 只留名称含 "audit"
+	items, total, err = q.Billing().ListTokenBilling(
+		ListOptions{Page: 1, PageSize: 10},
+		TokenBillingListFilter{UserID: &userID, NameSearch: "audit"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Equal(t, uint(5), items[0].TokenID)
+
+	// boundary: MinTokens = 16 → 只留 token 8(200)，剔除 token 9(15) 与 token 5(1)
+	items, total, err = q.Billing().ListTokenBilling(
+		ListOptions{Page: 1, PageSize: 10},
+		TokenBillingListFilter{UserID: &userID, MinTokens: 16},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total, "count must honor HAVING")
+	require.Len(t, items, 1)
+	require.Equal(t, uint(8), items[0].TokenID)
+}
+
+func TestListChannelBilling_SortByTotalTokensAndFilters(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+
+	// channel 9: total_tokens = 10+5+0+0 = 15, cost 高, type 1
+	// channel 8: total_tokens = 100+50+10+40 = 200, cost 低, type 2
+	// channel 5: total_tokens = 1, 名称 "audit", type 1
+	rows := []models.ChannelDailyBilling{
+		{Date: "2026-04-01", ChannelID: 9, ChannelName: "alpha", ChannelType: 1,
+			PromptTokens: 10, CompletionTokens: 5, TotalCost: 999, RequestCount: 1, LastUsedAt: 100},
+		{Date: "2026-04-01", ChannelID: 8, ChannelName: "beta", ChannelType: 2,
+			PromptTokens: 100, CompletionTokens: 50, CacheReadTokens: 10, CacheWriteTokens: 40,
+			TotalCost: 1, RequestCount: 1, LastUsedAt: 200},
+		{Date: "2026-04-01", ChannelID: 5, ChannelName: "audit", ChannelType: 1,
+			PromptTokens: 1, TotalCost: 5, RequestCount: 1, LastUsedAt: 50},
+	}
+	require.NoError(t, db.Create(&rows).Error)
+
+	// success: 默认按总 token 降序 → channel 8(200) 在 channel 9(15) 前
+	items, total, err := q.Billing().ListChannelBilling(
+		ListOptions{Page: 1, PageSize: 10},
+		ChannelBillingListFilter{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), total)
+	require.Equal(t, uint(8), items[0].ChannelID, "highest total_tokens first")
+	require.Equal(t, uint(9), items[1].ChannelID)
+
+	// filter: ChannelType 只留 type=2
+	channelType := 2
+	items, total, err = q.Billing().ListChannelBilling(
+		ListOptions{Page: 1, PageSize: 10},
+		ChannelBillingListFilter{ChannelType: &channelType},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Equal(t, uint(8), items[0].ChannelID)
+
+	// filter: NameSearch 只留名称含 "audit"
+	items, total, err = q.Billing().ListChannelBilling(
+		ListOptions{Page: 1, PageSize: 10},
+		ChannelBillingListFilter{NameSearch: "audit"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Equal(t, uint(5), items[0].ChannelID)
+
+	// boundary: MinTokens = 16 → 只留 channel 8(200)，剔除 channel 9(15) 与 channel 5(1)
+	items, total, err = q.Billing().ListChannelBilling(
+		ListOptions{Page: 1, PageSize: 10},
+		ChannelBillingListFilter{MinTokens: 16},
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total, "count must honor HAVING")
+	require.Len(t, items, 1)
+	require.Equal(t, uint(8), items[0].ChannelID)
 }

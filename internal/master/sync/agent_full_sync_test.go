@@ -88,6 +88,37 @@ func TestAgentFullSyncKeysetRetains501RowsAcrossDeletionAndInsert(t *testing.T) 
 	require.NotEqual(t, late.ID, secondAgents[0].ID)
 }
 
+func TestAgentFullSyncPreservesTransportPolicyDirections(t *testing.T) {
+	srv := setupMaster(t)
+	client := connectFullSyncAgent(t, srv, "agent-policy-recipient")
+	target := models.Agent{AgentID: "agent-policy-target", Secret: "redact-me", Name: "Policy Target", Status: 1}
+	require.NoError(t, srv.DB.Create(&target).Error)
+	require.NoError(t, srv.DB.Model(&models.Agent{}).Where("id = ?", target.ID).Updates(map[string]any{
+		"direct_inbound_enabled":  true,
+		"direct_outbound_enabled": false,
+		"relay_inbound_enabled":   false,
+		"relay_outbound_enabled":  true,
+	}).Error)
+
+	response := callAgentFullSyncV1(t, client, protocol.FullSyncRequest{
+		Entity: events.EntityAgent, PageSize: protocol.FullSyncMaxPageSize,
+	})
+	var agents []models.Agent
+	require.NoError(t, json.Unmarshal(response.Items, &agents))
+	for _, agent := range agents {
+		if agent.AgentID != target.AgentID {
+			continue
+		}
+		require.Empty(t, agent.Secret)
+		require.True(t, agent.DirectInboundEnabled)
+		require.False(t, agent.DirectOutboundEnabled)
+		require.False(t, agent.RelayInboundEnabled)
+		require.True(t, agent.RelayOutboundEnabled)
+		return
+	}
+	t.Fatalf("full sync did not return %q", target.AgentID)
+}
+
 func TestAgentFullSyncDatabaseErrorsReturnJSONRPCInternal(t *testing.T) {
 	tests := []struct {
 		name          string

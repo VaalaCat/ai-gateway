@@ -1,21 +1,23 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
 
 const (
@@ -23,13 +25,16 @@ const (
 	defaultDirectProbeTimeout = 10 * time.Second
 )
 
-var errDirectProbeTimeout = errors.New("direct probe: overall timeout")
+var (
+	errDirectProbeTimeout      = errors.New("direct probe: overall timeout")
+	errDirectProbeBodyTooLarge = errors.New("direct probe: response body too large")
+)
 
 type DirectProberOptions struct {
-	Transport *http.Transport
-	Now       func() time.Time
-	Timeout   time.Duration
-	Metrics   DirectProbeMetricRecorder
+	Pool    agentproxy.DirectProbeStreamOpener
+	Now     func() time.Time
+	Timeout time.Duration
+	Metrics DirectProbeMetricRecorder
 }
 
 type DirectProbeMetricRecorder interface {
@@ -37,10 +42,10 @@ type DirectProbeMetricRecorder interface {
 }
 
 type DirectProber struct {
-	transport *http.Transport
-	now       func() time.Time
-	timeout   time.Duration
-	metrics   DirectProbeMetricRecorder
+	pool    agentproxy.DirectProbeStreamOpener
+	now     func() time.Time
+	timeout time.Duration
+	metrics DirectProbeMetricRecorder
 }
 
 type DirectProbeGate interface {
@@ -50,10 +55,6 @@ type DirectProbeGate interface {
 }
 
 func NewDirectProber(opts DirectProberOptions) *DirectProber {
-	transport := opts.Transport
-	if transport == nil {
-		transport = http.DefaultTransport.(*http.Transport)
-	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
@@ -62,10 +63,13 @@ func NewDirectProber(opts DirectProberOptions) *DirectProber {
 	if timeout <= 0 {
 		timeout = defaultDirectProbeTimeout
 	}
-	return &DirectProber{transport: transport.Clone(), now: now, timeout: timeout, metrics: opts.Metrics}
+	return &DirectProber{pool: opts.Pool, now: now, timeout: timeout, metrics: opts.Metrics}
 }
 
 func (p *DirectProber) Probe(ctx context.Context, target protocol.DirectProbeTarget) (result protocol.DirectProbeResult) {
+	if p == nil {
+		return directProbeBase(target, time.Now(), "direct_invalid_target")
+	}
 	defer func() {
 		if p.metrics != nil {
 			metricResult := directProbeMetricResult(result)
@@ -77,54 +81,129 @@ func (p *DirectProber) Probe(ctx context.Context, target protocol.DirectProbeTar
 			}
 		}
 	}()
+
 	startedAt := p.now()
-	base := protocol.DirectProbeResult{
-		TargetAgentID: target.TargetAgentID, AddressFingerprint: target.AddressFingerprint,
-		Network: "unreachable", Identity: "unknown", CheckedAt: startedAt.Unix(),
-	}
+	result = directProbeBase(target, startedAt, "")
 	if ctx == nil {
-		base.ReasonCode = "invalid_context"
-		return base
+		result.ReasonCode = "invalid_context"
+		return result
 	}
+	if target.TargetAgentID == "" || target.AddressFingerprint == "" || len(target.Addresses) == 0 || !validProbePolicy(target.Policy) {
+		result.ReasonCode = "direct_invalid_target"
+		return result
+	}
+	if p.pool == nil {
+		result.Stage = "pool"
+		result.ReasonCode = consts.RouteErrorDirectDisabled
+		return result
+	}
+	proxyURL, err := directProbeProxyURL(target.EffectiveProxy)
+	if err != nil {
+		result.Stage = "proxy"
+		result.ReasonCode = consts.RouteErrorDirectDisabled
+		return result
+	}
+
 	probeCtx, cancel := context.WithTimeoutCause(ctx, p.timeout, errDirectProbeTimeout)
 	defer cancel()
-	if target.TargetAgentID == "" || len(target.Addresses) == 0 {
-		base.ReasonCode = "direct_invalid_target"
-		return base
-	}
-	transport, err := p.targetTransport(target.EffectiveProxy)
-	if err != nil {
-		base.ReasonCode = "direct_proxy_invalid"
-		return base
-	}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{
-		Transport:     transport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	best := base
+	best := result
 	for _, address := range target.Addresses {
-		candidate := p.probeAddress(probeCtx, client, target, address, startedAt)
+		frozen, err := directProbeSessionTarget(target, address, proxyURL)
+		if err != nil {
+			best.Stage = "url"
+			best.ReasonCode = consts.RouteErrorDirectDisabled
+			continue
+		}
+		candidate := p.probeSession(probeCtx, target, frozen, startedAt)
 		if candidate.Eligible {
 			return candidate
 		}
-		if best.Network != "reachable" && candidate.Network == "reachable" {
-			best = candidate
-		} else if best.ReasonCode == "" {
-			best = candidate
-		}
-		if context.Cause(probeCtx) != nil {
+		best = candidate
+		if context.Cause(probeCtx) != nil || candidate.Network == "reachable" {
 			return candidate
 		}
 	}
 	return best
 }
 
+func (p *DirectProber) probeSession(
+	ctx context.Context,
+	target protocol.DirectProbeTarget,
+	frozen agentproxy.DirectSessionTarget,
+	startedAt time.Time,
+) protocol.DirectProbeResult {
+	result := directProbeBase(target, startedAt, "")
+	stream, err := p.pool.OpenProbeStream(ctx, frozen, app.ProbeStreamRequest{
+		TargetAgentID: target.TargetAgentID,
+		RequestID:     "direct-connectivity-probe",
+		Remaining:     probeRemaining(ctx, p.timeout),
+		Policy:        target.Policy,
+	})
+	if err != nil {
+		if isTargetPolicyReset(err, target.Policy, consts.RouteErrorTargetDirectInboundDisabled) {
+			result.Stage = "open"
+			applyDirectPolicyDisabled(&result, consts.RouteErrorTargetDirectInboundDisabled)
+			return result
+		}
+		result.Stage, result.ReasonCode = directProbeOpenFailureCode(ctx, err)
+		return result
+	}
+	if stream == nil {
+		result.Stage = "pool"
+		result.ReasonCode = consts.RouteErrorDirectDisabled
+		return result
+	}
+	defer stream.Close()
+
+	response := newDirectProbeResponse()
+	stage, err := commitUploadAndCopyProbe(ctx, stream, response)
+	result.LatencyMS = p.now().Sub(startedAt).Milliseconds()
+	result.Stage = string(stage)
+	if err != nil {
+		stream.Cancel(err)
+		if isTargetPolicyReset(err, target.Policy, consts.RouteErrorTargetDirectInboundDisabled) {
+			applyDirectPolicyDisabled(&result, consts.RouteErrorTargetDirectInboundDisabled)
+			return result
+		}
+		if response.status != 0 {
+			result.Network = "reachable"
+			result.Identity = "verified"
+		}
+		result.ReasonCode = directProbeStreamFailureCode(ctx, stream, stage, err)
+		return result
+	}
+
+	result.Network = "reachable"
+	result.Identity = "verified"
+	if response.status != http.StatusOK {
+		result.ReasonCode = consts.RouteErrorDirectProbeHTTPStatus
+		return result
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(response.body.Bytes(), &body); err != nil || body.Status != "ok" {
+		result.ReasonCode = consts.RouteErrorDirectProbeInvalidResponse
+		return result
+	}
+	result.Eligible = true
+	result.Stage = ""
+	return result
+}
+
+func directProbeBase(target protocol.DirectProbeTarget, checkedAt time.Time, reason string) protocol.DirectProbeResult {
+	return protocol.DirectProbeResult{
+		TargetAgentID: target.TargetAgentID, AddressFingerprint: target.AddressFingerprint,
+		Network: "unreachable", Identity: "unknown", CheckedAt: checkedAt.Unix(),
+		ReasonCode: reason, Policy: target.Policy,
+	}
+}
+
 func directProbeMetricResult(result protocol.DirectProbeResult) pkgmetrics.ProbeResult {
-	if result.Eligible && result.Identity == "verified" {
+	if result.Network == "reachable" && result.Identity == "verified" && result.ReasonCode == "" {
 		return pkgmetrics.ProbeVerified
 	}
-	if result.ReasonCode == "cancelled" || result.ReasonCode == "request_cancelled" {
+	if result.ReasonCode == consts.RouteErrorRequestCancelled {
 		return pkgmetrics.ProbeCancelled
 	}
 	if result.Network == "unreachable" && result.ReasonCode != "invalid_context" && result.ReasonCode != "direct_invalid_target" {
@@ -133,135 +212,171 @@ func directProbeMetricResult(result protocol.DirectProbeResult) pkgmetrics.Probe
 	return pkgmetrics.ProbeInvalid
 }
 
-func (p *DirectProber) probeAddress(
-	ctx context.Context,
-	client *http.Client,
+func applyDirectPolicyDisabled(result *protocol.DirectProbeResult, reason string) {
+	result.Network = "reachable"
+	result.Identity = "verified"
+	result.Eligible = false
+	result.ReasonCode = ""
+	result.PolicyDisabled = true
+	result.PolicyReasonCode = reason
+}
+
+func isTargetPolicyReset(err error, policy protocol.ProbePolicy, reason string) bool {
+	if policy != protocol.ProbeRespectBusinessPolicy {
+		return false
+	}
+	var reset interface{ ResetCode() string }
+	return errors.As(err, &reset) && reset.ResetCode() == reason
+}
+
+func validProbePolicy(policy protocol.ProbePolicy) bool {
+	return policy == protocol.ProbeRespectBusinessPolicy || policy == protocol.ProbeBypassBusinessPolicy
+}
+
+func directProbeSessionTarget(
 	target protocol.DirectProbeTarget,
 	address protocol.Address,
-	startedAt time.Time,
-) protocol.DirectProbeResult {
-	result := protocol.DirectProbeResult{
+	proxyURL *url.URL,
+) (agentproxy.DirectSessionTarget, error) {
+	parsed, err := url.Parse(strings.TrimSpace(address.URL))
+	if err != nil || parsed == nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return agentproxy.DirectSessionTarget{}, errors.New("invalid direct probe address")
+	}
+	return agentproxy.DirectSessionTarget{
 		TargetAgentID: target.TargetAgentID, AddressFingerprint: target.AddressFingerprint,
-		Network: "unreachable", Identity: "unknown", CheckedAt: startedAt.Unix(),
+		WebSocketURL: parsed, ProxyURL: proxyURL,
+	}, nil
+}
+
+func directProbeProxyURL(raw string) (*url.URL, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
 	}
-	endpoint, err := directProbeURL(address.URL, target.TargetAgentID)
-	if err != nil {
-		result.ReasonCode = "direct_invalid_address"
-		return result
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed == nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" {
+		return nil, errors.New("invalid direct probe proxy")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		result.ReasonCode = "direct_invalid_address"
-		return result
+	return parsed, nil
+}
+
+func directProbeOpenFailureCode(ctx context.Context, err error) (string, string) {
+	if reason := probeContextFailureCode(ctx, err); reason != "" {
+		return "open", reason
 	}
-	request.Header = make(http.Header)
-	response, err := client.Do(request)
-	result.LatencyMS = p.now().Sub(startedAt).Milliseconds()
-	if err != nil {
-		result.ReasonCode = directProbeNetworkReason(ctx, err)
-		return result
+	stage, reason := "open", consts.RouteErrorDirectConnect
+	var failure interface {
+		Stage() string
+		ReasonCode() string
 	}
-	defer response.Body.Close()
-	result.Network = "reachable"
-	if response.StatusCode != http.StatusOK {
-		result.Identity = "unverified"
-		result.ReasonCode = "http_status"
-		return result
+	if !errors.As(err, &failure) {
+		return stage, reason
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, directProbeBodyLimit+1))
-	if err != nil {
-		if errors.Is(context.Cause(ctx), errDirectProbeTimeout) {
-			result.Identity = "invalid"
-			result.ReasonCode = "identity_interrupted"
-			return result
+	stage = failure.Stage()
+	switch stage {
+	case "credentials":
+		reason = consts.RouteErrorDirectAuthUnavailable
+	case "policy":
+		if consts.IsPublicRouteErrorCode(failure.ReasonCode()) {
+			reason = failure.ReasonCode()
 		}
-		if context.Cause(ctx) != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			result.ReasonCode = "cancelled"
-			return result
+	case "target", "url", "pool", "proxy":
+		reason = consts.RouteErrorDirectDisabled
+	}
+	return stage, reason
+}
+
+func directProbeStreamFailureCode(
+	ctx context.Context,
+	stream app.ProbeStream,
+	stage protocol.RelayProbeStage,
+	err error,
+) string {
+	if errors.Is(err, errDirectProbeBodyTooLarge) {
+		return consts.RouteErrorDirectProbeBodyTooLarge
+	}
+	if reason := probeContextFailureCode(ctx, err); reason != "" {
+		return reason
+	}
+	var reset interface{ ResetCode() string }
+	if errors.As(err, &reset) && consts.IsPublicRouteErrorCode(reset.ResetCode()) {
+		return reset.ResetCode()
+	}
+	if stage == protocol.RelayProbeStageCommit {
+		if stream.CommitState() == wire.PreCommit {
+			return consts.RouteErrorDirectConnect
 		}
-		result.Identity = "invalid"
-		result.ReasonCode = "identity_interrupted"
-		return result
+		return consts.RouteErrorDirectCommitUncertain
 	}
-	if len(body) > directProbeBodyLimit {
-		result.Identity = "invalid"
-		result.ReasonCode = "identity_too_large"
-		return result
-	}
-	var identity protocol.DirectIngressIdentity
-	if err := json.Unmarshal(body, &identity); err != nil {
-		result.Identity = "invalid"
-		result.ReasonCode = "identity_malformed"
-		return result
-	}
-	if identity.Contract != protocol.DirectIngressContractV1 {
-		result.Identity = "mismatch"
-		result.ReasonCode = "identity_contract_mismatch"
-		return result
-	}
-	if identity.Role != "agent" {
-		result.Identity = "mismatch"
-		result.ReasonCode = "identity_role_mismatch"
-		return result
-	}
-	if identity.AgentID != target.TargetAgentID {
-		result.Identity = "mismatch"
-		result.ReasonCode = "identity_agent_mismatch"
-		return result
-	}
-	result.Identity = "verified"
-	result.Eligible = true
-	return result
+	return consts.RouteErrorDirectResponseInterrupted
 }
 
-func (p *DirectProber) targetTransport(proxyRaw string) (*http.Transport, error) {
-	transport := p.transport.Clone()
-	if strings.TrimSpace(proxyRaw) == "" {
-		transport.Proxy = nil
-		return transport, nil
+func probeContextFailureCode(ctx context.Context, err error) string {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, errDirectProbeTimeout) || errors.Is(cause, errRelayProbeTimeout) ||
+		errors.Is(cause, context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return consts.RouteErrorRequestDeadline
 	}
-	proxyURL, err := url.Parse(proxyRaw)
-	if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
-		return nil, fmt.Errorf("invalid direct probe proxy")
+	if cause != nil || errors.Is(err, context.Canceled) {
+		return consts.RouteErrorRequestCancelled
 	}
-	transport.Proxy = http.ProxyURL(proxyURL)
-	return transport, nil
+	return ""
 }
 
-func directProbeURL(raw, targetAgentID string) (string, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" || parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("invalid direct probe address")
+func probeRemaining(ctx context.Context, fallback time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		return max(time.Until(deadline), 0)
 	}
-	// behavior change: the ingress identity route is listener-relative, matching
-	// DirectForwarder, which also treats a configured address path as non-authoritative.
-	parsed.Path = protocol.DirectIngressIdentityPath
-	parsed.RawPath = ""
-	query := url.Values{}
-	query.Set("target_agent_id", targetAgentID)
-	parsed.RawQuery = query.Encode()
-	parsed.Fragment = ""
-	return parsed.String(), nil
+	return fallback
 }
 
-func directProbeNetworkReason(ctx context.Context, err error) string {
-	if errors.Is(context.Cause(ctx), errDirectProbeTimeout) {
-		return "direct_connect"
+type directProbeResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newDirectProbeResponse() *directProbeResponse {
+	return &directProbeResponse{header: make(http.Header)}
+}
+
+func (w *directProbeResponse) Header() http.Header { return w.header }
+
+func (w *directProbeResponse) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
 	}
-	if context.Cause(ctx) != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "cancelled"
+}
+
+func (w *directProbeResponse) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
 	}
-	var dnsError *net.DNSError
-	lower := strings.ToLower(err.Error())
-	if errors.As(err, &dnsError) || strings.Contains(lower, "no such host") || strings.Contains(lower, "server misbehaving") {
-		return "direct_dns"
+	remaining := directProbeBodyLimit - w.body.Len()
+	if len(data) > remaining {
+		if remaining > 0 {
+			_, _ = w.body.Write(data[:remaining])
+		}
+		return remaining, errDirectProbeBodyTooLarge
 	}
-	var recordError tls.RecordHeaderError
-	var authorityError x509.UnknownAuthorityError
-	if errors.As(err, &recordError) || errors.As(err, &authorityError) || strings.Contains(lower, "tls") || strings.Contains(lower, "certificate") {
-		return "direct_tls"
+	return w.body.Write(data)
+}
+
+func commitUploadAndCopyProbe(
+	ctx context.Context,
+	stream app.ProbeStream,
+	dst http.ResponseWriter,
+) (protocol.RelayProbeStage, error) {
+	if err := stream.Commit(ctx); err != nil {
+		return protocol.RelayProbeStageCommit, err
 	}
-	return "direct_connect"
+	if err := stream.Upload(ctx, bytes.NewReader(nil)); err != nil {
+		return protocol.RelayProbeStageCommit, err
+	}
+	if err := stream.CopyResponse(ctx, dst); err != nil {
+		return protocol.RelayProbeStageResponse, err
+	}
+	return protocol.RelayProbeStageResponse, nil
 }
 
 func HandleDirectProbe(ctx context.Context, params json.RawMessage, prober *DirectProber, gate DirectProbeGate) (any, error) {
@@ -285,3 +400,6 @@ func HandleDirectProbe(ctx context.Context, params json.RawMessage, prober *Dire
 	}
 	return result, nil
 }
+
+var _ http.ResponseWriter = (*directProbeResponse)(nil)
+var _ io.Writer = (*directProbeResponse)(nil)

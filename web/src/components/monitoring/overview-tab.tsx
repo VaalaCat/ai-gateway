@@ -25,10 +25,11 @@ import {
 import {
   ChartContainer,
   ChartTooltip,
-  ChartTooltipContent,
 } from "@/components/ui/chart";
+import { BoundedChartTooltip } from "@/components/business/bounded-chart-tooltip";
+import { chartColorForSeries } from "@/lib/chart-colors";
 import { normalize0to100 } from "@/lib/utils/normalize";
-import { formatDuration } from "@/lib/utils/format";
+import { formatAvgPercentile, formatDuration } from "@/lib/utils/format";
 
 import { useObsRange } from "@/lib/hooks/use-obs-range";
 import { useMonitoringInsights } from "@/lib/api/monitoring-insights";
@@ -115,13 +116,13 @@ export function OverviewTab() {
                   {t("channels.errorRatio")}
                 </TableHead>
                 <TableHead className="text-right">
-                  {t("channels.ttft")}
+                  {t("metrics.ttft")}
                 </TableHead>
                 <TableHead className="text-right">
-                  {t("channels.tps")}
+                  {t("metrics.tps")}
                 </TableHead>
                 <TableHead className="text-right">
-                  {t("channels.p95")}
+                  {t("metrics.latencyP95")}
                 </TableHead>
                 <TableHead>{t("channels.spark24h")}</TableHead>
               </TableRow>
@@ -138,11 +139,11 @@ export function OverviewTab() {
                   <TableCell className="text-right">
                     {(c.error_ratio * 100).toFixed(1)}%
                   </TableCell>
-                  <TableCell className="text-right">
-                    {c.ttft_p95_ms ? formatDuration(c.ttft_p95_ms) : "—"}
+                  <TableCell className="text-right tabular-nums">
+                    {formatAvgPercentile(c.ttft_avg_ms, c.ttft_p95_ms, formatDuration)}
                   </TableCell>
-                  <TableCell className="text-right">
-                    {c.tps_avg ? c.tps_avg.toFixed(1) : "—"}
+                  <TableCell className="text-right tabular-nums">
+                    {formatAvgPercentile(c.tps_avg, c.tps_p5, (v) => v.toFixed(1))}
                   </TableCell>
                   <TableCell className="text-right">
                     {c.latency_p95_ms ? formatDuration(c.latency_p95_ms) : "—"}
@@ -197,10 +198,15 @@ export function OverviewTab() {
                 {a.online ? t("agents.online") : t("agents.offline")}
               </Badge>
               <span className="text-sm text-muted-foreground">
-                {a.requests} req
+                {t("agents.requests")}: {a.requests}
               </span>
-              <span className="text-sm text-muted-foreground">
-                {a.tps_avg ? a.tps_avg.toFixed(1) : "—"} tps
+              <span className="text-sm text-muted-foreground tabular-nums">
+                {t("metrics.ttft")}:{" "}
+                {formatAvgPercentile(a.ttft_avg_ms, a.ttft_p95_ms, formatDuration)}
+              </span>
+              <span className="text-sm text-muted-foreground tabular-nums">
+                {t("metrics.tps")}:{" "}
+                {formatAvgPercentile(a.tps_avg, a.tps_p5, (v) => v.toFixed(1))}
               </span>
               <DataGlyph
                 kind="line"
@@ -228,10 +234,11 @@ export function OverviewTab() {
         title={t("errors.byChannel")}
         loading={isFetching}
         empty={(data?.errors.by_channel ?? []).length === 0}
+        chartFrame={{}}
       >
         <ChartContainer
-          config={{ count: { label: "Errors", color: "var(--chart-2)" } }}
-          className="h-[280px] w-full"
+          config={{ count: { label: "Errors", color: chartColorForSeries("errors") } }}
+          className="h-full w-full"
         >
           <BarChart
             data={(data?.errors.by_channel ?? []).map((e) => ({
@@ -251,7 +258,7 @@ export function OverviewTab() {
               axisLine={false}
               width={120}
             />
-            <ChartTooltip content={<ChartTooltipContent />} />
+            <ChartTooltip content={<BoundedChartTooltip />} />
             <Bar
               dataKey="count"
               fill="var(--color-count)"

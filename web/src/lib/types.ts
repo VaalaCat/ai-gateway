@@ -1,3 +1,10 @@
+export type ChartTopN = 5 | 10 | 20;
+export type TrendStat = "avg" | "p95" | "p5";
+
+export interface DataStatus {
+  log_db: "available" | "unavailable";
+}
+
 export interface User {
   id: number;
   username: string;
@@ -14,6 +21,8 @@ export interface User {
   group_name?: string;
 }
 
+export type TokenTraceMode = "full" | "headers";
+
 export interface Token {
   id: number;
   user_id: number;
@@ -24,6 +33,7 @@ export interface Token {
   models: string;
   template_id?: number;
   trace_enabled: boolean;
+  trace_mode: TokenTraceMode;
   byok_only?: boolean;
   created_at: number;
   updated_at: number;
@@ -167,7 +177,12 @@ export type RelayConfigState = "configured" | "not_configured" | "disabled";
 export type RelayAvailability = "ready" | "draining" | "unavailable";
 export type RelayConvergence = "converged" | "applying" | "degraded";
 export type RelayMode = "inherit" | "custom" | "disabled";
-export type PeerRouteMode = "direct_first" | "relay_only";
+export interface AgentTransportPolicy {
+  direct_inbound_enabled: boolean;
+  direct_outbound_enabled: boolean;
+  relay_inbound_enabled: boolean;
+  relay_outbound_enabled: boolean;
+}
 export type DirectNetwork =
   | "unknown"
   | "checking"
@@ -257,7 +272,8 @@ export interface RelaySummary {
 }
 
 export interface DirectSummary {
-  state: DirectNetwork;
+  state: DirectNetwork | "disabled";
+  disabled: number;
   reachable: number;
   degraded: number;
   unreachable: number;
@@ -292,6 +308,7 @@ export type DirectPathState =
   | "stale";
 
 export type RelayPathState =
+  | "disabled"
   | "checking"
   | "reachable"
   | "unreachable"
@@ -302,6 +319,7 @@ export type RelayPathState =
 
 export interface RelayPathSummary {
   state: RelayPathState | "degraded";
+  disabled: number;
   reachable: number;
   unreachable: number;
   unavailable: number;
@@ -313,6 +331,7 @@ export interface RelayPathSummary {
 
 export interface RouteDirectTargetSnapshot {
   state: DirectPathState;
+  policy_reason?: string;
   addresses: AgentAddress[];
   network: DirectNetwork;
   identity: DirectIdentity;
@@ -329,6 +348,7 @@ export interface RouteRelayTargetSnapshot {
   target_agent_id: string;
   target_name: string;
   state: RelayPathState;
+  policy_reason?: string;
   stage?: "open" | "commit" | "response";
   checking: boolean;
   probe_generation: number;
@@ -358,6 +378,19 @@ export interface OperationStatus {
   denial_code?: string;
 }
 
+export interface TransportDirectionSnapshot {
+  configured: boolean;
+  effective: boolean;
+  reason_code?: string;
+}
+
+export interface AgentTransportPolicySnapshot {
+  direct_inbound: TransportDirectionSnapshot;
+  direct_outbound: TransportDirectionSnapshot;
+  relay_inbound: TransportDirectionSnapshot;
+  relay_outbound: TransportDirectionSnapshot;
+}
+
 export interface ConnectionSnapshot {
   version: "v1";
   snapshot_epoch: string;
@@ -365,6 +398,7 @@ export interface ConnectionSnapshot {
   observed_at: number;
   agent_id: string;
   admin_status: number;
+  transport_policy: AgentTransportPolicySnapshot;
   control: ControlSnapshot;
   relay: RelaySnapshot;
   direct: {
@@ -381,6 +415,7 @@ export interface ConnectionSummary {
   snapshot_epoch: string;
   snapshot_seq: number;
   observed_at: number;
+  transport_policy: AgentTransportPolicySnapshot;
   control: ControlSnapshot;
   relay: RelaySummary;
   direct: DirectSummary;
@@ -448,7 +483,7 @@ export interface ConnectionDiagnostics {
   route_failures: RouteFailureDiagnostic[];
 }
 
-interface AgentBase {
+interface AgentBase extends AgentTransportPolicy {
   id: number;
   agent_id: string;
   name: string;
@@ -456,7 +491,6 @@ interface AgentBase {
   tags: string;
   proxy_url: string;
   relay_mode: RelayMode;
-  peer_route_mode: PeerRouteMode;
   last_seen: number;
   created_at: number;
 }
@@ -487,7 +521,10 @@ export type AgentPatch = Partial<
     | "proxy_url"
     | "relay_mode"
     | "relay_uri"
-    | "peer_route_mode"
+    | "direct_inbound_enabled"
+    | "direct_outbound_enabled"
+    | "relay_inbound_enabled"
+    | "relay_outbound_enabled"
   >
 >;
 
@@ -721,6 +758,8 @@ export interface BillingTokenQueryParams {
   end_date?: string;
   token_id?: number;
   user_id?: number;
+  search?: string;
+  min_tokens?: number;
 }
 
 export interface BillingTokenDailyQueryParams {
@@ -735,6 +774,25 @@ export interface BillingChannelQueryParams {
   start_date?: string;
   end_date?: string;
   channel_id?: number;
+  search?: string;
+  channel_type?: number;
+  min_tokens?: number;
+}
+
+/** 单渠道按 model_name 分组的用量/计费细分行。total_cost=billed(折后实付), raw_cost=raw(折前原价)。 */
+export interface ChannelModelBreakdownRow {
+  model_name: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_cost: number;
+  raw_cost: number;
+}
+
+export interface ChannelModelBreakdownResponse {
+  rows: ChannelModelBreakdownRow[];
 }
 
 export interface BillingChannelDailyQueryParams {
@@ -881,6 +939,94 @@ export interface SystemInfo {
 export interface SystemStatsResponse {
   tables: TableStats[];
   system: SystemInfo;
+  storage: StorageStatus;
+}
+
+export interface DatabaseStatus {
+  status: "available" | "unavailable";
+  path: string;
+  schema_version: string;
+  last_error: string;
+  size_bytes: number;
+  open_connections: number;
+}
+
+export interface LogDeliveryQueueStatus {
+  pending: number;
+  retry: number;
+  inflight: number;
+  bytes: number;
+  oldest_seconds: number;
+  dropped: number;
+  last_error: string;
+}
+
+export interface StorageStatus {
+  core_db: DatabaseStatus;
+  log_db: DatabaseStatus;
+  legacy_db: DatabaseStatus;
+  legacy_artifact: LegacyArtifactStatus;
+  log_delivery_queue: LogDeliveryQueueStatus;
+  history_backfill: HistoryBackfillStatus;
+}
+
+export interface LegacyArtifactStatus {
+  available: boolean;
+  last_error: string;
+  path: string;
+  size_bytes: number;
+  exists: boolean;
+  in_use: boolean;
+  can_delete: boolean;
+  delete_error: string;
+}
+
+export interface HistoryCursorStatus {
+  last_source_id: number;
+  processed_rows: number;
+  skipped: boolean;
+}
+
+export interface HistoryBackfillStatus {
+  state: "" | "pending" | "copying" | "caught_up" | "degraded" | "completed" | "source_deleted";
+  source_kind: "" | "monolith" | "v5_core" | "none";
+  source_path: string;
+  source_size_bytes: number;
+  billing: HistoryCursorStatus;
+  requests: HistoryCursorStatus;
+  traces: HistoryCursorStatus;
+  rows_per_second: number;
+  last_error: string;
+  last_successful_at_unix: number;
+  can_complete: boolean;
+  can_delete_source: boolean;
+}
+
+export interface RetryLogQueueResponse {
+  woken: boolean;
+}
+
+export interface ClearLogBacklogResponse {
+  pending: number;
+  retry: number;
+  dropped: number;
+  bytes: number;
+}
+
+export interface RetryHistoryBackfillResponse {
+  woken: boolean;
+}
+
+export interface SkipHistoryBackfillResponse {
+  skipped: boolean;
+}
+
+export interface CompleteHistoryBackfillResponse {
+  completed: boolean;
+}
+
+export interface DeleteLegacyFileResponse {
+  deleted: boolean;
 }
 
 export interface CleanupPreviewResponse {
@@ -888,6 +1034,9 @@ export interface CleanupPreviewResponse {
   retain_days: number;
   total: number;
   to_delete: number;
+  cutoff_unix: number;
+  cutoff_date: string;
+  tables: Array<{ name: string; total: number; to_delete: number }>;
 }
 
 export interface CleanupResponse {
@@ -1013,7 +1162,10 @@ export interface TokenTemplateSyncResponse {
 
 export interface ScriptScope {
   channel_ids?: number[];
+  private_channel_ids?: number[];
   model_names?: string[];
+  group_ids?: number[];
+  user_ids?: number[];
 }
 
 export interface AdminScript {

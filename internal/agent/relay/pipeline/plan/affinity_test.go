@@ -19,8 +19,12 @@ func (c affStubCfg) Settings() settings.AgentSettings {
 }
 
 func newAffRctx(uid uint) *state.RelayContext {
+	return newAffTokenRctx(uid, 0)
+}
+
+func newAffTokenRctx(uid, tokenID uint) *state.RelayContext {
 	return &state.RelayContext{
-		Input: state.RelayInput{UserInfo: &app.UserInfo{UserID: uid}},
+		Input: state.RelayInput{UserInfo: &app.UserInfo{UserID: uid, TokenID: tokenID}},
 		State: &state.RelayState{},
 	}
 }
@@ -71,6 +75,31 @@ func TestApplyAffinity_Miss(t *testing.T) {
 	if out[0].SourceID != 10 || rctx.State.Plan.HadAffinityEntry {
 		t.Fatal("miss should leave order unchanged and HadAffinityEntry false")
 	}
+}
+
+func TestApplyAffinity_IsolatesByTokenID(t *testing.T) {
+	eng := affinity.New(affStubCfg{on: 1})
+	eng.Remember(affinity.Key{UserID: 1, TokenID: 11, RealModel: "m"}, state.SourceAdmin, 20, nil)
+	s := &defaultSolver{Affinity: eng}
+	in := []ScoredCandidate{affCand(10, state.SourceAdmin), affCand(20, state.SourceAdmin)}
+
+	t.Run("same token hits", func(t *testing.T) {
+		rctx := newAffTokenRctx(1, 11)
+		out := s.applyAffinity(rctx, "m", in)
+		if out[0].SourceID != 20 || !out[0].ByAffinity || !rctx.State.Plan.HadAffinityEntry {
+			t.Fatalf("same token should hit source 20, got source=%d by_affinity=%v had_entry=%v",
+				out[0].SourceID, out[0].ByAffinity, rctx.State.Plan.HadAffinityEntry)
+		}
+	})
+
+	t.Run("different token misses", func(t *testing.T) {
+		rctx := newAffTokenRctx(1, 22)
+		out := s.applyAffinity(rctx, "m", in)
+		if out[0].SourceID != 10 || out[0].ByAffinity || rctx.State.Plan.HadAffinityEntry {
+			t.Fatalf("different token should miss, got source=%d by_affinity=%v had_entry=%v",
+				out[0].SourceID, out[0].ByAffinity, rctx.State.Plan.HadAffinityEntry)
+		}
+	})
 }
 
 func TestApplyAffinity_NilEngine(t *testing.T) {

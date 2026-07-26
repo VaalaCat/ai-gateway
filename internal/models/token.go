@@ -12,6 +12,7 @@ type Token struct {
 	Models            string                    `gorm:"type:text" json:"models"`
 	TemplateID        *uint                     `gorm:"index" json:"template_id"`
 	TraceEnabled      bool                      `gorm:"default:false" json:"trace_enabled"`
+	TraceMode         TokenTraceMode            `gorm:"size:16;default:full" json:"trace_mode"`
 	BYOKOnly          bool                      `gorm:"default:false" json:"byok_only"`
 	AllowedChannelIDs datatypes.JSONSlice[uint] `gorm:"type:text" json:"allowed_channel_ids"`
 	CreatedAt         int64                     `gorm:"autoCreateTime" json:"created_at"`

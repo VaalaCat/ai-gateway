@@ -6,12 +6,143 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestCleanupHourlyDeletesEveryLogAggregateInOneTransaction(t *testing.T) {
+	core := setupTestDB(t)
+	logDB := setupTestDB(t)
+	application := app.NewApplication()
+	application.SetCoreDB(core)
+	application.SetLogDB(logDB)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	oldDate := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
+	newDate := time.Now().UTC().Format("2006-01-02")
+	seedHourlyCleanupRows(t, logDB, oldDate, newDate)
+	requireNoBillingHourlyDelete(t, core, oldDate)
+
+	h := &Handler{}
+	c := newTestContextWithApp(t, application)
+	preview, err := h.CleanupPreview(c, CleanupPreviewRequest{Target: "hourly_buckets", RetainDays: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Total != 12 || preview.ToDelete != 6 || len(preview.Tables) != 6 {
+		t.Fatalf("preview=%+v, want six per-table counts and totals 12/6", preview)
+	}
+	for _, table := range preview.Tables {
+		if table.Total != 2 || table.ToDelete != 1 {
+			t.Fatalf("preview table=%+v, want total=2 to_delete=1", table)
+		}
+	}
+
+	resp, err := h.Cleanup(c, cleanupRequest("hourly_buckets", 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Deleted != 6 {
+		t.Fatalf("Deleted=%d, want 6", resp.Deleted)
+	}
+	for _, table := range dao.LogCleanupTables("hourly_buckets", app.DatabaseLayoutSplit) {
+		var count int64
+		if err := logDB.Table(table.Name).Where("date = ?", oldDate).Count(&count).Error; err != nil || count != 0 {
+			t.Fatalf("%s old count=%d err=%v", table.Name, count, err)
+		}
+	}
+}
+
+func TestCleanupHourlyRollsBackWhenThirdTableFails(t *testing.T) {
+	core := setupTestDB(t)
+	logDB := setupTestDB(t)
+	application := app.NewApplication()
+	application.SetCoreDB(core)
+	application.SetLogDB(logDB)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	oldDate := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
+	newDate := time.Now().UTC().Format("2006-01-02")
+	seedHourlyCleanupRows(t, logDB, oldDate, newDate)
+	if err := logDB.Migrator().DropTable(&models.UsageTTFTHistogram{}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&Handler{}).Cleanup(newTestContextWithApp(t, application), cleanupRequest("hourly_buckets", 7))
+	if err == nil {
+		t.Fatal("expected cleanup failure")
+	}
+	for _, table := range dao.LogCleanupTables("hourly_buckets", app.DatabaseLayoutSplit)[:2] {
+		var count int64
+		if err := logDB.Table(table.Name).Where("date = ?", oldDate).Count(&count).Error; err != nil || count != 1 {
+			t.Fatalf("%s rollback count=%d err=%v", table.Name, count, err)
+		}
+	}
+}
+
+func cleanupRequest(target string, retainDays int) CleanupRequest {
+	return CleanupRequest{Target: target, RetainDays: retainDays, CutoffUnix: time.Now().UTC().AddDate(0, 0, -retainDays).Unix()}
+}
+
+func TestCleanupRejectsInvalidCutoff(t *testing.T) {
+	db := setupTestDB(t)
+	h := &Handler{}
+	c := newTestContext(t, db)
+	now := time.Now().UTC()
+	for _, req := range []CleanupRequest{
+		{Target: "logs", RetainDays: 7},
+		{Target: "logs", RetainDays: 7, CutoffUnix: now.Add(time.Hour).Unix()},
+		{Target: "logs", RetainDays: 7, CutoffUnix: now.AddDate(0, 0, -30).Unix()},
+	} {
+		if _, err := h.Cleanup(c, req); err == nil {
+			t.Fatalf("Cleanup(%+v) succeeded, want invalid cutoff", req)
+		}
+	}
+}
+
+func newTestContextWithApp(t *testing.T, application app.Application) *app.Context {
+	w := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(w)
+	return &app.Context{Context: ginCtx, App: application, OwnerContext: t.Context()}
+}
+
+func seedHourlyCleanupRows(t *testing.T, db *gorm.DB, oldDate, newDate string) {
+	t.Helper()
+	if err := db.AutoMigrate(&models.UsageUserTTFTHistogram{}, &models.UsageUserTPSHistogram{}); err != nil {
+		t.Fatal(err)
+	}
+	rows := []any{
+		&models.UsageHourlyBucket{Date: oldDate, ModelName: "old"}, &models.UsageHourlyBucket{Date: newDate, ModelName: "new"},
+		&models.UsageDurationHistogram{Date: oldDate, ModelName: "old"}, &models.UsageDurationHistogram{Date: newDate, ModelName: "new"},
+		&models.UsageTTFTHistogram{Date: oldDate, ModelName: "old"}, &models.UsageTTFTHistogram{Date: newDate, ModelName: "new"},
+		&models.UsageTPSHistogram{Date: oldDate, ModelName: "old"}, &models.UsageTPSHistogram{Date: newDate, ModelName: "new"},
+		&models.UsageUserTTFTHistogram{Date: oldDate, UserID: 1, ModelName: "old"}, &models.UsageUserTTFTHistogram{Date: newDate, UserID: 1, ModelName: "new"},
+		&models.UsageUserTPSHistogram{Date: oldDate, UserID: 1, ModelName: "old"}, &models.UsageUserTPSHistogram{Date: newDate, UserID: 1, ModelName: "new"},
+	}
+	for _, row := range rows {
+		if err := db.Create(row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func requireNoBillingHourlyDelete(t *testing.T, db *gorm.DB, date string) {
+	t.Helper()
+	if err := db.AutoMigrate(&models.BillingHourlyBucket{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.BillingHourlyBucket{Date: date, ModelName: "billing"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		var count int64
+		if err := db.Model(&models.BillingHourlyBucket{}).Where("date = ?", date).Count(&count).Error; err != nil || count != 1 {
+			t.Errorf("billing hourly count=%d err=%v, want preserved", count, err)
+		}
+	})
+}
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -36,7 +167,7 @@ func newTestContext(t *testing.T, db *gorm.DB) *app.Context {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	testApp := app.NewApplication()
-	testApp.SetDB(db)
+	testApp.SetCoreDB(db)
 	return &app.Context{
 		Context:      ginCtx,
 		App:          testApp,
@@ -157,10 +288,7 @@ func TestCleanup_DeletesOldRecords(t *testing.T) {
 	h := &Handler{}
 	c := newTestContext(t, db)
 
-	resp, err := h.Cleanup(c, CleanupRequest{
-		Target:     "traces",
-		RetainDays: 7,
-	})
+	resp, err := h.Cleanup(c, cleanupRequest("traces", 7))
 	if err != nil {
 		t.Fatalf("Cleanup returned error: %v", err)
 	}
@@ -230,9 +358,7 @@ func TestCleanup_HourlyBuckets_DeletesByDate(t *testing.T) {
 
 	h := &Handler{}
 	c := newTestContext(t, db)
-	resp, err := h.Cleanup(c, CleanupRequest{
-		Target: "hourly_buckets", RetainDays: 7,
-	})
+	resp, err := h.Cleanup(c, cleanupRequest("hourly_buckets", 7))
 	if err != nil {
 		t.Fatalf("Cleanup returned error: %v", err)
 	}
@@ -258,9 +384,7 @@ func TestCleanup_InvalidTarget_Rejected(t *testing.T) {
 	})
 	h := &Handler{}
 	c := newTestContext(t, db)
-	resp, err := h.Cleanup(c, CleanupRequest{
-		Target: "unknown_target", RetainDays: 7,
-	})
+	resp, err := h.Cleanup(c, cleanupRequest("unknown_target", 7))
 	if err != nil {
 		t.Fatalf("Cleanup returned error: %v", err)
 	}

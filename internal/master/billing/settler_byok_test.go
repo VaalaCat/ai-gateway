@@ -31,7 +31,7 @@ func TestSettleOne_PrivateFreeMode_ZeroCostWritesDaily(t *testing.T) {
 
 	initialQuota := getByokUserQuota(t, db, 1)
 
-	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
+	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{{
 		RequestID:        "byok-free-req-1",
 		UserID:           1,
@@ -99,7 +99,7 @@ func TestSettleOne_PrivateServiceFeeMode_DiscountedCost(t *testing.T) {
 	db.Create(&models.Setting{Key: "byok_billing_mode", Value: "service_fee"})
 	db.Create(&models.Setting{Key: "byok_service_fee_ratio", Value: "0.1"})
 
-	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
+	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{{
 		RequestID:        "byok-svc-req-1",
 		UserID:           1,
@@ -164,7 +164,7 @@ func TestSettleOne_AdminPath_Unchanged(t *testing.T) {
 
 	initialQuota := getByokUserQuota(t, db, 1)
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{{
 		RequestID:        "byok-admin-req-1",
 		UserID:           1,
@@ -220,7 +220,7 @@ func TestApplyByokBillingMode_ServiceFeeTotalClosed(t *testing.T) {
 	db.Create(&models.Setting{Key: "byok_billing_mode", Value: "service_fee"})
 	db.Create(&models.Setting{Key: "byok_service_fee_ratio", Value: "0.1"})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	q := dao.NewAdminQuery(dao.NewContext(appProv))
 
 	// Inputs chosen so that per-bucket truncation produces 99+100+100+100 = 399,

@@ -1,12 +1,16 @@
 package dao
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/durhist"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/tpshist"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/ttfthist"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -17,6 +21,8 @@ const (
 	RebuildTargetChannelDaily      = "channel_daily"
 	RebuildTargetHourlyBucket      = "hourly_bucket"
 	RebuildTargetDurationHistogram = "duration_histogram"
+	RebuildTargetTTFTHistogram     = "ttft_histogram"
+	RebuildTargetTPSHistogram      = "tps_histogram"
 )
 
 var rebuildAllTargets = []string{
@@ -24,6 +30,8 @@ var rebuildAllTargets = []string{
 	RebuildTargetChannelDaily,
 	RebuildTargetHourlyBucket,
 	RebuildTargetDurationHistogram,
+	RebuildTargetTTFTHistogram,
+	RebuildTargetTPSHistogram,
 }
 
 // ErrInvalidRebuildTarget is returned by RebuildDailyRollups when a Targets
@@ -32,10 +40,12 @@ var rebuildAllTargets = []string{
 var ErrInvalidRebuildTarget = errors.New("invalid rebuild target")
 
 type TokenBillingListFilter struct {
-	UserID    *uint
-	TokenID   *uint
-	StartDate string
-	EndDate   string
+	UserID     *uint
+	TokenID    *uint
+	StartDate  string
+	EndDate    string
+	NameSearch string // token_name LIKE %NameSearch%; "" = 不过滤
+	MinTokens  int64  // HAVING total_tokens >= MinTokens; 0 = 不过滤
 }
 
 type TokenBillingListItem struct {
@@ -71,9 +81,12 @@ type TokenBillingDailyItem struct {
 }
 
 type ChannelBillingListFilter struct {
-	ChannelID *uint
-	StartDate string
-	EndDate   string
+	ChannelID   *uint
+	StartDate   string
+	EndDate     string
+	NameSearch  string // channel_name LIKE %NameSearch%; "" = 不过滤
+	ChannelType *int   // channel_type = *ChannelType; nil = 不过滤
+	MinTokens   int64  // HAVING total_tokens >= MinTokens; 0 = 不过滤
 }
 
 type ChannelBillingListItem struct {
@@ -131,7 +144,9 @@ type BillingRebuildFilter struct {
 }
 
 type BillingRebuildResult struct {
-	ReplayedLogs int64 `json:"replayed_logs"`
+	ReplayedLogs  int64 `json:"replayed_logs"`
+	EffectiveFrom int64 `json:"effective_from,omitempty"`
+	EffectiveTo   int64 `json:"effective_to,omitempty"`
 }
 
 // HourlyBucketRow is the pre-aggregated input to BatchUpsertHourlyBucket.
@@ -157,6 +172,7 @@ type HourlyBucketRow struct {
 	InputCost        int64
 	OutputCost       int64
 	TotalCost        int64
+	RawCost          int64
 
 	StreamRequestCount        int64
 	SumFirstResponseMs        int64
@@ -173,6 +189,37 @@ type HourlyBucketRow struct {
 	UpdatedAt  int64
 }
 
+// BillingHourlyRow is a pre-aggregated core billing delta. Its dimensions
+// exactly match models.BillingHourlyBucket's unique key.
+type BillingHourlyRow struct {
+	Date             string
+	Hour             int
+	UserID           uint
+	TokenID          uint
+	ChannelID        uint
+	PrivateChannelID uint
+	OwnerType        string
+	ModelName        string
+	TokenName        string
+	ChannelName      string
+	ChannelType      int
+	RequestCount     int64
+	SuccessCount     int64
+	FailedCount      int64
+	PromptTokens     int64
+	CompletionTokens int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	InputCost        int64
+	OutputCost       int64
+	CacheReadCost    int64
+	CacheWriteCost   int64
+	TotalCost        int64
+	RawCost          int64
+	LastUsedAt       int64
+	UpdatedAt        int64
+}
+
 // DurationHistogramRow is the pre-aggregated input to BatchUpsertDurationHistogram.
 // 只含 status=1(成功)请求;Hist 槽定义见 internal/pkg/durhist。
 type DurationHistogramRow struct {
@@ -184,6 +231,36 @@ type DurationHistogramRow struct {
 	AgentID          string
 	MaxDurationMs    int64
 	Hist             [durhist.NumSlots]int64
+	UpdatedAt        int64
+}
+
+// TTFTHistogramRow is the pre-aggregated input to BatchUpsertTTFTHistogram.
+// 只含 IsStream && status=1 && first_response_ms>0 的请求;
+// Hist 槽定义见 internal/pkg/ttfthist。
+type TTFTHistogramRow struct {
+	Date               string
+	Hour               int
+	ChannelID          uint
+	PrivateChannelID   uint
+	ModelName          string
+	AgentID            string
+	MaxFirstResponseMs int64
+	Hist               [ttfthist.NumSlots]int64
+	UpdatedAt          int64
+}
+
+// TPSHistogramRow is the pre-aggregated input to BatchUpsertTPSHistogram.
+// 只含 IsStream && status=1 && completion_tokens>0 && 生成耗时>0 的请求;
+// Hist 槽定义见 internal/pkg/tpshist。
+type TPSHistogramRow struct {
+	Date             string
+	Hour             int
+	ChannelID        uint
+	PrivateChannelID uint
+	ModelName        string
+	AgentID          string
+	MaxTps           int64
+	Hist             [tpshist.NumSlots]int64
 	UpdatedAt        int64
 }
 
@@ -243,10 +320,10 @@ type AdminBillingQuery interface {
 	// ListPrivateChannelDailyByOwner 返回指定 owner 的全部 BYOK channel daily rollup 行（owner_type="private"），
 	// 通过 private_channels.owner_id JOIN 限定范围；admin 行被排除。
 	ListPrivateChannelDailyByOwner(ownerID uint, filter ChannelBillingListFilter) ([]ChannelBillingDailyItem, error)
-	// ListPrivateChannelByModelByOwner 直接从 usage_logs 聚合 owner 名下所有 BYOK
-	// 请求的 model 维度统计。daily 表无 model 列，因此必须回扫 usage_logs。
-	// filter.StartDate/EndDate 通过 usage_logs.created_at（unix秒）转换匹配。
+	// ListPrivateChannelByModelByOwner 从 core-owned billing facts 聚合 owner 名下
+	// 所有 BYOK 请求的 model 维度统计。
 	ListPrivateChannelByModelByOwner(ownerID uint, filter ChannelBillingListFilter) ([]PrivateChannelByModelItem, error)
+	RebuildBillingHourly(ctx context.Context, from, to int64) (*BillingRebuildResult, error)
 }
 
 // PrivateChannelByModelItem 是 by-model 聚合的单行结果。
@@ -269,12 +346,21 @@ type AdminBillingMutation interface {
 	UpsertChannelDaily(log *models.UsageLog) error
 	UpsertHourlyBucket(log *models.UsageLog) error
 	UpsertDurationHistogram(log *models.UsageLog) error
+	UpsertTTFTHistogram(log *models.UsageLog) error
+	UpsertTPSHistogram(log *models.UsageLog) error
 	BatchUpsertTokenDaily(rows []TokenDailyRow) error
 	BatchUpsertChannelDaily(rows []ChannelDailyRow) error
 	BatchUpsertHourlyBucket(rows []HourlyBucketRow) error
 	BatchUpsertDurationHistogram(rows []DurationHistogramRow) error
+	BatchUpsertTTFTHistogram(rows []TTFTHistogramRow) error
+	BatchUpsertTPSHistogram(rows []TPSHistogramRow) error
+	UpsertBillingHourlyBuckets(ctx context.Context, rows []BillingHourlyRow) error
+	UpsertCoreBillingRows(ctx context.Context, tokens []TokenDailyRow, channels []ChannelDailyRow, hourly []BillingHourlyRow) error
 	RebuildDailyRollups(filter BillingRebuildFilter) (*BillingRebuildResult, error)
 	RebuildHourSlice(date string, hour int, targets []string, resetDailyForDate bool) (*BillingRebuildResult, error)
+	RebuildCoreHourSlice(ctx context.Context, date string, hour int, targets []string) (*BillingRebuildResult, error)
+	RebuildCoreHourSliceThroughID(ctx context.Context, date string, hour int, targets []string, maxBillingLogID *uint) (*BillingRebuildResult, error)
+	RebuildCoreDailyForDateThroughID(ctx context.Context, date string, maxBillingLogID *uint) (*BillingRebuildResult, error)
 	DeleteHourlyBucketsBefore(cutoff time.Time) (int64, error)
 }
 
@@ -339,6 +425,10 @@ func applyTokenBillingFilterWithAlias(db *gorm.DB, filter TokenBillingListFilter
 	if filter.TokenID != nil {
 		db = db.Where(column("token_id")+" = ?", *filter.TokenID)
 	}
+	if filter.NameSearch != "" {
+		// 注意: 打在日账行的 token_name 上, 匹配历史存储名; 重命名后仅历史名的行会命中。
+		db = db.Where(column("token_name")+" LIKE ?", "%"+filter.NameSearch+"%")
+	}
 	if filter.StartDate != "" {
 		db = db.Where(column("date")+" >= ?", filter.StartDate)
 	}
@@ -362,6 +452,12 @@ func applyChannelBillingFilterWithAlias(db *gorm.DB, filter ChannelBillingListFi
 
 	if filter.ChannelID != nil {
 		db = db.Where(column("channel_id")+" = ?", *filter.ChannelID)
+	}
+	if filter.NameSearch != "" {
+		db = db.Where(column("channel_name")+" LIKE ?", "%"+filter.NameSearch+"%")
+	}
+	if filter.ChannelType != nil {
+		db = db.Where(column("channel_type")+" = ?", *filter.ChannelType)
 	}
 	if filter.StartDate != "" {
 		db = db.Where(column("date")+" >= ?", filter.StartDate)
@@ -391,16 +487,22 @@ func applyUsageLogDateFilter(db *gorm.DB, filter BillingRebuildFilter) (*gorm.DB
 }
 
 func (q *adminBillingQuery) ListTokenBilling(opts ListOptions, filter TokenBillingListFilter) ([]TokenBillingListItem, int64, error) {
-	base := applyTokenBillingFilter(q.ctx.GetDB().Model(&models.TokenDailyBilling{}), filter)
+	const totalTokensExpr = "COALESCE(SUM(prompt_tokens),0)+COALESCE(SUM(completion_tokens),0)+COALESCE(SUM(cache_read_tokens),0)+COALESCE(SUM(cache_write_tokens),0)"
+
+	base := applyTokenBillingFilter(q.ctx.GetCoreDB().Model(&models.TokenDailyBilling{}), filter)
+
 	grouped := base.Select("user_id, token_id").Group("user_id, token_id")
+	if filter.MinTokens > 0 {
+		grouped = grouped.Having(totalTokensExpr+" >= ?", filter.MinTokens)
+	}
 
 	var total int64
-	if err := q.ctx.GetDB().Table("(?) as token_groups", grouped).Count(&total).Error; err != nil {
+	if err := q.ctx.GetCoreDB().Table("(?) as token_groups", grouped).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
 	latestName := applyTokenBillingFilterWithAlias(
-		q.ctx.GetDB().Table("token_daily_billings as latest"),
+		q.ctx.GetCoreDB().Table("token_daily_billings as latest"),
 		filter,
 		"latest",
 	).Select("latest.token_name").
@@ -410,8 +512,7 @@ func (q *adminBillingQuery) ListTokenBilling(opts ListOptions, filter TokenBilli
 		Order("latest.id DESC").
 		Limit(1)
 
-	var rows []TokenBillingListItem
-	err := base.Select(
+	rowsQuery := base.Select(
 		"user_id, token_id, (?) as token_name, "+
 			"COALESCE(SUM(request_count), 0) as request_count, "+
 			"COALESCE(SUM(success_count), 0) as success_count, "+
@@ -425,8 +526,15 @@ func (q *adminBillingQuery) ListTokenBilling(opts ListOptions, filter TokenBilli
 			"COALESCE(SUM(total_cost), 0) as total_cost, "+
 			"COALESCE(MAX(last_used_at), 0) as last_used_at",
 		latestName,
-	).Group("user_id, token_id").
-		Order("total_cost DESC, token_id ASC").
+	).Group("user_id, token_id")
+	if filter.MinTokens > 0 {
+		rowsQuery = rowsQuery.Having(totalTokensExpr+" >= ?", filter.MinTokens)
+	}
+
+	var rows []TokenBillingListItem
+	err := rowsQuery.
+		Order(totalTokensExpr + " DESC").
+		Order("token_id ASC").
 		Offset(opts.Offset()).
 		Limit(opts.PageSize).
 		Scan(&rows).Error
@@ -435,7 +543,7 @@ func (q *adminBillingQuery) ListTokenBilling(opts ListOptions, filter TokenBilli
 
 func (q *adminBillingQuery) GetTokenDaily(tokenID uint, filter TokenBillingListFilter) ([]TokenBillingDailyItem, error) {
 	filter.TokenID = &tokenID
-	db := applyTokenBillingFilter(q.ctx.GetDB().Model(&models.TokenDailyBilling{}), filter)
+	db := applyTokenBillingFilter(q.ctx.GetCoreDB().Model(&models.TokenDailyBilling{}), filter)
 
 	var rows []TokenBillingDailyItem
 	err := db.Select(
@@ -446,7 +554,7 @@ func (q *adminBillingQuery) GetTokenDaily(tokenID uint, filter TokenBillingListF
 }
 
 func (q *adminBillingQuery) GetBillingOverview(filter TokenBillingListFilter) (*BillingOverview, error) {
-	db := applyTokenBillingFilter(q.ctx.GetDB().Model(&models.TokenDailyBilling{}), filter)
+	db := applyTokenBillingFilter(q.ctx.GetCoreDB().Model(&models.TokenDailyBilling{}), filter)
 
 	type overviewRow struct {
 		TotalCost    int64
@@ -480,16 +588,22 @@ func (q *adminBillingQuery) GetBillingOverview(filter TokenBillingListFilter) (*
 }
 
 func (q *adminBillingQuery) ListChannelBilling(opts ListOptions, filter ChannelBillingListFilter) ([]ChannelBillingListItem, int64, error) {
-	base := applyChannelBillingFilter(q.ctx.GetDB().Model(&models.ChannelDailyBilling{}), filter)
+	const totalTokensExpr = "COALESCE(SUM(prompt_tokens),0)+COALESCE(SUM(completion_tokens),0)+COALESCE(SUM(cache_read_tokens),0)+COALESCE(SUM(cache_write_tokens),0)"
+
+	base := applyChannelBillingFilter(q.ctx.GetCoreDB().Model(&models.ChannelDailyBilling{}), filter)
+
 	grouped := base.Select("channel_id").Group("channel_id")
+	if filter.MinTokens > 0 {
+		grouped = grouped.Having(totalTokensExpr+" >= ?", filter.MinTokens)
+	}
 
 	var total int64
-	if err := q.ctx.GetDB().Table("(?) as channel_groups", grouped).Count(&total).Error; err != nil {
+	if err := q.ctx.GetCoreDB().Table("(?) as channel_groups", grouped).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
 	latestName := applyChannelBillingFilterWithAlias(
-		q.ctx.GetDB().Table("channel_daily_billings as latest"),
+		q.ctx.GetCoreDB().Table("channel_daily_billings as latest"),
 		filter,
 		"latest",
 	).Select("latest.channel_name").
@@ -500,7 +614,7 @@ func (q *adminBillingQuery) ListChannelBilling(opts ListOptions, filter ChannelB
 		Limit(1)
 
 	latestType := applyChannelBillingFilterWithAlias(
-		q.ctx.GetDB().Table("channel_daily_billings as latest"),
+		q.ctx.GetCoreDB().Table("channel_daily_billings as latest"),
 		filter,
 		"latest",
 	).Select("latest.channel_type").
@@ -510,8 +624,7 @@ func (q *adminBillingQuery) ListChannelBilling(opts ListOptions, filter ChannelB
 		Order("latest.id DESC").
 		Limit(1)
 
-	var rows []ChannelBillingListItem
-	err := base.Select(
+	rowsQuery := base.Select(
 		"channel_id, (?) as channel_name, (?) as channel_type, "+
 			"COALESCE(SUM(request_count), 0) as request_count, "+
 			"COALESCE(SUM(success_count), 0) as success_count, "+
@@ -526,8 +639,15 @@ func (q *adminBillingQuery) ListChannelBilling(opts ListOptions, filter ChannelB
 			"COALESCE(MAX(last_used_at), 0) as last_used_at",
 		latestName,
 		latestType,
-	).Group("channel_id").
-		Order("total_cost DESC, channel_id ASC").
+	).Group("channel_id")
+	if filter.MinTokens > 0 {
+		rowsQuery = rowsQuery.Having(totalTokensExpr+" >= ?", filter.MinTokens)
+	}
+
+	var rows []ChannelBillingListItem
+	err := rowsQuery.
+		Order(totalTokensExpr + " DESC").
+		Order("channel_id ASC").
 		Offset(opts.Offset()).
 		Limit(opts.PageSize).
 		Scan(&rows).Error
@@ -536,7 +656,7 @@ func (q *adminBillingQuery) ListChannelBilling(opts ListOptions, filter ChannelB
 
 func (q *adminBillingQuery) GetChannelDaily(channelID uint, filter ChannelBillingListFilter) ([]ChannelBillingDailyItem, error) {
 	filter.ChannelID = &channelID
-	db := applyChannelBillingFilter(q.ctx.GetDB().Model(&models.ChannelDailyBilling{}), filter)
+	db := applyChannelBillingFilter(q.ctx.GetCoreDB().Model(&models.ChannelDailyBilling{}), filter)
 
 	var rows []ChannelBillingDailyItem
 	err := db.Select(
@@ -573,7 +693,7 @@ func (m *adminBillingMutation) UpsertTokenDaily(log *models.UsageLog) error {
 		UpdatedAt:        ts,
 	}
 
-	return m.ctx.GetDB().Clauses(clause.OnConflict{
+	return m.ctx.GetCoreDB().Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "date"},
 			{Name: "user_id"},
@@ -605,7 +725,7 @@ func (m *adminBillingMutation) BatchUpsertTokenDaily(rows []TokenDailyRow) error
 	if len(rows) == 0 {
 		return nil
 	}
-	return m.ctx.GetDB().Transaction(func(tx *gorm.DB) error {
+	return m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
 		for _, r := range rows {
 			row := models.TokenDailyBilling{
 				Date:             r.Date,
@@ -655,7 +775,196 @@ func (m *adminBillingMutation) BatchUpsertTokenDaily(rows []TokenDailyRow) error
 	})
 }
 
+func (m *adminBillingMutation) UpsertBillingHourlyBuckets(ctx context.Context, rows []BillingHourlyRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("upsert billing hourly buckets: nil context")
+	}
+	return m.ctx.GetCoreDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return upsertBillingHourlyRows(tx, rows)
+	})
+}
+
+func (m *adminBillingMutation) UpsertCoreBillingRows(ctx context.Context, tokens []TokenDailyRow, channels []ChannelDailyRow, hourly []BillingHourlyRow) error {
+	if ctx == nil {
+		return errors.New("upsert core billing rows: nil context")
+	}
+	return m.ctx.GetCoreDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return UpsertCoreBillingRowsInTx(ctx, tx, tokens, channels, hourly)
+	})
+}
+
+// UpsertCoreBillingRowsInTx applies all three billing projections inside the
+// caller-owned core transaction.
+func UpsertCoreBillingRowsInTx(ctx context.Context, tx *gorm.DB, tokens []TokenDailyRow, channels []ChannelDailyRow, hourly []BillingHourlyRow) error {
+	if ctx == nil {
+		return errors.New("upsert core billing rows in transaction: nil context")
+	}
+	if tx == nil {
+		return errors.New("upsert core billing rows in transaction: nil database")
+	}
+	tx = tx.WithContext(ctx)
+	txMutation := &adminBillingMutation{ctx: &baseContext{tx: tx}}
+	if err := txMutation.BatchUpsertTokenDaily(tokens); err != nil {
+		return err
+	}
+	if err := txMutation.BatchUpsertChannelDaily(channels); err != nil {
+		return err
+	}
+	return upsertBillingHourlyRows(tx, hourly)
+}
+
+func upsertBillingHourlyRows(db *gorm.DB, rows []BillingHourlyRow) error {
+	for _, value := range rows {
+		row := billingHourlyModel(value)
+		if err := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "date"}, {Name: "hour"}, {Name: "user_id"}, {Name: "token_id"},
+				{Name: "channel_id"}, {Name: "private_channel_id"}, {Name: "owner_type"}, {Name: "model_name"},
+			},
+			DoUpdates: clause.Assignments(billingHourlyAssignments(row)),
+		}).Create(&row).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func billingHourlyModel(row BillingHourlyRow) models.BillingHourlyBucket {
+	return models.BillingHourlyBucket{
+		Date: row.Date, Hour: row.Hour, UserID: row.UserID, TokenID: row.TokenID,
+		ChannelID: row.ChannelID, PrivateChannelID: row.PrivateChannelID,
+		OwnerType: row.OwnerType, ModelName: row.ModelName,
+		TokenName: row.TokenName, ChannelName: row.ChannelName, ChannelType: row.ChannelType,
+		RequestCount: row.RequestCount, SuccessCount: row.SuccessCount, FailedCount: row.FailedCount,
+		PromptTokens: row.PromptTokens, CompletionTokens: row.CompletionTokens,
+		CacheReadTokens: row.CacheReadTokens, CacheWriteTokens: row.CacheWriteTokens,
+		InputCost: row.InputCost, OutputCost: row.OutputCost,
+		CacheReadCost: row.CacheReadCost, CacheWriteCost: row.CacheWriteCost,
+		TotalCost: row.TotalCost, RawCost: row.RawCost,
+		LastUsedAt: row.LastUsedAt, CreatedAt: row.UpdatedAt, UpdatedAt: row.UpdatedAt,
+	}
+}
+
+func billingHourlyAssignments(row models.BillingHourlyBucket) map[string]any {
+	assignments := map[string]any{
+		"token_name":   gorm.Expr("CASE WHEN updated_at <= ? THEN ? ELSE token_name END", row.UpdatedAt, row.TokenName),
+		"channel_name": gorm.Expr("CASE WHEN updated_at <= ? THEN ? ELSE channel_name END", row.UpdatedAt, row.ChannelName),
+		"channel_type": gorm.Expr("CASE WHEN updated_at <= ? THEN ? ELSE channel_type END", row.UpdatedAt, row.ChannelType),
+		"last_used_at": updateLastUsedAt(row.LastUsedAt),
+		"updated_at":   gorm.Expr("CASE WHEN updated_at < ? THEN ? ELSE updated_at END", row.UpdatedAt, row.UpdatedAt),
+	}
+	for column, amount := range map[string]int64{
+		"request_count": row.RequestCount, "success_count": row.SuccessCount, "failed_count": row.FailedCount,
+		"prompt_tokens": row.PromptTokens, "completion_tokens": row.CompletionTokens,
+		"cache_read_tokens": row.CacheReadTokens, "cache_write_tokens": row.CacheWriteTokens,
+		"input_cost": row.InputCost, "output_cost": row.OutputCost,
+		"cache_read_cost": row.CacheReadCost, "cache_write_cost": row.CacheWriteCost,
+		"total_cost": row.TotalCost, "raw_cost": row.RawCost,
+	} {
+		assignments[column] = gorm.Expr(column+" + ?", amount)
+	}
+	return assignments
+}
+
+func (q *adminBillingQuery) RebuildBillingHourly(ctx context.Context, from, to int64) (*BillingRebuildResult, error) {
+	if ctx == nil {
+		return nil, errors.New("rebuild billing hourly: nil context")
+	}
+	if from < 0 || to <= from {
+		return nil, fmt.Errorf("rebuild billing hourly: invalid range [%d,%d)", from, to)
+	}
+	effectiveFrom, effectiveTo := completeHourWindow(from, to)
+	result := &BillingRebuildResult{EffectiveFrom: effectiveFrom, EffectiveTo: effectiveTo}
+	err := q.ctx.GetCoreDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := deleteBillingHourlyWindow(tx, effectiveFrom, effectiveTo); err != nil {
+			return err
+		}
+		count, err := replayBillingHourlyWindow(tx, effectiveFrom, effectiveTo, nil)
+		result.ReplayedLogs = count
+		return err
+	})
+	return result, err
+}
+
+func completeHourWindow(from, to int64) (int64, int64) {
+	start := time.Unix(from, 0).UTC().Truncate(time.Hour)
+	endTime := time.Unix(to, 0).UTC()
+	end := endTime.Truncate(time.Hour)
+	if end.Unix() != to {
+		end = end.Add(time.Hour)
+	}
+	return start.Unix(), end.Unix()
+}
+
+func deleteBillingHourlyWindow(tx *gorm.DB, from, to int64) error {
+	start := time.Unix(from, 0).UTC()
+	end := time.Unix(to, 0).UTC()
+	return tx.Where(
+		"(date > ? OR (date = ? AND hour >= ?)) AND (date < ? OR (date = ? AND hour < ?))",
+		start.Format("2006-01-02"), start.Format("2006-01-02"), start.Hour(),
+		end.Format("2006-01-02"), end.Format("2006-01-02"), end.Hour(),
+	).Delete(&models.BillingHourlyBucket{}).Error
+}
+
+func replayBillingHourlyWindow(tx *gorm.DB, from, to int64, maxID *uint) (int64, error) {
+	const pageSize = 500
+	var lastID uint
+	var replayed int64
+	for {
+		var logs []models.BillingLog
+		query := tx.Where("id > ? AND created_at >= ? AND created_at < ?", lastID, from, to)
+		if maxID != nil {
+			query = query.Where("id <= ?", *maxID)
+		}
+		if err := query.Order("id ASC").Limit(pageSize).Find(&logs).Error; err != nil {
+			return replayed, err
+		}
+		if len(logs) == 0 {
+			return replayed, nil
+		}
+		rows := make([]BillingHourlyRow, 0, len(logs))
+		for i := range logs {
+			rows = append(rows, billingHourlyRowFromLog(&logs[i]))
+		}
+		if err := upsertBillingHourlyRows(tx, rows); err != nil {
+			return replayed, err
+		}
+		replayed += int64(len(logs))
+		lastID = logs[len(logs)-1].ID
+	}
+}
+
+func billingHourlyRowFromLog(log *models.BillingLog) BillingHourlyRow {
+	ts := log.CreatedAt
+	if ts == 0 {
+		ts = time.Now().Unix()
+	}
+	ownerType := log.OwnerType
+	if ownerType == "" {
+		ownerType = "admin"
+	}
+	success, failed := successFailureCounts(log.Status)
+	return BillingHourlyRow{
+		Date: time.Unix(ts, 0).UTC().Format("2006-01-02"), Hour: time.Unix(ts, 0).UTC().Hour(),
+		UserID: log.UserID, TokenID: log.TokenID, ChannelID: log.ChannelID,
+		PrivateChannelID: log.PrivateChannelID, OwnerType: ownerType, ModelName: log.ModelName,
+		TokenName: log.TokenName, ChannelName: log.ChannelName, ChannelType: log.ChannelType,
+		RequestCount: 1, SuccessCount: success, FailedCount: failed,
+		PromptTokens: int64(log.PromptTokens), CompletionTokens: int64(log.CompletionTokens),
+		CacheReadTokens: int64(log.CacheReadTokens), CacheWriteTokens: int64(log.CacheWriteTokens),
+		InputCost: log.InputCost, OutputCost: log.OutputCost,
+		CacheReadCost: log.CacheReadCost, CacheWriteCost: log.CacheWriteCost,
+		TotalCost: log.TotalCost, RawCost: log.RawTotal(), LastUsedAt: ts, UpdatedAt: ts,
+	}
+}
+
 func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) (*BillingRebuildResult, error) {
+	if err := m.requireLegacyMixedRebuild(); err != nil {
+		return nil, err
+	}
 	targetSet, err := resolveRebuildTargets(filter.Targets)
 	if err != nil {
 		return nil, err
@@ -668,7 +977,7 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 		mutation := &adminBillingMutation{ctx: baseCtx}
 
 		if targetSet[RebuildTargetTokenDaily] {
-			tokenRollups := applyTokenBillingFilter(baseCtx.GetDB().Model(&models.TokenDailyBilling{}), TokenBillingListFilter{
+			tokenRollups := applyTokenBillingFilter(baseCtx.GetCoreDB().Model(&models.TokenDailyBilling{}), TokenBillingListFilter{
 				StartDate: filter.StartDate,
 				EndDate:   filter.EndDate,
 			})
@@ -678,7 +987,7 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 		}
 
 		if targetSet[RebuildTargetChannelDaily] {
-			channelRollups := applyChannelBillingFilter(baseCtx.GetDB().Model(&models.ChannelDailyBilling{}), ChannelBillingListFilter{
+			channelRollups := applyChannelBillingFilter(baseCtx.GetCoreDB().Model(&models.ChannelDailyBilling{}), ChannelBillingListFilter{
 				StartDate: filter.StartDate,
 				EndDate:   filter.EndDate,
 			})
@@ -688,7 +997,7 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 		}
 
 		if targetSet[RebuildTargetHourlyBucket] {
-			hourly := baseCtx.GetDB().Model(&models.UsageHourlyBucket{})
+			hourly := baseCtx.GetCoreDB().Model(&models.UsageHourlyBucket{})
 			if filter.StartDate != "" {
 				hourly = hourly.Where("date >= ?", filter.StartDate)
 			}
@@ -701,7 +1010,7 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 		}
 
 		if targetSet[RebuildTargetDurationHistogram] {
-			hist := baseCtx.GetDB().Model(&models.UsageDurationHistogram{})
+			hist := baseCtx.GetCoreDB().Model(&models.UsageDurationHistogram{})
 			if filter.StartDate != "" {
 				hist = hist.Where("date >= ?", filter.StartDate)
 			}
@@ -713,7 +1022,53 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 			}
 		}
 
-		logQuery, err := applyUsageLogDateFilter(baseCtx.GetDB().Model(&models.UsageLog{}).Order("id ASC"), filter)
+		if targetSet[RebuildTargetTTFTHistogram] {
+			ttftHist := baseCtx.GetCoreDB().Model(&models.UsageTTFTHistogram{})
+			if filter.StartDate != "" {
+				ttftHist = ttftHist.Where("date >= ?", filter.StartDate)
+			}
+			if filter.EndDate != "" {
+				ttftHist = ttftHist.Where("date <= ?", filter.EndDate)
+			}
+			if err := ttftHist.Delete(&models.UsageTTFTHistogram{}).Error; err != nil {
+				return err
+			}
+			userHist := baseCtx.GetCoreDB().Model(&models.UsageUserTTFTHistogram{})
+			if filter.StartDate != "" {
+				userHist = userHist.Where("date >= ?", filter.StartDate)
+			}
+			if filter.EndDate != "" {
+				userHist = userHist.Where("date <= ?", filter.EndDate)
+			}
+			if err := userHist.Delete(&models.UsageUserTTFTHistogram{}).Error; err != nil {
+				return err
+			}
+		}
+
+		if targetSet[RebuildTargetTPSHistogram] {
+			tpsHist := baseCtx.GetCoreDB().Model(&models.UsageTPSHistogram{})
+			if filter.StartDate != "" {
+				tpsHist = tpsHist.Where("date >= ?", filter.StartDate)
+			}
+			if filter.EndDate != "" {
+				tpsHist = tpsHist.Where("date <= ?", filter.EndDate)
+			}
+			if err := tpsHist.Delete(&models.UsageTPSHistogram{}).Error; err != nil {
+				return err
+			}
+			userHist := baseCtx.GetCoreDB().Model(&models.UsageUserTPSHistogram{})
+			if filter.StartDate != "" {
+				userHist = userHist.Where("date >= ?", filter.StartDate)
+			}
+			if filter.EndDate != "" {
+				userHist = userHist.Where("date <= ?", filter.EndDate)
+			}
+			if err := userHist.Delete(&models.UsageUserTPSHistogram{}).Error; err != nil {
+				return err
+			}
+		}
+
+		logQuery, err := applyUsageLogDateFilter(baseCtx.GetCoreDB().Model(&models.UsageLog{}).Order("id ASC"), filter)
 		if err != nil {
 			return err
 		}
@@ -742,6 +1097,16 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 						return err
 					}
 				}
+				if targetSet[RebuildTargetTTFTHistogram] {
+					if err := mutation.UpsertTTFTHistogram(&log); err != nil {
+						return err
+					}
+				}
+				if targetSet[RebuildTargetTPSHistogram] {
+					if err := mutation.UpsertTPSHistogram(&log); err != nil {
+						return err
+					}
+				}
 				result.ReplayedLogs++
 			}
 			return nil
@@ -752,6 +1117,153 @@ func (m *adminBillingMutation) RebuildDailyRollups(filter BillingRebuildFilter) 
 	}
 
 	return result, nil
+}
+
+// RebuildCoreHourSlice rebuilds only core billing projections from billing_logs.
+// Log-only hourly and histogram targets are validated but intentionally ignored;
+// Task 7 routes those targets to log.db.
+func (m *adminBillingMutation) RebuildCoreHourSlice(
+	ctx context.Context,
+	date string,
+	hour int,
+	targets []string,
+) (*BillingRebuildResult, error) {
+	return m.RebuildCoreHourSliceThroughID(ctx, date, hour, targets, nil)
+}
+
+// RebuildCoreHourSliceThroughID treats nil as unbounded. Any non-nil value,
+// including zero, is an explicit inclusive BillingLog ID watermark.
+func (m *adminBillingMutation) RebuildCoreHourSliceThroughID(
+	ctx context.Context,
+	date string,
+	hour int,
+	targets []string,
+	maxBillingLogID *uint,
+) (*BillingRebuildResult, error) {
+	if ctx == nil {
+		return nil, errors.New("rebuild core billing hour: nil context")
+	}
+	targetSet, err := resolveRebuildTargets(targets)
+	if err != nil {
+		return nil, err
+	}
+	start, end, err := hourRangeUnix(date, hour)
+	if err != nil {
+		return nil, err
+	}
+	result := &BillingRebuildResult{}
+	err = m.ctx.GetCoreDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if !targetSet[RebuildTargetHourlyBucket] {
+			return nil
+		}
+		if err := tx.Where("date = ? AND hour = ?", date, hour).Delete(&models.BillingHourlyBucket{}).Error; err != nil {
+			return err
+		}
+		return replayCoreBillingHour(tx, start, end, maxBillingLogID, result)
+	})
+	return result, err
+}
+
+func replayCoreBillingHour(tx *gorm.DB, start, end int64, maxID *uint, result *BillingRebuildResult) error {
+	const pageSize = 500
+	var lastID uint
+	for {
+		var facts []models.BillingLog
+		query := tx.Where("id > ? AND created_at >= ? AND created_at < ?", lastID, start, end)
+		query = query.Where(`NOT EXISTS (
+			SELECT 1 FROM billing_projection_receipts bpr
+			WHERE bpr.billing_log_id = billing_logs.id AND bpr.state = ?
+		)`, models.BillingProjectionPending)
+		if maxID != nil {
+			query = query.Where("id <= ?", *maxID)
+		}
+		if err := query.Order("id ASC").Limit(pageSize).Find(&facts).Error; err != nil {
+			return err
+		}
+		if len(facts) == 0 {
+			return nil
+		}
+		for i := range facts {
+			if err := upsertBillingHourlyRows(tx, []BillingHourlyRow{billingHourlyRowFromLog(&facts[i])}); err != nil {
+				return err
+			}
+			result.ReplayedLogs++
+		}
+		lastID = facts[len(facts)-1].ID
+	}
+}
+
+// RebuildCoreDailyForDateThroughID rebuilds both core daily projections in
+// one transaction. nil is unbounded; non-nil zero is an explicit empty bound.
+func (m *adminBillingMutation) RebuildCoreDailyForDateThroughID(ctx context.Context, date string, maxBillingLogID *uint) (*BillingRebuildResult, error) {
+	if ctx == nil {
+		return nil, errors.New("rebuild core billing daily: nil context")
+	}
+	start, _, err := hourRangeUnix(date, 0)
+	if err != nil {
+		return nil, err
+	}
+	result := &BillingRebuildResult{}
+	err = m.ctx.GetCoreDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("date = ?", date).Delete(&models.TokenDailyBilling{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("date = ?", date).Delete(&models.ChannelDailyBilling{}).Error; err != nil {
+			return err
+		}
+		return replayCoreBillingDaily(tx, start, start+24*3600, maxBillingLogID, result)
+	})
+	return result, err
+}
+
+func replayCoreBillingDaily(tx *gorm.DB, start, end int64, maxID *uint, result *BillingRebuildResult) error {
+	const pageSize = 500
+	var lastID uint
+	mutation := &adminBillingMutation{ctx: &baseContext{tx: tx}}
+	for {
+		var facts []models.BillingLog
+		query := tx.Where("id > ? AND created_at >= ? AND created_at < ?", lastID, start, end)
+		query = query.Where(`NOT EXISTS (
+			SELECT 1 FROM billing_projection_receipts bpr
+			WHERE bpr.billing_log_id = billing_logs.id AND bpr.state = ?
+		)`, models.BillingProjectionPending)
+		if maxID != nil {
+			query = query.Where("id <= ?", *maxID)
+		}
+		if err := query.Order("id ASC").Limit(pageSize).Find(&facts).Error; err != nil {
+			return err
+		}
+		if len(facts) == 0 {
+			return nil
+		}
+		for i := range facts {
+			usage := usageLogFromBillingFact(&facts[i])
+			if err := mutation.UpsertTokenDaily(usage); err != nil {
+				return err
+			}
+			if err := mutation.UpsertChannelDaily(usage); err != nil {
+				return err
+			}
+			result.ReplayedLogs++
+		}
+		lastID = facts[len(facts)-1].ID
+	}
+}
+
+func usageLogFromBillingFact(fact *models.BillingLog) *models.UsageLog {
+	return &models.UsageLog{
+		RequestID: fact.RequestID, UserID: fact.UserID, TokenID: fact.TokenID, TokenName: fact.TokenName,
+		ChannelID: fact.ChannelID, PrivateChannelID: fact.PrivateChannelID, OwnerType: fact.OwnerType,
+		ChannelName: fact.ChannelName, ChannelType: fact.ChannelType, ModelName: fact.ModelName,
+		PromptTokens: fact.PromptTokens, CompletionTokens: fact.CompletionTokens,
+		CacheReadTokens: fact.CacheReadTokens, CacheWriteTokens: fact.CacheWriteTokens,
+		InputCost: fact.InputCost, OutputCost: fact.OutputCost,
+		CacheReadCost: fact.CacheReadCost, CacheWriteCost: fact.CacheWriteCost, TotalCost: fact.TotalCost,
+		RawInputCost: fact.RawInputCost, RawOutputCost: fact.RawOutputCost,
+		RawCacheReadCost: fact.RawCacheReadCost, RawCacheWriteCost: fact.RawCacheWriteCost,
+		BillingFactor: fact.BillingFactor, PriceRatio: fact.PriceRatio, Free: fact.Free,
+		Status: fact.Status, CreatedAt: fact.CreatedAt,
+	}
 }
 
 // RebuildHourSlice rebuilds a single (date, hour) slice of rollup tables.
@@ -772,6 +1284,9 @@ func (m *adminBillingMutation) RebuildHourSlice(
 	targets []string,
 	resetDailyForDate bool,
 ) (*BillingRebuildResult, error) {
+	if err := m.requireLegacyMixedRebuild(); err != nil {
+		return nil, err
+	}
 	targetSet, err := resolveRebuildTargets(targets)
 	if err != nil {
 		return nil, err
@@ -788,14 +1303,14 @@ func (m *adminBillingMutation) RebuildHourSlice(
 
 		if resetDailyForDate {
 			if targetSet[RebuildTargetTokenDaily] {
-				if err := baseCtx.GetDB().
+				if err := baseCtx.GetCoreDB().
 					Where("date = ?", date).
 					Delete(&models.TokenDailyBilling{}).Error; err != nil {
 					return err
 				}
 			}
 			if targetSet[RebuildTargetChannelDaily] {
-				if err := baseCtx.GetDB().
+				if err := baseCtx.GetCoreDB().
 					Where("date = ?", date).
 					Delete(&models.ChannelDailyBilling{}).Error; err != nil {
 					return err
@@ -804,7 +1319,7 @@ func (m *adminBillingMutation) RebuildHourSlice(
 		}
 
 		if targetSet[RebuildTargetHourlyBucket] {
-			if err := baseCtx.GetDB().
+			if err := baseCtx.GetCoreDB().
 				Where("date = ? AND hour = ?", date, hour).
 				Delete(&models.UsageHourlyBucket{}).Error; err != nil {
 				return err
@@ -812,14 +1327,36 @@ func (m *adminBillingMutation) RebuildHourSlice(
 		}
 
 		if targetSet[RebuildTargetDurationHistogram] {
-			if err := baseCtx.GetDB().
+			if err := baseCtx.GetCoreDB().
 				Where("date = ? AND hour = ?", date, hour).
 				Delete(&models.UsageDurationHistogram{}).Error; err != nil {
 				return err
 			}
 		}
 
-		logQuery := baseCtx.GetDB().
+		if targetSet[RebuildTargetTTFTHistogram] {
+			if err := baseCtx.GetCoreDB().
+				Where("date = ? AND hour = ?", date, hour).
+				Delete(&models.UsageTTFTHistogram{}).Error; err != nil {
+				return err
+			}
+			if err := baseCtx.GetCoreDB().Where("date = ? AND hour = ?", date, hour).Delete(&models.UsageUserTTFTHistogram{}).Error; err != nil {
+				return err
+			}
+		}
+
+		if targetSet[RebuildTargetTPSHistogram] {
+			if err := baseCtx.GetCoreDB().
+				Where("date = ? AND hour = ?", date, hour).
+				Delete(&models.UsageTPSHistogram{}).Error; err != nil {
+				return err
+			}
+			if err := baseCtx.GetCoreDB().Where("date = ? AND hour = ?", date, hour).Delete(&models.UsageUserTPSHistogram{}).Error; err != nil {
+				return err
+			}
+		}
+
+		logQuery := baseCtx.GetCoreDB().
 			Model(&models.UsageLog{}).
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Order("id ASC")
@@ -847,6 +1384,16 @@ func (m *adminBillingMutation) RebuildHourSlice(
 						return err
 					}
 				}
+				if targetSet[RebuildTargetTTFTHistogram] {
+					if err := mutation.UpsertTTFTHistogram(&log); err != nil {
+						return err
+					}
+				}
+				if targetSet[RebuildTargetTPSHistogram] {
+					if err := mutation.UpsertTPSHistogram(&log); err != nil {
+						return err
+					}
+				}
 				result.ReplayedLogs++
 			}
 			return nil
@@ -856,6 +1403,17 @@ func (m *adminBillingMutation) RebuildHourSlice(
 		return nil, err
 	}
 	return result, nil
+}
+
+func (m *adminBillingMutation) requireLegacyMixedRebuild() error {
+	mode, err := m.ctx.DatabaseLayoutMode()
+	if err != nil {
+		return err
+	}
+	if mode != app.DatabaseLayoutLegacySingle {
+		return errors.New("legacy mixed billing rebuild is unavailable in split layout")
+	}
+	return nil
 }
 
 // resolveRebuildTargets validates filter.Targets and returns a lookup set.
@@ -869,6 +1427,8 @@ func resolveRebuildTargets(targets []string) (map[string]bool, error) {
 		RebuildTargetChannelDaily:      {},
 		RebuildTargetHourlyBucket:      {},
 		RebuildTargetDurationHistogram: {},
+		RebuildTargetTTFTHistogram:     {},
+		RebuildTargetTPSHistogram:      {},
 	}
 	set := make(map[string]bool, len(targets))
 	for _, t := range targets {
@@ -918,7 +1478,7 @@ func (m *adminBillingMutation) UpsertChannelDaily(log *models.UsageLog) error {
 		UpdatedAt:        ts,
 	}
 
-	return m.ctx.GetDB().Clauses(clause.OnConflict{
+	return m.ctx.GetCoreDB().Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "date"},
 			{Name: "channel_id"},
@@ -953,7 +1513,7 @@ func (m *adminBillingMutation) BatchUpsertChannelDaily(rows []ChannelDailyRow) e
 	if len(rows) == 0 {
 		return nil
 	}
-	return m.ctx.GetDB().Transaction(func(tx *gorm.DB) error {
+	return m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
 		for _, r := range rows {
 			row := models.ChannelDailyBilling{
 				Date:             r.Date,
@@ -1027,12 +1587,13 @@ func (m *adminBillingMutation) UpsertHourlyBucket(log *models.UsageLog) error {
 
 	successCount, failedCount := successFailureCounts(log.Status)
 
-	// 速度指标仅在 stream + success + completion_tokens > 0 时累加
 	streamCount, sumFirst, sumGen, sumComp := int64(0), int64(0), int64(0), int64(0)
-	if log.IsStream && log.Status == 1 && log.CompletionTokens > 0 {
+	if log.IsStream && log.Status == 1 && log.FirstResponseMs > 0 {
 		streamCount = 1
 		sumFirst = int64(log.FirstResponseMs)
-		sumGen = int64(log.Duration - log.FirstResponseMs)
+	}
+	if generation := log.Duration - log.FirstResponseMs; log.IsStream && log.Status == 1 && log.CompletionTokens > 0 && generation > 0 {
+		sumGen = int64(generation)
 		sumComp = int64(log.CompletionTokens)
 	}
 
@@ -1071,6 +1632,7 @@ func (m *adminBillingMutation) UpsertHourlyBucket(log *models.UsageLog) error {
 		InputCost:                 log.InputCost,
 		OutputCost:                log.OutputCost,
 		TotalCost:                 log.TotalCost,
+		RawCost:                   log.RawTotal(),
 		StreamRequestCount:        streamCount,
 		SumFirstResponseMs:        sumFirst,
 		SumGenerationMs:           sumGen,
@@ -1085,7 +1647,11 @@ func (m *adminBillingMutation) UpsertHourlyBucket(log *models.UsageLog) error {
 		UpdatedAt:                 ts,
 	}
 
-	return m.ctx.GetDB().Clauses(clause.OnConflict{
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return err
+	}
+	return WrapLogDatabaseError(db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "date"}, {Name: "hour"},
 			{Name: "channel_id"}, {Name: "private_channel_id"},
@@ -1105,6 +1671,7 @@ func (m *adminBillingMutation) UpsertHourlyBucket(log *models.UsageLog) error {
 			"input_cost":                   gorm.Expr("input_cost + ?", row.InputCost),
 			"output_cost":                  gorm.Expr("output_cost + ?", row.OutputCost),
 			"total_cost":                   gorm.Expr("total_cost + ?", row.TotalCost),
+			"raw_cost":                     gorm.Expr("raw_cost + ?", row.RawCost),
 			"stream_request_count":         gorm.Expr("stream_request_count + ?", row.StreamRequestCount),
 			"sum_first_response_ms":        gorm.Expr("sum_first_response_ms + ?", row.SumFirstResponseMs),
 			"sum_generation_ms":            gorm.Expr("sum_generation_ms + ?", row.SumGenerationMs),
@@ -1117,7 +1684,7 @@ func (m *adminBillingMutation) UpsertHourlyBucket(log *models.UsageLog) error {
 			"last_used_at":                 updateLastUsedAt(row.LastUsedAt),
 			"updated_at":                   row.UpdatedAt,
 		}),
-	}).Create(&row).Error
+	}).Create(&row).Error)
 }
 
 // BatchUpsertHourlyBucket applies a pre-aggregated slice of HourlyBucketRow
@@ -1125,11 +1692,16 @@ func (m *adminBillingMutation) UpsertHourlyBucket(log *models.UsageLog) error {
 // (10 standard + 4 stream-conditional + 5 latency segments) all accumulate
 // via "col + ?"; channel_name/channel_type/owner_type overwrite; last_used_at
 // uses updateLastUsedAt (max). Empty input is a no-op.
-func (m *adminBillingMutation) BatchUpsertHourlyBucket(rows []HourlyBucketRow) error {
+func (m *adminBillingMutation) BatchUpsertHourlyBucket(rows []HourlyBucketRow) (err error) {
+	defer func() { err = WrapLogDatabaseError(err) }()
 	if len(rows) == 0 {
 		return nil
 	}
-	return m.ctx.GetDB().Transaction(func(tx *gorm.DB) error {
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
 		for _, r := range rows {
 			row := models.UsageHourlyBucket{
 				Date:                      r.Date,
@@ -1151,6 +1723,7 @@ func (m *adminBillingMutation) BatchUpsertHourlyBucket(rows []HourlyBucketRow) e
 				InputCost:                 r.InputCost,
 				OutputCost:                r.OutputCost,
 				TotalCost:                 r.TotalCost,
+				RawCost:                   r.RawCost,
 				StreamRequestCount:        r.StreamRequestCount,
 				SumFirstResponseMs:        r.SumFirstResponseMs,
 				SumGenerationMs:           r.SumGenerationMs,
@@ -1184,6 +1757,7 @@ func (m *adminBillingMutation) BatchUpsertHourlyBucket(rows []HourlyBucketRow) e
 					"input_cost":                   gorm.Expr("input_cost + ?", row.InputCost),
 					"output_cost":                  gorm.Expr("output_cost + ?", row.OutputCost),
 					"total_cost":                   gorm.Expr("total_cost + ?", row.TotalCost),
+					"raw_cost":                     gorm.Expr("raw_cost + ?", row.RawCost),
 					"stream_request_count":         gorm.Expr("stream_request_count + ?", row.StreamRequestCount),
 					"sum_first_response_ms":        gorm.Expr("sum_first_response_ms + ?", row.SumFirstResponseMs),
 					"sum_generation_ms":            gorm.Expr("sum_generation_ms + ?", row.SumGenerationMs),
@@ -1210,11 +1784,15 @@ func (m *adminBillingMutation) BatchUpsertHourlyBucket(rows []HourlyBucketRow) e
 // Mirrors BatchUpsertHourlyBucket's OnConflict pattern; conflict key is the
 // same 6-dimension bucket (date, hour, channel_id, private_channel_id,
 // model_name, agent_id).
-func (m *adminBillingMutation) BatchUpsertDurationHistogram(rows []DurationHistogramRow) error {
+func (m *adminBillingMutation) BatchUpsertDurationHistogram(rows []DurationHistogramRow) (err error) {
+	defer func() { err = WrapLogDatabaseError(err) }()
 	if len(rows) == 0 {
 		return nil
 	}
-	db := m.ctx.GetDB()
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return err
+	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		for _, row := range rows {
 			rec := models.UsageDurationHistogram{
@@ -1282,6 +1860,211 @@ func (m *adminBillingMutation) UpsertDurationHistogram(log *models.UsageLog) err
 	return m.BatchUpsertDurationHistogram([]DurationHistogramRow{row})
 }
 
+// BatchUpsertTTFTHistogram merges pre-aggregated rows into the TTFT
+// (time-to-first-token) histogram side table. Same accumulation semantics
+// as BatchUpsertDurationHistogram: hand-written OnConflict assign map so
+// slot counts add and max is kept via a cross-dialect CASE WHEN, never
+// UpdateAll (which would overwrite instead of accumulate).
+func (m *adminBillingMutation) BatchUpsertTTFTHistogram(rows []TTFTHistogramRow) (err error) {
+	defer func() { err = WrapLogDatabaseError(err) }()
+	if len(rows) == 0 {
+		return nil
+	}
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, row := range rows {
+			rec := models.UsageTTFTHistogram{
+				Date: row.Date, Hour: row.Hour,
+				ChannelID: row.ChannelID, PrivateChannelID: row.PrivateChannelID,
+				ModelName: row.ModelName, AgentID: row.AgentID,
+				MaxFirstResponseMs: row.MaxFirstResponseMs,
+				H0:                 row.Hist[0], H1: row.Hist[1], H2: row.Hist[2], H3: row.Hist[3],
+				H4: row.Hist[4], H5: row.Hist[5], H6: row.Hist[6], H7: row.Hist[7],
+				H8: row.Hist[8], H9: row.Hist[9], H10: row.Hist[10], H11: row.Hist[11],
+				H12: row.Hist[12], H13: row.Hist[13], H14: row.Hist[14], H15: row.Hist[15],
+				H16:       row.Hist[16],
+				UpdatedAt: row.UpdatedAt,
+			}
+			assign := map[string]any{
+				// 槽计数累加
+				"h0": gorm.Expr("h0 + ?", row.Hist[0]), "h1": gorm.Expr("h1 + ?", row.Hist[1]),
+				"h2": gorm.Expr("h2 + ?", row.Hist[2]), "h3": gorm.Expr("h3 + ?", row.Hist[3]),
+				"h4": gorm.Expr("h4 + ?", row.Hist[4]), "h5": gorm.Expr("h5 + ?", row.Hist[5]),
+				"h6": gorm.Expr("h6 + ?", row.Hist[6]), "h7": gorm.Expr("h7 + ?", row.Hist[7]),
+				"h8": gorm.Expr("h8 + ?", row.Hist[8]), "h9": gorm.Expr("h9 + ?", row.Hist[9]),
+				"h10": gorm.Expr("h10 + ?", row.Hist[10]), "h11": gorm.Expr("h11 + ?", row.Hist[11]),
+				"h12": gorm.Expr("h12 + ?", row.Hist[12]), "h13": gorm.Expr("h13 + ?", row.Hist[13]),
+				"h14": gorm.Expr("h14 + ?", row.Hist[14]), "h15": gorm.Expr("h15 + ?", row.Hist[15]),
+				"h16": gorm.Expr("h16 + ?", row.Hist[16]),
+				// max 取大(跨方言:不用 GREATEST/max(x,y))
+				"max_first_response_ms": gorm.Expr("CASE WHEN max_first_response_ms >= ? THEN max_first_response_ms ELSE ? END",
+					row.MaxFirstResponseMs, row.MaxFirstResponseMs),
+				"updated_at": row.UpdatedAt,
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{
+					{Name: "date"}, {Name: "hour"}, {Name: "channel_id"},
+					{Name: "private_channel_id"}, {Name: "model_name"}, {Name: "agent_id"},
+				},
+				DoUpdates: clause.Assignments(assign),
+			}).Create(&rec).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// UpsertTTFTHistogram replays a single UsageLog into the TTFT histogram side
+// table (rebuild path only; the live path uses the batched Aggregator).
+// Guard condition is independent from TPS: only streaming, successful
+// requests with a positive first-token time are counted.
+func (m *adminBillingMutation) UpsertTTFTHistogram(log *models.UsageLog) error {
+	if log == nil || !log.IsStream || log.Status != 1 || log.FirstResponseMs <= 0 {
+		return nil
+	}
+	ts := billingTimestamp(log)
+	t := time.Unix(ts, 0).UTC()
+	var row TTFTHistogramRow
+	row.Date = t.Format("2006-01-02")
+	row.Hour = t.Hour()
+	row.ChannelID = log.ChannelID
+	row.PrivateChannelID = log.PrivateChannelID
+	row.ModelName = log.ModelName
+	row.AgentID = log.AgentID
+	row.MaxFirstResponseMs = int64(log.FirstResponseMs)
+	row.Hist[ttfthist.SlotIndex(int64(log.FirstResponseMs))] = 1
+	row.UpdatedAt = ts
+	if err := m.BatchUpsertTTFTHistogram([]TTFTHistogramRow{row}); err != nil {
+		return err
+	}
+	if log.UserID == 0 {
+		return nil
+	}
+	return m.upsertUserTTFTHistogram(log.UserID, row)
+}
+
+func histogramAssignments(hist [17]int64, maxColumn string, maxValue, updatedAt int64) map[string]any {
+	assign := map[string]any{"updated_at": updatedAt, maxColumn: gorm.Expr("CASE WHEN "+maxColumn+" >= ? THEN "+maxColumn+" ELSE ? END", maxValue, maxValue)}
+	for i, value := range hist {
+		column := fmt.Sprintf("h%d", i)
+		assign[column] = gorm.Expr(column+" + ?", value)
+	}
+	return assign
+}
+
+func (m *adminBillingMutation) upsertUserTTFTHistogram(userID uint, row TTFTHistogramRow) error {
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return err
+	}
+	rec := models.UsageUserTTFTHistogram{Date: row.Date, Hour: row.Hour, UserID: userID, ModelName: row.ModelName, MaxFirstResponseMs: row.MaxFirstResponseMs, UpdatedAt: row.UpdatedAt,
+		H0: row.Hist[0], H1: row.Hist[1], H2: row.Hist[2], H3: row.Hist[3], H4: row.Hist[4], H5: row.Hist[5], H6: row.Hist[6], H7: row.Hist[7], H8: row.Hist[8], H9: row.Hist[9], H10: row.Hist[10], H11: row.Hist[11], H12: row.Hist[12], H13: row.Hist[13], H14: row.Hist[14], H15: row.Hist[15], H16: row.Hist[16]}
+	return db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "date"}, {Name: "hour"}, {Name: "user_id"}, {Name: "model_name"}}, DoUpdates: clause.Assignments(histogramAssignments(row.Hist, "max_first_response_ms", row.MaxFirstResponseMs, row.UpdatedAt))}).Create(&rec).Error
+}
+
+// BatchUpsertTPSHistogram merges pre-aggregated rows into the TPS
+// (tokens-per-second generation rate) histogram side table. Same
+// accumulation semantics as BatchUpsertTTFTHistogram.
+func (m *adminBillingMutation) BatchUpsertTPSHistogram(rows []TPSHistogramRow) (err error) {
+	defer func() { err = WrapLogDatabaseError(err) }()
+	if len(rows) == 0 {
+		return nil
+	}
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, row := range rows {
+			rec := models.UsageTPSHistogram{
+				Date: row.Date, Hour: row.Hour,
+				ChannelID: row.ChannelID, PrivateChannelID: row.PrivateChannelID,
+				ModelName: row.ModelName, AgentID: row.AgentID,
+				MaxTps: row.MaxTps,
+				H0:     row.Hist[0], H1: row.Hist[1], H2: row.Hist[2], H3: row.Hist[3],
+				H4: row.Hist[4], H5: row.Hist[5], H6: row.Hist[6], H7: row.Hist[7],
+				H8: row.Hist[8], H9: row.Hist[9], H10: row.Hist[10], H11: row.Hist[11],
+				H12: row.Hist[12], H13: row.Hist[13], H14: row.Hist[14], H15: row.Hist[15],
+				H16:       row.Hist[16],
+				UpdatedAt: row.UpdatedAt,
+			}
+			assign := map[string]any{
+				// 槽计数累加
+				"h0": gorm.Expr("h0 + ?", row.Hist[0]), "h1": gorm.Expr("h1 + ?", row.Hist[1]),
+				"h2": gorm.Expr("h2 + ?", row.Hist[2]), "h3": gorm.Expr("h3 + ?", row.Hist[3]),
+				"h4": gorm.Expr("h4 + ?", row.Hist[4]), "h5": gorm.Expr("h5 + ?", row.Hist[5]),
+				"h6": gorm.Expr("h6 + ?", row.Hist[6]), "h7": gorm.Expr("h7 + ?", row.Hist[7]),
+				"h8": gorm.Expr("h8 + ?", row.Hist[8]), "h9": gorm.Expr("h9 + ?", row.Hist[9]),
+				"h10": gorm.Expr("h10 + ?", row.Hist[10]), "h11": gorm.Expr("h11 + ?", row.Hist[11]),
+				"h12": gorm.Expr("h12 + ?", row.Hist[12]), "h13": gorm.Expr("h13 + ?", row.Hist[13]),
+				"h14": gorm.Expr("h14 + ?", row.Hist[14]), "h15": gorm.Expr("h15 + ?", row.Hist[15]),
+				"h16": gorm.Expr("h16 + ?", row.Hist[16]),
+				// max 取大(跨方言:不用 GREATEST/max(x,y))
+				"max_tps": gorm.Expr("CASE WHEN max_tps >= ? THEN max_tps ELSE ? END",
+					row.MaxTps, row.MaxTps),
+				"updated_at": row.UpdatedAt,
+			}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{
+					{Name: "date"}, {Name: "hour"}, {Name: "channel_id"},
+					{Name: "private_channel_id"}, {Name: "model_name"}, {Name: "agent_id"},
+				},
+				DoUpdates: clause.Assignments(assign),
+			}).Create(&rec).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// UpsertTPSHistogram replays a single UsageLog into the TPS histogram side
+// table (rebuild path only; the live path uses the batched Aggregator).
+// The slot value is generation rate tps = completion_tokens*1000/gen_ms.
+func (m *adminBillingMutation) UpsertTPSHistogram(log *models.UsageLog) error {
+	if log == nil || !log.IsStream || log.Status != 1 || log.CompletionTokens <= 0 {
+		return nil
+	}
+	gen := log.Duration - log.FirstResponseMs
+	if gen <= 0 {
+		return nil
+	}
+	ts := billingTimestamp(log)
+	t := time.Unix(ts, 0).UTC()
+	tps := tpshist.TokensPerSecond(int64(log.CompletionTokens), int64(gen))
+	var row TPSHistogramRow
+	row.Date = t.Format("2006-01-02")
+	row.Hour = t.Hour()
+	row.ChannelID = log.ChannelID
+	row.PrivateChannelID = log.PrivateChannelID
+	row.ModelName = log.ModelName
+	row.AgentID = log.AgentID
+	row.MaxTps = tps
+	row.Hist[tpshist.SlotIndex(tps)] = 1
+	row.UpdatedAt = ts
+	if err := m.BatchUpsertTPSHistogram([]TPSHistogramRow{row}); err != nil {
+		return err
+	}
+	if log.UserID == 0 {
+		return nil
+	}
+	return m.upsertUserTPSHistogram(log.UserID, row)
+}
+
+func (m *adminBillingMutation) upsertUserTPSHistogram(userID uint, row TPSHistogramRow) error {
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return err
+	}
+	rec := models.UsageUserTPSHistogram{Date: row.Date, Hour: row.Hour, UserID: userID, ModelName: row.ModelName, MaxTps: row.MaxTps, UpdatedAt: row.UpdatedAt,
+		H0: row.Hist[0], H1: row.Hist[1], H2: row.Hist[2], H3: row.Hist[3], H4: row.Hist[4], H5: row.Hist[5], H6: row.Hist[6], H7: row.Hist[7], H8: row.Hist[8], H9: row.Hist[9], H10: row.Hist[10], H11: row.Hist[11], H12: row.Hist[12], H13: row.Hist[13], H14: row.Hist[14], H15: row.Hist[15], H16: row.Hist[16]}
+	return db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "date"}, {Name: "hour"}, {Name: "user_id"}, {Name: "model_name"}}, DoUpdates: clause.Assignments(histogramAssignments(row.Hist, "max_tps", row.MaxTps, row.UpdatedAt))}).Create(&rec).Error
+}
+
 // ListPrivateChannelDailyByOwner 返回指定 owner 的全部 BYOK channel daily rollup 行。
 // 通过 INNER JOIN private_channels.owner_id 限定范围；admin 行（owner_type="admin"
 // / private_channel_id=0）天然被 JOIN 过滤掉。
@@ -1289,7 +2072,7 @@ func (m *adminBillingMutation) UpsertDurationHistogram(log *models.UsageLog) err
 // filter.ChannelID 不在此处生效（BYOK 行 channel_id 恒为 0）；如需按
 // private_channel 过滤，调用方应在返回结果上额外筛选或扩展 filter。
 func (q *adminBillingQuery) ListPrivateChannelDailyByOwner(ownerID uint, filter ChannelBillingListFilter) ([]ChannelBillingDailyItem, error) {
-	db := q.ctx.GetDB().
+	db := q.ctx.GetCoreDB().
 		Table("channel_daily_billings AS cdb").
 		Joins("INNER JOIN private_channels AS pc ON pc.id = cdb.private_channel_id").
 		Where("cdb.owner_type = ?", "private").
@@ -1316,13 +2099,21 @@ func (q *adminBillingQuery) ListPrivateChannelDailyByOwner(ownerID uint, filter 
 	return rows, err
 }
 
-// ListPrivateChannelByModelByOwner 在 usage_logs 上按 model_name 聚合 owner 全部
-// BYOK 请求的统计指标。daily 表无 model 列，因此必须直接查询 usage_logs；
+// ListPrivateChannelByModelByOwner 按 model_name 聚合 owner 全部 BYOK 请求的
+// 统计指标。split layout 读取 core billing_logs，legacy layout 保持读取 usage_logs；
 // 仍通过 INNER JOIN private_channels 限定 owner_id，admin 行（owner_type!='private'）
 // 同时被 WHERE 过滤排除。
 func (q *adminBillingQuery) ListPrivateChannelByModelByOwner(ownerID uint, filter ChannelBillingListFilter) ([]PrivateChannelByModelItem, error) {
-	db := q.ctx.GetDB().
-		Table("usage_logs AS ul").
+	mode, err := q.ctx.DatabaseLayoutMode()
+	if err != nil {
+		return nil, err
+	}
+	table := "usage_logs"
+	if mode == app.DatabaseLayoutSplit {
+		table = "billing_logs"
+	}
+	db := q.ctx.GetCoreDB().
+		Table(table+" AS ul").
 		Joins("INNER JOIN private_channels AS pc ON pc.id = ul.private_channel_id").
 		Where("ul.owner_type = ?", "private").
 		Where("pc.owner_id = ?", ownerID)
@@ -1344,7 +2135,7 @@ func (q *adminBillingQuery) ListPrivateChannelByModelByOwner(ownerID uint, filte
 	}
 
 	var rows []PrivateChannelByModelItem
-	err := db.Select(
+	err = db.Select(
 		"ul.model_name AS model_name, " +
 			"COUNT(*) AS request_count, " +
 			"SUM(CASE WHEN ul.status = 1 THEN 1 ELSE 0 END) AS success_count, " +
@@ -1369,6 +2160,27 @@ func (q *adminBillingQuery) ListPrivateChannelByModelByOwner(ownerID uint, filte
 // 返回被删除的行数。
 func (m *adminBillingMutation) DeleteHourlyBucketsBefore(cutoff time.Time) (int64, error) {
 	cutoffDate := cutoff.UTC().Format("2006-01-02")
-	res := m.ctx.GetDB().Where("date < ?", cutoffDate).Delete(&models.UsageHourlyBucket{})
-	return res.RowsAffected, res.Error
+	db, err := m.ctx.LogDB()
+	if err != nil {
+		return 0, err
+	}
+	var deleted int64
+	mode, err := m.ctx.DatabaseLayoutMode()
+	if err != nil {
+		return 0, err
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		for _, table := range LogCleanupTables("hourly_buckets", mode) {
+			res := tx.Table(table.Name).Where("date < ?", cutoffDate).Delete(&map[string]any{})
+			if res.Error != nil {
+				return res.Error
+			}
+			deleted += res.RowsAffected
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, WrapLogDatabaseError(err)
+	}
+	return deleted, nil
 }

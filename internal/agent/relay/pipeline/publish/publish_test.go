@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -42,7 +43,7 @@ func newGinCtxForTest(setup func(c *gin.Context)) *gin.Context {
 // ---------- H1: attachTraceData(*Recorder) tests ----------
 
 func TestAttachTraceDataFillsMsColumns(t *testing.T) {
-	rec := trace.NewRecorder(false, 0)
+	rec := trace.NewRecorder(trace.CaptureOff, 0)
 	rec.WithStage(trace.StageInboundDecode)
 	time.Sleep(2 * time.Millisecond)
 	rec.WithStage(trace.StageOutboundEncode)
@@ -56,7 +57,7 @@ func TestAttachTraceDataFillsMsColumns(t *testing.T) {
 
 func TestAttachTraceDataErrorStageLiteral(t *testing.T) {
 	// Behavior-equal: error_stage column gets the trace-internal Stage value.
-	rec := trace.NewRecorder(false, 0)
+	rec := trace.NewRecorder(trace.CaptureOff, 0)
 	rec.WithFail(trace.StageOutboundEncode, state.ErrInvalidBody)
 	var e protocol.UsageLogEntry
 	attachTraceData(&e, rec)
@@ -68,13 +69,13 @@ func TestAttachTraceDataErrorStageLiteral(t *testing.T) {
 func TestAttachTraceDataTraceDataPopulatedOnFail(t *testing.T) {
 	// Failure path forces verbose; even without body capture, MarshalJSON returns
 	// a valid object so TraceData is non-empty.
-	rec := trace.NewRecorder(false, 0)
+	rec := trace.NewRecorder(trace.CaptureOff, 0)
 	rec.WithFail(trace.StageInternal, state.ErrReadBody)
 	var e protocol.UsageLogEntry
 	attachTraceData(&e, rec)
-	// HasBody() is true on failure path (verbose triggers). TraceData should be set.
+	// HasTraceData() is true on failure path (verbose triggers). TraceData should be set.
 	if e.TraceData == "" {
-		t.Logf("TraceData empty (acceptable if HasBody() conditional excludes this case)")
+		t.Logf("TraceData empty (acceptable if HasTraceData() conditional excludes this case)")
 	} else {
 		// Sanity check: it should be JSON
 		var probe map[string]any
@@ -101,7 +102,7 @@ func TestAttachTraceDataNilRecorderSafe(t *testing.T) {
 
 func TestAttachTraceDataIsZeroWhenNoStages(t *testing.T) {
 	// boundary: fresh recorder, no stages → all *Ms = 0
-	rec := trace.NewRecorder(false, 0)
+	rec := trace.NewRecorder(trace.CaptureOff, 0)
 	var e protocol.UsageLogEntry
 	attachTraceData(&e, rec)
 	if e.InboundDecodeMs != 0 || e.OutboundEncodeMs != 0 ||
@@ -170,7 +171,7 @@ func newPublishTestRctx() *state.RelayContext {
 			InboundProto: codec.ProtocolOpenAIChat,
 			UserInfo:     &app.UserInfo{UserID: 1, TokenID: 2, TokenName: "test"},
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 }
 
@@ -401,7 +402,7 @@ func TestPublishLocalAgentRouteFallbackEmitsUsage(t *testing.T) {
 // behavior change: Publisher itself has no route-based skip. The target
 // attempt endpoint emits zero usage by construction because it never owns a Publisher.
 func TestPublishCannotBeSuppressedByTrustedIngress(t *testing.T) {
-	for _, kind := range []string{agentproxy.IngressKindDirect, agentproxy.IngressKindTunnel} {
+	for _, kind := range []string{agentproxy.IngressKindDirectTunnel, agentproxy.IngressKindRelayTunnel} {
 		rctx := newPublishTestRctx()
 		meta := agentproxy.IngressMeta{
 			Kind: kind, SourceAgentID: "source", RouteID: 42, Hop: 1,
@@ -427,7 +428,7 @@ func TestPublishTrustedIngressFailureStillEmitsUsage(t *testing.T) {
 		{name: "attempt limiter reject", err: state.ErrRateLimited},
 		{name: "request body open failure", err: errors.New("replay body open failed")},
 	} {
-		for _, kind := range []string{agentproxy.IngressKindDirect, agentproxy.IngressKindTunnel} {
+		for _, kind := range []string{agentproxy.IngressKindDirectTunnel, agentproxy.IngressKindRelayTunnel} {
 			t.Run(tc.name+"/"+kind, func(t *testing.T) {
 				rctx := newPublishTestRctx()
 				meta := agentproxy.IngressMeta{
@@ -816,7 +817,7 @@ func TestPublish_FallbackChainCarried(t *testing.T) {
 // TestPublish_AttemptTracesCarried 验证 recorder.Attempts() 快照被转成 AttemptTraces
 // 并附在发出的 UsageLogEntry 上；slice 顺序即候选顺序（AttemptIndex 由 settler 赋值）。
 func TestPublish_AttemptTracesCarried(t *testing.T) {
-	rec := trace.NewRecorder(true, 0)
+	rec := trace.NewRecorder(trace.CaptureFull, 0)
 	// 模拟两候选快照
 	rec.WithFail(trace.StageUpstreamStatus, errors.New("503"))
 	rec.SnapshotAttempt()
@@ -857,11 +858,11 @@ func TestPublish_AttemptTracesCarried(t *testing.T) {
 }
 
 // TestAttachTraceData_EmptyAttempts_FallsBackToTraceData 验证无快照时回退旧行为：
-// AttemptTraces 为空；TraceData 按旧逻辑（HasBody()）填写。
-// 本用例不关心 TraceData 是否非空（HasBody() 由 InboundPath 决定，无 inbound 则为空），
+// AttemptTraces 为空；TraceData 按旧逻辑（HasTraceData()）填写。
+// 本用例不关心 TraceData 是否非空（HasTraceData() 由 InboundPath 决定，无 inbound 则为空），
 // 重点是 AttemptTraces 必须为空且 error_stage 正确填写。
 func TestAttachTraceData_EmptyAttempts_FallsBackToTraceData(t *testing.T) {
-	rec := trace.NewRecorder(false, 0)
+	rec := trace.NewRecorder(trace.CaptureOff, 0)
 	rec.WithFail(trace.StageInternal, errors.New("oops"))
 
 	var e protocol.UsageLogEntry
@@ -880,8 +881,8 @@ func TestAttachTraceData_EmptyAttempts_FallsBackToTraceData(t *testing.T) {
 // TestAttachTraceData_NonVerboseSnapshotSkipped 回归:关闭 trace 的【成功】尝试
 // 即使被 SnapshotAttempt 快照,也不得落 trace 行(否则每个请求都写空 trace + has_trace)。
 func TestAttachTraceData_NonVerboseSnapshotSkipped(t *testing.T) {
-	rec := trace.NewRecorder(false, 0) // trace 关
-	rec.SnapshotAttempt()              // 成功尝试:非 verbose
+	rec := trace.NewRecorder(trace.CaptureOff, 0) // trace 关
+	rec.SnapshotAttempt()                         // 成功尝试:非 verbose
 
 	var e protocol.UsageLogEntry
 	attachTraceData(&e, rec)
@@ -892,6 +893,113 @@ func TestAttachTraceData_NonVerboseSnapshotSkipped(t *testing.T) {
 	if e.TraceData != "" {
 		t.Errorf("关 trace 的成功请求不得设 TraceData,got %q", e.TraceData)
 	}
+}
+
+func populatedPublishRecorder(t *testing.T, mode trace.CaptureMode) *trace.Recorder {
+	t.Helper()
+	rec := trace.NewRecorder(mode, 256*1024)
+	inbound := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	inbound.Header.Set("X-Inbound", "kept")
+	rec.WithInbound(inbound, []byte(`{"model":"public"}`))
+	outbound := httptest.NewRequest(http.MethodPost, "https://upstream.example/v1/chat/completions", nil)
+	outbound.Header.Set("X-Outbound", "kept")
+	rec.WithOutbound(outbound, []byte(`{"model":"upstream"}`), &models.Channel{})
+	rec.WithUpstreamStatus(&http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"X-Upstream": {"kept"}},
+	})
+	rec.SetUpstreamBody([]byte(`{"response":"upstream"}`))
+	rec.WithPassthrough()
+	return rec
+}
+
+func TestAttachTraceDataCaptureModes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mode     trace.CaptureMode
+		fail     bool
+		wantRows int
+		wantBody bool
+	}{
+		{name: "off success", mode: trace.CaptureOff},
+		{name: "headers success", mode: trace.CaptureHeaders, wantRows: 1},
+		{name: "headers failure", mode: trace.CaptureHeaders, fail: true, wantRows: 1, wantBody: true},
+		{name: "full success", mode: trace.CaptureFull, wantRows: 1, wantBody: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := populatedPublishRecorder(t, tc.mode)
+			if tc.fail {
+				rec.WithFail(trace.StageUpstreamStatus, errors.New("upstream failed"))
+			}
+			rec.SnapshotAttempt()
+			entry := &protocol.UsageLogEntry{RequestID: "req"}
+
+			attachTraceData(entry, rec)
+
+			require.Len(t, entry.AttemptTraces, tc.wantRows)
+			if tc.wantRows == 0 {
+				return
+			}
+			row := entry.AttemptTraces[0]
+			require.NotEmpty(t, row.InboundHeaders)
+			require.NotEmpty(t, row.OutboundHeaders)
+			require.NotEmpty(t, row.ResponseHeaders)
+			if tc.wantBody {
+				require.NotEmpty(t, row.InboundBody)
+				require.NotEmpty(t, row.OutboundBody)
+				require.NotEmpty(t, row.ResponseBody)
+				require.NotEmpty(t, row.ClientResponseBody)
+				return
+			}
+			require.Empty(t, row.InboundBody)
+			require.Empty(t, row.OutboundBody)
+			require.Empty(t, row.ResponseBody)
+			require.Empty(t, row.ClientResponseBody)
+		})
+	}
+}
+
+func TestAttachTraceDataHeaderOnlyFallbackUsesHasTraceData(t *testing.T) {
+	rec := populatedPublishRecorder(t, trace.CaptureHeaders)
+	entry := &protocol.UsageLogEntry{RequestID: "req"}
+
+	attachTraceData(entry, rec)
+
+	require.Empty(t, entry.AttemptTraces)
+	require.NotEmpty(t, entry.TraceData)
+	var row models.UsageLogTrace
+	require.NoError(t, json.Unmarshal([]byte(entry.TraceData), &row))
+	require.NotEmpty(t, row.InboundHeaders)
+	require.NotEmpty(t, row.OutboundHeaders)
+	require.NotEmpty(t, row.ResponseHeaders)
+	require.Empty(t, row.InboundBody)
+	require.Empty(t, row.OutboundBody)
+	require.Empty(t, row.ResponseBody)
+	require.Empty(t, row.ClientResponseBody)
+}
+
+func TestAttachTraceDataPreservesSparseAttemptIndexes(t *testing.T) {
+	rec := populatedPublishRecorder(t, trace.CaptureHeaders)
+	rec.WithFail(trace.StageUpstreamStatus, errors.New("first attempt failed"))
+	rec.SnapshotAttempt()
+	rec.ResetAttempt()
+	rec.SnapshotAttempt()
+	rec.AppendAttempt(nil)
+	rec.ResetAttempt()
+	rec.SnapshotAttempt()
+	entry := &protocol.UsageLogEntry{RequestID: "req"}
+
+	attachTraceData(entry, rec)
+
+	require.Len(t, entry.AttemptTraces, 3)
+	require.Equal(t, []int{0, 1, 3}, []int{
+		entry.AttemptTraces[0].AttemptIndex,
+		entry.AttemptTraces[1].AttemptIndex,
+		entry.AttemptTraces[2].AttemptIndex,
+	})
+	require.NotEmpty(t, entry.AttemptTraces[0].InboundBody)
+	require.Empty(t, entry.AttemptTraces[1].InboundBody)
+	require.Empty(t, entry.AttemptTraces[2].InboundBody)
 }
 
 // boundary: legacy mode + UpstreamModel empty → fall back to ApplyModelMapping

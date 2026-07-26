@@ -22,7 +22,7 @@ func bigBody() []byte {
 
 func benchRun(b *testing.B, code string, body []byte) {
 	e := engineWith(time.Second, mustCompile(b, "s", 0, code))
-	in := HookInput{Hook: HookRequest, Model: "m", Body: body}
+	in := HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: body}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

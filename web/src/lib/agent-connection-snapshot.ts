@@ -85,6 +85,7 @@ function mergeSummary(
     snapshot_epoch: incoming.snapshot_epoch,
     snapshot_seq: incoming.snapshot_seq,
     observed_at: incoming.observed_at,
+    transport_policy: incoming.transport_policy,
     control: incoming.control,
     relay: {
       ...current.relay,

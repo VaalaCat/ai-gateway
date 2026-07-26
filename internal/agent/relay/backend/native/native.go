@@ -3,7 +3,6 @@ package native
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -78,10 +77,11 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 		Rec:      rec,
 	}
 	flow := dataflow.BuildChannelDataFlow(ch, outboundProto, outboundCodec, dataflow.StepDeps{
-		Agent:  b.Agent,
-		GinCtx: c,
-		RCtx:   rctx,
-		Logger: logger,
+		Agent:   b.Agent,
+		GinCtx:  c,
+		RCtx:    rctx,
+		Attempt: a,
+		Logger:  logger,
 	})
 	if err := flow.Run(ctx, pass); err != nil {
 		return state.AttemptResult{Err: err}
@@ -238,21 +238,33 @@ func handleNativeErrorStatus(rec *trace.Recorder, resp *http.Response, _w gin.Re
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		return state.AttemptResult{}, false
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	capture, readErr := common.ReadBoundedErrorBody(upstreamResponseContext(resp), resp.Body, common.DefaultErrorBodyLimits())
+	rec.SetUpstreamBodyCapture(capture.Tail, capture.TotalSeen, capture.Truncated)
+	if readErr != nil {
+		wrapped := fmt.Errorf("read upstream error response: %w", readErr)
+		rec.WithFail(trace.StageUpstreamStatus, wrapped)
+		return state.AttemptResult{UpstreamModel: upstreamModel, Err: wrapped}, true
+	}
+	body := capture.BoundedHead()
 	upErr := &common.UpstreamError{
 		Status:            resp.StatusCode,
 		Body:              body,
-		ProviderErrorType: common.ParseProviderErrorType(body),
+		ProviderErrorType: common.ParseProviderErrorType(capture.Head),
 		Header:            resp.Header.Clone(),
 	}
-	rec.SetUpstreamBody(body)
 	rec.WithFail(trace.StageUpstreamStatus, upErr)
 	return state.AttemptResult{
 		UpstreamModel: upstreamModel,
 		Err:           upErr,
 		// Written 留默认 false;客户端写回由 Executor 在 plan 结束时统一处理。
 	}, true
+}
+
+func upstreamResponseContext(resp *http.Response) context.Context {
+	if resp != nil && resp.Request != nil {
+		return resp.Request.Context()
+	}
+	return context.Background()
 }
 
 // dispatchUpstream 跑 HTTP 请求；失败时通过 Recorder.WithFail 打 trace + 返回 wrapped error。

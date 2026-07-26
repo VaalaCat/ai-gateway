@@ -48,7 +48,7 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 		}
 	}
 
-	// Normal users can modify name, trace_enabled, and status.
+	// Normal users can modify name, trace_enabled, trace_mode, and status.
 	// Enabling a token requires positive balance; disabling is always allowed.
 	if scope != nil && !scope.IsAdmin {
 		allowed := map[string]any{}
@@ -68,6 +68,9 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 		}
 		if v, ok := updates["trace_enabled"]; ok {
 			allowed["trace_enabled"] = v
+		}
+		if v, ok := updates["trace_mode"]; ok {
+			allowed["trace_mode"] = v
 		}
 		if v, ok := updates["byok_only"]; ok {
 			allowed["byok_only"] = v
@@ -89,6 +92,18 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 			allowed["status"] = v
 		}
 		updates = allowed
+	}
+
+	if raw, ok := updates["trace_mode"]; ok {
+		value, ok := raw.(string)
+		if !ok {
+			return models.Token{}, api.BadRequestError("trace_mode must be a string", nil)
+		}
+		mode, err := models.NormalizeTokenTraceModeForWrite(value)
+		if err != nil {
+			return models.Token{}, api.BadRequestError(err.Error(), err)
+		}
+		updates["trace_mode"] = mode
 	}
 
 	if userIDRaw, ok := updates["user_id"]; ok {

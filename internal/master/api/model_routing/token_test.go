@@ -145,7 +145,7 @@ func TestDeletingTokenAlsoDeletesTokenRoutings(t *testing.T) {
 	deleted := routingRequest(t, srv, aliceJWT, http.MethodDelete, fmt.Sprintf("/api/tokens/%d", token.ID), nil)
 	require.Equal(t, http.StatusOK, deleted.Code, deleted.Body.String())
 	var routingCount int64
-	require.NoError(t, srv.App.GetDB().Model(&models.ModelRouting{}).Where("id = ?", routing.ID).Count(&routingCount).Error)
+	require.NoError(t, srv.App.GetCoreDB().Model(&models.ModelRouting{}).Where("id = ?", routing.ID).Count(&routingCount).Error)
 	require.Zero(t, routingCount)
 
 	get := routingRequest(t, srv, aliceJWT, http.MethodGet, fmt.Sprintf("/api/tokens/%d", token.ID), nil)

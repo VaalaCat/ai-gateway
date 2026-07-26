@@ -1,19 +1,42 @@
 "use client";
 
-import { Suspense, useMemo } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { useDashboard, type LeaderRow, type SpeedRow } from "@/lib/api/dashboard";
+import {
+  useDashboard,
+  useMarketShare,
+  useMetricTrend,
+  type LeaderRow,
+  type SpeedRow,
+  type MarketShareDim,
+  type TrendMetric,
+  type TrendStat,
+  type ChartTopN,
+} from "@/lib/api/dashboard";
+import { useModelDistribution } from "@/lib/api/stats";
 import { useObsRange } from "@/lib/hooks/use-obs-range";
+import { useChartTopN } from "@/lib/hooks/use-chart-top-n";
 import { useAuth } from "@/lib/auth";
+import type { TimeBucket } from "@/lib/types/observability";
 
 import { ObservabilityHeader } from "@/components/business/observability-header";
-import { MetricTrendChart } from "@/components/business/metric-trend-chart";
+import { MetricTrendChart, type TrendDim } from "@/components/business/metric-trend-chart";
 import { DonutChart } from "@/components/business/donut-chart";
 import { Leaderboard } from "@/components/business/leaderboard";
 import { KpiGrid, type KpiItem } from "@/components/business/kpi-grid";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
-import { formatDuration, formatMoneyCompact, formatTokensCompact, UNIT_QUOTA_SCALE } from "@/lib/utils/format";
+import { ModelName } from "@/components/business/model-name";
+import { SpeedRanking } from "@/components/business/speed-ranking";
+import { MarketShareChart, type MarketShareMode } from "@/components/business/market-share-chart";
+import { ChartOptionSelect } from "@/components/business/chart-option-select";
+import {
+  formatAvgPercentile,
+  formatDuration,
+  formatMoneyCompact,
+  formatTokensCompact,
+  UNIT_QUOTA_SCALE,
+} from "@/lib/utils/format";
 
 export default function DashboardPage() {
   return (
@@ -31,13 +54,15 @@ export default function DashboardPage() {
 
 function DashboardPageContent() {
   const t = useTranslations("dashboard");
-  const { isAdmin } = useAuth();
+  const { user, isAdmin } = useAuth();
   const tcf = useTranslations("charts");
   const searchParams = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
   const model = searchParams.get("model") ?? "";
   const userId = searchParams.get("user_id") ?? "";
+  const selectedUserId = isAdmin && userId ? Number(userId) : undefined;
+  const [topN, setTopN] = useChartTopN(user?.user_id ?? 0, pathname);
   const setParam = (key: string, value: string) => {
     const sp = new URLSearchParams(searchParams.toString());
     if (value) sp.set(key, value);
@@ -60,7 +85,7 @@ function DashboardPageContent() {
     {
       ...range,
       ...(model ? { model } : {}),
-      ...(userId ? { user_id: Number(userId) } : {}),
+      ...(selectedUserId ? { user_id: selectedUserId } : {}),
     },
     { refetchKey: refreshKey },
   );
@@ -68,9 +93,90 @@ function DashboardPageContent() {
   const kpis = data?.kpis;
   const quota = !isAdmin ? kpis?.quota : undefined;
 
+  const [marketShareDim, setMarketShareDim] = useState<MarketShareDim>("model");
+  const [marketShareMode, setMarketShareMode] = useState<MarketShareMode>("percent");
+  const marketShare = useMarketShare(marketShareDim, range.start, range.end, {
+    gran: range.gran,
+    ...(model ? { model } : {}),
+    top_n: topN,
+    enabled: isAdmin,
+  });
+
+  const modelDistribution = useModelDistribution(
+    {
+      ...range,
+      ...(model ? { model } : {}),
+      ...(selectedUserId ? { user_id: selectedUserId } : {}),
+      top_n: topN,
+    },
+    { enabled: isAdmin && !model },
+  );
+
+  // 趋势图 metric/dim 提升到页面级受控 state:dim 决定是否要按 model/channel 拆多线；
+  // 普通用户由后端锁定 self scope，只有管理员可以附加 URL 中选中的 user_id。
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>("tokens");
+  const [trendStat, setTrendStat] = useState<TrendStat>("avg");
+  const [trendDim, setTrendDim] = useState<TrendDim>("off");
+  const metricTrend = useMetricTrend(
+    trendMetric,
+    trendDim === "channel" ? "channel" : "model",
+    range.start,
+    range.end,
+    {
+      gran: range.gran,
+      top_n: topN,
+      ...((trendMetric === "ttft" || trendMetric === "tps") ? { stat: trendStat } : {}),
+      ...(model ? { model } : {}),
+      ...(selectedUserId ? { user_id: selectedUserId } : {}),
+      enabled: trendDim !== "off",
+    },
+  );
+
+  const changeTrendMetric = (metric: TrendMetric) => {
+    setTrendMetric(metric);
+    setTrendStat("avg");
+  };
+  const changeTrendStat = (stat: TrendStat) => {
+    setTrendStat(stat);
+    if (stat !== "avg") setTrendDim("model");
+  };
+  const changeTrendDim = (dim: TrendDim) => {
+    setTrendDim(dim);
+    if (dim !== "model") setTrendStat("avg");
+  };
+
+  const chartBuckets = useMemo<TimeBucket[]>(() => {
+    const performanceByTs = new Map(
+      (data?.log_metrics?.trend.buckets ?? []).map((bucket) => [bucket.ts, bucket]),
+    );
+    return (data?.trend.buckets ?? []).map((bucket) => ({
+      ...bucket,
+      ...performanceByTs.get(bucket.ts),
+    }));
+  }, [data]);
+  const logUnavailable = data?.data_status.log_db === "unavailable";
+  const availableMetrics = [
+    ...(data?.trend.metrics ?? []),
+    // behavior change: keep performance controls reachable so the inline
+    // unavailable state can explain an offline log database.
+    ...(data?.log_metrics?.trend.metrics ?? (logUnavailable ? ["ttft", "tps", "cache_hit_rate"] : [])),
+  ];
+  const leaderboard = data?.log_metrics?.leaderboard;
+  const speedCompare = data?.log_metrics?.speed_compare;
+  const expectedTrendStat = trendMetric === "ttft" || trendMetric === "tps"
+    ? trendStat
+    : trendMetric === "cache_hit_rate" ? "ratio" : "sum";
+  const groupedTrend = metricTrend.data?.metric === trendMetric
+    && metricTrend.data.stat === expectedTrendStat
+    ? metricTrend.data
+    : undefined;
+  const groupedOnly = (trendMetric === "ttft" || trendMetric === "tps") && trendStat !== "avg";
+
   const handleRefresh = () => {
     refresh();
     refetch();
+    marketShare.refetch();
+    if (trendDim !== "off") metricTrend.refetch();
   };
 
   return (
@@ -101,6 +207,16 @@ function DashboardPageContent() {
                 className="w-44"
               />
             )}
+            <ChartOptionSelect
+              value={String(topN) as "5" | "10" | "20"}
+              onValueChange={(value) => setTopN(Number(value) as ChartTopN)}
+              label={tcf("prefix.topN")}
+              options={[
+                { value: "5", label: "5" },
+                { value: "10", label: "10" },
+                { value: "20", label: "20" },
+              ]}
+            />
           </>
         }
       />
@@ -136,16 +252,19 @@ function DashboardPageContent() {
               value: kpis.users?.value ?? 0,
             });
           }
-          const succ = kpis.success_rate?.value ?? 0;
+          const succ = kpis.success_rate?.value;
           const reqs = kpis.requests?.value ?? 0;
-          const successPct = reqs > 0 ? Math.min(succ / reqs, 1) * 100 : 0;
-          const errorPct = 100 - successPct;
+          const successPct = succ !== undefined && reqs > 0
+            ? Math.min(succ / reqs, 1) * 100
+            : undefined;
           items.push({
             key: "successRate",
             label: t("kpi.successRate"),
-            value: `${successPct.toFixed(1)}%`,
-            ratio: errorPct,
-            threshold: { warn: 5, critical: 10 },
+            value: successPct === undefined ? "—" : `${successPct.toFixed(1)}%`,
+            ...(successPct === undefined ? {} : {
+              ratio: 100 - successPct,
+              threshold: { warn: 5, critical: 10 },
+            }),
           });
         }
 
@@ -169,76 +288,148 @@ function DashboardPageContent() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div
           className={
-            isAdmin && data?.model_distribution && data.model_distribution.length > 0 && !model
+            isAdmin && (modelDistribution.data?.buckets.length ?? 0) > 0 && !model
               ? "lg:col-span-2"
               : "lg:col-span-3"
           }
         >
           <MetricTrendChart
-            buckets={data?.trend.buckets ?? []}
-            defaultMetric="tokens"
+            buckets={chartBuckets}
+            availableMetrics={availableMetrics}
+            metric={trendMetric}
+            onMetricChange={changeTrendMetric}
+            dim={trendDim}
+            onDimChange={changeTrendDim}
+            grouped={groupedTrend}
+            groupedOnly={groupedOnly}
+            logUnavailable={logUnavailable}
+            loading={groupedOnly && metricTrend.isLoading}
             title={t("trendCard.title")}
+            headerExtra={
+              trendMetric === "ttft" || trendMetric === "tps" ? (
+                <ChartOptionSelect
+                  value={trendStat}
+                  onValueChange={changeTrendStat}
+                  label={tcf("prefix.stat")}
+                  options={trendMetric === "ttft"
+                    ? [
+                        { value: "avg", label: tcf("stat.avg") },
+                        { value: "p95", label: tcf("stat.p95") },
+                      ]
+                    : [
+                        { value: "avg", label: tcf("stat.avg") },
+                        { value: "p5", label: tcf("stat.p5") },
+                      ]}
+                />
+              ) : undefined
+            }
           />
         </div>
         {isAdmin &&
-          data?.model_distribution &&
-          data.model_distribution.length > 0 &&
+          modelDistribution.data &&
+          modelDistribution.data.buckets.length > 0 &&
           !model && (
             <DonutChart
-              slices={data.model_distribution}
+              slices={modelDistribution.data.buckets}
               title={t("modelDist.title")}
-              topN={5}
+              topN={topN}
+              othersLabel={tcf("trend.others")}
+              legendLabel={tcf("legend.series")}
             />
           )}
       </div>
 
-      {isAdmin && data?.speed_compare && !userId && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {!model && (
+      {isAdmin && (
+        <MarketShareChart
+          buckets={marketShare.data?.buckets ?? []}
+          seriesOrder={marketShare.data?.series_order ?? []}
+          mode={marketShareMode}
+          onModeChange={setMarketShareMode}
+          dim={marketShareDim}
+          onDimChange={setMarketShareDim}
+          loading={marketShare.isLoading}
+        />
+      )}
+
+      {isAdmin && speedCompare && !userId && (
+        <>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <SpeedRanking
+              rows={[
+                ...speedCompare.by_model.map((row) => ({ ...row, entity: "model" as const })),
+                ...speedCompare.by_channel.map((row) => ({ ...row, entity: "channel" as const })),
+              ]}
+              metric="ttft"
+              title={t("speedRanking.ttftTitle")}
+              rankLabel={t("speedRanking.rank")}
+              nameLabel={t("speedRanking.name")}
+              valueLabel={t("speedRanking.ttftP95")}
+              emptyText={t("speedRanking.empty")}
+            />
+            <SpeedRanking
+              rows={[
+                ...speedCompare.by_model.map((row) => ({ ...row, entity: "model" as const })),
+                ...speedCompare.by_channel.map((row) => ({ ...row, entity: "channel" as const })),
+              ]}
+              metric="tps"
+              title={t("speedRanking.tpsTitle")}
+              rankLabel={t("speedRanking.rank")}
+              nameLabel={t("speedRanking.name")}
+              valueLabel={t("speedRanking.tpsP5")}
+              emptyText={t("speedRanking.empty")}
+            />
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {!model && (
+              <Leaderboard<SpeedRow>
+                title={t("speed.modelTitle")}
+                rows={speedCompare.by_model}
+                columns={[
+                  {
+                    key: "name",
+                    label: t("speed.col.name"),
+                    render: (r) => <ModelName name={r.name} />,
+                  },
+                  {
+                    key: "ttft_ms",
+                    label: t("speed.col.ttft"),
+                    render: (r) => formatAvgPercentile(r.ttft_ms, r.ttft_p95_ms, formatDuration),
+                  },
+                  {
+                    key: "tps",
+                    label: t("speed.col.tps"),
+                    render: (r) => formatAvgPercentile(r.tps, r.tps_p5, (v) => v.toFixed(1)),
+                  },
+                ]}
+              />
+            )}
             <Leaderboard<SpeedRow>
-              title={t("speed.modelTitle")}
-              rows={data.speed_compare.by_model}
+              title={t("speed.channelTitle")}
+              rows={speedCompare.by_channel}
               columns={[
-                { key: "name", label: "Name" },
+                { key: "name", label: t("speed.col.name") },
                 {
                   key: "ttft_ms",
-                  label: "TTFT",
-                  render: (r) => formatDuration(r.ttft_ms),
+                  label: t("speed.col.ttft"),
+                  render: (r) => formatAvgPercentile(r.ttft_ms, r.ttft_p95_ms, formatDuration),
                 },
                 {
                   key: "tps",
-                  label: "TPS",
-                  render: (r) => r.tps.toFixed(1),
+                  label: t("speed.col.tps"),
+                  render: (r) => formatAvgPercentile(r.tps, r.tps_p5, (v) => v.toFixed(1)),
                 },
               ]}
             />
-          )}
-          <Leaderboard<SpeedRow>
-            title={t("speed.channelTitle")}
-            rows={data.speed_compare.by_channel}
-            columns={[
-              { key: "name", label: "Name" },
-              {
-                key: "ttft_ms",
-                label: "TTFT",
-                render: (r) => formatDuration(r.ttft_ms),
-              },
-              {
-                key: "tps",
-                label: "TPS",
-                render: (r) => r.tps.toFixed(1),
-              },
-            ]}
-          />
-        </div>
+          </div>
+        </>
       )}
 
-      {isAdmin && data?.leaderboard && (
+      {isAdmin && leaderboard && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {!userId && (
             <Leaderboard<LeaderRow>
               title={t("leaderboard.byUsers")}
-              rows={data.leaderboard.users}
+              rows={leaderboard.users}
               columns={[
                 { key: "name", label: t("leaderboard.col.name") },
                 {
@@ -258,9 +449,13 @@ function DashboardPageContent() {
           )}
           <Leaderboard<LeaderRow>
             title={t("leaderboard.byModels")}
-            rows={data.leaderboard.models}
+            rows={leaderboard.models}
             columns={[
-              { key: "name", label: t("leaderboard.col.name") },
+              {
+                key: "name",
+                label: t("leaderboard.col.name"),
+                render: (r) => <ModelName name={r.name} />,
+              },
               {
                 key: "tokens",
                 label: t("leaderboard.col.tokens"),
@@ -277,7 +472,7 @@ function DashboardPageContent() {
           />
           <Leaderboard<LeaderRow>
             title={t("leaderboard.byChannels")}
-            rows={data.leaderboard.channels}
+            rows={leaderboard.channels}
             columns={[
               { key: "name", label: t("leaderboard.col.name") },
               {

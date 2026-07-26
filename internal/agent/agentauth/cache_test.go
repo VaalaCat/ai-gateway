@@ -81,7 +81,7 @@ func TestTicketCacheBootstrapSnapshotIsDefensiveAndCloseClearsOwnedState(t *test
 			return jsonResult(protocol.AuthBootstrapResponse{
 				MasterInstanceID: "master-a",
 				Capabilities: []string{
-					protocol.AgentCapabilityTunnelV1,
+					protocol.AgentCapabilityTunnelV2,
 					protocol.AgentCapabilityForwardV1,
 				},
 				SigningKeys: []pkgagentauth.PublicKey{key},
@@ -99,14 +99,14 @@ func TestTicketCacheBootstrapSnapshotIsDefensiveAndCloseClearsOwnedState(t *test
 
 	first := cache.Bootstrap()
 	require.Equal(t, "master-a", first.MasterInstanceID)
-	require.Equal(t, []string{protocol.AgentCapabilityForwardV1, protocol.AgentCapabilityTunnelV1}, first.Capabilities)
+	require.Equal(t, []string{protocol.AgentCapabilityForwardV1, protocol.AgentCapabilityTunnelV2}, first.Capabilities)
 	require.Equal(t, []pkgagentauth.PublicKey{key}, first.SigningKeys)
 	first.MasterInstanceID = "mutated"
 	first.Capabilities[0] = "mutated"
 	first.SigningKeys[0].Key[0] = 99
 	require.Equal(t, BootstrapSnapshot{
 		MasterInstanceID: "master-a",
-		Capabilities:     []string{protocol.AgentCapabilityForwardV1, protocol.AgentCapabilityTunnelV1},
+		Capabilities:     []string{protocol.AgentCapabilityForwardV1, protocol.AgentCapabilityTunnelV2},
 		SigningKeys:      []pkgagentauth.PublicKey{key},
 	}, cache.Bootstrap())
 
@@ -114,7 +114,7 @@ func TestTicketCacheBootstrapSnapshotIsDefensiveAndCloseClearsOwnedState(t *test
 	require.NoError(t, err)
 	require.Equal(t, pkgagentauth.RelayTicket("relay-secret"), relay)
 	require.Eventually(t, func() bool {
-		forward, err := cache.CachedForwardTicket()
+		forward, err := readCachedTicket(cache)
 		return err == nil && forward == pkgagentauth.ForwardTicket("forward-secret")
 	}, time.Second, time.Millisecond, "background owner must cache the first forward ticket")
 
@@ -149,7 +149,7 @@ func TestTicketCacheUsesDefaultRelayTTLRefreshAndNormalizesInvalidFractions(t *t
 		t.Run(tc.name, func(t *testing.T) {
 			clock := newCacheTestClock()
 			var issues atomic.Int32
-			control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(method string, _ any) (json.RawMessage, error) {
+			control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(method string, _ any) (json.RawMessage, error) {
 				require.Equal(t, consts.RPCAgentIssueRelayTicket, method)
 				n := issues.Add(1)
 				return ticketJSON(fmt.Sprintf("relay-%d", n), cacheTestNow.Add(10*time.Minute)), nil
@@ -178,7 +178,7 @@ func TestTicketCacheRefreshFailureUsesValidTicketWithoutBusyLoopAndRejectsItAtEx
 	clock := newCacheTestClock()
 	marker := "relay-secret-marker"
 	var issues atomic.Int32
-	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		if issues.Add(1) == 1 {
 			return ticketJSON("relay-valid", cacheTestNow.Add(10*time.Minute)), nil
 		}
@@ -218,13 +218,13 @@ func TestTicketCacheRejectsInvalidTicketResponsesWithoutCaching(t *testing.T) {
 	}{
 		{
 			name:       "relay empty token",
-			capability: protocol.AgentCapabilityTunnelV1,
+			capability: protocol.AgentCapabilityTunnelV2,
 			method:     consts.RPCAgentIssueRelayTicket,
 			response:   protocol.TicketResponse{ExpiresAt: cacheTestNow.Add(time.Minute).Unix()},
 		},
 		{
 			name:       "relay expires now",
-			capability: protocol.AgentCapabilityTunnelV1,
+			capability: protocol.AgentCapabilityTunnelV2,
 			method:     consts.RPCAgentIssueRelayTicket,
 			response:   protocol.TicketResponse{Token: "relay-expired-secret", ExpiresAt: cacheTestNow.Unix()},
 		},
@@ -267,7 +267,7 @@ func TestTicketCacheRefreshOwnersShareSameRelayGenerationAndSeparateDifferentGen
 		clock := newCacheTestClock()
 		issued := make(chan uint64, 1)
 		release := make(chan struct{})
-		control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, params any) (json.RawMessage, error) {
+		control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, params any) (json.RawMessage, error) {
 			generation := requireRelayGeneration(t, params)
 			issued <- generation
 			<-release
@@ -307,7 +307,7 @@ func TestTicketCacheRefreshOwnersShareSameRelayGenerationAndSeparateDifferentGen
 		clock := newCacheTestClock()
 		issued := make(chan uint64, 2)
 		release := make(chan struct{})
-		control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, params any) (json.RawMessage, error) {
+		control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, params any) (json.RawMessage, error) {
 			generation := requireRelayGeneration(t, params)
 			issued <- generation
 			<-release
@@ -343,7 +343,7 @@ func TestTicketCacheRefreshOwnersShareSameRelayGenerationAndSeparateDifferentGen
 func TestRelayRefreshOwnershipRechecksStaleDueDecisionBeforeCreatingOwner(t *testing.T) {
 	clock := newCacheTestClock()
 	var issues atomic.Int32
-	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(method string, params any) (json.RawMessage, error) {
+	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(method string, params any) (json.RawMessage, error) {
 		require.Equal(t, consts.RPCAgentIssueRelayTicket, method)
 		require.Equal(t, uint64(17), requireRelayGeneration(t, params))
 		n := issues.Add(1)
@@ -406,11 +406,11 @@ func TestCacheNowRunsOutsideMutex(t *testing.T) {
 		cache.hasForward = true
 		cache.mu.Unlock()
 
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		require.NoError(t, err)
 		require.Equal(t, pkgagentauth.ForwardTicket("forward-cached"), ticket)
 		require.Equal(t, int32(1), calls.Load())
-		require.False(t, calledWithLock.Load(), "CachedForwardTicket called Now while holding cache.mu")
+		require.False(t, calledWithLock.Load(), "CachedForwardCredential called Now while holding cache.mu")
 	})
 
 	t.Run("stale relay owner admission", func(t *testing.T) {
@@ -436,7 +436,7 @@ func TestCacheNowRunsOutsideMutex(t *testing.T) {
 		cache.mu.Lock()
 		cache.started = true
 		cache.runCtx = runCtx
-		cache.bootstrap.Capabilities = []string{protocol.AgentCapabilityTunnelV1}
+		cache.bootstrap.Capabilities = []string{protocol.AgentCapabilityTunnelV2}
 		cache.relayTickets[17] = ticketEntry{
 			token:     "relay-refreshed",
 			issuedAt:  now,
@@ -472,12 +472,12 @@ func TestForwardCacheRunImmediatelyIssuesFirstTicketWithoutRequestTrigger(t *tes
 	})
 
 	receiveWithTimeout(t, issued, "immediate forward issue")
-	ticket, err := cache.CachedForwardTicket()
+	ticket, err := readCachedTicket(cache)
 	require.Error(t, err, "a blocked background owner must not make the cache appear populated")
 	require.Empty(t, ticket)
 	releaseOnce.Do(func() { close(release) })
 	require.Eventually(t, func() bool {
-		ticket, err = cache.CachedForwardTicket()
+		ticket, err = readCachedTicket(cache)
 		return err == nil && ticket == pkgagentauth.ForwardTicket("forward-1")
 	}, time.Second, time.Millisecond)
 	require.Equal(t, 1, control.Calls(consts.RPCAgentIssueForwardTicket))
@@ -528,7 +528,7 @@ func TestForwardCacheCloseCancelsBlockedInitialIssueAndDoneWaitsForReturn(t *tes
 	release()
 	receiveWithTimeout(t, callReturned, "initial forward issue return")
 	requireClosed(t, cache.Done(), "initial forward owner shutdown")
-	ticket, err := cache.CachedForwardTicket()
+	ticket, err := readCachedTicket(cache)
 	require.ErrorIs(t, err, errCacheClosed)
 	require.Empty(t, ticket)
 	require.Equal(t, 1, control.Calls(consts.RPCAgentIssueForwardTicket))
@@ -559,17 +559,17 @@ func TestForwardCacheRefreshesAtConfiguredAgeBoundary(t *testing.T) {
 			})
 			require.NoError(t, cache.Run(context.Background()))
 			t.Cleanup(func() { closeTicketCache(t, cache) })
-			requireCachedForwardTicket(t, cache, "forward-1")
+			requireCachedTicket(t, cache, "forward-1")
 
 			clock.Set(cacheTestNow.Add(tc.refreshAfter - time.Second))
 			refreshTicketsForTest(t, cache)
 			require.Equal(t, int32(1), issues.Load(), "refresh must not run before the age boundary")
-			requireCachedForwardTicket(t, cache, "forward-1")
+			requireCachedTicket(t, cache, "forward-1")
 
 			clock.Set(cacheTestNow.Add(tc.refreshAfter))
 			refreshTicketsForTest(t, cache)
 			require.Equal(t, int32(2), issues.Load(), "refresh must run exactly at the age boundary")
-			requireCachedForwardTicket(t, cache, "forward-2")
+			requireCachedTicket(t, cache, "forward-2")
 		})
 	}
 }
@@ -592,12 +592,12 @@ func TestForwardCacheFailureCooldownKeepsValidTicketAndRetries(t *testing.T) {
 	cache := NewCache(control, CacheOptions{Now: clock.Now})
 	require.NoError(t, cache.Run(context.Background()))
 	t.Cleanup(func() { closeTicketCache(t, cache) })
-	requireCachedForwardTicket(t, cache, "forward-old-secret")
+	requireCachedTicket(t, cache, "forward-old-secret")
 
 	clock.Set(cacheTestNow.Add(24 * time.Hour))
 	refreshTicketsForTest(t, cache)
 	require.Equal(t, int32(2), issues.Load())
-	ticket, err := cache.CachedForwardTicket()
+	ticket, err := readCachedTicket(cache)
 	require.NoError(t, err)
 	require.Equal(t, pkgagentauth.ForwardTicket("forward-old-secret"), ticket)
 
@@ -609,7 +609,7 @@ func TestForwardCacheFailureCooldownKeepsValidTicketAndRetries(t *testing.T) {
 	clock.Set(cacheTestNow.Add(24*time.Hour + time.Second))
 	refreshTicketsForTest(t, cache)
 	require.Equal(t, int32(3), issues.Load(), "background owner must retry at the cooldown boundary")
-	requireCachedForwardTicket(t, cache, "forward-new")
+	requireCachedTicket(t, cache, "forward-new")
 }
 
 func TestForwardRefreshContainsControlPanicAndRecordsCooldown(t *testing.T) {
@@ -692,7 +692,7 @@ func TestForwardRefreshLoopSurvivesPanicCooldownAndRecovers(t *testing.T) {
 	default:
 	}
 	require.Equal(t, "master-a", cache.Bootstrap().MasterInstanceID)
-	ticket, err := cache.CachedForwardTicket()
+	ticket, err := readCachedTicket(cache)
 	require.ErrorIs(t, err, errTicketRefresh)
 	require.Empty(t, ticket)
 	require.NotContains(t, err.Error(), marker)
@@ -705,28 +705,28 @@ func TestForwardRefreshLoopSurvivesPanicCooldownAndRecovers(t *testing.T) {
 	clock.Set(cacheTestNow.Add(ticketFailureCooldown))
 	refreshTicketsForTest(t, cache)
 	require.Equal(t, int32(2), attempts.Load(), "refresh must retry exactly at the cooldown boundary")
-	requireCachedForwardTicket(t, cache, "forward-recovered")
+	requireCachedTicket(t, cache, "forward-recovered")
 	cache.Close()
 	requireClosed(t, cache.Done(), "forward panic recovery shutdown")
 }
 
-func TestCachedForwardTicketRejectsUnavailableAndExpiredSnapshotsWithoutLeaking(t *testing.T) {
+func TestCachedForwardCredentialRejectsUnavailableAndExpiredSnapshotsWithoutLeaking(t *testing.T) {
 	t.Run("cache not running", func(t *testing.T) {
 		cache := NewCache(nil, CacheOptions{})
 		t.Cleanup(cache.Close)
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		require.ErrorIs(t, err, errCacheNotRunning)
 		require.Empty(t, ticket)
 	})
 
 	t.Run("capability off", func(t *testing.T) {
-		control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV1}, func(string, any) (json.RawMessage, error) {
+		control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV2}, func(string, any) (json.RawMessage, error) {
 			return nil, errors.New("must not issue forward ticket")
 		})
 		cache := NewCache(control, CacheOptions{})
 		require.NoError(t, cache.Run(context.Background()))
 		t.Cleanup(func() { closeTicketCache(t, cache) })
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		require.ErrorIs(t, err, errCapabilityOff)
 		require.Empty(t, ticket)
 		require.Zero(t, control.Calls(consts.RPCAgentIssueForwardTicket))
@@ -745,7 +745,7 @@ func TestCachedForwardTicketRejectsUnavailableAndExpiredSnapshotsWithoutLeaking(
 			defer cache.mu.Unlock()
 			return !cache.forwardFailure.IsZero()
 		}, time.Second, time.Millisecond)
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		require.ErrorIs(t, err, errTicketRefresh)
 		require.Empty(t, ticket)
 		require.NotContains(t, err.Error(), marker)
@@ -759,11 +759,11 @@ func TestCachedForwardTicketRejectsUnavailableAndExpiredSnapshotsWithoutLeaking(
 		cache := NewCache(control, CacheOptions{Now: clock.Now})
 		require.NoError(t, cache.Run(context.Background()))
 		t.Cleanup(func() { closeTicketCache(t, cache) })
-		requireCachedForwardTicket(t, cache, "expired-forward-secret")
+		requireCachedTicket(t, cache, "expired-forward-secret")
 		calls := control.Calls(consts.RPCAgentIssueForwardTicket)
 
 		clock.Set(cacheTestNow.Add(7 * 24 * time.Hour))
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		require.ErrorIs(t, err, errTicketRefresh)
 		require.Empty(t, ticket)
 		require.NotContains(t, err.Error(), "expired-forward-secret")
@@ -776,16 +776,59 @@ func TestCachedForwardTicketRejectsUnavailableAndExpiredSnapshotsWithoutLeaking(
 		})
 		cache := NewCache(control, CacheOptions{})
 		require.NoError(t, cache.Run(context.Background()))
-		requireCachedForwardTicket(t, cache, "closed-forward-secret")
+		requireCachedTicket(t, cache, "closed-forward-secret")
 		closeTicketCache(t, cache)
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		require.ErrorIs(t, err, errCacheClosed)
 		require.Empty(t, ticket)
 		require.NotContains(t, err.Error(), "closed-forward-secret")
 	})
 }
 
-func TestCachedForwardTicketRejectsInvalidIssueResponseWithoutCaching(t *testing.T) {
+func TestCachedForwardCredentialUsesStrictExpiryAndReturnsDetachedValue(t *testing.T) {
+	now := cacheTestNow
+	clock := newCacheTestClock()
+	cache := NewCache(nil, CacheOptions{Now: clock.Now})
+	cache.started = true
+	cache.runCtx = t.Context()
+	cache.bootstrap.Capabilities = []string{protocol.AgentCapabilityForwardV1}
+	cache.forward = ticketEntry{token: "forward-secret", expiresAt: now.Add(time.Hour)}
+	cache.hasForward = true
+
+	clock.Set(now.Add(time.Hour - time.Nanosecond))
+	credential, err := cache.CachedForwardCredential()
+	require.NoError(t, err)
+	require.Equal(t, pkgagentauth.ForwardTicket("forward-secret"), credential.Ticket)
+	require.Equal(t, now.Add(time.Hour), credential.ExpiresAt)
+
+	cache.forward.token = "mutated-after-read"
+	require.Equal(t, pkgagentauth.ForwardTicket("forward-secret"), credential.Ticket)
+
+	clock.Set(now.Add(time.Hour))
+	credential, err = cache.CachedForwardCredential()
+	require.ErrorIs(t, err, errTicketRefresh)
+	require.Zero(t, credential)
+	require.False(t, cache.hasForward)
+	require.Empty(t, cache.forward.token)
+}
+
+func TestCachedForwardCredentialDelegatesToCredentialReader(t *testing.T) {
+	clock := newCacheTestClock()
+	cache := NewCache(nil, CacheOptions{Now: clock.Now})
+	cache.started = true
+	cache.runCtx = t.Context()
+	cache.bootstrap.Capabilities = []string{protocol.AgentCapabilityForwardV1}
+	cache.forward = ticketEntry{token: "forward-v1", expiresAt: cacheTestNow.Add(time.Hour)}
+	cache.hasForward = true
+
+	credential, err := cache.CachedForwardCredential()
+	require.NoError(t, err)
+	ticket, err := readCachedTicket(cache)
+	require.NoError(t, err)
+	require.Equal(t, credential.Ticket, ticket)
+}
+
+func TestCachedForwardCredentialRejectsInvalidIssueResponseWithoutCaching(t *testing.T) {
 	clock := newCacheTestClock()
 	marker := "invalid-forward-secret"
 	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityForwardV1}, func(method string, _ any) (json.RawMessage, error) {
@@ -802,7 +845,7 @@ func TestCachedForwardTicketRejectsInvalidIssueResponseWithoutCaching(t *testing
 	}, time.Second, time.Millisecond)
 
 	for range 2 {
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		require.ErrorIs(t, err, errTicketRefresh)
 		require.Empty(t, ticket)
 		require.NotContains(t, err.Error(), marker)
@@ -813,7 +856,7 @@ func TestCachedForwardTicketRejectsInvalidIssueResponseWithoutCaching(t *testing
 	require.Equal(t, 2, control.Calls(consts.RPCAgentIssueForwardTicket))
 }
 
-func TestCachedForwardTicketStaysReadOnlyWhileBackgroundRefreshBlocks(t *testing.T) {
+func TestCachedForwardCredentialStaysReadOnlyWhileBackgroundRefreshBlocks(t *testing.T) {
 	clock := newCacheTestClock()
 	refreshStarted := make(chan struct{})
 	releaseRefresh := make(chan struct{})
@@ -845,7 +888,7 @@ func TestCachedForwardTicketStaysReadOnlyWhileBackgroundRefreshBlocks(t *testing
 		releaseOnce.Do(func() { close(releaseRefresh) })
 		closeTicketCache(t, cache)
 	})
-	requireCachedForwardTicket(t, cache, "forward-1")
+	requireCachedTicket(t, cache, "forward-1")
 
 	clock.Set(cacheTestNow.Add(25 * time.Hour))
 	receiveWithTimeout(t, refreshStarted, "blocked background forward refresh")
@@ -854,7 +897,7 @@ func TestCachedForwardTicketStaysReadOnlyWhileBackgroundRefreshBlocks(t *testing
 	readers := pool.NewWithResults[forwardTicketResult]().WithMaxGoroutines(20)
 	for range 100 {
 		readers.Go(func() forwardTicketResult {
-			ticket, err := cache.CachedForwardTicket()
+			ticket, err := readCachedTicket(cache)
 			return forwardTicketResult{ticket: ticket, err: err}
 		})
 	}
@@ -879,7 +922,7 @@ func TestCachedForwardTicketStaysReadOnlyWhileBackgroundRefreshBlocks(t *testing
 			<-startConcurrentReaders
 			var result forwardTicketResult
 			for range 100 {
-				result.ticket, result.err = cache.CachedForwardTicket()
+				result.ticket, result.err = readCachedTicket(cache)
 				if result.err != nil {
 					return result
 				}
@@ -893,7 +936,7 @@ func TestCachedForwardTicketStaysReadOnlyWhileBackgroundRefreshBlocks(t *testing
 		require.NoError(t, result.err)
 		require.Contains(t, []pkgagentauth.ForwardTicket{"forward-1", "forward-2"}, result.ticket)
 	}
-	requireCachedForwardTicket(t, cache, "forward-2")
+	requireCachedTicket(t, cache, "forward-2")
 	require.Equal(t, int32(2), issues.Load())
 }
 
@@ -904,7 +947,7 @@ func TestTicketCacheCallerCancellationDoesNotCancelSharedRefresh(t *testing.T) {
 	issued := make(chan struct{}, 1)
 	underlyingCanceled := make(chan struct{}, 1)
 	release := make(chan struct{})
-	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		issued <- struct{}{}
 		select {
 		case <-release:
@@ -915,7 +958,7 @@ func TestTicketCacheCallerCancellationDoesNotCancelSharedRefresh(t *testing.T) {
 	})
 	control.handler = func(ctx context.Context, method string, params any) (json.RawMessage, error) {
 		if method == consts.RPCAgentAuthBootstrap {
-			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV1}), nil
+			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV2}), nil
 		}
 		issued <- struct{}{}
 		select {
@@ -970,12 +1013,12 @@ func TestTicketCacheCloseCancelsBlockedControlCallAndAllWaiters(t *testing.T) {
 	clock := newCacheTestClock()
 	issued := make(chan struct{}, 1)
 	underlyingDone := make(chan error, 1)
-	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		panic("ticket handler must receive cache context")
 	})
 	control.handler = func(ctx context.Context, method string, _ any) (json.RawMessage, error) {
 		if method == consts.RPCAgentAuthBootstrap {
-			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV1}), nil
+			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV2}), nil
 		}
 		issued <- struct{}{}
 		<-ctx.Done()
@@ -1022,7 +1065,7 @@ func TestTicketCacheDoneWaitsForCanceledSharedRefreshWorkerToReturn(t *testing.T
 	}
 	control := newCacheTestControl(func(ctx context.Context, method string, _ any) (json.RawMessage, error) {
 		if method == consts.RPCAgentAuthBootstrap {
-			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV1}), nil
+			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV2}), nil
 		}
 		close(callStarted)
 		<-ctx.Done()
@@ -1069,7 +1112,7 @@ func TestTicketCacheCompletedHighCardinalityRefreshesDoNotRetainRefreshWorkers(t
 	release := func() {
 		releaseOnce.Do(func() { close(releaseCalls) })
 	}
-	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, params any) (json.RawMessage, error) {
+	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, params any) (json.RawMessage, error) {
 		request, ok := params.(protocol.RelayTicketRequest)
 		if !ok {
 			return nil, fmt.Errorf("relay params type = %T", params)
@@ -1114,7 +1157,7 @@ func TestTicketCacheCompletedHighCardinalityRefreshesDoNotRetainRefreshWorkers(t
 func TestTicketCacheRefreshPanicCompletesOwnerWaitersAndClose(t *testing.T) {
 	const waiterCount = 16
 	const refreshKey = "relay:panic"
-	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		return nil, errors.New("unexpected ticket call")
 	})
 	cache := NewCache(control, CacheOptions{Now: func() time.Time { return cacheTestNow }})
@@ -1218,7 +1261,7 @@ func TestTicketCacheConcurrentSameKeyUsesSingleTrackedRefreshOwner(t *testing.T)
 	}
 	control := newCacheTestControl(func(_ context.Context, method string, _ any) (json.RawMessage, error) {
 		if method == consts.RPCAgentAuthBootstrap {
-			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV1}), nil
+			return bootstrapJSON([]string{protocol.AgentCapabilityTunnelV2}), nil
 		}
 		startedOnce.Do(func() { close(callStarted) })
 		<-releaseCall
@@ -1369,7 +1412,7 @@ func TestTicketCacheOldMasterOrMalformedBootstrapDisablesSessionOnce(t *testing.
 				relay, err := cache.RelayTicket(context.Background(), 0)
 				require.Error(t, err)
 				require.Empty(t, relay)
-				forward, err := cache.CachedForwardTicket()
+				forward, err := readCachedTicket(cache)
 				require.Error(t, err)
 				require.Empty(t, forward)
 			}
@@ -1414,7 +1457,7 @@ func TestAuthBootstrapRejectsInvalidSigningKeySetsAndDisablesTickets(t *testing.
 					return jsonResult(protocol.AuthBootstrapResponse{
 						MasterInstanceID: "master-a",
 						Capabilities: []string{
-							protocol.AgentCapabilityTunnelV1,
+							protocol.AgentCapabilityTunnelV2,
 							protocol.AgentCapabilityForwardV1,
 						},
 						SigningKeys: tc.keys,
@@ -1430,7 +1473,7 @@ func TestAuthBootstrapRejectsInvalidSigningKeySetsAndDisablesTickets(t *testing.
 			relay, relayErr := cache.RelayTicket(context.Background(), 0)
 			require.Error(t, relayErr)
 			require.Empty(t, relay)
-			forward, forwardErr := cache.CachedForwardTicket()
+			forward, forwardErr := readCachedTicket(cache)
 			require.Error(t, forwardErr)
 			require.Empty(t, forward)
 			require.Zero(t, control.Calls(consts.RPCAgentIssueRelayTicket))
@@ -1470,7 +1513,7 @@ func TestAuthBootstrapAcceptsEightUniqueEdDSASigningKeys(t *testing.T) {
 func TestTicketCacheRelayMapKeepsDeterministicHighestTwoGenerations(t *testing.T) {
 	clock := newCacheTestClock()
 	var sequence atomic.Int32
-	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, params any) (json.RawMessage, error) {
+	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, params any) (json.RawMessage, error) {
 		generation := requireRelayGeneration(t, params)
 		n := sequence.Add(1)
 		return ticketJSON(fmt.Sprintf("relay-%d-%d", generation, n), cacheTestNow.Add(time.Hour)), nil
@@ -1519,7 +1562,7 @@ func TestTicketCacheFirstFailureCooldownBoundaryAndSuccessRecovery(t *testing.T)
 	}{
 		{
 			name:       "relay",
-			capability: protocol.AgentCapabilityTunnelV1,
+			capability: protocol.AgentCapabilityTunnelV2,
 			method:     consts.RPCAgentIssueRelayTicket,
 			issue: func(cache *Cache) (string, error) {
 				ticket, err := cache.RelayTicket(context.Background(), 9)
@@ -1565,7 +1608,7 @@ func TestTicketCacheFirstFailureCooldownBoundaryAndSuccessRecovery(t *testing.T)
 }
 
 func TestTicketCacheCanceledCallerDoesNotIssueOrRecordFailure(t *testing.T) {
-	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		return nil, errors.New("must not be called")
 	})
 	cache := NewCache(control, CacheOptions{})
@@ -1589,7 +1632,7 @@ func TestTicketCacheCanceledCallerDoesNotIssueOrRecordFailure(t *testing.T) {
 func TestTicketCacheExpiredTicketFailureStartsCooldown(t *testing.T) {
 	clock := newCacheTestClock()
 	var attempts atomic.Int32
-	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		if attempts.Add(1) == 1 {
 			return ticketJSON("short-ticket", cacheTestNow.Add(time.Second)), nil
 		}
@@ -1613,7 +1656,7 @@ func TestTicketCacheExpiredTicketFailureStartsCooldown(t *testing.T) {
 
 func TestTicketCacheRelayFailureCooldownKeepsHighestTwoGenerations(t *testing.T) {
 	clock := newCacheTestClock()
-	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(clock, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		return nil, errors.New("relay unavailable")
 	})
 	cache := NewCache(control, CacheOptions{Now: clock.Now})
@@ -1637,7 +1680,7 @@ func TestTicketCacheRunOwnsProactiveRefreshLoop(t *testing.T) {
 	now := time.Now()
 	var issues atomic.Int32
 	refreshed := make(chan struct{}, 1)
-	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		n := issues.Add(1)
 		if n == 2 {
 			refreshed <- struct{}{}
@@ -1722,10 +1765,15 @@ func refreshTicketsForTest(t *testing.T, cache *Cache) {
 	cache.refreshDueTickets(ctx)
 }
 
-func requireCachedForwardTicket(t *testing.T, cache *Cache, want pkgagentauth.ForwardTicket) {
+func readCachedTicket(cache *Cache) (pkgagentauth.ForwardTicket, error) {
+	credential, err := cache.CachedForwardCredential()
+	return credential.Ticket, err
+}
+
+func requireCachedTicket(t *testing.T, cache *Cache, want pkgagentauth.ForwardTicket) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		ticket, err := cache.CachedForwardTicket()
+		ticket, err := readCachedTicket(cache)
 		return err == nil && ticket == want
 	}, time.Second, time.Millisecond)
 }
@@ -1773,7 +1821,7 @@ func concPoolWorkerCount() int {
 
 func TestTicketCacheErrorsNeverContainControlSecrets(t *testing.T) {
 	marker := "Authorization-secret-private-key-ticket"
-	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV1}, func(_ string, _ any) (json.RawMessage, error) {
+	control := ticketCacheControl(nil, []string{protocol.AgentCapabilityTunnelV2}, func(_ string, _ any) (json.RawMessage, error) {
 		return nil, errors.New(marker)
 	})
 	cache := NewCache(control, CacheOptions{})

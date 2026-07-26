@@ -36,6 +36,7 @@ import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { createSelectionColumn } from "@/components/data-table/selection-column";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { StatusBadge } from "@/components/business/status-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
@@ -65,8 +66,7 @@ function BYOKPageInner() {
   const tt = useTranslations("channelTransfer");
   const router = useRouter();
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
   const [deleteTarget, setDeleteTarget] = useState<BYOKChannelDetail | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testDialogChannel, setTestDialogChannel] = useState<BYOKChannelDetail | null>(null);
@@ -94,13 +94,7 @@ function BYOKPageInner() {
     },
   } satisfies FilterSpec), [t, byokTypes]);
 
-  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
-
-  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
-    setPage(1);
-    setRowSelection({});
-    setFilterValuesRaw(next);
-  };
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading, refetch } = useBYOKChannels({
     page,
@@ -122,13 +116,13 @@ function BYOKPageInner() {
   const updateMut = useUpdateBYOKChannel();
 
   const handlePaginationChange = (nextPage: number, nextPageSize: number) => {
-    if (nextPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(nextPageSize);
-    } else {
-      setPage(nextPage);
-    }
+    setPagination(nextPageSize === pageSize ? nextPage : 1, nextPageSize);
     setRowSelection({});
+  };
+
+  const handleFilterChange = (next: Parameters<typeof setFilterValues>[0]) => {
+    setRowSelection({});
+    setFilterValues(next);
   };
 
   const handleDeleteConfirm = async () => {
@@ -472,7 +466,7 @@ function BYOKPageInner() {
           <FilterableToolbar
             spec={filterSpec}
             value={filterValues}
-            onChange={setFilterValues}
+            onChange={handleFilterChange}
             secondaryActions={[
               {
                 label: tt("importAction"),

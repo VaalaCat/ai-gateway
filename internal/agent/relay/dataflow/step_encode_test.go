@@ -22,7 +22,7 @@ func TestStepEncode_Success(t *testing.T) {
 		Working: &codec.Request{Model: "upstream-model", Messages: []codec.Message{
 			{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "hi"}}},
 		}},
-		Rec: trace.NewRecorder(false, 0),
+		Rec: trace.NewRecorder(trace.CaptureOff, 0),
 	}
 	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func (errCodec) DecodeResponse(*http.Response, bool) (<-chan codec.Event, error)
 
 func TestStepEncode_Failure(t *testing.T) {
 	s := &StepEncode{oc: errCodec{}, proto: codec.ProtocolOpenAIChat}
-	p := &Pass{Working: &codec.Request{Model: "m"}, Rec: trace.NewRecorder(false, 0)}
+	p := &Pass{Working: &codec.Request{Model: "m"}, Rec: trace.NewRecorder(trace.CaptureOff, 0)}
 	if err := s.Apply(context.Background(), p); err == nil {
 		t.Fatal("expected encode error")
 	}
@@ -61,7 +61,7 @@ func TestStepEncode_EmptyMessages(t *testing.T) {
 		oc:    &openai.ChatCodec{},
 		proto: codec.ProtocolOpenAIChat,
 	}
-	p := &Pass{Working: &codec.Request{Model: "m"}, Rec: trace.NewRecorder(false, 0)}
+	p := &Pass{Working: &codec.Request{Model: "m"}, Rec: trace.NewRecorder(trace.CaptureOff, 0)}
 	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatalf("empty messages should still encode: %v", err)
 	}

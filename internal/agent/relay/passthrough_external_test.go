@@ -45,7 +45,7 @@ func TestRelayPassthrough_InvalidRequestBodyJSON_ErrNotPanic(t *testing.T) {
 			InboundProto: codec.ProtocolOpenAIChat,
 			StartTime:    time.Now(),
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	backend := &passthrough.Backend{Agent: nil} // logger/transportPool 走 nil-guard 兜底
 

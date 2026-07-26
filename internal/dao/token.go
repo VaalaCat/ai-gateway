@@ -26,18 +26,18 @@ type adminTokenMutation struct{ ctx *baseContext }
 
 func (q *adminTokenQuery) GetByID(id uint) (*models.Token, error) {
 	var token models.Token
-	err := q.ctx.GetDB().First(&token, id).Error
+	err := q.ctx.GetCoreDB().First(&token, id).Error
 	return &token, err
 }
 
 func (q *adminTokenQuery) GetByKey(key string) (*models.Token, error) {
 	var token models.Token
-	err := q.ctx.GetDB().Where("`key` = ?", key).First(&token).Error
+	err := q.ctx.GetCoreDB().Where("`key` = ?", key).First(&token).Error
 	return &token, err
 }
 
 func (q *adminTokenQuery) List(opts ListOptions, filter TokenListFilter) ([]models.Token, int64, error) {
-	db := q.ctx.GetDB().Model(&models.Token{})
+	db := q.ctx.GetCoreDB().Model(&models.Token{})
 	if filter.Search != "" {
 		like := "%" + filter.Search + "%"
 		db = db.Where("name LIKE ? OR `key` LIKE ?", like, like)
@@ -58,15 +58,15 @@ func (q *adminTokenQuery) List(opts ListOptions, filter TokenListFilter) ([]mode
 }
 
 func (m *adminTokenMutation) Create(token *models.Token) error {
-	return m.ctx.GetDB().Create(token).Error
+	return m.ctx.GetCoreDB().Create(token).Error
 }
 
 func (m *adminTokenMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetDB().Model(&models.Token{}).Where("id = ?", id).Updates(updates).Error
+	return m.ctx.GetCoreDB().Model(&models.Token{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (m *adminTokenMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.Token{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.Token{}, id).Error
 }
 
 func (m *adminTokenMutation) DeleteWithRoutings(id uint) (deleted []models.ModelRouting, err error) {
@@ -87,12 +87,12 @@ func (m *adminTokenMutation) DeleteWithRoutings(id uint) (deleted []models.Model
 }
 
 func (m *adminTokenMutation) DisableAllForUser(userID uint) error {
-	return m.ctx.GetDB().Model(&models.Token{}).Where("user_id = ? AND status = 1", userID).Update("status", 0).Error
+	return m.ctx.GetCoreDB().Model(&models.Token{}).Where("user_id = ? AND status = 1", userID).Update("status", 0).Error
 }
 
 func (q *adminTokenQuery) ListByTemplateID(templateID uint) ([]models.Token, error) {
 	var tokens []models.Token
-	err := q.ctx.GetDB().Where("template_id = ?", templateID).Find(&tokens).Error
+	err := q.ctx.GetCoreDB().Where("template_id = ?", templateID).Find(&tokens).Error
 	return tokens, err
 }
 
@@ -101,7 +101,7 @@ func (q *adminTokenQuery) ListByIDs(ids []uint) ([]models.Token, error) {
 		return nil, nil
 	}
 	var tokens []models.Token
-	err := q.ctx.GetDB().Where("id IN ?", ids).Find(&tokens).Error
+	err := q.ctx.GetCoreDB().Where("id IN ?", ids).Find(&tokens).Error
 	return tokens, err
 }
 
@@ -120,7 +120,7 @@ func (m *adminTokenMutation) BulkSyncFromTemplate(templateID uint, tpl *models.T
 	}
 	err := RunInTx[Context](m.ctx, func(txCtx Context) error {
 		var tokens []models.Token
-		if err := txCtx.GetDB().Where("template_id = ?", templateID).Find(&tokens).Error; err != nil {
+		if err := txCtx.GetCoreDB().Where("template_id = ?", templateID).Find(&tokens).Error; err != nil {
 			return err
 		}
 		total = len(tokens)
@@ -136,7 +136,7 @@ func (m *adminTokenMutation) BulkSyncFromTemplate(templateID uint, tpl *models.T
 		if len(toUpdate) == 0 {
 			return nil
 		}
-		if err := txCtx.GetDB().Model(&models.Token{}).
+		if err := txCtx.GetCoreDB().Model(&models.Token{}).
 			Where("id IN ?", toUpdate).
 			Updates(updates).Error; err != nil {
 			return err

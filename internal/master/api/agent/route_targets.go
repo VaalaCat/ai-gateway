@@ -10,6 +10,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
 const routeTargetsCursorTTL = 5 * time.Minute
@@ -108,7 +109,7 @@ func decodeRouteTargetsCursor(encoded string) (routeTargetsCursor, error) {
 	return cursor, nil
 }
 
-func (h *Handler) routeTargetsSnapshotForRequest(agent models.Agent, req RouteTargetsRequest) (connectivity.ConnectionSnapshot, error) {
+func (h *Handler) routeTargetsSnapshotForRequest(c *app.Context, agent models.Agent, req RouteTargetsRequest) (connectivity.ConnectionSnapshot, error) {
 	now := time.Now()
 	if h.Now != nil {
 		now = h.Now()
@@ -126,13 +127,25 @@ func (h *Handler) routeTargetsSnapshotForRequest(agent models.Agent, req RouteTa
 			if snapshot, ok := h.loadRouteTargetsSnapshotByKey(key, now); ok {
 				return snapshot, nil
 			}
-			current := h.Connections.Build(agent)
+			current, err := h.Connections.BuildContext(c.RequestContext(), agent)
+			if err != nil {
+				if apiErr := requestContextAPIError(c); apiErr != nil {
+					return connectivity.ConnectionSnapshot{}, apiErr
+				}
+				return connectivity.ConnectionSnapshot{}, api.InternalError("build connection snapshot failed", err)
+			}
 			if current.SnapshotEpoch != req.ExpectedSnapshotEpoch {
 				return connectivity.ConnectionSnapshot{}, routeTargetsCursorAPIError(http.StatusConflict, "route_targets_cursor_epoch_changed", "the connection snapshot epoch changed")
 			}
 			return connectivity.ConnectionSnapshot{}, routeTargetsCursorAPIError(http.StatusConflict, "route_targets_cursor_snapshot_changed", "the connection snapshot is no longer available")
 		}
-		snapshot := h.Connections.Build(agent)
+		snapshot, err := h.Connections.BuildContext(c.RequestContext(), agent)
+		if err != nil {
+			if apiErr := requestContextAPIError(c); apiErr != nil {
+				return connectivity.ConnectionSnapshot{}, apiErr
+			}
+			return connectivity.ConnectionSnapshot{}, api.InternalError("build connection snapshot failed", err)
+		}
 		if err := validateExpectedRouteTargetsSnapshot(snapshot, req.ExpectedSnapshotEpoch, req.ExpectedSnapshotSeq); err != nil {
 			return connectivity.ConnectionSnapshot{}, err
 		}
@@ -150,7 +163,13 @@ func (h *Handler) routeTargetsSnapshotForRequest(agent models.Agent, req RouteTa
 		return snapshot, nil
 	}
 
-	current := h.Connections.Build(agent)
+	current, err := h.Connections.BuildContext(c.RequestContext(), agent)
+	if err != nil {
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return connectivity.ConnectionSnapshot{}, apiErr
+		}
+		return connectivity.ConnectionSnapshot{}, api.InternalError("build connection snapshot failed", err)
+	}
 	if current.SnapshotEpoch != cursor.SnapshotEpoch {
 		return connectivity.ConnectionSnapshot{}, routeTargetsCursorAPIError(http.StatusConflict, "route_targets_cursor_epoch_changed", "the connection snapshot epoch changed")
 	}

@@ -6,10 +6,14 @@ import (
 
 // Application 是整个应用的顶层容器接口
 // 统一管理 Master 和 Agent 侧的所有组件，通过 Get/Set 方法实现依赖注入
-// 并发安全策略：仅在初始化阶段 Set，运行时只 Get，无需加锁
+// 除 LogDB 支持后台 connector 原子替换外，其余依赖仅在初始化阶段 Set。
 type Application interface {
-	GetDB() *gorm.DB
-	SetDB(*gorm.DB)
+	GetCoreDB() *gorm.DB
+	SetCoreDB(*gorm.DB)
+	GetLogDB() *gorm.DB
+	SetLogDB(*gorm.DB)
+	GetDatabaseLayoutMode() DatabaseLayoutMode
+	SetDatabaseLayoutMode(DatabaseLayoutMode)
 	GetMasterServer() MasterServer
 	SetMasterServer(MasterServer)
 	GetHub() Hub

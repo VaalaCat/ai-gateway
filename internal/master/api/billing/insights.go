@@ -1,16 +1,17 @@
 package billing
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"gorm.io/gorm"
 )
-
-// billing insights 默认 top-N model;超出折叠为 "others"。
-const insightsTopModels = 5
 
 // parseInsightsRange 是 billing/insights 端点专用 query 缺省值解析:
 // end<=0 → now; start<=0 → end-86400; gran!="hour" → GranDay。
@@ -45,6 +46,10 @@ func toDaoScope(s *middleware.RequestScope) dao.Scope {
 //
 // 窗口超过 ObsRange.Validate() 上限时返回 400 RangeOutOfBounds。
 func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsResponse, error) {
+	topN, err := api.ParseTopN(req.TopN)
+	if err != nil {
+		return InsightsResponse{}, err
+	}
 	r := parseInsightsRange(req.Start, req.End, req.Gran)
 	if err := r.Validate(); err != nil {
 		return InsightsResponse{}, api.ErrorWithCode(400, "RangeOutOfBounds",
@@ -54,16 +59,60 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 
 	scope := middleware.GetScope(c.Context)
 	s := toDaoScope(scope)
-	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
-
-	filter := dao.ObsFilter{ModelName: req.Model, UserID: req.UserID}
+	filter := dao.ObsFilter{ModelName: req.Model, UserID: req.UserID, TokenID: req.TokenID}
 	if !s.IsAdmin {
 		filter.UserID = 0
 	}
+	if err := validateInsightsToken(c, s, req.TokenID); err != nil {
+		return InsightsResponse{}, err
+	}
 	// 缓存命中卡不跟模型(spec §4):只吃 user。
 	cacheFilter := dao.ObsFilter{UserID: filter.UserID}
+	load := func(ctx context.Context) (any, error) {
+		return h.loadInsights(ctx, c, r, s, topN, filter, cacheFilter)
+	}
+	if h.Cache == nil {
+		value, err := load(c.RequestContext())
+		return value.(InsightsResponse), err
+	}
+	scopeName := "user"
+	if s.IsAdmin {
+		scopeName = "admin"
+	}
+	value, err := h.Cache.Get(c.RequestContext(), dao.QueryKey{
+		Name: "billing.insights", From: r.Start, To: r.End, Gran: string(r.Gran),
+		Scope: scopeName, UserID: filter.EffectiveUserID(s), Model: filter.ModelName,
+		TokenID: filter.TokenID, Dim: req.Stack, TopN: topN,
+	}, load)
+	if err != nil {
+		return InsightsResponse{}, err
+	}
+	response, ok := value.(InsightsResponse)
+	if !ok {
+		return InsightsResponse{}, fmt.Errorf("billing insights cache returned %T", value)
+	}
+	return response, nil
+}
 
-	stacked, err := q.Stats().CostTrendStackedByModel(r, s, insightsTopModels, filter)
+func validateInsightsToken(c *app.Context, scope dao.Scope, tokenID uint) error {
+	if tokenID == 0 {
+		return nil
+	}
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
+	token, err := q.Token().GetByID(tokenID)
+	if errors.Is(err, gorm.ErrRecordNotFound) || err == nil && !scope.IsAdmin && token.UserID != scope.UserID {
+		return api.NotFoundError("token not found")
+	}
+	if err != nil {
+		return api.InternalError("get token failed", err)
+	}
+	return nil
+}
+
+func (h *Handler) loadInsights(ctx context.Context, c *app.Context, r dao.ObsRange, s dao.Scope, topN int, filter, cacheFilter dao.ObsFilter) (InsightsResponse, error) {
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, ctx))
+
+	stacked, err := q.Stats().CostTrendStackedByModel(r, s, topN, filter)
 	if err != nil {
 		return InsightsResponse{}, api.InternalError("billing insights cost trend", err)
 	}

@@ -90,6 +90,83 @@ func TestRelayAuthorizesModelBeforeRequestScript(t *testing.T) {
 	assertTrackingBodiesClosed(t, bodyStore)
 }
 
+func TestApplyRequestScriptsMatchesAuthenticatedIdentityScope(t *testing.T) {
+	tests := []struct {
+		name      string
+		scope     models.ScriptScope
+		user      *app.UserInfo
+		wantScope string
+	}{
+		{
+			name:      "user id matches",
+			scope:     models.ScriptScope{UserIDs: []uint{41}},
+			user:      &app.UserInfo{UserID: 41},
+			wantScope: "user",
+		},
+		{
+			name:      "group id matches",
+			scope:     models.ScriptScope{GroupIDs: []uint{52}},
+			user:      &app.UserInfo{GroupID: 52},
+			wantScope: "group",
+		},
+		{
+			name:  "admin channel never matches before route selection",
+			scope: models.ScriptScope{ChannelIDs: []uint{7}},
+			user:  &app.UserInfo{UserID: 41, GroupID: 52},
+		},
+		{
+			name:  "private channel never matches before route selection",
+			scope: models.ScriptScope{PrivateChannelIDs: []uint{7}},
+			user:  &app.UserInfo{UserID: 41, GroupID: 52},
+		},
+		{
+			name:  "nil identity does not match numeric user scope",
+			scope: models.ScriptScope{UserIDs: []uint{41}, GroupIDs: []uint{52}},
+			user:  nil,
+		},
+		{
+			name:  "zero identity does not match numeric user scope",
+			scope: models.ScriptScope{UserIDs: []uint{41}, GroupIDs: []uint{52}},
+			user:  &app.UserInfo{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := cache.NewStore(nil, config.AgentCacheConfig{})
+			store.LoadScripts([]models.AdminScript{{
+				ID:      1,
+				Name:    "identity-scope",
+				Enabled: true,
+				Code:    `function onRequest(ctx) { ctx.body.scope = "` + tt.wantScope + `" }`,
+				Scope:   datatypes.NewJSONType(tt.scope),
+			}})
+			h := newResourceTestHandler(store, &handlerTrackingBodyStore{})
+			old := &handlerTrackingReplayBody{data: []byte(`{"model":"gpt-4o"}`)}
+			rctx, _ := scriptTestRelayContext(t, h, old)
+			rctx.Input.Model = "gpt-4o"
+			rctx.Input.UserInfo = tt.user
+
+			rejected, err := h.applyRequestScripts(rctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rejected {
+				t.Fatal("identity scope script unexpectedly rejected request")
+			}
+			if tt.wantScope == "" {
+				if string(rctx.Input.Body) != `{"model":"gpt-4o"}` {
+					t.Fatalf("body = %s, want scope miss to keep original body", rctx.Input.Body)
+				}
+				return
+			}
+			if !bytes.Contains(rctx.Input.Body, []byte(`"scope":"`+tt.wantScope+`"`)) {
+				t.Fatalf("body = %s, want identity scope %q to rewrite it", rctx.Input.Body, tt.wantScope)
+			}
+		})
+	}
+}
+
 func TestRelayMapsTypedBodyTooLargeToHTTP413(t *testing.T) {
 	bodyStore := &handlerTrackingBodyStore{captureErr: typedBodyTestError("body_too_large")}
 	h := newResourceTestHandler(cache.NewStore(nil, config.AgentCacheConfig{}), bodyStore)

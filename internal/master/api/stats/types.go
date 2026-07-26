@@ -1,11 +1,26 @@
 package stats
 
 import (
+	"context"
+
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
 type Handler struct {
-	ConnectedCount func() int
+	ConnectedCount      func() int
+	Cache               *dao.StatsCache
+	LogDatabaseReady    func() bool
+	DashboardDataFinder func(app.Application, context.Context) DashboardDataFinder
+}
+
+type DashboardDataFinder interface {
+	CoreDashboardKpis(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiBundle, error)
+	CoreDashboardTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error)
+	DashboardSuccessRate(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiMetric, error)
+	HourlyTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error)
+	Leaderboard(string, string, int, dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.LeaderRow, error)
+	SpeedCompare(string, dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.SpeedRow, error)
 }
 
 type OverviewResponse struct {
@@ -44,20 +59,50 @@ type DashboardRequest struct {
 	UserID uint   `form:"user_id"`
 }
 
-// DashboardResponse 是 /v1/stats/dashboard 的统一返回。
-// admin scope 返回全部字段；user scope 仅 Kpis + Trend，其余 omitempty。
+// DashboardResponse keeps core billing facts concrete and groups every
+// log-backed chart under the nullable LogMetrics section.
 type DashboardResponse struct {
-	Kpis              dao.KpiBundle      `json:"kpis"`
-	Trend             TrendBlock         `json:"trend"`
-	ModelDistribution []dao.Bucket       `json:"model_distribution,omitempty"`
-	Leaderboard       *LeaderboardBlock  `json:"leaderboard,omitempty"`
-	SpeedCompare      *SpeedCompareBlock `json:"speed_compare,omitempty"`
+	Kpis              dao.KpiBundle `json:"kpis"`
+	Trend             TrendBlock    `json:"trend"`
+	LogMetrics        *LogMetrics   `json:"log_metrics"`
+	DataStatus        DataStatus    `json:"data_status"`
 }
 
-// TrendBlock 包含 HourlyTrend 输出 + 当前可选 metric 列表（前端 metric 切换用）。
+type DataStatus struct {
+	LogDB string `json:"log_db"`
+}
+
+type LogMetrics struct {
+	Trend        PerformanceTrendBlock `json:"trend"`
+	Leaderboard  *LeaderboardBlock     `json:"leaderboard,omitempty"`
+	SpeedCompare *SpeedCompareBlock    `json:"speed_compare,omitempty"`
+}
+
+type PerformanceTrendBlock struct {
+	Buckets []PerformanceBucket `json:"buckets"`
+	Metrics []string            `json:"metrics"`
+}
+
+type PerformanceBucket struct {
+	Ts           int64   `json:"ts"`
+	Label        string  `json:"label"`
+	TTFTMs       int64   `json:"ttft_ms"`
+	TPS          float64 `json:"tps"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
+}
+
+// TrendBlock contains only core billing metrics.
 type TrendBlock struct {
-	Buckets []dao.TimeBucket `json:"buckets"`
-	Metrics []string         `json:"metrics"`
+	Buckets []BillingTrendBucket `json:"buckets"`
+	Metrics []string             `json:"metrics"`
+}
+
+type BillingTrendBucket struct {
+	Ts       int64  `json:"ts"`
+	Label    string `json:"label"`
+	Cost     int64  `json:"cost"`
+	Requests int64  `json:"requests"`
+	Tokens   int64  `json:"tokens"`
 }
 
 // LeaderboardBlock 聚合三个维度 (user/model/channel) 的 cost top10 + 可选 metric 列表。

@@ -10,8 +10,8 @@ import (
 type ingressMetaContextKey struct{}
 
 const (
-	IngressKindDirect = "direct"
-	IngressKindTunnel = "tunnel"
+	IngressKindDirectTunnel = "direct_tunnel"
+	IngressKindRelayTunnel  = "relay_tunnel"
 )
 
 type IngressMeta struct {

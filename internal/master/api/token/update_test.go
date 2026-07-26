@@ -29,7 +29,7 @@ func setupTokenUpdateTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	}
 
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	application.SetEventBus(eventbus.NewMemoryBus())
 
 	w := httptest.NewRecorder()
@@ -74,6 +74,78 @@ func TestUpdate_ClearAllowedChannelIDs_Success(t *testing.T) {
 	}
 	if len(reloaded.AllowedChannelIDs) != 0 {
 		t.Fatalf("expected empty AllowedChannelIDs, got %v", reloaded.AllowedChannelIDs)
+	}
+}
+
+func TestTokenUpdate_TraceMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    models.TokenTraceMode
+		wantErr bool
+	}{
+		{name: "full", value: "full", want: models.TokenTraceModeFull},
+		{name: "headers", value: "headers", want: models.TokenTraceModeHeaders},
+		{name: "empty defaults full", value: "", want: models.TokenTraceModeFull},
+		{name: "unknown", value: "body", wantErr: true},
+		{name: "wrong type", value: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ctx, db := setupTokenUpdateTest(t)
+			tok := seedToken(t, db, nil)
+			req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+			req.SetBodyMap(map[string]any{"trace_mode": tc.value})
+			got, err := h.Update(ctx, req)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				apiErr, ok := err.(*api.APIError)
+				if !ok || apiErr.Status != 400 {
+					t.Fatalf("error=%#v want status 400", err)
+				}
+				return
+			}
+			if got.TraceMode != tc.want {
+				t.Fatalf("TraceMode=%q want=%q", got.TraceMode, tc.want)
+			}
+		})
+	}
+}
+
+func TestTokenUpdate_OmittedTraceModePreservesHeaders(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	tok := seedToken(t, db, nil)
+	if err := db.Model(&tok).Update("trace_mode", models.TokenTraceModeHeaders).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"name": "renamed"})
+	got, err := h.Update(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TraceMode != models.TokenTraceModeHeaders {
+		t.Fatalf("TraceMode=%q want=%q", got.TraceMode, models.TokenTraceModeHeaders)
+	}
+}
+
+func TestTokenUpdate_UserTraceModeOnEnabledTokenZeroBalance(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	seedUserQuota(t, db, 1, 0)
+	tok := seedTokenStatus(t, db, 1, 1)
+	setScope(ctx, false, 1)
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"status": float64(1), "trace_mode": "headers"})
+	got, err := h.Update(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TraceMode != models.TokenTraceModeHeaders {
+		t.Fatalf("TraceMode=%q want=%q", got.TraceMode, models.TokenTraceModeHeaders)
 	}
 }
 

@@ -4,6 +4,12 @@ import type {
   SystemStatsResponse,
   CleanupPreviewResponse,
   CleanupResponse,
+  RetryLogQueueResponse,
+  ClearLogBacklogResponse,
+  RetryHistoryBackfillResponse,
+  SkipHistoryBackfillResponse,
+  CompleteHistoryBackfillResponse,
+  DeleteLegacyFileResponse,
 } from "@/lib/types";
 
 export interface SettingsResponse {
@@ -12,7 +18,6 @@ export interface SettingsResponse {
 
 export type AgentRelaySettingsPatch = Partial<{
   "agent.relay_default_uri": string;
-  "agent.relay_fallback_enabled": "0" | "1";
   "agent.connectivity_probe_success_ttl_seconds": string;
   "agent.connectivity_probe_failure_retry_min_seconds": string;
   "agent.connectivity_probe_failure_retry_max_seconds": string;
@@ -22,6 +27,67 @@ export function useSystemStats() {
   return useQuery({
     queryKey: ["system-stats"],
     queryFn: () => api.get<SystemStatsResponse>("/admin/system/stats"),
+  });
+}
+
+export function useRetryLogQueue() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post<RetryLogQueueResponse>("/admin/system/log-queue/retry", {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["system-stats"] }),
+  });
+}
+
+export function useClearLogBacklog() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ confirm }: { confirm: true }) =>
+      api.delete<ClearLogBacklogResponse>(`/admin/system/log-queue/backlog?confirm=${confirm}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["system-stats"] }),
+  });
+}
+
+export function useRetryHistoryBackfill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.post<RetryHistoryBackfillResponse>("/admin/system/history-backfill/retry", {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["system-stats"] }),
+  });
+}
+
+export function useSkipHistoryBackfill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ confirm }: { confirm: true }) =>
+      api.post<SkipHistoryBackfillResponse>(`/admin/system/history-backfill/skip?confirm=${confirm}`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["system-stats"] }),
+  });
+}
+
+export function useCompleteHistoryBackfill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { confirm: true }) =>
+      api.post<CompleteHistoryBackfillResponse>("/admin/system/history-backfill/complete", body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["system-stats"] }),
+  });
+}
+
+export function useDeleteLegacySource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ confirmation }: { confirmation: "DELETE" }) =>
+      api.delete<DeleteLegacyFileResponse>(`/admin/system/history-backfill/source?confirmation=${confirmation}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["system-stats"] }),
+  });
+}
+
+export function useDeleteLegacyArtifact() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ confirmation }: { confirmation: "DELETE" }) =>
+      api.delete<DeleteLegacyFileResponse>(`/admin/system/history-backfill/legacy-artifact?confirmation=${confirmation}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["system-stats"] }),
   });
 }
 
@@ -43,7 +109,7 @@ export function useCleanupPreview(
 export function useCleanup() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { target: string; retain_days: number }) =>
+    mutationFn: (body: { target: string; retain_days: number; cutoff_unix: number }) =>
       api.post<CleanupResponse>("/admin/system/cleanup", body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["system-stats"] });

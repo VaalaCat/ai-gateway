@@ -13,7 +13,7 @@ func TestRelayResultsApplyGenerationBoundReachableResult(t *testing.T) {
 	service, relay := relayResultServiceForTest()
 	target := ProbeTarget{AgentID: "target", Name: "Target"}
 	service.MarkRelayProbeChecking("source", 7, target, "relay-fp", 31, 11, 22)
-	service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{
+	service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", State: protocol.RelayProbeReachable,
 		Stage: protocol.RelayProbeStageResponse, CheckedAt: 100, LatencyMS: 8,
 	})
@@ -35,6 +35,46 @@ func TestRelayResultsApplyGenerationBoundReachableResult(t *testing.T) {
 	require.Equal(t, protocol.RelayProbeReachable, unchanged.Targets["target"].State)
 }
 
+func TestRelayResultsNewestProbeOwnsTargetAcrossCompletionOrder(t *testing.T) {
+	for _, order := range []struct {
+		name        string
+		generations []uint64
+	}{
+		{name: "older completes first", generations: []uint64{1, 2}},
+		{name: "newer completes first", generations: []uint64{2, 1}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			service, _ := relayResultServiceForTest()
+			target := ProbeTarget{AgentID: "target", Name: "Target"}
+			service.MarkRelayProbeChecking("source", 7, target, "relay-fp", 2, 11, 22)
+			service.MarkRelayProbeChecking("source", 7, target, "relay-fp", 1, 11, 22)
+			checking := service.relayPathSnapshot("source").Targets["target"]
+			require.Equal(t, uint64(2), checking.ProbeGeneration)
+			require.True(t, checking.Checking)
+
+			for _, generation := range order.generations {
+				result := protocol.RelayProbeResult{
+					Policy: protocol.ProbeRespectBusinessPolicy, TargetAgentID: "target",
+					State: protocol.RelayProbeUnreachable, Stage: protocol.RelayProbeStageResponse,
+					ReasonCode: consts.RouteErrorRelayResponseInterrupted, CheckedAt: 100,
+				}
+				if generation == 2 {
+					result.State = protocol.RelayProbeReachable
+					result.ReasonCode = ""
+					result.CheckedAt = 200
+				}
+				service.ApplyRelayProbeResult("source", 7, target, "relay-fp", generation, 11, 22, result)
+			}
+
+			stored := service.relayPathSnapshot("source").Targets["target"]
+			require.Equal(t, uint64(2), stored.ProbeGeneration)
+			require.Equal(t, protocol.RelayProbeReachable, stored.State)
+			require.Equal(t, int64(200), stored.CheckedAt)
+			require.False(t, stored.Checking)
+		})
+	}
+}
+
 func TestRelayResultsRejectLateOrReplacedGenerations(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -50,7 +90,7 @@ func TestRelayResultsRejectLateOrReplacedGenerations(t *testing.T) {
 			target := ProbeTarget{AgentID: "target", Name: "Target"}
 			service.MarkRelayProbeChecking("source", 7, target, "relay-fp", 31, 11, 22)
 			test.mutate(relay)
-			service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{
+			service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 				TargetAgentID: "target", State: protocol.RelayProbeReachable,
 				Stage: protocol.RelayProbeStageResponse, CheckedAt: 100,
 			})
@@ -67,7 +107,7 @@ func TestRelayResultsNormalizeInvalidPayloadAndForgetSourceSession(t *testing.T)
 	service, _ := relayResultServiceForTest()
 	target := ProbeTarget{AgentID: "target"}
 	service.MarkRelayProbeChecking("source", 7, target, "relay-fp", 31, 11, 22)
-	service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{
+	service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", State: "invented", Stage: "invented", ReasonCode: "private_error", CheckedAt: 100,
 	})
 
@@ -87,10 +127,10 @@ func TestRelayResultsIgnoreZeroAndMismatchedProbeIdentity(t *testing.T) {
 	target := ProbeTarget{AgentID: "target"}
 	service.MarkRelayProbeChecking("source", 7, target, "relay-fp", 31, 11, 22)
 
-	service.ApplyRelayProbeResult("source", 7, target, "other-fp", 31, 11, 22, protocol.RelayProbeResult{
+	service.ApplyRelayProbeResult("source", 7, target, "other-fp", 31, 11, 22, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", State: protocol.RelayProbeReachable, CheckedAt: 100,
 	})
-	service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 30, 11, 22, protocol.RelayProbeResult{
+	service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 30, 11, 22, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", State: protocol.RelayProbeReachable, CheckedAt: 100,
 	})
 	service.MarkRelayProbeChecking("source", 7, ProbeTarget{}, "relay-fp", 0, 0, 0)
@@ -107,7 +147,7 @@ func TestRelayResultsRejectMismatchedTargetIdentity(t *testing.T) {
 			service, _ := relayResultServiceForTest()
 			target := ProbeTarget{AgentID: "target"}
 			service.MarkRelayProbeChecking("source", 7, target, "relay-fp", 31, 11, 22)
-			service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{
+			service.ApplyRelayProbeResult("source", 7, target, "relay-fp", 31, 11, 22, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 				TargetAgentID: resultTargetID, State: protocol.RelayProbeReachable,
 				Stage: protocol.RelayProbeStageResponse, CheckedAt: 100,
 			})

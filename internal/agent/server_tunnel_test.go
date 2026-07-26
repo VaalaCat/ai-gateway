@@ -123,8 +123,11 @@ func TestTunnelServerClassifiesOldMasterUnsupported(t *testing.T) {
 	t.Parallel()
 	unsupported := agentauthcache.BootstrapSnapshot{MasterInstanceID: "master-old", SigningKeys: []pkgauth.PublicKey{{KeyID: "k"}}}
 	require.False(t, tunnelBootstrapSupported(unsupported))
+	legacy := unsupported
+	legacy.Capabilities = []string{strings.Join([]string{"agent", "tunnel", "v1"}, "_")}
+	require.False(t, tunnelBootstrapSupported(legacy))
 	supported := unsupported
-	supported.Capabilities = []string{"future.capability", protocol.AgentCapabilityTunnelV1}
+	supported.Capabilities = []string{"future.capability", protocol.AgentCapabilityTunnelV2}
 	require.True(t, tunnelBootstrapSupported(supported))
 }
 
@@ -165,7 +168,7 @@ func TestTunnelServerOldMasterDoesNotDialUntilBootstrapGenerationChanges(t *test
 	require.Zero(t, tickets.calls.Load())
 	require.Zero(t, dialer.calls.Load())
 
-	supported := newTunnelBootstrapCache(t, []string{protocol.AgentCapabilityTunnelV1})
+	supported := newTunnelBootstrapCache(t, []string{protocol.AgentCapabilityTunnelV2})
 	server.replaceAgentAuthCache(supported)
 	server.reconcileTunnelDesired()
 	require.Eventually(t, func() bool {
@@ -181,9 +184,9 @@ func TestTunnelServerOldMasterDoesNotDialUntilBootstrapGenerationChanges(t *test
 func TestTunnelServerReportsRuntimeCapabilities(t *testing.T) {
 	t.Parallel()
 	require.ElementsMatch(t, []string{
-		protocol.AgentCapabilityTunnelV1,
+		protocol.AgentCapabilityTunnelV2,
 		protocol.AgentCapabilityForwardV1,
-		protocol.AgentCapabilityDirectIngressV1,
+		protocol.AgentCapabilityDirectTunnelV1,
 		protocol.AgentCapabilityRelayHTTPPingV1,
 		protocol.AgentCapabilityTokenRoutingV1,
 	}, agentRuntimeCapabilities())
@@ -295,12 +298,31 @@ func TestTunnelStandaloneAndEmbeddedRoutersHandleBoundAttemptsEquivalently(t *te
 	for _, mode := range []string{"standalone", "embedded"} {
 		t.Run(mode, func(t *testing.T) {
 			store := agentcache.NewStore(nil, config.AgentCacheConfig{})
-			store.LoadSettings([]models.Setting{{Key: "agent.relay_fallback_enabled", Value: "1"}})
+			store.SetAgent(&models.Agent{
+				AgentID: "target-a", Status: consts.StatusEnabled,
+				DirectInboundEnabled: true, DirectOutboundEnabled: true,
+				RelayInboundEnabled: true, RelayOutboundEnabled: true,
+			})
+			store.SetAgent(&models.Agent{
+				AgentID: "source-a", Status: consts.StatusEnabled,
+				DirectInboundEnabled: true, DirectOutboundEnabled: true,
+				RelayInboundEnabled: true, RelayOutboundEnabled: true,
+			})
 			calls := atomic.Int32{}
 			router := gin.New()
 			router.POST(attemptwire.EndpointPath, func(c *gin.Context) {
 				calls.Add(1)
+				c.Header(attemptwire.HeaderMode, attemptwire.ModeResponse)
 				c.JSON(http.StatusOK, gin.H{"pipeline": "committed"})
+				resultWriter, ok := attemptwire.AttemptResultWriterFromContext(c.Request.Context())
+				require.True(t, ok)
+				require.NoError(t, resultWriter.WriteAttemptResult(attemptwire.AttemptProxyResult{
+					Kind: attemptwire.ResultSucceeded, PromptTokens: 12, CompletionTokens: 7,
+					ProviderResultKnown: true, ResponseStarted: true,
+					Trace: &attemptwire.AttemptTraceWire{
+						InboundBody: `{"model":"gpt-4o"}`, ResponseBody: `{"pipeline":"committed"}`,
+					},
+				}))
 			})
 			server := &Server{
 				Creds: &enrollment.Credentials{AgentID: "target-a", Secret: "secret"}, Store: store, Logger: zap.NewNop(),
@@ -318,7 +340,9 @@ func TestTunnelStandaloneAndEmbeddedRoutersHandleBoundAttemptsEquivalently(t *te
 				MaxMetadataBytes: 64 * 1024, MaxDataBytes: 64 * 1024, InitialStreamWindow: 64 * 1024,
 				MaxQueuedSessionBytes: 1024 * 1024, MaxConcurrentStreams: 1,
 			}
-			session := agenttunnel.NewSession(conn, 1, limits, agenttunnel.SessionOptions{TargetHandler: targetHandler})
+			session := agenttunnel.NewSession(conn, 1, limits, agenttunnel.SessionOptions{
+				Direction: agenttunnel.SessionDirectionRelay, TargetHandler: targetHandler,
+			})
 			runDone := make(chan error, 1)
 			go func() { runDone <- session.Run(t.Context()) }()
 			t.Cleanup(func() {
@@ -354,8 +378,11 @@ func TestTunnelStandaloneAndEmbeddedRoutersHandleBoundAttemptsEquivalently(t *te
 
 			status := 0
 			var response strings.Builder
+			var responseFrames []wire.Type
+			var resultPayload []byte
 			for {
 				frame := readTunnelServerFrame(t, peer, limits)
+				responseFrames = append(responseFrames, frame.Type)
 				switch frame.Type {
 				case wire.FrameHeaders:
 					var headers wire.Headers
@@ -363,9 +390,26 @@ func TestTunnelStandaloneAndEmbeddedRoutersHandleBoundAttemptsEquivalently(t *te
 					status = headers.StatusCode
 				case wire.FrameResponseData:
 					response.Write(frame.Payload)
+				case wire.FrameAttemptResult:
+					resultPayload = append([]byte(nil), frame.Payload...)
+					result, err := attemptwire.DecodeResultJSON(frame.Payload)
+					require.NoError(t, err)
+					require.Equal(t, attemptwire.ResultSucceeded, result.Kind)
+					require.Equal(t, 12, result.PromptTokens)
+					require.Equal(t, 7, result.CompletionTokens)
+					require.Equal(t, `{"model":"gpt-4o"}`, result.Trace.InboundBody)
+					require.Equal(t, `{"pipeline":"committed"}`, result.Trace.ResponseBody)
 				case wire.FrameEnd:
 					require.Equal(t, http.StatusOK, status)
 					require.JSONEq(t, `{"pipeline":"committed"}`, response.String())
+					require.Equal(t, []wire.Type{
+						wire.FrameHeaders, wire.FrameResponseData, wire.FrameAttemptResult, wire.FrameEnd,
+					}, responseFrames)
+					require.JSONEq(t, `{
+						"kind":"succeeded","prompt_tokens":12,"completion_tokens":7,
+						"provider_result_known":true,"response_started":true,
+						"trace":{"inbound_body":"{\"model\":\"gpt-4o\"}","response_body":"{\"pipeline\":\"committed\"}"}
+					}`, string(resultPayload))
 					require.EqualValues(t, 1, calls.Load())
 					return
 				default:
@@ -404,7 +448,6 @@ func TestTunnelUnboundBusinessOpenNeverReachesAgentRouter(t *testing.T) {
 	})
 	server.Store.RebuildModelIndex()
 	server.Store.LoadSettings([]models.Setting{
-		{Key: "agent.relay_fallback_enabled", Value: "1"},
 		{Key: "rate_limiter_enabled", Value: "1"},
 	})
 	server.Store.LimiterIndex.LoadLimiters([]models.RequestLimiter{{
@@ -430,7 +473,9 @@ func TestTunnelUnboundBusinessOpenNeverReachesAgentRouter(t *testing.T) {
 		MaxMetadataBytes: 64 * 1024, MaxDataBytes: 64 * 1024, InitialStreamWindow: 256 * 1024,
 		MaxQueuedSessionBytes: 1024 * 1024, MaxConcurrentStreams: 4,
 	}
-	session := agenttunnel.NewSession(conn, 1, limits, agenttunnel.SessionOptions{TargetHandler: targetHandler})
+	session := agenttunnel.NewSession(conn, 1, limits, agenttunnel.SessionOptions{
+		Direction: agenttunnel.SessionDirectionRelay, TargetHandler: targetHandler,
+	})
 	runDone := make(chan struct{})
 	go func() { defer close(runDone); _ = session.Run(t.Context()) }()
 	t.Cleanup(func() {
@@ -512,16 +557,18 @@ func TestMountRoutesAttemptProxyAuthenticatesOriginalAuthorizationAndExecutesOnl
 		RequestPath: "/v1/chat/completions",
 	}
 	identity := agentproxy.IngressMeta{
-		Kind: agentproxy.IngressKindTunnel, SourceAgentID: "source-a", RouteID: 0,
+		Kind: agentproxy.IngressKindRelayTunnel, SourceAgentID: "source-a", RouteID: 0,
 		StreamID: wire.StreamID{92}, Hop: 1, Attempt: &meta,
 	}
 	body := `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`
 	request := httptest.NewRequest(http.MethodPost, attemptwire.EndpointPath, strings.NewReader(body))
 	request.Header.Set(consts.HeaderAuthorization, "Bearer attempt-token")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set(attemptwire.HeaderMeta, `{"attempt":"forged"}`)
 	request.Header.Set(consts.HeaderXAgentForwardTicket, "forged-ticket")
-	request = request.WithContext(agentproxy.WithIngressMeta(request.Context(), identity))
+	resultWriter := &serverTunnelAttemptResultWriter{}
+	requestCtx := agentproxy.WithIngressMeta(request.Context(), identity)
+	requestCtx = attemptwire.WithAttemptResultWriter(requestCtx, resultWriter)
+	request = request.WithContext(requestCtx)
 	tokenHitsBefore := server.Store.CacheSnapshot()["token"].Hits
 	response := httptest.NewRecorder()
 
@@ -529,15 +576,25 @@ func TestMountRoutesAttemptProxyAuthenticatesOriginalAuthorizationAndExecutesOnl
 
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Contains(t, response.Body.String(), `"content":"bound-ok"`)
+	require.NotNil(t, resultWriter.result)
+	require.Equal(t, attemptwire.ResultSucceeded, resultWriter.result.Kind)
 	require.EqualValues(t, 1, providerCalls.Load())
 	require.EqualValues(t, 1, server.Store.CacheSnapshot()["token"].Hits-tokenHitsBefore)
-	require.Empty(t, request.Header.Get(attemptwire.HeaderMeta))
 	require.Empty(t, request.Header.Get(consts.HeaderXAgentForwardTicket))
 	select {
 	case entry := <-usage:
 		t.Fatalf("target attempt proxy published entry-agent usage: %#v", entry)
 	default:
 	}
+}
+
+type serverTunnelAttemptResultWriter struct {
+	result *attemptwire.AttemptProxyResult
+}
+
+func (w *serverTunnelAttemptResultWriter) WriteAttemptResult(result attemptwire.AttemptProxyResult) error {
+	w.result = &result
+	return nil
 }
 
 func tunnelServerWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn) {

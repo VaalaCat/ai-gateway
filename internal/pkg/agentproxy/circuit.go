@@ -15,6 +15,7 @@ const (
 type directCircuitKey struct {
 	TargetAgentID      string
 	AddressFingerprint string
+	TransportIdentity  DirectTransportIdentity
 }
 
 type directCircuitOptions struct {

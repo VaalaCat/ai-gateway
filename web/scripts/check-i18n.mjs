@@ -15,6 +15,48 @@ export function flattenKeys(obj, prefix = "") {
   return result;
 }
 
+export function checkRequiredRuntimeKeys(messages, keys) {
+  const missing = [];
+  for (const key of keys) {
+    let value = messages;
+    for (const segment of key.split(".")) value = value?.[segment];
+    if (typeof value !== "string" || value.trim().length === 0) missing.push(key);
+  }
+  return missing;
+}
+
+const TASK_15_RUNTIME_KEYS = [
+  "charts.trend.logUnavailable",
+  "system.logStorage.title",
+  "system.logStorage.description",
+  "system.logStorage.coreDatabase",
+  "system.logStorage.logDatabase",
+  "system.logStorage.available",
+  "system.logStorage.unavailable",
+  "system.logStorage.path",
+  "system.logStorage.size",
+  "system.logStorage.schemaVersion",
+  "system.logStorage.openConnections",
+  "system.logStorage.queue",
+  "system.logStorage.pending",
+  "system.logStorage.retry",
+  "system.logStorage.inflight",
+  "system.logStorage.bytes",
+  "system.logStorage.oldest",
+  "system.logStorage.dropped",
+  "system.logStorage.lastError",
+  "system.logStorage.retryQueue",
+  "system.logStorage.retryQueueSuccess",
+  "system.logStorage.retryQueueError",
+  "system.logStorage.clearBacklog",
+  "system.logStorage.confirmClearTitle",
+  "system.logStorage.confirmClearDescription",
+  "system.logStorage.confirmClearBacklog",
+  "system.logStorage.clearBacklogSuccess",
+  "system.logStorage.clearBacklogError",
+  "system.logStorage.cancel",
+];
+
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 
@@ -181,6 +223,7 @@ export function formatReport(violations) {
   const aligned = violations.filter((v) => v.type === "missing");
   const placeholder = violations.filter((v) => v.reason);
   const missingRef = violations.filter((v) => v.type === "missing-ref");
+  const missingRuntime = violations.filter((v) => v.type === "missing-runtime");
 
   if (aligned.length > 0) {
     lines.push(`[1] Keys not aligned between zh.json / en.json (${aligned.length}):`);
@@ -203,6 +246,11 @@ export function formatReport(violations) {
     }
     lines.push("");
   }
+  if (missingRuntime.length > 0) {
+    lines.push(`[4] Required runtime keys missing or empty (${missingRuntime.length}):`);
+    for (const v of missingRuntime) lines.push(`  - ${v.side}.json: ${v.key}`);
+    lines.push("");
+  }
   lines.push(`${violations.length} violations.`);
   return lines.join("\n");
 }
@@ -218,6 +266,8 @@ export async function main() {
     ...checkKeysAligned(zhKeys, enKeys),
     ...checkPlaceholderValues(zhObj, enObj),
     ...checkCodeReferencesExist(codeRefs, zhKeys),
+    ...checkRequiredRuntimeKeys(zhObj, TASK_15_RUNTIME_KEYS).map((key) => ({ type: "missing-runtime", side: "zh", key })),
+    ...checkRequiredRuntimeKeys(enObj, TASK_15_RUNTIME_KEYS).map((key) => ({ type: "missing-runtime", side: "en", key })),
   ];
 
   if (violations.length === 0) {

@@ -45,7 +45,7 @@ function Inner() {
 
   return (
     <Tabs value={tab} onValueChange={setTab} className="space-y-6">
-      <TabsList>
+      <TabsList className="max-w-full justify-start overflow-x-auto">
         <TabsTrigger value="overview">{t("tab.overview")}</TabsTrigger>
         <TabsTrigger value="inflight">{t("tab.inflight")}</TabsTrigger>
         <TabsTrigger value="limiter">{t("tab.limiter")}</TabsTrigger>

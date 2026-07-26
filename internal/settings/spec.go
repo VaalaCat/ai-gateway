@@ -87,7 +87,8 @@ type AgentSettings struct {
 	ImageInlineHostAllowlist   string `setting:"image_inline_host_allowlist,"`                   // host 白名单(逗号/换行分隔;空=不限)
 
 	RelayDefaultURI             string `setting:"agent.relay_default_uri,"`
-	RelayFallbackEnabled        int    `setting:"agent.relay_fallback_enabled,0,0,1"`
+	DirectMaxSessions           int    `setting:"agent.direct_max_sessions,256,1,4096"`
+	DirectSessionIdleTimeoutSec int    `setting:"agent.direct_session_idle_timeout_seconds,300,1,3600"`
 	BodyMemoryThresholdBytes    int64  `setting:"agent.body_memory_threshold_bytes,1048576,65536,16777216"`
 	BodyHardLimitBytes          int64  `setting:"agent.body_hard_limit_bytes,67108864,1048576,268435456"`
 	TunnelMaxMetadataBytes      int64  `setting:"agent.tunnel_max_metadata_bytes,65536,4096,262144"`

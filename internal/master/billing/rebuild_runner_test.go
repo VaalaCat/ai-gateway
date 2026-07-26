@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -141,6 +142,82 @@ func TestRebuildRunner_RunSucceeds(t *testing.T) {
 	require.False(t, calls[1].ResetDaily)
 }
 
+func TestRebuildRunnerDefaultReplaysCoreBillingFromBillingLogs(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	require.NoError(t, db.Migrator().DropTable(&models.UsageLog{}))
+	require.NoError(t, db.Create(&models.BillingLog{
+		RequestID: "rebuild-core", UserID: 1, TokenID: 2, ChannelID: 3,
+		OwnerType: "admin", ModelName: "m", PromptTokens: 11, TotalCost: 7,
+		Status: 1, CreatedAt: 1777611600,
+	}).Error)
+	agg := NewAggregator(appProv, zap.NewNop(), AggregatorOptions{})
+	agg.SetCoreFlushContextFn(func(ctx context.Context, tokens []dao.TokenDailyRow, channels []dao.ChannelDailyRow, hourly []dao.BillingHourlyRow) error {
+		return dao.NewAdminMutation(dao.NewContext(appProv)).Billing().UpsertCoreBillingRows(ctx, tokens, channels, hourly)
+	})
+	r := NewRebuildRunner(appProv, zap.NewNop(), time.Hour)
+	r.SetCoreRebuildAdmission(agg)
+	r.Start(t.Context())
+	t.Cleanup(func() { _ = r.Stop(context.Background()) })
+
+	job, err := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-01", EndDate: "2026-05-01"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		got, ok := r.Get(job.ID)
+		return ok && got.Snapshot().Status != JobStatusRunning
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, JobStatusSucceeded, job.Snapshot().Status)
+	require.Equal(t, int64(1), job.Snapshot().ReplayedLogs)
+	require.Equal(t, int64(1), countRows(t, db, &models.TokenDailyBilling{}))
+	require.Equal(t, int64(1), countRows(t, db, &models.ChannelDailyBilling{}))
+	require.Equal(t, int64(1), countRows(t, db, &models.BillingHourlyBucket{}))
+	var token models.TokenDailyBilling
+	var channel models.ChannelDailyBilling
+	var hourly models.BillingHourlyBucket
+	require.NoError(t, db.First(&token).Error)
+	require.NoError(t, db.First(&channel).Error)
+	require.NoError(t, db.First(&hourly).Error)
+	require.Equal(t, token.PromptTokens, hourly.PromptTokens)
+	require.Equal(t, channel.PromptTokens, hourly.PromptTokens)
+	require.Equal(t, token.TotalCost, hourly.TotalCost)
+	require.Equal(t, channel.TotalCost, hourly.TotalCost)
+}
+
+func TestRebuildRunnerDailyTargetDoesNotReplaceHourlyProjection(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	require.NoError(t, db.Create(&models.BillingLog{
+		RequestID: "daily-only", UserID: 1, TokenID: 2, ChannelID: 3,
+		OwnerType: "admin", ModelName: "m", PromptTokens: 11, TotalCost: 7,
+		Status: 1, CreatedAt: 1777611600,
+	}).Error)
+	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+		Date: "2026-05-01", Hour: 5, UserID: 1, TokenID: 2, ChannelID: 3,
+		OwnerType: "admin", ModelName: "m", PromptTokens: 99,
+	}).Error)
+	agg := NewAggregator(appProv, zap.NewNop(), AggregatorOptions{})
+	agg.SetCoreFlushContextFn(func(ctx context.Context, tokens []dao.TokenDailyRow, channels []dao.ChannelDailyRow, hourly []dao.BillingHourlyRow) error {
+		return dao.NewAdminMutation(dao.NewContext(appProv)).Billing().UpsertCoreBillingRows(ctx, tokens, channels, hourly)
+	})
+	r := NewRebuildRunner(appProv, zap.NewNop(), time.Hour)
+	r.SetCoreRebuildAdmission(agg)
+	r.Start(t.Context())
+	t.Cleanup(func() { _ = r.Stop(context.Background()) })
+
+	job, err := r.Submit(dao.BillingRebuildFilter{
+		StartDate: "2026-05-01", EndDate: "2026-05-01",
+		Targets: []string{dao.RebuildTargetTokenDaily},
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return job.Snapshot().Status != JobStatusRunning }, 2*time.Second, 10*time.Millisecond)
+	require.Equal(t, JobStatusSucceeded, job.Snapshot().Status)
+	require.Equal(t, int64(24), job.Snapshot().DoneSlices)
+	require.Equal(t, int64(1), job.Snapshot().ReplayedLogs)
+	var hourly models.BillingHourlyBucket
+	require.NoError(t, db.First(&hourly).Error)
+	require.Equal(t, int64(99), hourly.PromptTokens)
+	require.Equal(t, int64(1), countRows(t, db, &models.TokenDailyBilling{}))
+	require.Equal(t, int64(1), countRows(t, db, &models.ChannelDailyBilling{}))
+}
+
 func TestRebuildRunner_RunFailsOnSliceError(t *testing.T) {
 	r := newRunnerForTest(t)
 	defer r.Stop(context.Background())
@@ -219,4 +296,77 @@ func TestRebuildRunnerCloseCancelsBlockedSliceAndRejectsRestart(t *testing.T) {
 	if got := r.ResourceCounts(); got != (app.ResourceCounts{}) {
 		t.Fatalf("Start after Close created resources: %+v", got)
 	}
+}
+
+// TestRun_InterSliceSleepCancelable 验证片间 sleep(SetSliceSleep)用
+// ctx-cancelable select 实现:sleep 中途 ctx 被取消,job 立即标记 canceled
+// 并停止调度后续分片,而不是傻等 sleep 到期或跑满全部分片。
+func TestRun_InterSliceSleepCancelable(t *testing.T) {
+	r := NewRebuildRunner(nil, zap.NewNop(), time.Hour)
+	r.SetSliceSleep(50 * time.Millisecond)
+
+	var mu sync.Mutex
+	sliceCalls := 0
+	r.SetSliceContextFn(func(ctx context.Context, d string, h int, targets []string, reset bool) (*dao.BillingRebuildResult, error) {
+		mu.Lock()
+		sliceCalls++
+		mu.Unlock()
+		return &dao.BillingRebuildResult{}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.Start(ctx)
+	defer r.Stop(context.Background())
+
+	// 2 天窗口 = 48 分片,足够大以便观测"远小于总数"就停下。
+	job, err := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-05-01", EndDate: "2026-05-02"})
+	require.NoError(t, err)
+
+	// 第一片(几乎立即完成)之后进入 50ms sleep;30ms 时取消,应在 sleep 期间被打断。
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	require.Eventually(t, func() bool {
+		got, _ := r.Get(job.ID)
+		return got.Snapshot().Status == JobStatusCanceled
+	}, 2*time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	calls := sliceCalls
+	mu.Unlock()
+	require.Less(t, calls, 48, "sleep 的 select 应被 ctx 打断,不会跑满全部分片")
+}
+
+func TestRebuildRunnerSliceSleepDoesNotHoldSubmitAdmission(t *testing.T) {
+	_, application := setupTestDB(t)
+	agg := NewAggregator(application, zap.NewNop(), AggregatorOptions{})
+	agg.SetCoreFlushContextFn(func(ctx context.Context, tokens []dao.TokenDailyRow, channels []dao.ChannelDailyRow, hourly []dao.BillingHourlyRow) error {
+		return dao.NewAdminMutation(dao.NewContext(application)).Billing().UpsertCoreBillingRows(ctx, tokens, channels, hourly)
+	})
+	r := NewRebuildRunner(application, zap.NewNop(), time.Hour)
+	r.SetCoreRebuildAdmission(agg)
+	r.SetSliceSleep(5 * time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
+	r.Start(ctx)
+	t.Cleanup(func() { _ = r.Stop(context.Background()) })
+
+	job, err := r.Submit(dao.BillingRebuildFilter{StartDate: "2026-07-23", EndDate: "2026-07-23"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return job.Snapshot().DoneSlices == 1 }, time.Second, 5*time.Millisecond)
+
+	fact := coreFact("during-slice-sleep", time.Date(2026, 7, 23, 1, 10, 0, 0, time.UTC).Unix(), 3)
+	done := make(chan struct{})
+	go func() {
+		agg.SubmitBilling(fact)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("SubmitBilling waited for RebuildRunner slice sleep")
+	}
+	cancel()
+	require.Eventually(t, func() bool { return job.Snapshot().Status == JobStatusCanceled }, time.Second, 5*time.Millisecond)
 }

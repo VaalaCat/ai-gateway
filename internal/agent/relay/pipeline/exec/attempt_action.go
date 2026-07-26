@@ -25,20 +25,21 @@ const (
 )
 
 type AttemptOutcome struct {
-	Kind                AttemptOutcomeKind
-	Result              state.AttemptResult
-	ExecutionAgentID    string
-	Path                app.RoutePath
-	Commit              tunnel.CommitState
-	ProviderResultKnown bool
-	ProviderDispatched  bool
-	PlanAdvanceAllowed  bool
-	ResponseStarted     bool
-	ReasonCode          string
-	AgentPaths          []models.AgentPathRecord
-	Trace               *trace.TraceRecord
-	Dispatches          int
-	DurationMs          int
+	Kind                  AttemptOutcomeKind
+	Result                state.AttemptResult
+	ExecutionAgentID      string
+	Path                  app.RoutePath
+	Commit                tunnel.CommitState
+	ProviderResultKnown   bool
+	ProviderDispatched    bool
+	PlanAdvanceAllowed    bool
+	ResponseStarted       bool
+	ReasonCode            string
+	AgentPaths            []models.AgentPathRecord
+	Trace                 *trace.TraceRecord
+	Dispatches            int
+	DurationMs            int
+	remoteFailureFallback bool
 }
 
 type AttemptAction string

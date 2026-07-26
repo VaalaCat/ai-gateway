@@ -10,27 +10,125 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNormalizeV1Limits(t *testing.T) {
+func TestNormalizeV2Limits(t *testing.T) {
 	valid := Limits{MaxMetadataBytes: math.MaxInt64, MaxDataBytes: math.MaxInt64,
-		InitialStreamWindow: MaxV1StreamWindowBytes, MaxQueuedSessionBytes: MaxV1SessionQueueBytes,
-		MaxConcurrentStreams: MaxV1ConcurrentStreams}
-	got, err := NormalizeV1Limits(valid)
+		InitialStreamWindow: MaxV2StreamWindowBytes, MaxQueuedSessionBytes: MaxV2SessionQueueBytes,
+		MaxConcurrentStreams: MaxV2ConcurrentStreams}
+	got, err := NormalizeV2Limits(valid)
 	require.NoError(t, err)
-	require.EqualValues(t, MaxV1PayloadBytes, got.MaxMetadataBytes)
-	require.EqualValues(t, MaxV1PayloadBytes, got.MaxDataBytes)
+	require.EqualValues(t, MaxV2PayloadBytes, got.MaxMetadataBytes)
+	require.EqualValues(t, MaxV2PayloadBytes, got.MaxDataBytes)
 
 	invalid := []Limits{
 		{},
 		{MaxMetadataBytes: -1, MaxDataBytes: 1, InitialStreamWindow: 1, MaxQueuedSessionBytes: 1, MaxConcurrentStreams: 1},
 		{MaxMetadataBytes: 1, MaxDataBytes: 0, InitialStreamWindow: 1, MaxQueuedSessionBytes: 1, MaxConcurrentStreams: 1},
-		{MaxMetadataBytes: 1, MaxDataBytes: 1, InitialStreamWindow: MaxV1StreamWindowBytes + 1, MaxQueuedSessionBytes: 1, MaxConcurrentStreams: 1},
-		{MaxMetadataBytes: 1, MaxDataBytes: 1, InitialStreamWindow: 1, MaxQueuedSessionBytes: MaxV1SessionQueueBytes + 1, MaxConcurrentStreams: 1},
-		{MaxMetadataBytes: 1, MaxDataBytes: 1, InitialStreamWindow: 1, MaxQueuedSessionBytes: 1, MaxConcurrentStreams: MaxV1ConcurrentStreams + 1},
+		{MaxMetadataBytes: 1, MaxDataBytes: 1, InitialStreamWindow: MaxV2StreamWindowBytes + 1, MaxQueuedSessionBytes: 1, MaxConcurrentStreams: 1},
+		{MaxMetadataBytes: 1, MaxDataBytes: 1, InitialStreamWindow: 1, MaxQueuedSessionBytes: MaxV2SessionQueueBytes + 1, MaxConcurrentStreams: 1},
+		{MaxMetadataBytes: 1, MaxDataBytes: 1, InitialStreamWindow: 1, MaxQueuedSessionBytes: 1, MaxConcurrentStreams: MaxV2ConcurrentStreams + 1},
 	}
 	for _, limits := range invalid {
-		_, err := NormalizeV1Limits(limits)
+		_, err := NormalizeV2Limits(limits)
 		require.ErrorIs(t, err, ErrInvalidLimits)
 	}
+}
+
+func TestSelectDirectLimitsNegotiatesEveryField(t *testing.T) {
+	source := Limits{
+		MaxMetadataBytes: 64 * 1024, MaxDataBytes: 32 * 1024,
+		InitialStreamWindow: 512 * 1024, MaxQueuedSessionBytes: 8 * 1024 * 1024,
+		MaxConcurrentStreams: 256,
+	}
+	target := Limits{
+		MaxMetadataBytes: 32 * 1024, MaxDataBytes: 64 * 1024,
+		InitialStreamWindow: 256 * 1024, MaxQueuedSessionBytes: 4 * 1024 * 1024,
+		MaxConcurrentStreams: 128,
+	}
+
+	got, err := SelectDirectLimits(source, target)
+	require.NoError(t, err)
+	require.Equal(t, Limits{
+		MaxMetadataBytes: 32 * 1024, MaxDataBytes: 32 * 1024,
+		InitialStreamWindow: 256 * 1024, MaxQueuedSessionBytes: 4 * 1024 * 1024,
+		MaxConcurrentStreams: 128,
+	}, got)
+
+	equal, err := SelectDirectLimits(source, source)
+	require.NoError(t, err)
+	require.Equal(t, source, equal)
+}
+
+func TestSelectDirectLimitsBoundsResultInBothOfferDirections(t *testing.T) {
+	large := testLimits()
+	small := large
+	small.MaxMetadataBytes = 4 * 1024
+
+	for _, offers := range []struct {
+		name           string
+		source, target Limits
+	}{
+		{name: "source smaller", source: small, target: large},
+		{name: "target smaller", source: large, target: small},
+	} {
+		t.Run(offers.name, func(t *testing.T) {
+			selected, err := SelectDirectLimits(offers.source, offers.target)
+			require.NoError(t, err)
+			limit, err := FramePayloadLimit(FrameAttemptResult, selected)
+			require.NoError(t, err)
+			require.Equal(t, small.MaxMetadataBytes, limit)
+		})
+	}
+}
+
+func TestSelectDirectLimitsNormalizesZeroAndRejectsInvalidOffers(t *testing.T) {
+	defaults, err := SelectDirectLimits(Limits{}, Limits{})
+	require.NoError(t, err)
+	_, err = NormalizeV2Limits(defaults)
+	require.NoError(t, err)
+
+	_, err = SelectDirectLimits(Limits{InitialStreamWindow: MaxV2StreamWindowBytes + 1}, Limits{})
+	require.ErrorIs(t, err, ErrInvalidLimits)
+	_, err = SelectDirectLimits(Limits{}, Limits{MaxQueuedSessionBytes: MaxV2SessionQueueBytes + 1})
+	require.ErrorIs(t, err, ErrInvalidLimits)
+}
+
+func TestDirectHandshakeMetadataRoundTrips(t *testing.T) {
+	require.Equal(t, "/internal/agent/direct-tunnel", DirectTunnelPath)
+	limits := testLimits()
+	requireMetadataRoundTrip(t, DirectHello{ProtocolVersion: ProtocolVersion, Limits: limits})
+	requireMetadataRoundTrip(t, DirectReady{
+		ProtocolVersion: ProtocolVersion, TargetAgentID: "target-a", SessionGeneration: 7, Limits: limits,
+	})
+	requireMetadataRoundTrip(t, DirectAccepted{SessionGeneration: 7})
+	requireMetadataRoundTrip(t, DirectConfirmed{SessionGeneration: 7})
+}
+
+func TestOpenConnectivityProbeRequiresExactShape(t *testing.T) {
+	base := Open{
+		ProbePolicy: ProbeRespectBusinessPolicy, Method: "GET", Path: "/ping",
+		TargetAgentID: "target", RemainingNanos: 1, ResponseWindow: 1,
+	}
+	require.True(t, base.IsConnectivityProbe())
+
+	attempt := attemptwire.AttemptProxyMeta{}
+	mutations := []func(*Open){
+		func(open *Open) { open.ProbePolicy = "invalid" },
+		func(open *Open) { open.Method = "POST" },
+		func(open *Open) { open.Path = "/v1/models" },
+		func(open *Open) { open.Header = map[string][]string{"X-Test": {"1"}} },
+		func(open *Open) { open.BodyLength = 1 },
+		func(open *Open) { open.RouteID = 1 },
+		func(open *Open) { open.Hop = 1 },
+		func(open *Open) { open.Attempt = &attempt },
+	}
+	for _, mutate := range mutations {
+		open := base
+		mutate(&open)
+		require.False(t, open.IsConnectivityProbe())
+	}
+
+	base.ProbePolicy = ProbeBypassBusinessPolicy
+	require.True(t, base.IsConnectivityProbe())
 }
 
 func TestMetadataRoundTripsEveryType(t *testing.T) {
@@ -43,7 +141,7 @@ func TestMetadataRoundTripsEveryType(t *testing.T) {
 				Header:     map[string][]string{"Content-Type": {"application/json"}},
 				BodyLength: 123, RemainingNanos: 456, RequestID: "req-1",
 				SourceAgentID: "agent-a", TargetAgentID: "agent-b", RouteID: 42,
-				Hop: 1, ResponseWindow: 65536, Purpose: StreamPurposeConnectivityProbe,
+				Hop: 1, ResponseWindow: 65536, ProbePolicy: ProbeRespectBusinessPolicy,
 			}
 			requireMetadataRoundTrip(t, want)
 		},
@@ -297,7 +395,7 @@ func TestMetadataHonorsSmallerCallerLimit(t *testing.T) {
 	require.ErrorIs(t, err, ErrMetadataTooLarge)
 }
 
-func TestMetadataClampsCallerLimitToV1HardLimit(t *testing.T) {
+func TestMetadataClampsCallerLimitToV2HardLimit(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -396,7 +494,6 @@ func TestStableProtocolErrorCodes(t *testing.T) {
 	require.Equal(t, "request_deadline", ErrorCodeRequestDeadline)
 	require.Equal(t, "session_closed", ErrorCodeSessionClosed)
 	require.Equal(t, "drain_timeout", ErrorCodeDrainTimeout)
-	require.Equal(t, "relay_fallback_disabled", ErrorCodeRelayFallbackDisabled)
 }
 
 func TestProtocolErrorsAreStable(t *testing.T) {
@@ -441,7 +538,7 @@ func TestTrailersMetadataRoundTripAndEmptyEndCompatibility(t *testing.T) {
 	}
 	requireMetadataRoundTrip(t, want)
 
-	limits := Limits{MaxMetadataBytes: MaxMetadataBytes, MaxDataBytes: MaxV1PayloadBytes}
+	limits := Limits{MaxMetadataBytes: MaxMetadataBytes, MaxDataBytes: MaxV2PayloadBytes}
 	frame := Frame{Version: ProtocolVersion, Type: FrameEnd, StreamID: [16]byte{1}, Sequence: 9}
 	encoded, err := Encode(frame, limits)
 	require.NoError(t, err)

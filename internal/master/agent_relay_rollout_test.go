@@ -17,7 +17,6 @@ import (
 	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
-	mastertunnel "github.com/VaalaCat/ai-gateway/internal/master/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	pkgauth "github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -108,10 +107,9 @@ func requireNoRolloutDial(t *testing.T, dialer *rolloutDialer) {
 }
 
 func TestAgentRelayRollout(t *testing.T) {
-	t.Run("fresh install has false switch and empty default URI", func(t *testing.T) {
+	t.Run("fresh install has empty default URI", func(t *testing.T) {
 		defaults := settings.Defaults()
 		require.Equal(t, "", defaults[consts.SettingAgentRelayDefaultURI])
-		require.Equal(t, "0", defaults[consts.SettingAgentRelayFallbackEnabled])
 	})
 
 	t.Run("custom canary remains isolated while inherit is not configured", func(t *testing.T) {
@@ -126,18 +124,14 @@ func TestAgentRelayRollout(t *testing.T) {
 		requireNoRolloutDial(t, inheritDialer)
 	})
 
-	t.Run("global enabled plus empty default admits custom only", func(t *testing.T) {
-		var gate mastertunnel.AdmissionGate
-		gate.Set(true)
-		require.True(t, gate.AllowNew())
-
+	t.Run("empty default URI connects custom only", func(t *testing.T) {
 		client, peer, server := agentRelayWebSocketPair(t)
 		t.Cleanup(server.Close)
 		t.Cleanup(func() { _ = peer.Close() })
 		session := agenttunnel.NewSession(client, 1, wire.Limits{
 			MaxMetadataBytes: 64 << 10, MaxDataBytes: 64 << 10, InitialStreamWindow: 256 << 10,
 			MaxQueuedSessionBytes: 1 << 20, MaxConcurrentStreams: 4,
-		}, agenttunnel.SessionOptions{})
+		}, agenttunnel.SessionOptions{Direction: agenttunnel.SessionDirectionRelay})
 		customDialer := newRolloutDialer(session)
 		custom := runRolloutManager(t, customDialer, agenttunnel.Desired{
 			Mode: consts.RelayModeCustom, ConfiguredURI: "ws://relay.example/custom", EffectiveURI: "ws://relay.example/custom",
@@ -158,7 +152,7 @@ func TestAgentRelayRollout(t *testing.T) {
 			MaxMetadataBytes: 64 << 10, MaxDataBytes: 64 << 10, InitialStreamWindow: 256 << 10,
 			MaxQueuedSessionBytes: 1 << 20, MaxConcurrentStreams: 4,
 		}
-		dialer := newRolloutDialer(agenttunnel.NewSession(client, 2, limits, agenttunnel.SessionOptions{}))
+		dialer := newRolloutDialer(agenttunnel.NewSession(client, 2, limits, agenttunnel.SessionOptions{Direction: agenttunnel.SessionDirectionRelay}))
 		manager := runRolloutManager(t, dialer, agenttunnel.Desired{
 			Mode: consts.RelayModeInherit, EffectiveURI: "ws://relay.example/default",
 		})
@@ -194,11 +188,32 @@ func TestAgentRelayRollout(t *testing.T) {
 		blocked.requireProviderAndUsage(1, 0, 1, "source", "local")
 
 		ready := newRoutedRelayFixture(t, relayProviderSuccess(nil), nil, true)
-		ready.lookup.SetCapabilities("target", []string{protocol.AgentCapabilityTunnelV1})
+		ready.lookup.SetCapabilities("target", []string{protocol.AgentCapabilityTunnelV2})
 		status, body, err = ready.request(t.Context(), false)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, status, body)
 		ready.requireProviderAndUsage(0, 1, 1, "source", "relay")
+	})
+
+	t.Run("Direct address and policy updates affect the next request", func(t *testing.T) {
+		fixture := newDirectTunnelIntegrationFixture(t, directTunnelFixtureOptions{provider: relayProviderSuccess(nil)})
+		fixture.setDirectAddress(fixture.closedTarget)
+		status, _, _, err := fixture.requestResponse(t.Context(), false, "", "req-rollout-relay-before-direct")
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, "relay", fixture.usageByRequestID("req-rollout-relay-before-direct").AgentRoutePath)
+
+		fixture.setDirectAddress(fixture.directProxy.URL())
+		status, _, _, err = fixture.requestResponse(t.Context(), false, "", "req-rollout-direct-ready")
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, "direct", fixture.usageByRequestID("req-rollout-direct-ready").AgentRoutePath)
+
+		fixture.setTargetPolicy(func(target *models.Agent) { target.DirectInboundEnabled = false })
+		status, _, _, err = fixture.requestResponse(t.Context(), false, "", "req-rollout-relay-after-policy")
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, status)
+		require.Equal(t, "relay", fixture.usageByRequestID("req-rollout-relay-after-policy").AgentRoutePath)
 	})
 
 	t.Run("wrong Master WELCOME proof leaves old active ready", func(t *testing.T) {
@@ -259,48 +274,6 @@ func TestAgentRelayRollout(t *testing.T) {
 		require.True(t, after.AcceptingNewStreams)
 	})
 
-	t.Run("kill switch rejects OPEN while Source Control is disconnected", func(t *testing.T) {
-		fixture := newRoutedRelayFixture(t, relayProviderSuccess(nil), nil, true)
-		require.Equal(t, 1, fixture.source.Store.Settings().RelayFallbackEnabled)
-		fixture.admission.Set(false)
-
-		status, body, err := fixture.request(t.Context(), false)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, status, body)
-		fixture.requireProviderAndUsage(1, 0, 1, "source", "local")
-	})
-
-	t.Run("kill switch drains existing committed Stream", func(t *testing.T) {
-		barrier := newRelayTargetBarrier()
-		fixture := newRoutedRelayFixture(t, relayProviderSuccess(nil), barrier, true)
-		type requestResult struct {
-			status int
-			body   string
-			err    error
-		}
-		requestDone := make(chan requestResult, 1)
-		go func() {
-			status, body, err := fixture.request(t.Context(), false)
-			requestDone <- requestResult{status: status, body: body, err: err}
-		}()
-		barrier.wait(t)
-		fixture.admission.Set(false)
-		drainDone := make(chan error, 1)
-		go func() { drainDone <- fixture.hub.DrainAll(t.Context()) }()
-		select {
-		case err := <-drainDone:
-			t.Fatalf("drain returned before the committed Stream completed: %v", err)
-		case <-time.After(50 * time.Millisecond):
-		}
-
-		barrier.release()
-		result := <-requestDone
-		require.NoError(t, result.err)
-		require.Equal(t, http.StatusOK, result.status, result.body)
-		require.NoError(t, <-drainDone)
-		fixture.requireProviderAndUsage(0, 1, 1, "source", "relay")
-	})
-
 	t.Run("rollback leaves additive Agent columns and signing key intact", func(t *testing.T) {
 		db := newAgentRouteUsageDB(t)
 		agent := models.Agent{
@@ -314,13 +287,9 @@ func TestAgentRelayRollout(t *testing.T) {
 		key := models.MasterSigningKey{KeyID: "rollout-key", PublicKey: publicKey, PrivateKey: privateKey, ActiveSlot: &active}
 		require.NoError(t, db.Create(&key).Error)
 		require.NoError(t, db.Create(&models.Setting{Key: consts.SettingAgentRelayDefaultURI, Value: "wss://relay.example/default"}).Error)
-		require.NoError(t, db.Create(&models.Setting{Key: consts.SettingAgentRelayFallbackEnabled, Value: "1"}).Error)
 
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&models.Setting{}).Where("key = ?", consts.SettingAgentRelayDefaultURI).Update("value", "").Error; err != nil {
-				return err
-			}
-			return tx.Model(&models.Setting{}).Where("key = ?", consts.SettingAgentRelayFallbackEnabled).Update("value", "0").Error
+			return tx.Model(&models.Setting{}).Where("key = ?", consts.SettingAgentRelayDefaultURI).Update("value", "").Error
 		}))
 
 		var storedAgent models.Agent

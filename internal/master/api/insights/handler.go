@@ -10,5 +10,7 @@ import (
 type Handler struct {
 	// Tracker 用于 EnrichLastSeen，覆盖 agent Meta 的 last_seen。
 	// nil 时跳过 enrich（DB 值 fallback）。
-	Tracker *msync.HeartbeatTracker
+	Tracker               *msync.HeartbeatTracker
+	LogDatabaseReady      func() bool
+	InsightProviderFinder func(string) (InsightProvider, bool)
 }

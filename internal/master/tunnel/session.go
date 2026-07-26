@@ -132,6 +132,11 @@ func (s *Session) run() {
 	s.writerStarted.Store(true)
 	go s.writer.run()
 	err := s.readLoop()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		s.recordError(diagnostics.Event{
+			Code: masterSessionDiagnosticCode(err), Stage: "read", Message: err.Error(), At: s.now(),
+		})
+	}
 	s.readerOnce.Do(func() { close(s.readerDone) })
 	s.Cancel(err)
 	<-s.done
@@ -151,12 +156,19 @@ func (s *Session) readLoop() error {
 		}
 		frame, err := wire.Decode(raw, s.limits)
 		if err != nil {
-			return fmt.Errorf("%w: %v", errProtocol, err)
+			return fmt.Errorf("%w: %w", errProtocol, err)
 		}
 		if err := s.dispatch(frame); err != nil {
 			return err
 		}
 	}
+}
+
+func masterSessionDiagnosticCode(err error) string {
+	if errors.Is(err, wire.ErrUnsupportedVersion) {
+		return wire.ErrorCodeUnsupportedProtocolVersion
+	}
+	return wire.ErrorCodeRelayProtocol
 }
 
 func (s *Session) dispatch(frame wire.Frame) error {
@@ -183,22 +195,34 @@ func (s *Session) dispatch(frame wire.Frame) error {
 
 func (s *Session) handleOpen(frame wire.Frame) error {
 	if !s.accepting.Load() || s.hub == nil {
-		s.sendAdmissionReset(frame.StreamID)
+		_ = s.sendResetCode(frame.StreamID, consts.RouteErrorRelayNotReady, "admission")
 		return nil
 	}
 	var open wire.Open
 	if err := wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes); err != nil {
 		return s.rejectStream(frame.StreamID, nil, "open", err)
 	}
-	// behavior change: a bounded diagnostic ping may verify Relay while business fallback admission is disabled.
-	if s.hub.opts.Admission == nil || !s.hub.opts.Admission.AllowNew() && !open.IsConnectivityProbe() {
-		s.sendAdmissionReset(frame.StreamID)
-		return nil
+	isProbe := open.IsConnectivityProbe()
+	bypassProbe := open.ProbePolicy == wire.ProbeBypassBusinessPolicy
+	if bypassProbe && !isProbe {
+		return s.rejectStream(frame.StreamID, nil, "open", errProtocol)
 	}
-	target, err := s.hub.activeTarget(s.ctx, open.TargetAgentID)
-	if err != nil {
-		s.sendResetCode(frame.StreamID, masterResetCode(err), "target")
-		return nil
+	var target *Session
+	var err error
+	// behavior change: valid automatic probes share the business policy gate with attempts;
+	// only structurally valid manual probes bypass it.
+	if open.Attempt != nil || isProbe && !bypassProbe {
+		target, err = s.hub.authorizeRelayOpen(s.ctx, s.agentID, open.TargetAgentID)
+		if err != nil {
+			_ = s.sendResetCode(frame.StreamID, masterResetCode(err), "policy")
+			return nil
+		}
+	} else {
+		target, err = s.hub.activeTarget(s.ctx, open.TargetAgentID)
+		if err != nil {
+			s.sendResetCode(frame.StreamID, masterResetCode(err), "target")
+			return nil
+		}
 	}
 	sw := newSwitch(s.hub, s, target, frame.StreamID, s.now(), s.limits)
 	if err := s.hub.attachSwitch(sw); err != nil {
@@ -213,16 +237,6 @@ func (s *Session) handleOpen(frame wire.Frame) error {
 		return s.rejectStream(frame.StreamID, sw, "open", err)
 	}
 	return nil
-}
-
-func (s *Session) sendAdmissionReset(id wire.StreamID) {
-	code := wire.ErrorCodeRelayProtocol
-	if s.hub != nil && s.hub.opts.Admission != nil {
-		if rejectionCode := s.hub.opts.Admission.RejectionCode(); rejectionCode != "" {
-			code = rejectionCode
-		}
-	}
-	_ = s.sendResetCode(id, code, "admission")
 }
 
 func (s *Session) rejectStream(id wire.StreamID, sw *Switch, stage string, cause error) error {
@@ -257,6 +271,10 @@ func (s *Session) sendResetCode(id wire.StreamID, code, stage string) error {
 }
 
 func masterResetCode(err error) string {
+	var coded interface{ ReasonCode() string }
+	if errors.As(err, &coded) && consts.IsPublicRouteErrorCode(coded.ReasonCode()) {
+		return coded.ReasonCode()
+	}
 	switch {
 	case errors.Is(err, errTargetNotFound):
 		return consts.RouteErrorTargetNotFound
@@ -264,6 +282,8 @@ func masterResetCode(err error) string {
 		return consts.RouteErrorTargetDisabled
 	case errors.Is(err, errTargetCapability):
 		return consts.RouteErrorRelayUnsupported
+	case errors.Is(err, errRelayConnectionDisabled):
+		return consts.RouteErrorRelayConnectionDisabled
 	case errors.Is(err, errRelayNotReady), errors.Is(err, errHubDraining), errors.Is(err, errSessionClosed):
 		return consts.RouteErrorRelayNotReady
 	case errors.Is(err, errStreamCapacity), errors.Is(err, errQueueFull):
@@ -623,7 +643,7 @@ func (w *sessionWriter) run() {
 	for {
 		item, ok := w.next()
 		if ok {
-			raw, err := wire.Encode(item.frame, wire.Limits{MaxMetadataBytes: wire.MaxV1PayloadBytes, MaxDataBytes: wire.MaxV1PayloadBytes})
+			raw, err := wire.Encode(item.frame, wire.Limits{MaxMetadataBytes: wire.MaxV2PayloadBytes, MaxDataBytes: wire.MaxV2PayloadBytes})
 			if err == nil {
 				err = w.conn.SetWriteDeadline(w.now().Add(w.writeTimeout))
 			}

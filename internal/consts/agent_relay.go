@@ -5,11 +5,7 @@ const (
 	RelayModeCustom   = "custom"
 	RelayModeDisabled = "disabled"
 
-	PeerRouteModeDirectFirst = "direct_first"
-	PeerRouteModeRelayOnly   = "relay_only"
-
 	SettingAgentRelayDefaultURI                         = "agent.relay_default_uri"
-	SettingAgentRelayFallbackEnabled                    = "agent.relay_fallback_enabled"
 	SettingAgentConnectivityProbeSuccessTTLSeconds      = "agent.connectivity_probe_success_ttl_seconds"
 	SettingAgentConnectivityProbeFailureRetryMinSeconds = "agent.connectivity_probe_failure_retry_min_seconds"
 	SettingAgentConnectivityProbeFailureRetryMaxSeconds = "agent.connectivity_probe_failure_retry_max_seconds"
@@ -27,12 +23,13 @@ const (
 	RouteErrorDirectTLS                  = "direct_tls"
 	RouteErrorDirectIdentityMismatch     = "direct_identity_mismatch"
 	RouteErrorDirectProbeInvalidResponse = "direct_probe_invalid_response"
+	RouteErrorDirectProbeHTTPStatus      = "direct_probe_http_status"
+	RouteErrorDirectProbeBodyTooLarge    = "direct_probe_body_too_large"
 	RouteErrorDirectCommitUncertain      = "direct_commit_uncertain"
 	RouteErrorDirectResponseInterrupted  = "direct_response_interrupted"
 	RouteErrorRelayUnsupported           = "relay_unsupported"
 	RouteErrorRelayNotConfigured         = "relay_not_configured"
 	RouteErrorRelayDisabled              = "relay_disabled"
-	RouteErrorRelayFallbackDisabled      = "relay_fallback_disabled"
 	RouteErrorRelayNotReady              = "relay_not_ready"
 	RouteErrorRelayOverloaded            = "relay_overloaded"
 	RouteErrorRelayProtocol              = "relay_protocol"
@@ -52,15 +49,25 @@ const (
 	RouteErrorRelayProbeInvalidResult    = "relay_probe_invalid_result"
 )
 
+const (
+	RouteErrorSourceDirectOutboundDisabled = "source_direct_outbound_disabled"
+	RouteErrorTargetDirectInboundDisabled  = "target_direct_inbound_disabled"
+	RouteErrorSourceRelayOutboundDisabled  = "source_relay_outbound_disabled"
+	RouteErrorTargetRelayInboundDisabled   = "target_relay_inbound_disabled"
+	RouteErrorRelayConnectionDisabled      = "relay_connection_disabled"
+)
+
 var publicRouteErrorCodes = [...]string{
 	RouteErrorSelectorInvalid, RouteErrorTargetNotFound, RouteErrorTargetDisabled, RouteErrorTagNoCandidate,
 	RouteErrorDirectDisabled, RouteErrorDirectIngressUnsupported, RouteErrorDirectCircuitOpen, RouteErrorDirectAuthUnavailable, RouteErrorDirectDNS,
 	RouteErrorDirectConnect, RouteErrorDirectTLS, RouteErrorDirectIdentityMismatch, RouteErrorDirectProbeInvalidResponse,
 	RouteErrorDirectCommitUncertain, RouteErrorDirectResponseInterrupted, RouteErrorRelayUnsupported,
-	RouteErrorRelayNotConfigured, RouteErrorRelayDisabled, RouteErrorRelayFallbackDisabled, RouteErrorRelayNotReady,
+	RouteErrorRelayNotConfigured, RouteErrorRelayDisabled, RouteErrorRelayNotReady,
 	RouteErrorRelayOverloaded, RouteErrorRelayProtocol, RouteErrorRelayAuth, RouteErrorRelayCommitUncertain,
 	RouteErrorRelayResponseInterrupted, RouteErrorRequestCancelled, RouteErrorRequestDeadline, RouteErrorBodyTooLarge,
 	RouteErrorBodyStoreFailed, RouteErrorStreamWindowTimeout, RouteErrorSessionClosed, RouteErrorDrainTimeout,
+	RouteErrorSourceDirectOutboundDisabled, RouteErrorTargetDirectInboundDisabled,
+	RouteErrorSourceRelayOutboundDisabled, RouteErrorTargetRelayInboundDisabled, RouteErrorRelayConnectionDisabled,
 }
 
 var connectivityProbeOnlyErrorCodes = [...]string{
@@ -68,6 +75,8 @@ var connectivityProbeOnlyErrorCodes = [...]string{
 	RouteErrorRelayProbeBodyTooLarge,
 	RouteErrorRelayProbeInvalidResponse,
 	RouteErrorRelayProbeInvalidResult,
+	RouteErrorDirectProbeHTTPStatus,
+	RouteErrorDirectProbeBodyTooLarge,
 }
 
 func PublicRouteErrorCodes() []string {
@@ -81,6 +90,18 @@ func IsPublicRouteErrorCode(code string) bool {
 		}
 	}
 	return false
+}
+
+func IsDirectedTransportPolicyErrorCode(code string) bool {
+	switch code {
+	case RouteErrorSourceDirectOutboundDisabled,
+		RouteErrorTargetDirectInboundDisabled,
+		RouteErrorSourceRelayOutboundDisabled,
+		RouteErrorTargetRelayInboundDisabled:
+		return true
+	default:
+		return false
+	}
 }
 
 func IsConnectivityProbeErrorCode(code string) bool {

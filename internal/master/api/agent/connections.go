@@ -33,11 +33,12 @@ func connectionSummary(snapshot connectivity.ConnectionSnapshot) connectivity.Co
 	control := snapshot.Control
 	control.ReasonCodes = append([]string{}, snapshot.Control.ReasonCodes...)
 	return connectivity.ConnectionSummary{
-		Version:       snapshot.Version,
-		SnapshotEpoch: snapshot.SnapshotEpoch,
-		SnapshotSeq:   snapshot.SnapshotSeq,
-		ObservedAt:    snapshot.ObservedAt,
-		Control:       control,
+		Version:         snapshot.Version,
+		SnapshotEpoch:   snapshot.SnapshotEpoch,
+		SnapshotSeq:     snapshot.SnapshotSeq,
+		ObservedAt:      snapshot.ObservedAt,
+		TransportPolicy: snapshot.TransportPolicy,
+		Control:         control,
 		Relay: connectivity.RelaySummary{
 			Support:             snapshot.Relay.Support,
 			Config:              snapshot.Relay.Config,
@@ -213,7 +214,7 @@ func (h *Handler) RouteTargets(c *app.Context, req RouteTargetsRequest) (connect
 	}
 	agents := []models.Agent{agent}
 	h.enrichLastSeen(agents)
-	snapshot, err := h.routeTargetsSnapshotForRequest(agents[0], req)
+	snapshot, err := h.routeTargetsSnapshotForRequest(c, agents[0], req)
 	if err != nil {
 		return connectivity.RouteTargetsPage{}, err
 	}

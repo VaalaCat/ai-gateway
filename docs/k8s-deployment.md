@@ -58,7 +58,9 @@ data:
     log_level: info
 
     master:
-      db_path: "/data/master.db?_pragma=journal_mode(WAL)"
+      core_db_path: "/data/core.db?_pragma=journal_mode(WAL)"
+      log_db_path: "/data/log.db?_pragma=journal_mode(WAL)"
+      legacy_db_path: "/data/master.db?_pragma=journal_mode(WAL)"
       jwt_secret: "replace-with-strong-secret"
       enrollment_token_ttl: 3600
       admin_user: "admin"
@@ -228,7 +230,7 @@ data:
     log_level: info
 
     master:
-      db_path: "/tmp/unused.db"
+      core_db_path: "/tmp/unused.db"
       jwt_secret: "unused"
       enrollment_token_ttl: 3600
       admin_user: "unused"

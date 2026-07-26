@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/netaddr"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/sourcegraph/conc/pool"
@@ -500,17 +501,12 @@ func retryItemIDs(batch []retryItem) []string {
 // 互不影响。
 func (u *UsageUploader) retryBackoff(attempts int) time.Duration {
 	max := time.Duration(u.cfg.BackoffMaxSec()) * time.Second
-	if attempts < 0 {
-		attempts = 0
-	}
-	if attempts > 32 { // 避免 1s<<attempts 移位溢出;这么多次早就该顶格了
+	if max <= 0 {
 		return max
 	}
-	backoff := uploadBackoffBase << uint(attempts)
-	if backoff <= 0 || backoff > max {
-		return max
-	}
-	return backoff
+	// Agent historically used 1s << attempts (attempt 1 waits 2s). Keep that
+	// schedule exactly; Master consumers can opt into deliveryqueue jitter.
+	return deliveryqueue.Backoff("agent-usage", attempts+1, uploadBackoffBase, max, 0)
 }
 
 // drainOnShutdown 在 Run 的循环 ctx 已 Done 之后做一次尽力而为的收尾投递:

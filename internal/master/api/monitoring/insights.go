@@ -1,7 +1,10 @@
 package monitoring
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -19,11 +22,8 @@ const errorWarnRatio = 0.05
 // 全 admin-only:user scope 直接 403 (monitoring 是运维向工具,
 // 一般用户不关心 channel/agent 健康度)。
 //
-// 各子查询失败不阻断主响应:monitoring 是 best-effort 聚合面板,
-// 单项失败时退化为零值/空数组。这一行为与 stats.Dashboard 一致。
-//
-// 唯一会阻断响应的是窗口校验和 KPI 环聚合错误 (后者依赖 DashboardKpis,
-// 失败说明 DB 出问题,值得 500)。
+// 日志库在前置检查或任一实际查询中失联时返回 503；其它单项错误保持
+// best-effort，退化为零值或空数组。
 func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsResponse, error) {
 	scope := middleware.GetScope(c.Context)
 	if scope == nil || !scope.IsAdmin {
@@ -37,12 +37,31 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 	}
 
 	s := dao.Scope{IsAdmin: true, UserID: scope.UserID}
-	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
+	if h.LogDatabaseReady != nil && !h.LogDatabaseReady() {
+		return InsightsResponse{}, mapLogDatabaseUnavailable(dao.ErrLogDatabaseUnavailable)
+	}
+	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
+	if _, err := daoCtx.LogDB(); err != nil {
+		return InsightsResponse{}, mapLogDatabaseUnavailable(err)
+	}
+	finder := h.monitoringDataFinder(c.App, c.RequestContext())
 
-	channels, _ := q.Stats().ChannelMetrics(r)
-	agents, _ := q.Stats().AgentMetrics(r)
-	byStage, _ := q.Stats().ErrorDistribution("stage", r, s)
-	byChannel, _ := q.Stats().ErrorDistribution("channel", r, s)
+	channels, err := finder.ChannelMetrics(r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return InsightsResponse{}, mapLogDatabaseUnavailable(err)
+	}
+	agents, err := finder.AgentMetrics(r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return InsightsResponse{}, mapLogDatabaseUnavailable(err)
+	}
+	byStage, err := finder.ErrorDistribution("stage", r, s)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return InsightsResponse{}, mapLogDatabaseUnavailable(err)
+	}
+	byChannel, err := finder.ErrorDistribution("channel", r, s)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return InsightsResponse{}, mapLogDatabaseUnavailable(err)
+	}
 	// nil → 空数组 (前端期待稳定数组)。
 	if byStage == nil {
 		byStage = []dao.ErrBucket{}
@@ -51,8 +70,11 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 		byChannel = []dao.ErrBucket{}
 	}
 
-	rings, err := computeKpiRings(q, r, s, agents)
+	rings, err := computeKpiRings(finder, r, s, agents)
 	if err != nil {
+		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+			return InsightsResponse{}, mapLogDatabaseUnavailable(err)
+		}
 		return InsightsResponse{}, api.InternalError("kpi rings", err)
 	}
 
@@ -67,6 +89,20 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 	}, nil
 }
 
+func (h *Handler) monitoringDataFinder(application app.Application, ctx context.Context) MonitoringDataFinder {
+	if h.MonitoringDataFinder != nil {
+		return h.MonitoringDataFinder(application, ctx)
+	}
+	return dao.NewAdminQuery(dao.NewContextWithContext(application, ctx)).Stats()
+}
+
+func mapLogDatabaseUnavailable(err error) error {
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return api.ErrorWithCode(http.StatusServiceUnavailable, "LogDatabaseUnavailable", "log database is temporarily unavailable", nil)
+	}
+	return err
+}
+
 // computeKpiRings 组装 5 个环形卡片;每个卡片的数据源:
 //
 //	success  ← DashboardKpis (success_count / requests)
@@ -75,14 +111,16 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 //	tps      ← AgentMetrics  (各 agent tps 简单算术平均, ratio 固定 1.0)
 //	error    ← DashboardKpis (failed = requests - success_count)
 //
-// 子查询 (cache_saving) 失败不阻断主流程,会退化为零值环。
-// DashboardKpis 失败才返回 error (主要数据源)。
-func computeKpiRings(q dao.AdminQuery, r dao.ObsRange, s dao.Scope, agents []dao.AgentMetric) (KpiRings, error) {
-	kpis, err := q.Stats().DashboardKpis(r, s, dao.ObsFilter{})
+// cache_saving 的普通错误不阻断主流程；日志库失联和 DashboardKpis 错误返回上层。
+func computeKpiRings(finder MonitoringDataFinder, r dao.ObsRange, s dao.Scope, agents []dao.AgentMetric) (KpiRings, error) {
+	kpis, err := finder.DashboardKpis(r, s, dao.ObsFilter{})
 	if err != nil {
 		return KpiRings{}, err
 	}
-	cache, _ := q.Stats().CacheSaving(r, s, dao.ObsFilter{})
+	cache, cacheErr := finder.CacheSaving(r, s, dao.ObsFilter{})
+	if errors.Is(cacheErr, dao.ErrLogDatabaseUnavailable) {
+		return KpiRings{}, cacheErr
+	}
 
 	return KpiRings{
 		Success: successRing(kpis),

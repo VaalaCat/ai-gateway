@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { flattenKeys } from "./check-i18n.mjs";
+
+test("log storage: required runtime keys exist and are non-empty", async () => {
+  const { checkRequiredRuntimeKeys } = await import("./check-i18n.mjs");
+  const valid = { system: { logStorage: { available: "Available", retryQueue: "Retry" } } };
+  assert.deepEqual(checkRequiredRuntimeKeys(valid, ["system.logStorage.available", "system.logStorage.retryQueue"]), []);
+  assert.deepEqual(checkRequiredRuntimeKeys(valid, ["system.logStorage.unavailable"]), ["system.logStorage.unavailable"]);
+});
 
 test("flattenKeys: 嵌套对象返回点分隔的叶子路径", () => {
   const input = { a: { b: "x" }, c: "y" };
@@ -20,6 +28,37 @@ test("flattenKeys: 深度嵌套", () => {
 test("flattenKeys: 数组当作 leaf 处理（不深入）", () => {
   const input = { a: ["x", "y"] };
   assert.deepEqual(flattenKeys(input), ["a"]);
+});
+
+test("chart controls: zh/en runtime lookup values exist and are non-empty", () => {
+  const zh = JSON.parse(readFileSync("src/i18n/zh.json", "utf8"));
+  const en = JSON.parse(readFileSync("src/i18n/en.json", "utf8"));
+  for (const locale of [zh, en]) {
+    for (const value of [
+      locale.charts?.prefix?.topN,
+      locale.charts?.prefix?.stat,
+      locale.charts?.stat?.avg,
+      locale.charts?.stat?.p95,
+      locale.charts?.stat?.p5,
+    ]) {
+      assert.equal(typeof value, "string");
+      assert.ok(value.trim().length > 0);
+    }
+  }
+});
+
+test("TPS metric labels describe avg/p5 rather than avg/p95", () => {
+  const zh = JSON.parse(readFileSync("src/i18n/zh.json", "utf8"));
+  const en = JSON.parse(readFileSync("src/i18n/en.json", "utf8"));
+  for (const locale of [zh, en]) {
+    for (const value of [
+      locale.dashboard?.speed?.col?.tps,
+      locale.monitoring?.metrics?.tps,
+    ]) {
+      assert.match(value, /p5/i);
+      assert.doesNotMatch(value, /p95/i);
+    }
+  }
 });
 
 import { findPlaceholderValues } from "./check-i18n.mjs";

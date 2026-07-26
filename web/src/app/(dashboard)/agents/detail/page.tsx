@@ -304,6 +304,8 @@ function AgentDetailContent() {
             initialRouteTargetsPage={routeTargetsPage}
             stale={connectionStale}
             loading={detail.isFetching || monitored.isFetching}
+            refreshing={monitored.isFetching || !monitored.routeTargetsCurrent}
+            routeTargetsCurrent={monitored.routeTargetsCurrent}
           />
         </TabsContent>
         <TabsContent value="runtime" className="mt-4"><RuntimeTab agent={agent} /></TabsContent>

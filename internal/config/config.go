@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
+	masterdatabase "github.com/VaalaCat/ai-gateway/internal/master/database"
 	"github.com/spf13/viper"
 )
 
@@ -27,15 +29,19 @@ type Config struct {
 }
 
 type MasterConfig struct {
-	Listen             string   `mapstructure:"listen"` // ":8140" | "unix:/run/gw.sock" | "unix:@name"(abstract, Linux)
-	DBPath             string   `mapstructure:"db_path"`
-	JWTSecret          string   `mapstructure:"jwt_secret"`
-	BYOKKEK            string   `mapstructure:"byok_kek"` // base64 32B; empty → HKDF derive from JWTSecret
-	EnrollmentTokenTTL int      `mapstructure:"enrollment_token_ttl"`
-	AdminUser          string   `mapstructure:"admin_user"`
-	AdminPassword      string   `mapstructure:"admin_password"`
-	ProxyURL           string   `mapstructure:"proxy_url"`
-	PublicBaseURLs     []string `mapstructure:"public_base_urls"`
+	Listen               string   `mapstructure:"listen"` // ":8140" | "unix:/run/gw.sock" | "unix:@name"(abstract, Linux)
+	DBPath               string   `mapstructure:"core_db_path"`
+	LogDBPath            string   `mapstructure:"log_db_path"`
+	LegacyDBPath         string   `mapstructure:"legacy_db_path"`
+	DeprecatedDBPath     string   `mapstructure:"db_path"`
+	UsesDeprecatedDBPath bool     `mapstructure:"-"`
+	JWTSecret            string   `mapstructure:"jwt_secret"`
+	BYOKKEK              string   `mapstructure:"byok_kek"` // base64 32B; empty → HKDF derive from JWTSecret
+	EnrollmentTokenTTL   int      `mapstructure:"enrollment_token_ttl"`
+	AdminUser            string   `mapstructure:"admin_user"`
+	AdminPassword        string   `mapstructure:"admin_password"`
+	ProxyURL             string   `mapstructure:"proxy_url"`
+	PublicBaseURLs       []string `mapstructure:"public_base_urls"`
 }
 
 type AgentAddress struct {
@@ -128,7 +134,8 @@ func (c *MasterRuntimeConfig) ToMasterRuntimeConfig() *MasterRuntimeConfig {
 
 	masterCfg := c.Master
 	masterCfg.Listen = normalizeDefault(masterCfg.Listen, ":8140")
-	masterCfg.DBPath = normalizeDefault(masterCfg.DBPath, "./data/master.db")
+	defaultCoreDatabasePath(&masterCfg, "./data/core.db")
+	defaultMasterDatabaseConfig(&masterCfg)
 	masterCfg.EnrollmentTokenTTL = normalizeDefaultInt(masterCfg.EnrollmentTokenTTL, 3600)
 	masterCfg.AdminUser = normalizeDefault(masterCfg.AdminUser, "admin")
 
@@ -151,7 +158,8 @@ func (c *Config) ToMasterRuntimeConfig() *MasterRuntimeConfig {
 	masterCfg := c.Master
 	masterCfg.Listen = normalizeDefault(masterCfg.Listen, c.Listen)
 	masterCfg.Listen = normalizeDefault(masterCfg.Listen, ":8140")
-	masterCfg.DBPath = normalizeDefault(masterCfg.DBPath, "./data/master.db?_pragma=journal_mode(WAL)")
+	defaultCoreDatabasePath(&masterCfg, "./data/core.db?_pragma=journal_mode(WAL)")
+	defaultMasterDatabaseConfig(&masterCfg)
 	masterCfg.EnrollmentTokenTTL = normalizeDefaultInt(masterCfg.EnrollmentTokenTTL, 3600)
 	masterCfg.AdminUser = normalizeDefault(masterCfg.AdminUser, "admin")
 
@@ -222,7 +230,6 @@ func Load(path string) (*Config, error) {
 	viper.SetDefault("role", "master")
 	viper.SetDefault("listen", ":8140")
 	viper.SetDefault("log_level", "info")
-	viper.SetDefault("master.db_path", "./data/master.db?_pragma=journal_mode(WAL)")
 	viper.SetDefault("master.enrollment_token_ttl", 3600)
 	viper.SetDefault("agent.listen", ":8139")
 	viper.SetDefault("agent.credentials_file", "./data/agent_credentials.json")
@@ -256,6 +263,10 @@ func Load(path string) (*Config, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
+	defaultCoreDatabasePath(&cfg.Master, "./data/core.db?_pragma=journal_mode(WAL)")
+	if err := prepareMasterDatabaseConfig(&cfg.Master); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -267,7 +278,10 @@ func LoadMaster(path string) (*MasterRuntimeConfig, error) {
 
 	cfg.Runtime = normalizeRuntimeConfig(cfg.Runtime)
 	cfg.Master.Listen = normalizeDefault(cfg.Master.Listen, ":8140")
-	cfg.Master.DBPath = normalizeDefault(cfg.Master.DBPath, "./data/master.db")
+	defaultCoreDatabasePath(&cfg.Master, "./data/core.db")
+	if err := prepareMasterDatabaseConfig(&cfg.Master); err != nil {
+		return nil, err
+	}
 	cfg.Master.EnrollmentTokenTTL = normalizeDefaultInt(cfg.Master.EnrollmentTokenTTL, 3600)
 	cfg.Master.AdminUser = normalizeDefault(cfg.Master.AdminUser, "admin")
 
@@ -315,7 +329,6 @@ func loadFileConfig(path string) (*FileConfig, error) {
 	v.SetConfigType("yaml")
 	v.SetDefault("log_level", "info")
 	v.SetDefault("master.listen", ":8140")
-	v.SetDefault("master.db_path", "./data/master.db")
 	v.SetDefault("master.enrollment_token_ttl", 3600)
 	v.SetDefault("master.admin_user", "admin")
 	v.SetDefault("master.proxy_url", "")
@@ -425,6 +438,200 @@ func validateMaster(cfg *MasterRuntimeConfig) error {
 			return fmt.Errorf("master.public_base_urls: duplicate origin %q", o)
 		}
 		seen[o] = struct{}{}
+	}
+	return nil
+}
+
+func prepareMasterDatabaseConfig(cfg *MasterConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("master database config is required")
+	}
+	if err := applyDeprecatedDatabasePath(cfg); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.DBPath) == "" {
+		if strings.TrimSpace(cfg.LegacyDBPath) == "" {
+			return fmt.Errorf("master.core_db_path is required")
+		}
+		coreDBPath, err := defaultSiblingDBPath(cfg.LegacyDBPath, "core.db")
+		if err != nil {
+			return err
+		}
+		cfg.DBPath = coreDBPath
+	}
+	if err := validateSQLiteDSNField("master.core_db_path", cfg.DBPath); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.LegacyDBPath) == "" {
+		legacyDBPath, err := defaultSiblingDBPath(cfg.DBPath, "master.db")
+		if err != nil {
+			return err
+		}
+		cfg.LegacyDBPath = legacyDBPath
+	}
+	if err := validateSQLiteDSNField("master.legacy_db_path", cfg.LegacyDBPath); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.LogDBPath) == "" {
+		logDBPath, err := defaultSiblingDBPath(cfg.LegacyDBPath, "log.db")
+		if err != nil {
+			return err
+		}
+		cfg.LogDBPath = logDBPath
+	}
+	if err := validateSQLiteDSNField("master.log_db_path", cfg.LogDBPath); err != nil {
+		return err
+	}
+	return validateMasterDatabasePaths(cfg)
+}
+
+func applyDeprecatedDatabasePath(cfg *MasterConfig) error {
+	deprecated := strings.TrimSpace(cfg.DeprecatedDBPath)
+	if deprecated == "" {
+		return nil
+	}
+	if err := validateSQLiteDSNField("master.db_path", deprecated); err != nil {
+		return err
+	}
+	cfg.UsesDeprecatedDBPath = true
+	if strings.TrimSpace(cfg.LegacyDBPath) == "" {
+		cfg.LegacyDBPath = deprecated
+		return nil
+	}
+	if err := masterdatabase.ValidatePaths(deprecated, cfg.LegacyDBPath); err == nil {
+		return fmt.Errorf("master.db_path and master.legacy_db_path must identify the same legacy SQLite file")
+	}
+	return nil
+}
+
+func defaultCoreDatabasePath(cfg *MasterConfig, fallback string) {
+	if cfg == nil || strings.TrimSpace(cfg.DBPath) != "" || strings.TrimSpace(cfg.LegacyDBPath) != "" || strings.TrimSpace(cfg.DeprecatedDBPath) != "" {
+		return
+	}
+	cfg.DBPath = fallback
+}
+
+func defaultMasterDatabaseConfig(cfg *MasterConfig) {
+	if cfg == nil {
+		return
+	}
+	if strings.TrimSpace(cfg.LegacyDBPath) == "" && strings.TrimSpace(cfg.DeprecatedDBPath) != "" {
+		cfg.LegacyDBPath = strings.TrimSpace(cfg.DeprecatedDBPath)
+		cfg.UsesDeprecatedDBPath = true
+	}
+	if strings.TrimSpace(cfg.DBPath) == "" && strings.TrimSpace(cfg.LegacyDBPath) != "" {
+		cfg.DBPath, _ = defaultSiblingDBPath(cfg.LegacyDBPath, "core.db")
+	}
+	if strings.TrimSpace(cfg.LogDBPath) == "" {
+		if isSQLiteMemoryConfigDSN(cfg.LegacyDBPath) {
+			cfg.LogDBPath = ":memory:"
+		} else if strings.TrimSpace(cfg.LegacyDBPath) != "" {
+			cfg.LogDBPath, _ = defaultSiblingDBPath(cfg.LegacyDBPath, "log.db")
+		} else if strings.TrimSpace(cfg.DBPath) != "" {
+			cfg.LogDBPath, _ = defaultSiblingDBPath(cfg.DBPath, "log.db")
+		}
+	}
+	if strings.TrimSpace(cfg.LegacyDBPath) == "" {
+		if isSQLiteMemoryConfigDSN(cfg.DBPath) {
+			cfg.LegacyDBPath = ":memory:"
+		} else if strings.TrimSpace(cfg.DBPath) != "" {
+			cfg.LegacyDBPath, _ = defaultSiblingDBPath(cfg.DBPath, "master.db")
+		}
+	}
+}
+
+func defaultLogDBPath(coreDSN string) (string, error) {
+	return defaultSiblingDBPath(coreDSN, "log.db")
+}
+
+func defaultSiblingDBPath(coreDSN, filename string) (string, error) {
+	if isSQLiteMemoryConfigDSN(coreDSN) {
+		return ":memory:", nil
+	}
+	parsed, err := masterdatabase.ParseSQLiteDSN(coreDSN)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(parsed.FilesystemPath) == "" {
+		return "", fmt.Errorf("master database path: SQLite DSN file path is empty")
+	}
+	sibling := filepath.Join(filepath.Dir(parsed.FilesystemPath), filename)
+	base, rawQuery, _ := strings.Cut(strings.TrimSpace(coreDSN), "?")
+	if strings.HasPrefix(strings.ToLower(base), "file:") {
+		uri, err := url.Parse(base)
+		if err != nil {
+			return "", fmt.Errorf("parse SQLite file URI: %w", err)
+		}
+		if uri.Opaque != "" {
+			uri.Opaque = sibling
+		} else {
+			uri.Path = sibling
+			uri.RawPath = ""
+		}
+		base = uri.String()
+	} else {
+		base = sibling
+	}
+	if rawQuery != "" {
+		return base + "?" + rawQuery, nil
+	}
+	return base, nil
+}
+
+func validateMasterDatabasePaths(cfg *MasterConfig) error {
+	paths := []struct {
+		field string
+		raw   string
+	}{
+		{field: "master.core_db_path", raw: cfg.DBPath},
+		{field: "master.log_db_path", raw: cfg.LogDBPath},
+		{field: "master.legacy_db_path", raw: cfg.LegacyDBPath},
+	}
+	for i := range paths {
+		for j := i + 1; j < len(paths); j++ {
+			if err := masterdatabase.ValidatePaths(paths[i].raw, paths[j].raw); err != nil {
+				return fmt.Errorf("%s and %s must use different SQLite files: %w", paths[i].field, paths[j].field, err)
+			}
+		}
+	}
+	return nil
+}
+
+func sqliteConfigFilesystemPath(raw string) string {
+	base, _, _ := strings.Cut(strings.TrimSpace(raw), "?")
+	if !strings.HasPrefix(strings.ToLower(base), "file:") {
+		return base
+	}
+	uri, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	if uri.Opaque != "" {
+		path, err := url.PathUnescape(uri.Opaque)
+		if err == nil {
+			return path
+		}
+		return base
+	}
+	return uri.Path
+}
+
+func isSQLiteMemoryConfigDSN(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	base, rawQuery, _ := strings.Cut(trimmed, "?")
+	if base == ":memory:" || strings.EqualFold(base, "file::memory:") {
+		return true
+	}
+	if strings.TrimSpace(base) == "" {
+		return false
+	}
+	query, err := url.ParseQuery(rawQuery)
+	return err == nil && query.Get("mode") == "memory"
+}
+
+func validateSQLiteDSNField(field, raw string) error {
+	if _, err := masterdatabase.ParseSQLiteDSN(raw); err != nil {
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
 }

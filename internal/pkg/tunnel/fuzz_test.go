@@ -8,7 +8,7 @@ import (
 
 func FuzzDecodeFrame(f *testing.F) {
 	valid, err := Encode(Frame{
-		Version:  1,
+		Version:  ProtocolVersion,
 		Type:     FrameRequestData,
 		StreamID: testStreamID(),
 		Sequence: 0,
@@ -21,6 +21,17 @@ func FuzzDecodeFrame(f *testing.F) {
 	f.Add([]byte(nil))
 	f.Add(make([]byte, HeaderSize-1))
 	f.Add(valid)
+	v1 := append([]byte(nil), valid...)
+	v1[0] = 1
+	f.Add(v1)
+	result, err := Encode(Frame{
+		Version: ProtocolVersion, Type: FrameAttemptResult, StreamID: StreamID{2}, Sequence: 1,
+		Payload: []byte(`{"kind":"succeeded"}`),
+	}, testLimits())
+	if err != nil {
+		f.Fatalf("encode Result seed: %v", err)
+	}
+	f.Add(result)
 	f.Add(append(append([]byte(nil), valid...), 0xff))
 	f.Add(func() []byte {
 		data := append([]byte(nil), valid...)
@@ -47,7 +58,7 @@ func FuzzDecodeFrame(f *testing.F) {
 		if !bytes.Equal(frame.Payload, data[HeaderSize:]) {
 			t.Fatalf("decoded payload differs from complete message payload")
 		}
-		if len(frame.Payload) > MaxV1PayloadBytes || cap(frame.Payload) > MaxV1PayloadBytes {
+		if len(frame.Payload) > MaxV2PayloadBytes || cap(frame.Payload) > MaxV2PayloadBytes {
 			t.Fatalf("payload allocation exceeds limit: len=%d cap=%d", len(frame.Payload), cap(frame.Payload))
 		}
 	})

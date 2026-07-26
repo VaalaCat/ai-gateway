@@ -15,6 +15,8 @@ type ListTokensRequest struct {
 	EndDate   string `form:"end_date"`
 	TokenID   string `form:"token_id"`
 	UserID    string `form:"user_id"`
+	Search    string `form:"search"`
+	MinTokens int64  `form:"min_tokens"`
 }
 
 type TokenDailyRequest struct {
@@ -38,12 +40,14 @@ type TokenDailyResponse struct {
 // start/end 为 unix 秒, end 缺省 now, start 缺省 end-86400;
 // gran 缺省 "day"; stack 缺省 "model" (Phase 1 仅支持 model, 其它值静默回退为 model)。
 type InsightsRequest struct {
-	Start  int64  `form:"start"`
-	End    int64  `form:"end"`
-	Gran   string `form:"gran"`
-	Stack  string `form:"stack"`
-	Model  string `form:"model"`
-	UserID uint   `form:"user_id"`
+	Start   int64  `form:"start"`
+	End     int64  `form:"end"`
+	Gran    string `form:"gran"`
+	Stack   string `form:"stack"`
+	Model   string `form:"model"`
+	UserID  uint   `form:"user_id"`
+	TokenID uint   `form:"token_id"`
+	TopN    int    `form:"top_n"`
 }
 
 // InsightsResponse 是 /v1/billing/insights 返回。
@@ -66,6 +70,17 @@ func parseOptionalUint(raw string) (*uint, error) {
 	}
 	parsed := uint(value)
 	return &parsed, nil
+}
+
+func parseOptionalInt(raw string) (*int, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 func parseRequiredUint(raw string) (uint, error) {

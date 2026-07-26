@@ -3,7 +3,95 @@ package trace
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	backendcommon "github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/stretchr/testify/require"
 )
+
+func TestMaskingTailMatchesPatternOracleAcrossEveryChunkSplit(t *testing.T) {
+	inputs := []string{
+		"Key Bearer abc",
+		"Key xxxBearer abc",
+		"Bearer Key abc",
+		"Key sk-abcdefghijklmnopqrst",
+		"Bearer sk-abcdefghijklmnopqrst",
+		"sk-abcdefghijklmnopqrstKey Bearer abc",
+		"Bearer abc,Key def;sk-abcdefghijklmnopqrst\"tail",
+		"Bearer\tabc Key\ndef Bearer\fghi Key\rjkl",
+		"Bearer abc,Key def;Bearer ghi\"Key jkl",
+		"Bear BearerX Keynote sk-short ordinary",
+		"Bearer \t",
+		"Key\n",
+		"sk-abcdefghijklmnopqrs",
+	}
+
+	for _, input := range inputs {
+		want := maskPatterns(input)
+		t.Run(input, func(t *testing.T) {
+			for split := 0; split <= len(input); split++ {
+				capture := backendcommon.NewMaskingTail(4096)
+				_, err := capture.Write([]byte(input[:split]))
+				require.NoError(t, err)
+				_, err = capture.Write([]byte(input[split:]))
+				require.NoError(t, err)
+				require.Equal(t, want, capture.String(), "split=%d", split)
+			}
+
+			capture := backendcommon.NewMaskingTail(4096)
+			for index := range input {
+				_, err := capture.Write([]byte{input[index]})
+				require.NoError(t, err)
+			}
+			require.Equal(t, want, capture.String(), "single-byte writes")
+		})
+	}
+}
+
+func TestMaskingTailMatchesBoundedOracleAfterLongWhitespace(t *testing.T) {
+	const limit = 32
+	whitespace := strings.Repeat(" \t\n\f\r", limit*4)
+	for _, input := range []string{
+		"prefix Bearer" + whitespace + ";tail",
+		"prefix Bearer" + whitespace,
+		"prefix Bearer" + whitespace + "secret,tail",
+		"Key Bearer" + whitespace + "secret,tail",
+	} {
+		want := maskPatterns(input)
+		if len(want) > limit {
+			want = want[len(want)-limit:]
+		}
+		capture := backendcommon.NewMaskingTail(limit)
+		for index := range input {
+			_, err := capture.Write([]byte{input[index]})
+			require.NoError(t, err)
+		}
+		require.Equal(t, want, capture.String(), input)
+	}
+}
+
+func TestMaskTextPreservingLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		secrets []string
+		secret  string
+	}{
+		{name: "channel secret", input: "before-channel-secret-after", secrets: []string{"channel-secret"}, secret: "channel-secret"},
+		{name: "host beside multibyte", input: "前api.example.com后", secrets: []string{"api.example.com"}, secret: "api.example.com"},
+		{name: "sk token", input: "key=sk-abcdefghijklmnopqrstuvwxyz", secret: "sk-abcdefghijklmnopqrstuvwxyz"},
+		{name: "bearer token", input: "前 Bearer eyJhbGciOiJIUzI1NiJ9.xxx 后", secret: "Bearer eyJhbGciOiJIUzI1NiJ9.xxx"},
+		{name: "key token", input: "Key abcdefghijklmnop", secret: "Key abcdefghijklmnop"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := maskTextPreservingLength(tt.input, tt.secrets)
+			require.Len(t, []byte(got), len([]byte(tt.input)))
+			require.NotContains(t, got, tt.secret)
+			require.Equal(t, strings.Repeat("*", len(tt.secret)), got[strings.Index(tt.input, tt.secret):strings.Index(tt.input, tt.secret)+len(tt.secret)])
+		})
+	}
+}
 
 func TestMaskSensitiveValues(t *testing.T) {
 	tests := []struct {
@@ -103,45 +191,47 @@ func TestMaskHeaders(t *testing.T) {
 	}
 }
 
-func TestTruncateBodyWithLimit(t *testing.T) {
+func TestTruncateBodyKeepsTailWithinByteLimit(t *testing.T) {
 	tests := []struct {
-		name     string
-		body     string
-		limit    int
-		wantLen  int
-		wantTail string
+		name  string
+		body  string
+		limit int
+		want  string
 	}{
-		{
-			name:     "under limit",
-			body:     "short",
-			limit:    100,
-			wantLen:  5,
-			wantTail: "",
-		},
-		{
-			name:     "over limit",
-			body:     string(make([]byte, 200)),
-			limit:    100,
-			wantLen:  100 + len("...(truncated)"),
-			wantTail: "...(truncated)",
-		},
-		{
-			name:     "exactly at limit",
-			body:     string(make([]byte, 100)),
-			limit:    100,
-			wantLen:  100,
-			wantTail: "",
-		},
+		{name: "empty", body: "", limit: 4, want: ""},
+		{name: "under limit", body: "abc", limit: 4, want: "abc"},
+		{name: "exact limit", body: "abcd", limit: 4, want: "abcd"},
+		{name: "limit plus one", body: "abcde", limit: 4, want: "...(truncated)bcde"},
+		{name: "limit one", body: "abc", limit: 1, want: "...(truncated)c"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := truncateBodyWithLimit(tt.body, tt.limit)
-			if len(got) != tt.wantLen {
-				t.Errorf("len = %d, want %d", len(got), tt.wantLen)
-			}
-			if tt.wantTail != "" && !strings.HasSuffix(got, tt.wantTail) {
-				t.Errorf("should end with %q", tt.wantTail)
-			}
+			require.Equal(t, tt.want, got)
 		})
+	}
+}
+
+func TestTruncateBodySkipsUTF8ContinuationAtTailStart(t *testing.T) {
+	got := truncateBodyWithLimit("a界b", 3)
+	require.Equal(t, "...(truncated)b", got)
+	require.True(t, utf8.ValidString(got))
+
+	// A fully continuation-byte tail has no valid rune start and keeps only the marker.
+	got = truncateBodyWithLimit(string([]byte{'a', 0x80, 0x80}), 2)
+	require.Equal(t, truncatedPrefix, got)
+	require.True(t, utf8.ValidString(got))
+
+	got = truncateBodyWithLimit(string([]byte{'a', 0xff, 'b'}), 2)
+	require.Equal(t, "...(truncated)b", got)
+	require.True(t, utf8.ValidString(got))
+}
+
+func TestTruncateBodyLimitFallback(t *testing.T) {
+	body := strings.Repeat("a", defaultTraceMaxBodySize) + "z"
+	for _, limit := range []int{0, -1} {
+		got := truncateBodyWithLimit(body, limit)
+		require.Equal(t, truncatedPrefix+body[1:], got)
+		require.Len(t, strings.TrimPrefix(got, truncatedPrefix), defaultTraceMaxBodySize)
 	}
 }

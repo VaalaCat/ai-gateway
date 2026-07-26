@@ -39,15 +39,13 @@ type TraceRecord struct {
 	Verbose bool
 }
 
-// HasBody 表示当前 record 是否包含 verbose 字段（4 body / 4 headers / upstream_status）。
-// 调用方据此判断是否要把 record 落到 UsageLogTrace 表。判定字段选 InboundPath：
-// 所有 verbose 路径（含 early-error）都把 c.Request.URL.Path 拷进来，非 verbose
-// 路径恒留空字符串。nil 接收者返 false（哨兵兼容）。
-func (rec *TraceRecord) HasBody() bool {
+// HasTraceData 表示当前 record 包含可落库的 verbose trace。
+// Header-only trace 合法地不含 body，因此不能用 body 字段判断。
+func (rec *TraceRecord) HasTraceData() bool {
 	if rec == nil {
 		return false
 	}
-	return rec.InboundPath != ""
+	return rec.Verbose && rec.InboundPath != ""
 }
 
 // MarshalJSON 输出与 models.UsageLogTrace JSON tag 完全对齐的 payload，

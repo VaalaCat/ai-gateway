@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -22,7 +25,43 @@ import (
 // testAppProvider wraps *gorm.DB to satisfy dao.AppProvider.
 type testAppProvider struct{ db *gorm.DB }
 
-func (p *testAppProvider) GetDB() *gorm.DB { return p.db }
+func (p *testAppProvider) GetCoreDB() *gorm.DB { return p.db }
+func (p *testAppProvider) GetLogDB() *gorm.DB  { return p.db }
+func (p *testAppProvider) GetDatabaseLayoutMode() app.DatabaseLayoutMode {
+	return app.DatabaseLayoutLegacySingle
+}
+
+type legacyTestLogQueue struct{ db *gorm.DB }
+
+func (q legacyTestLogQueue) Enqueue(batch logqueue.LogBatch) deliveryqueue.EnqueueResult {
+	err := q.db.Transaction(func(tx *gorm.DB) error {
+		request := models.UsageLog(batch.Request)
+		request.ID = 0
+		if err := tx.Create(&request).Error; err != nil {
+			return err
+		}
+		for _, source := range batch.Traces {
+			trace := models.UsageLogTrace(source)
+			trace.ID = 0
+			if err := tx.Create(&trace).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return deliveryqueue.EnqueueResult{Dropped: true, Error: err.Error()}
+	}
+	return deliveryqueue.EnqueueResult{Accepted: true}
+}
+
+func newTestSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger) *Settler {
+	return NewCoreFactSettler(application, bus, logger, noopCoreAggregator{}, legacyTestLogQueue{db: application.GetCoreDB()})
+}
+
+func newTestSettlerWithAggregator(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg CoreAggregator) *Settler {
+	return NewCoreFactSettler(application, bus, logger, agg, legacyTestLogQueue{db: application.GetCoreDB()})
+}
 
 func setupTestDB(t *testing.T) (*gorm.DB, *testAppProvider) {
 	t.Helper()
@@ -37,6 +76,12 @@ func setupTestDB(t *testing.T) (*gorm.DB, *testAppProvider) {
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := models.AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.BillingLog{}, &models.BillingHourlyBucket{}, &models.BillingProjectionReceipt{}, &models.BillingProjectionBaseline{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.BillingProjectionBaseline{ID: models.BillingProjectionBaselineID}).Error; err != nil {
 		t.Fatal(err)
 	}
 	return db, &testAppProvider{db: db}
@@ -57,10 +102,10 @@ func TestSetupTestDBOwnsSingleSQLiteMemoryConnection(t *testing.T) {
 // post-commit handoff semantics without exercising real dao writes.
 type mockAggregator struct {
 	mu      sync.Mutex
-	submits []models.UsageLog
+	submits []models.BillingLog
 }
 
-func (m *mockAggregator) Submit(log *models.UsageLog) {
+func (m *mockAggregator) SubmitBilling(log *models.BillingLog) {
 	if log == nil {
 		return
 	}
@@ -69,10 +114,10 @@ func (m *mockAggregator) Submit(log *models.UsageLog) {
 	m.submits = append(m.submits, *log)
 }
 
-func (m *mockAggregator) snapshot() []models.UsageLog {
+func (m *mockAggregator) snapshot() []models.BillingLog {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cp := make([]models.UsageLog, len(m.submits))
+	cp := make([]models.BillingLog, len(m.submits))
 	copy(cp, m.submits)
 	return cp
 }
@@ -85,14 +130,55 @@ type syncAggregator struct {
 	app dao.AppProvider
 }
 
-func (s *syncAggregator) Submit(log *models.UsageLog) {
+func (s *syncAggregator) SubmitBilling(fact *models.BillingLog) {
+	log := usageLogFromBilling(fact)
 	if log == nil {
 		return
 	}
 	m := dao.NewAdminMutation(dao.NewContext(s.app))
 	_ = m.Billing().UpsertTokenDaily(log)
 	_ = m.Billing().UpsertChannelDaily(log)
-	_ = m.Billing().UpsertHourlyBucket(log)
+	_ = m.Billing().UpsertBillingHourlyBuckets(context.Background(), []dao.BillingHourlyRow{billingHourlyTestRow(fact)})
+}
+
+func billingHourlyTestRow(fact *models.BillingLog) dao.BillingHourlyRow {
+	ts := fact.CreatedAt
+	ownerType := fact.OwnerType
+	if ownerType == "" {
+		ownerType = "admin"
+	}
+	success, failed := aggSuccessFailureCounts(fact.Status)
+	return dao.BillingHourlyRow{
+		Date: time.Unix(ts, 0).UTC().Format("2006-01-02"), Hour: time.Unix(ts, 0).UTC().Hour(),
+		UserID: fact.UserID, TokenID: fact.TokenID, ChannelID: fact.ChannelID,
+		PrivateChannelID: fact.PrivateChannelID, OwnerType: ownerType, ModelName: fact.ModelName,
+		TokenName: fact.TokenName, ChannelName: fact.ChannelName, ChannelType: fact.ChannelType,
+		RequestCount: 1, SuccessCount: success, FailedCount: failed,
+		PromptTokens: int64(fact.PromptTokens), CompletionTokens: int64(fact.CompletionTokens),
+		CacheReadTokens: int64(fact.CacheReadTokens), CacheWriteTokens: int64(fact.CacheWriteTokens),
+		InputCost: fact.InputCost, OutputCost: fact.OutputCost, CacheReadCost: fact.CacheReadCost,
+		CacheWriteCost: fact.CacheWriteCost, TotalCost: fact.TotalCost, RawCost: fact.RawTotal(),
+		LastUsedAt: ts, UpdatedAt: ts,
+	}
+}
+
+func usageLogFromBilling(fact *models.BillingLog) *models.UsageLog {
+	if fact == nil {
+		return nil
+	}
+	return &models.UsageLog{
+		RequestID: fact.RequestID, UserID: fact.UserID, TokenID: fact.TokenID, TokenName: fact.TokenName,
+		ChannelID: fact.ChannelID, PrivateChannelID: fact.PrivateChannelID, OwnerType: fact.OwnerType,
+		ChannelName: fact.ChannelName, ChannelType: fact.ChannelType, ModelName: fact.ModelName,
+		PromptTokens: fact.PromptTokens, CompletionTokens: fact.CompletionTokens,
+		CacheReadTokens: fact.CacheReadTokens, CacheWriteTokens: fact.CacheWriteTokens,
+		InputCost: fact.InputCost, OutputCost: fact.OutputCost, CacheReadCost: fact.CacheReadCost,
+		CacheWriteCost: fact.CacheWriteCost, TotalCost: fact.TotalCost,
+		RawInputCost: fact.RawInputCost, RawOutputCost: fact.RawOutputCost,
+		RawCacheReadCost: fact.RawCacheReadCost, RawCacheWriteCost: fact.RawCacheWriteCost,
+		BillingFactor: fact.BillingFactor, PriceRatio: fact.PriceRatio, Free: fact.Free,
+		Status: fact.Status, CreatedAt: fact.CreatedAt,
+	}
 }
 
 func TestSettleUsage(t *testing.T) {
@@ -104,7 +190,7 @@ func TestSettleUsage(t *testing.T) {
 	db.Create(&models.User{Username: "test", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 
 	// Settle usage
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
@@ -150,7 +236,7 @@ func TestSettleUsage(t *testing.T) {
 func TestSettlePersistsAgentRouteScalarsVerbatim(t *testing.T) {
 	db, appProv := setupTestDB(t)
 	db.Create(&models.User{Username: "route-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
-	settler := NewSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+	settler := newTestSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
 
 	entries := []protocol.UsageLogEntry{
 		{
@@ -186,7 +272,7 @@ func TestSettlePersistsAgentRouteScalarsVerbatim(t *testing.T) {
 func TestSettlerExecutionAgentIDPointerPresence(t *testing.T) {
 	db, appProv := setupTestDB(t)
 	db.Create(&models.User{Username: "execution-agent-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
-	settler := NewSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+	settler := newTestSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
 	target, empty := "target-a", ""
 
 	settler.Settle(context.Background(), "authenticated-source", []protocol.UsageLogEntry{
@@ -222,7 +308,7 @@ func TestSettle_PublishesUserQuotaSync(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		settler := NewSettler(appProv, bus, logger)
+		settler := newTestSettler(appProv, bus, logger)
 		settler.Settle(context.Background(), "agentX", []protocol.UsageLogEntry{
 			{
 				RequestID:        "req-sync-1",
@@ -264,7 +350,7 @@ func TestSettle_PublishesUserQuotaSync(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		settler := NewSettler(appProv, bus, logger)
+		settler := newTestSettler(appProv, bus, logger)
 		settler.Settle(context.Background(), "agentX", []protocol.UsageLogEntry{
 			{
 				RequestID: "req-sync-anon",
@@ -292,7 +378,7 @@ func TestSettle_PublishesUserQuotaSync(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		settler := NewSettler(appProv, bus, logger)
+		settler := newTestSettler(appProv, bus, logger)
 		// user 777 不存在 → GetByID 报错 → 跳过 → users 为空 → 不发
 		settler.Settle(context.Background(), "agentX", []protocol.UsageLogEntry{
 			{
@@ -319,7 +405,7 @@ func TestQuotaDepletion(t *testing.T) {
 	db.Create(&models.Token{UserID: 1, Key: "sk-poor", Name: "t1", Status: 1, ExpiredAt: -1})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	checker := NewQuotaChecker(appProv, bus, logger)
 	checker.Start()
 
@@ -357,7 +443,7 @@ func TestSettleUsage_SystemTestOwnerlessPersistsUsageLogWithoutQuotaDeduction(t 
 	db.Create(&sentinelUser)
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-system-ownerless-1",
@@ -406,7 +492,7 @@ func TestSettleUsage_NonSystemOwnerlessPersistsUsageLogWithoutUserDeduction(t *t
 	db.Create(&sentinelUser)
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-ownerless-1",
@@ -454,7 +540,7 @@ func TestSettleUsagePersistsFailedStatus(t *testing.T) {
 	db.Create(&models.User{Username: "failed-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-failed-1",
@@ -490,7 +576,7 @@ func TestSettleUsage_EmptyModelDoesNotWarnAndUsesZeroCost(t *testing.T) {
 
 	db.Create(&models.User{Username: "empty-model-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-empty-model",
@@ -533,7 +619,7 @@ func TestSettleOne_HasTrace(t *testing.T) {
 	db.Create(&models.User{Username: "trace-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-trace-1",
@@ -577,7 +663,7 @@ func TestSettleOne_OtherFieldPersisted(t *testing.T) {
 	db.Create(&models.User{Username: "other-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	otherJSON := `{"relay_mode":"native","channel_type":1,"channel_name":"test-ch","passthrough_enabled":false}`
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
@@ -611,7 +697,7 @@ func TestSettleOne_NoTrace(t *testing.T) {
 	db.Create(&models.User{Username: "notrace-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-notrace-1",
@@ -646,7 +732,7 @@ func TestSettler_WritesBillingRollups(t *testing.T) {
 	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
+	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:        "req-rollup-1",
@@ -722,7 +808,7 @@ func TestSettler_TracksFailedRequests(t *testing.T) {
 	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
+	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
 			RequestID:    "req-rollup-failed-1",
@@ -775,7 +861,7 @@ func TestSettler_PersistsErrorStageAndTimings(t *testing.T) {
 	db.Create(&models.User{Username: "trace-fields-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "test-model", InputPrice: 0, OutputPrice: 0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 
 	entry := protocol.UsageLogEntry{
 		RequestID:          "req-trace-fields",
@@ -821,7 +907,7 @@ func TestSettler_TraceDataEmpty_NoTraceRow(t *testing.T) {
 	db.Create(&models.User{Username: "trace-empty-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "test-model", InputPrice: 0, OutputPrice: 0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 
 	entry := protocol.UsageLogEntry{
 		RequestID:          "req-trace-empty",
@@ -869,7 +955,7 @@ func TestSettler_TraceDataNonEmpty_FailedRequest(t *testing.T) {
 	db.Create(&models.User{Username: "trace-fail-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "test-model", InputPrice: 0, OutputPrice: 0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 
 	// 构造一个合法的 TraceData JSON（与 TraceRecord.MarshalJSON 输出格式对齐）
 	traceJSON := `{
@@ -947,7 +1033,7 @@ func TestSettler_IgnoresDuplicateRequestID(t *testing.T) {
 		Timestamp:        time.Now().Unix(),
 	}
 
-	settler := NewSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
+	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{entry})
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{entry})
 
@@ -1004,7 +1090,7 @@ func TestSettler_SubmitsToAggregatorAfterCommit(t *testing.T) {
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
 	mockAgg := &mockAggregator{}
-	settler := NewSettlerWithAggregator(appProv, bus, logger, mockAgg)
+	settler := newTestSettlerWithAggregator(appProv, bus, logger, mockAgg)
 
 	// success: 第一次 settle → aggregator 收到 1 条
 	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
@@ -1082,12 +1168,11 @@ func TestSettler_BehaviorEquivalentToLegacy(t *testing.T) {
 		func(rows []dao.ChannelDailyRow) error {
 			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertChannelDaily(rows)
 		},
-		func(rows []dao.HourlyBucketRow) error {
-			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertHourlyBucket(rows)
+		func(rows []dao.BillingHourlyRow) error {
+			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().UpsertBillingHourlyBuckets(context.Background(), rows)
 		},
-		nil,
 	)
-	settlerA := NewSettlerWithAggregator(appA, busA, logger, agg)
+	settlerA := newTestSettlerWithAggregator(appA, busA, logger, agg)
 
 	// --- Path B: legacy (syncAggregator drives per-log UpsertXxx) ---
 	dbB, appB := setupTestDB(t)
@@ -1095,7 +1180,7 @@ func TestSettler_BehaviorEquivalentToLegacy(t *testing.T) {
 	dbB.Create(&models.User{Username: "ub", Password: "x", Role: 1, Status: 1, Quota: 1_000_000})
 	dbB.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settlerB := NewSettlerWithAggregator(appB, busB, logger, &syncAggregator{app: appB})
+	settlerB := newTestSettlerWithAggregator(appB, busB, logger, &syncAggregator{app: appB})
 
 	// --- Mixed inputs covering edge cases ---
 	// 用固定的 ts 避免两次跑出现在不同分钟/小时窗口的边界 flake。
@@ -1169,9 +1254,9 @@ func TestSettler_BehaviorEquivalentToLegacy(t *testing.T) {
 		require.Equal(t, chB[i], chA[i], "channel_daily row %d", i)
 	}
 
-	var hA, hB []models.UsageHourlyBucket
-	require.NoError(t, dbA.Order("date, hour, channel_id, private_channel_id, model_name, agent_id").Find(&hA).Error)
-	require.NoError(t, dbB.Order("date, hour, channel_id, private_channel_id, model_name, agent_id").Find(&hB).Error)
+	var hA, hB []models.BillingHourlyBucket
+	require.NoError(t, dbA.Order("date, hour, user_id, token_id, channel_id, private_channel_id, owner_type, model_name").Find(&hA).Error)
+	require.NoError(t, dbB.Order("date, hour, user_id, token_id, channel_id, private_channel_id, owner_type, model_name").Find(&hB).Error)
 	require.Equal(t, len(hB), len(hA), "hourly_bucket row count")
 	for i := range hB {
 		hA[i].ID, hB[i].ID = 0, 0
@@ -1191,7 +1276,7 @@ func TestSettle_PersistsFallbackChainAndTraces(t *testing.T) {
 	db.Create(&models.User{Username: "fb-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettler(appProv, bus, logger)
+	settler := newTestSettler(appProv, bus, logger)
 
 	entry := protocol.UsageLogEntry{
 		RequestID: "req-fb",
@@ -1245,7 +1330,7 @@ func TestSettle_PersistsFallbackChainAndTraces(t *testing.T) {
 	}
 }
 
-// TestSettler_NilAggregatorFallsBackToNoop 验证 NewSettlerWithAggregator(nil)
+// TestSettler_NilAggregatorFallsBackToNoop 验证 newTestSettlerWithAggregator(nil)
 // 不会 panic：构造函数会把 nil 替换为 noopAggregator。
 func TestSettler_NilAggregatorFallsBackToNoop(t *testing.T) {
 	db, appProv := setupTestDB(t)
@@ -1255,7 +1340,7 @@ func TestSettler_NilAggregatorFallsBackToNoop(t *testing.T) {
 	db.Create(&models.User{Username: "nil-agg-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
 	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-	settler := NewSettlerWithAggregator(appProv, bus, logger, nil)
+	settler := newTestSettlerWithAggregator(appProv, bus, logger, nil)
 	require.NotNil(t, settler.Aggregator, "nil aggregator must fall back to noopAggregator")
 
 	// settle 不应 panic
@@ -1292,7 +1377,7 @@ func TestSettleBatch_ReturnsErrorButSettlesRest(t *testing.T) {
 		db.Create(&models.User{Username: "batch-ok-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
 		db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 
-		settler := NewSettler(appProv, bus, logger)
+		settler := newTestSettler(appProv, bus, logger)
 		err := settler.SettleBatch(context.Background(), "agent-batch", []protocol.UsageLogEntry{
 			{
 				RequestID:        "req-batch-1",
@@ -1324,7 +1409,9 @@ func TestSettleBatch_ReturnsErrorButSettlesRest(t *testing.T) {
 		require.Equal(t, int64(2), count, "both entries must be persisted")
 	})
 
-	t.Run("failure_dropped_table_returns_non_nil_error", func(t *testing.T) {
+	// behavior change: request-log persistence is weakly reliable and cannot
+	// turn a committed billing fact into an ingest failure.
+	t.Run("dropped_log_table_keeps_committed_billing_successful", func(t *testing.T) {
 		db, appProv := setupTestDB(t)
 		bus := eventbus.NewMemoryBus()
 		logger := zap.NewNop()
@@ -1336,7 +1423,7 @@ func TestSettleBatch_ReturnsErrorButSettlesRest(t *testing.T) {
 		// usage_logs 表让每条 Create 都失败。
 		require.NoError(t, db.Migrator().DropTable(&models.UsageLog{}))
 
-		settler := NewSettler(appProv, bus, logger)
+		settler := newTestSettler(appProv, bus, logger)
 		err := settler.SettleBatch(context.Background(), "agent-batch-fail", []protocol.UsageLogEntry{
 			{
 				RequestID:        "req-batch-fail-1",
@@ -1361,7 +1448,10 @@ func TestSettleBatch_ReturnsErrorButSettlesRest(t *testing.T) {
 				Timestamp:        time.Now().Unix(),
 			},
 		})
-		require.Error(t, err, "settle failures must surface as a non-nil aggregated error so the caller 5xx's")
+		require.NoError(t, err)
+		var count int64
+		require.NoError(t, db.Model(&models.BillingLog{}).Where("request_id LIKE ?", "req-batch-fail-%").Count(&count).Error)
+		require.Equal(t, int64(2), count)
 	})
 
 	t.Run("void_wrapper_does_not_panic_on_failure", func(t *testing.T) {
@@ -1373,7 +1463,7 @@ func TestSettleBatch_ReturnsErrorButSettlesRest(t *testing.T) {
 		db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
 		require.NoError(t, db.Migrator().DropTable(&models.UsageLog{}))
 
-		settler := NewSettler(appProv, bus, logger)
+		settler := newTestSettler(appProv, bus, logger)
 		require.NotPanics(t, func() {
 			settler.Settle(context.Background(), "agent-batch-void", []protocol.UsageLogEntry{
 				{

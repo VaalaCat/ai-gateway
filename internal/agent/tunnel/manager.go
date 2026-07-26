@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
@@ -31,6 +32,12 @@ var (
 	errDesiredChanged             = errors.New("agent tunnel manager: desired configuration changed")
 )
 
+// IsManagerClosed reports whether an operation lost the race with Manager
+// shutdown. Callers may treat it as successful convergence during teardown.
+func IsManagerClosed(err error) bool {
+	return errors.Is(err, errManagerClosed)
+}
+
 type Desired struct {
 	Mode          string
 	ConfiguredURI string
@@ -46,16 +53,17 @@ type Dialer interface {
 }
 
 type ManagerOptions struct {
-	SourceID     string
-	Dialer       Dialer
-	Tickets      TicketProvider
-	Limits       wire.Limits
-	DrainTimeout time.Duration
-	BackoffMin   time.Duration
-	BackoffMax   time.Duration
-	Logger       *zap.Logger
-	Now          func() time.Time
-	Suppressor   *diagnostics.Suppressor
+	SourceID             string
+	RelayOutboundEnabled func() bool
+	Dialer               Dialer
+	Tickets              TicketProvider
+	Limits               wire.Limits
+	DrainTimeout         time.Duration
+	BackoffMin           time.Duration
+	BackoffMax           time.Duration
+	Logger               *zap.Logger
+	Now                  func() time.Time
+	Suppressor           *diagnostics.Suppressor
 }
 
 type Snapshot struct {
@@ -129,6 +137,9 @@ type Manager struct {
 }
 
 func NewManager(opts ManagerOptions) *Manager {
+	if opts.RelayOutboundEnabled == nil {
+		opts.RelayOutboundEnabled = func() bool { return true }
+	}
 	if opts.Logger == nil {
 		opts.Logger = zap.NewNop()
 	}
@@ -156,7 +167,7 @@ func NewManager(opts ManagerOptions) *Manager {
 	if isNilInterface(opts.Tickets) {
 		opts.Tickets = nil
 	}
-	if normalized, err := wire.NormalizeV1Limits(opts.Limits); err == nil {
+	if normalized, err := wire.NormalizeV2Limits(opts.Limits); err == nil {
 		opts.Limits = normalized
 	}
 	workerCtx, workerCancel := context.WithCancelCause(context.Background())
@@ -234,7 +245,29 @@ func (m *Manager) Apply(desired Desired) uint64 {
 	}
 }
 
-func (m *Manager) OpenStream(ctx context.Context, req agentproxy.RelayRequest) (agentproxy.RelayStream, error) {
+func (m *Manager) OpenAttemptStream(ctx context.Context, req agentproxy.AttemptStreamRequest) (agentproxy.AttemptStream, error) {
+	return m.openAttemptStream(ctx, req)
+}
+
+func (m *Manager) openAttemptStream(ctx context.Context, req agentproxy.AttemptStreamRequest) (agentproxy.AttemptStream, error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if m == nil || m.opts.RelayOutboundEnabled == nil || !m.opts.RelayOutboundEnabled() {
+		return nil, newPathPolicyError(consts.RouteErrorSourceRelayOutboundDisabled)
+	}
+	session := m.activeRef.Load()
+	if session == nil {
+		return nil, errRelayNotAvailable
+	}
+	if !session.acquireAdmission() {
+		return nil, errRelayNotAccepting
+	}
+	defer session.releaseAdmission()
+	return session.OpenAttemptStream(ctx, req)
+}
+
+func (m *Manager) OpenProbeStream(ctx context.Context, req agentproxy.ProbeStreamRequest) (agentproxy.ProbeStream, error) {
 	if ctx == nil {
 		return nil, errNilContext
 	}
@@ -246,7 +279,7 @@ func (m *Manager) OpenStream(ctx context.Context, req agentproxy.RelayRequest) (
 		return nil, errRelayNotAccepting
 	}
 	defer session.releaseAdmission()
-	return session.OpenStream(ctx, req)
+	return session.OpenProbeStream(ctx, req)
 }
 
 func (m *Manager) Snapshot() Snapshot {

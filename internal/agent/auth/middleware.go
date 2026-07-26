@@ -46,6 +46,7 @@ func TokenAuth(store *cache.Store) gin.HandlerFunc {
 			TokenID:      token.ID,
 			TokenName:    token.Name,
 			TraceEnabled: token.TraceEnabled,
+			TraceMode:    token.TraceMode,
 			BYOKOnly:     token.BYOKOnly,
 		}
 

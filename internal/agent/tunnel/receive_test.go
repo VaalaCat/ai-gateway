@@ -80,7 +80,8 @@ func TestReceiveWindowReplayResetsOnlyBadStreamAndHealthyStreamContinues(t *test
 	require.True(t, bad.handleFrame(wire.Frame{Type: wire.FrameWindowUpdate, Sequence: 3, StreamID: bad.id, Payload: update}))
 	require.Equal(t, before, bad.requestWindow.Available())
 	require.NoError(t, bad.session.ctx.Err())
-	healthy := newStream(bad.session, bad.session.ctx, t.Context(), testStreamID(86), 0)
+	require.True(t, bad.session.acceptsNew(), "a Relay stream violation must not poison the multiplexed session")
+	healthy := newStream(bad.session, bad.session.ctx, testStreamID(86), 0, "")
 	ready := mustMetadata(t, wire.Ready{RequestWindow: 0}, bad.session.limits)
 	require.False(t, healthy.handleFrame(wire.Frame{Type: wire.FrameReady, Sequence: 1, StreamID: healthy.id, Payload: ready}))
 	require.Equal(t, receiveReady, healthy.receivePhase)
@@ -100,8 +101,8 @@ func newReceiveTestStream(t *testing.T) *Stream {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	w := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error { return nil })
-	session := &Session{generation: 1, limits: testLimits(2), ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
-		tombstones: newTombstoneStore(8, time.Second, time.Now)}
-	return newStream(session, ctx, t.Context(), testStreamID(85), 0)
+	session := newSessionValue(nil, 1, testLimits(2), SessionOptions{Direction: SessionDirectionRelay})
+	session.ctx = ctx
+	session.writer = w
+	return newStream(session, ctx, testStreamID(85), 0, "")
 }

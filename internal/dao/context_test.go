@@ -7,11 +7,25 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/stretchr/testify/require"
 )
 
-func TestNewContext_GetDB(t *testing.T) {
+func TestSplitTransactionsRejectCrossDatabaseAccess(t *testing.T) {
+	core := setupTestDB(t)
+	logDB := setupTestDB(t)
+	ctx := NewContext(&testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit})
+	require.ErrorIs(t, RunInCoreTx(ctx, func(tx Context) error {
+		_, err := tx.LogDB()
+		return err
+	}), ErrCrossDatabaseTransaction)
+	require.ErrorIs(t, RunInLogTx(ctx, func(tx Context) error {
+		return tx.CoreDB().Error
+	}), ErrCrossDatabaseTransaction)
+}
+
+func TestNewContext_GetCoreDB(t *testing.T) {
 	ctx, db := setupAdminContext(t)
-	if ctx.GetDB() != db {
+	if ctx.GetCoreDB() != db {
 		t.Fatal("GetDB should return the app's DB")
 	}
 }
@@ -22,10 +36,10 @@ func TestContextConstructorsRequireAndPreserveContext(t *testing.T) {
 		ctx := context.WithValue(context.Background(), struct{}{}, "value")
 		admin := NewContextWithContext(application, ctx)
 		user := NewUserContextWithContext(application, ctx, &app.UserInfo{UserID: 7})
-		if admin.GetDB().Statement.Context != ctx {
+		if admin.GetCoreDB().Statement.Context != ctx {
 			t.Fatal("admin DAO context did not preserve caller context")
 		}
-		if user.GetDB().Statement.Context != ctx {
+		if user.GetCoreDB().Statement.Context != ctx {
 			t.Fatal("user DAO context did not preserve caller context")
 		}
 	})
@@ -35,10 +49,10 @@ func TestContextConstructorsRequireAndPreserveContext(t *testing.T) {
 		cancel(cause)
 		admin := NewContextWithContext(application, ctx)
 		user := NewUserContextWithContext(application, ctx, &app.UserInfo{UserID: 7})
-		if got := context.Cause(admin.GetDB().Statement.Context); !errors.Is(got, cause) {
+		if got := context.Cause(admin.GetCoreDB().Statement.Context); !errors.Is(got, cause) {
 			t.Fatalf("admin DAO context cause = %v, want %v", got, cause)
 		}
-		if got := context.Cause(user.GetDB().Statement.Context); !errors.Is(got, cause) {
+		if got := context.Cause(user.GetCoreDB().Statement.Context); !errors.Is(got, cause) {
 			t.Fatalf("user DAO context cause = %v, want %v", got, cause)
 		}
 	})
@@ -88,7 +102,7 @@ func TestUserContext_UserDB_Scopes(t *testing.T) {
 
 func TestWithTx_PreservesUserInfo(t *testing.T) {
 	ctx, _ := setupUserContext(t, 99)
-	db := ctx.GetDB()
+	db := ctx.GetCoreDB()
 
 	txCtx := ctx.WithTx(db)
 	uc, ok := txCtx.(*userContextImpl)
@@ -103,7 +117,7 @@ func TestWithTx_PreservesUserInfo(t *testing.T) {
 func TestRunInTx_Commit(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	err := RunInTx(ctx, func(txCtx Context) error {
-		return txCtx.GetDB().Create(&models.Setting{Key: "k1", Value: "v1"}).Error
+		return txCtx.GetCoreDB().Create(&models.Setting{Key: "k1", Value: "v1"}).Error
 	})
 	if err != nil {
 		t.Fatalf("RunInTx: %v", err)
@@ -118,7 +132,7 @@ func TestRunInTx_Commit(t *testing.T) {
 func TestRunInTx_Rollback(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	err := RunInTx(ctx, func(txCtx Context) error {
-		txCtx.GetDB().Create(&models.Setting{Key: "k2", Value: "v2"})
+		txCtx.GetCoreDB().Create(&models.Setting{Key: "k2", Value: "v2"})
 		return errors.New("boom")
 	})
 	if err == nil {

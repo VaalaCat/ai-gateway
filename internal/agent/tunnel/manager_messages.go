@@ -154,7 +154,7 @@ func (m *Manager) refreshRuntimeSettings() {
 		return
 	}
 	limits, drainTimeout := provider.managerRuntimeSettings()
-	if normalized, err := wire.NormalizeV1Limits(limits); err == nil {
+	if normalized, err := wire.NormalizeV2Limits(limits); err == nil {
 		m.opts.Limits = normalized
 	}
 	if drainTimeout > 0 {

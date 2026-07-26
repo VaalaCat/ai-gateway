@@ -13,9 +13,9 @@ import (
 
 // agentInsightProvider 实现 InsightProvider for type=agent。
 // 数据源:
-//  - Meta:   models.Agent (JOIN 不到则 404 InsightNotFound)
-//  - Summary/Trend/Breakdown: usage_hourly_buckets,过滤 agent_id
-//  - StageLatency / RecentErrors: usage_logs, 过滤 agent_id
+//   - Meta:   models.Agent (JOIN 不到则 404 InsightNotFound)
+//   - Summary/Trend/Breakdown: usage_hourly_buckets,过滤 agent_id
+//   - StageLatency / RecentErrors: legacy usage_logs 或 split request_logs,过滤 agent_id
 type agentInsightProvider struct{}
 
 // Meta 查 models.Agent;找不到返回 404 InsightNotFound。
@@ -42,9 +42,10 @@ func (agentInsightProvider) Meta(ctx Context, id string) (EntityMeta, error) {
 // Summary 拼装 agent 在窗口内的 KPI 概览。
 //
 // 各字段数据源:
-//   Requests/Cost/Tokens/SuccessRate ← agentBucketAggregate (hourly buckets, agent_id 过滤)
-//   TPSAvg                            ← AgentMetrics 已算好的 sum_completion/sum_gen_ms
-//   TTFTP95Ms                         ← usage_logs (单 agent 短窗口 OFFSET 近似)
+//
+//	Requests/Cost/Tokens/SuccessRate ← agentBucketAggregate (hourly buckets, agent_id 过滤)
+//	TPSAvg                            ← AgentMetrics 已算好的 sum_completion/sum_gen_ms
+//	TTFTP95Ms                         ← usage_logs (单 agent 短窗口 OFFSET 近似)
 //
 // 注意 buckets 聚合和 AgentMetrics 维度一致 (都按 agent_id 分组),只是 AgentMetrics
 // 顺手把 24h spark/tps 算好了,我们这里只挑 tps_avg 复用。
@@ -69,9 +70,13 @@ func (agentInsightProvider) Summary(ctx Context, id string, r dao.ObsRange) (Sum
 				break
 			}
 		}
+	} else if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return SummaryKpis{}, err
 	}
 	if ttft, err := agentTTFTP95(ctx, id, r); err == nil {
 		out.TTFTP95Ms = ttft
+	} else if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return SummaryKpis{}, err
 	}
 	return out, nil
 }
@@ -92,8 +97,14 @@ func (agentInsightProvider) StageLatency(_ Context, _ string, _ dao.ObsRange) (*
 // 复用 leaderboard 已封好的 SQL,但要带 agent_id 过滤 — 现成 method 没暴露这个维度,
 // 于是这里走 raw 聚合 (与 leaderboard 同形)。
 func (agentInsightProvider) Breakdown(ctx Context, id string, r dao.ObsRange) (Breakdown, error) {
-	byModel, _ := agentBreakdownByModel(ctx, id, r)
-	byChannel, _ := agentBreakdownByChannel(ctx, id, r)
+	byModel, err := agentBreakdownByModel(ctx, id, r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return Breakdown{}, err
+	}
+	byChannel, err := agentBreakdownByChannel(ctx, id, r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return Breakdown{}, err
+	}
 	return Breakdown{ByModel: byModel, ByChannel: byChannel}, nil
 }
 
@@ -102,9 +113,9 @@ func (agentInsightProvider) RecentErrors(ctx Context, id string, r dao.ObsRange,
 	if limit <= 0 {
 		limit = 10
 	}
-	db := agentRawDB(ctx)
-	if db == nil {
-		return nil, nil
+	db, model, err := agentRequestLogDB(ctx)
+	if err != nil {
+		return nil, err
 	}
 	type row struct {
 		CreatedAt    int64
@@ -114,14 +125,14 @@ func (agentInsightProvider) RecentErrors(ctx Context, id string, r dao.ObsRange,
 		ErrorMessage string
 	}
 	var rows []row
-	err := db.Model(&models.UsageLog{}).
+	err = db.Model(model).
 		Where("agent_id = ? AND status = 0 AND created_at >= ? AND created_at < ?", id, r.Start, r.End).
 		Select("created_at, error_stage, channel_name, model_name, error_message").
 		Order("created_at DESC").
 		Limit(limit).
 		Scan(&rows).Error
 	if err != nil {
-		return nil, err
+		return nil, dao.WrapLogDatabaseError(err)
 	}
 	out := make([]ErrorSample, 0, len(rows))
 	for _, x := range rows {
@@ -148,28 +159,28 @@ type agentBucketAgg struct {
 
 // agentBucketAggregate 在 [r.Start, r.End) 内对 agent_id 聚合 cost/requests/tokens/success。
 func agentBucketAggregate(ctx Context, agentID string, r dao.ObsRange) (agentBucketAgg, error) {
-	db := agentRawDB(ctx)
-	if db == nil {
-		return agentBucketAgg{}, fmt.Errorf("agent insight: db unavailable")
+	db, err := agentRawDB(ctx)
+	if err != nil {
+		return agentBucketAgg{}, err
 	}
 	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
 	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
 	var a agentBucketAgg
-	err := db.Model(&models.UsageHourlyBucket{}).
+	err = db.Model(&models.UsageHourlyBucket{}).
 		Where("agent_id = ? AND date >= ? AND date <= ?", agentID, startDate, endDate).
 		Select(`COALESCE(SUM(request_count), 0) AS requests,
 			COALESCE(SUM(success_count), 0) AS success,
 			COALESCE(SUM(total_cost), 0) AS cost,
 			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens`).
 		Scan(&a).Error
-	return a, err
+	return a, dao.WrapLogDatabaseError(err)
 }
 
 // agentBuckets 返回 agent 时间序列,逐桶 (hour/day) 给 cost/requests/tokens。
 func agentBuckets(ctx Context, agentID string, r dao.ObsRange) ([]dao.TimeBucket, error) {
-	db := agentRawDB(ctx)
-	if db == nil {
-		return nil, nil
+	db, err := agentRawDB(ctx)
+	if err != nil {
+		return nil, err
 	}
 	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
 	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
@@ -198,7 +209,7 @@ func agentBuckets(ctx Context, agentID string, r dao.ObsRange) ([]dao.TimeBucket
 		Group(groupCols).
 		Order(groupCols).
 		Scan(&rows).Error; err != nil {
-		return nil, err
+		return nil, dao.WrapLogDatabaseError(err)
 	}
 
 	out := make([]dao.TimeBucket, 0, len(rows))
@@ -217,9 +228,9 @@ func agentBuckets(ctx Context, agentID string, r dao.ObsRange) ([]dao.TimeBucket
 
 // agentBreakdownByModel 在 agent 内做 by-model leaderboard (cost desc, top 10)。
 func agentBreakdownByModel(ctx Context, agentID string, r dao.ObsRange) ([]dao.LeaderRow, error) {
-	db := agentRawDB(ctx)
-	if db == nil {
-		return nil, nil
+	db, err := agentRawDB(ctx)
+	if err != nil {
+		return nil, err
 	}
 	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
 	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
@@ -230,7 +241,7 @@ func agentBreakdownByModel(ctx Context, agentID string, r dao.ObsRange) ([]dao.L
 		Tokens   int64
 	}
 	var rows []row
-	err := db.Model(&models.UsageHourlyBucket{}).
+	err = db.Model(&models.UsageHourlyBucket{}).
 		Where("agent_id = ? AND date >= ? AND date <= ?", agentID, startDate, endDate).
 		Select(`model_name AS name,
 			COALESCE(SUM(total_cost), 0) AS cost,
@@ -241,7 +252,7 @@ func agentBreakdownByModel(ctx Context, agentID string, r dao.ObsRange) ([]dao.L
 		Limit(10).
 		Scan(&rows).Error
 	if err != nil {
-		return nil, err
+		return nil, dao.WrapLogDatabaseError(err)
 	}
 	out := make([]dao.LeaderRow, 0, len(rows))
 	for _, x := range rows {
@@ -253,9 +264,9 @@ func agentBreakdownByModel(ctx Context, agentID string, r dao.ObsRange) ([]dao.L
 // agentBreakdownByChannel 在 agent 内做 by-channel leaderboard (cost desc, top 10)。
 // channel_id > 0 → 排除 BYOK 私域行。
 func agentBreakdownByChannel(ctx Context, agentID string, r dao.ObsRange) ([]dao.LeaderRow, error) {
-	db := agentRawDB(ctx)
-	if db == nil {
-		return nil, nil
+	db, err := agentRawDB(ctx)
+	if err != nil {
+		return nil, err
 	}
 	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
 	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
@@ -267,7 +278,7 @@ func agentBreakdownByChannel(ctx Context, agentID string, r dao.ObsRange) ([]dao
 		Tokens   int64
 	}
 	var rows []row
-	err := db.Model(&models.UsageHourlyBucket{}).
+	err = db.Model(&models.UsageHourlyBucket{}).
 		Where("agent_id = ? AND date >= ? AND date <= ? AND channel_id > 0", agentID, startDate, endDate).
 		Select(`channel_id AS id,
 			COALESCE(MIN(NULLIF(channel_name, '')), '') AS name,
@@ -279,7 +290,7 @@ func agentBreakdownByChannel(ctx Context, agentID string, r dao.ObsRange) ([]dao
 		Limit(10).
 		Scan(&rows).Error
 	if err != nil {
-		return nil, err
+		return nil, dao.WrapLogDatabaseError(err)
 	}
 	out := make([]dao.LeaderRow, 0, len(rows))
 	for _, x := range rows {
@@ -290,18 +301,18 @@ func agentBreakdownByChannel(ctx Context, agentID string, r dao.ObsRange) ([]dao
 
 // agentTTFTP95 单 agent 的 ttft p95 (走 usage_logs)。
 func agentTTFTP95(ctx Context, agentID string, r dao.ObsRange) (int64, error) {
-	db := agentRawDB(ctx)
-	if db == nil {
-		return 0, nil
+	db, model, err := agentRequestLogDB(ctx)
+	if err != nil {
+		return 0, err
 	}
 	base := func() *gorm.DB {
-		return db.Model(&models.UsageLog{}).
+		return db.Model(model).
 			Where("agent_id = ? AND created_at >= ? AND created_at < ? AND is_stream = 1 AND status = 1 AND completion_tokens > 0",
 				agentID, r.Start, r.End)
 	}
 	var cnt int64
 	if err := base().Count(&cnt).Error; err != nil {
-		return 0, err
+		return 0, dao.WrapLogDatabaseError(err)
 	}
 	if cnt == 0 {
 		return 0, nil
@@ -311,12 +322,12 @@ func agentTTFTP95(ctx Context, agentID string, r dao.ObsRange) (int64, error) {
 		offset = cnt - 1
 	}
 	var v int64
-	err := base().
+	err = base().
 		Select("first_response_ms").
 		Order("first_response_ms ASC").
 		Offset(int(offset)).Limit(1).
 		Scan(&v).Error
-	return v, err
+	return v, dao.WrapLogDatabaseError(err)
 }
 
 // agentBucketTs 把 (date, hour) 翻译为 (ts, label)。复制 dao.bucketTsLabel 语义,
@@ -332,12 +343,26 @@ func agentBucketTs(date string, hour int, gran dao.Gran) (int64, string) {
 
 // agentRawDB 从 Context 拿底层 *gorm.DB。
 // Context 接口故意不暴露 rawDB() 方法 (保持 mock 友好),provider 实现走类型断言。
-// 测试用真实 providerCtx 注入,所以断言总能成功;mock 实现拿到的是 nil → provider
-// 内部函数都会 short-circuit 返回零值,避免 panic。
-func agentRawDB(ctx Context) *gorm.DB {
+// 非 providerCtx 或 nil DB 明确视为日志库不可用，避免静默返回成功零值。
+func agentRawDB(ctx Context) (*gorm.DB, error) {
+	pc, ok := ctx.(*providerCtx)
+	if !ok || pc.rawDB() == nil {
+		return nil, dao.ErrLogDatabaseUnavailable
+	}
+	return pc.rawDB(), nil
+}
+
+func agentRequestLogDB(ctx Context) (*gorm.DB, any, error) {
 	pc, ok := ctx.(*providerCtx)
 	if !ok {
-		return nil
+		return nil, nil, dao.ErrLogDatabaseUnavailable
 	}
-	return pc.rawDB()
+	db, model, err := pc.requestLogs()
+	if err != nil {
+		return nil, nil, err
+	}
+	if db == nil || model == nil {
+		return nil, nil, dao.ErrLogDatabaseUnavailable
+	}
+	return db, model, nil
 }

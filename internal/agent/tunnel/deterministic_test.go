@@ -19,6 +19,7 @@ func TestDeterministicOpenCommitTimeoutStopsStream(t *testing.T) {
 	clock := newManualClock(time.Unix(100, 0))
 	conn := newMemorySessionConn()
 	session := newSession(conn, 1, testLimits(1), SessionOptions{
+		Direction:         SessionDirectionRelay,
 		OpenCommitTimeout: 30 * time.Second,
 		PingInterval:      time.Hour,
 		PongTimeout:       time.Hour,
@@ -27,7 +28,7 @@ func TestDeterministicOpenCommitTimeoutStopsStream(t *testing.T) {
 	runDone := make(chan struct{})
 	go func() { defer close(runDone); _ = session.Run(t.Context()) }()
 	<-session.started
-	stream, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	stream, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
 	require.Equal(t, wire.FrameOpen, decodeMemoryWrite(t, <-conn.writes, session.limits).Type)
 	require.Eventually(t, func() bool { return clock.EventCount() >= 2 }, time.Second, time.Millisecond)
@@ -48,7 +49,7 @@ func TestDeterministicWriteDeadlineAndFailure(t *testing.T) {
 	conn := newMemorySessionConn()
 	writeErr := errors.New("memory write failed")
 	conn.writeErr = writeErr
-	session := newSession(conn, 1, testLimits(1), SessionOptions{WriteTimeout: 15 * time.Second, clock: clock})
+	session := newSession(conn, 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay, WriteTimeout: 15 * time.Second, clock: clock})
 	err := session.writeFrame(testFrame(1, 'x'))
 	require.ErrorIs(t, err, writeErr)
 	conn.mu.Lock()
@@ -60,7 +61,7 @@ func TestDeterministicPongExtendsReadDeadline(t *testing.T) {
 	now := time.Unix(300, 0)
 	clock := newManualClock(now)
 	conn := newMemorySessionConn()
-	session := newSession(conn, 1, testLimits(1), SessionOptions{PongTimeout: time.Minute, clock: clock})
+	session := newSession(conn, 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay, PongTimeout: time.Minute, clock: clock})
 	session.configureReader()
 	conn.mu.Lock()
 	first := conn.readDeadline
@@ -78,7 +79,7 @@ func TestDeterministicUnknownDataRollingWindowExpires(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	conn := newMemorySessionConn()
-	session := newSession(conn, 1, testLimits(1), SessionOptions{clock: clock})
+	session := newSession(conn, 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay, clock: clock})
 	session.ctx = ctx
 	session.writer = newFairWriter(ctx, session.limits.MaxQueuedSessionBytes, time.Second, func(wire.Frame) error { return nil })
 	for i := byte(1); i <= 7; i++ {
@@ -95,12 +96,12 @@ func TestMemorySessionHasOneReaderAndOneWriterOwner(t *testing.T) {
 	clock := newManualClock(time.Unix(500, 0))
 	conn := newMemorySessionConn()
 	limits := testLimits(4)
-	session := newSession(conn, 1, limits, SessionOptions{PingInterval: time.Hour, PongTimeout: time.Hour, clock: clock})
+	session := newSession(conn, 1, limits, SessionOptions{Direction: SessionDirectionRelay, PingInterval: time.Hour, PongTimeout: time.Hour, clock: clock})
 	runDone := make(chan struct{})
 	go func() { defer close(runDone); _ = session.Run(t.Context()) }()
 	<-session.started
 	for i := 0; i < 4; i++ {
-		_, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+		_, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 		require.NoError(t, err)
 	}
 	for range 4 {
@@ -118,13 +119,13 @@ func TestMemorySessionOneByteStressDoesNotBlockOtherStreamOrPong(t *testing.T) {
 	limits.MaxDataBytes = 64 * 1024
 	limits.InitialStreamWindow = 256 * 1024
 	limits.MaxQueuedSessionBytes = 1024 * 1024
-	session := newSession(conn, 1, limits, SessionOptions{PingInterval: time.Hour, PongTimeout: time.Hour})
+	session := newSession(conn, 1, limits, SessionOptions{Direction: SessionDirectionRelay, PingInterval: time.Hour, PongTimeout: time.Hour})
 	runDone := make(chan struct{})
 	go func() { defer close(runDone); _ = session.Run(t.Context()) }()
 	<-session.started
-	first, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	first, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
-	second, err := session.OpenStream(t.Context(), validBoundRelayRequest("/v1/responses"))
+	second, err := session.OpenAttemptStream(t.Context(), validBoundRelayRequest("/v1/responses"))
 	require.NoError(t, err)
 	<-conn.writes
 	<-conn.writes
@@ -221,11 +222,11 @@ func TestDeterministicControlSendTimeoutStopsOwner(t *testing.T) {
 	<-started
 	session := &Session{
 		generation: 1, limits: testLimits(1), ctx: ctx, writer: w,
-		opts:       defaultSessionOptions(SessionOptions{WriteTimeout: 15 * time.Second, OpenCommitTimeout: time.Hour, clock: clock}),
+		opts:       defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay, WriteTimeout: 15 * time.Second, OpenCommitTimeout: time.Hour, clock: clock}),
 		streams:    make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, clock.Now),
 	}
-	stream := newStream(session, ctx, t.Context(), testStreamID(53), 0)
+	stream := newStream(session, ctx, testStreamID(53), 0, "")
 	go stream.run()
 	stream.Cancel(context.Canceled)
 	require.Eventually(t, func() bool { return clock.EventCount() >= 2 }, time.Second, time.Millisecond)
@@ -245,14 +246,15 @@ func TestDeterministicRemainingDeadlinePrecedesOpenCommit(t *testing.T) {
 	clock := newManualClock(time.Unix(900, 0))
 	conn := newMemorySessionConn()
 	session := newSession(conn, 1, testLimits(1), SessionOptions{
-		OpenCommitTimeout: 30 * time.Second, PingInterval: time.Hour, PongTimeout: time.Hour, clock: clock,
+		Direction: SessionDirectionRelay, OpenCommitTimeout: 30 * time.Second,
+		PingInterval: time.Hour, PongTimeout: time.Hour, clock: clock,
 	})
 	runDone := make(chan struct{})
 	go func() { defer close(runDone); _ = session.Run(t.Context()) }()
 	<-session.started
 	request := validBoundRelayRequest("/v1/responses")
 	request.Remaining = 10 * time.Second
-	stream, err := session.OpenStream(t.Context(), request)
+	stream, err := session.OpenAttemptStream(t.Context(), request)
 	require.NoError(t, err)
 	<-conn.writes
 	require.Eventually(t, func() bool { return clock.EventCount() >= 3 }, time.Second, time.Millisecond)
@@ -271,14 +273,15 @@ func TestDeterministicOpenCommitPrecedesRemainingDeadline(t *testing.T) {
 	clock := newManualClock(time.Unix(950, 0))
 	conn := newMemorySessionConn()
 	session := newSession(conn, 1, testLimits(1), SessionOptions{
-		OpenCommitTimeout: 30 * time.Second, PingInterval: time.Hour, PongTimeout: time.Hour, clock: clock,
+		Direction: SessionDirectionRelay, OpenCommitTimeout: 30 * time.Second,
+		PingInterval: time.Hour, PongTimeout: time.Hour, clock: clock,
 	})
 	runDone := make(chan struct{})
 	go func() { defer close(runDone); _ = session.Run(t.Context()) }()
 	<-session.started
 	request := validBoundRelayRequest("/v1/responses")
 	request.Remaining = 40 * time.Second
-	stream, err := session.OpenStream(t.Context(), request)
+	stream, err := session.OpenAttemptStream(t.Context(), request)
 	require.NoError(t, err)
 	<-conn.writes
 	require.Eventually(t, func() bool { return clock.EventCount() >= 3 }, time.Second, time.Millisecond)
@@ -310,9 +313,9 @@ func TestDeterministicRemainingAndWindowStallOrdering(t *testing.T) {
 			defer cancel()
 			w := newFairWriter(ctx, 4096, time.Second, func(wire.Frame) error { return nil })
 			session := &Session{generation: 1, limits: testLimits(1), ctx: ctx, writer: w,
-				opts:    defaultSessionOptions(SessionOptions{OpenCommitTimeout: time.Hour, WindowStallTimeout: test.stall, clock: clock}),
+				opts:    defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay, OpenCommitTimeout: time.Hour, WindowStallTimeout: test.stall, clock: clock}),
 				streams: make(map[wire.StreamID]*Stream), tombstones: newTombstoneStore(8, time.Second, clock.Now)}
-			stream := newStream(session, ctx, t.Context(), testStreamID(70), test.remaining)
+			stream := newStream(session, ctx, testStreamID(70), test.remaining, "")
 			stream.commitState.Store(uint32(wire.Committed))
 			stream.requestWindow.Set(0)
 			go stream.run()

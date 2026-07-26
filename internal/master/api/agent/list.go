@@ -23,7 +23,10 @@ type AgentResponse struct {
 	Tags                    string                         `json:"tags"`
 	ProxyURL                string                         `json:"proxy_url"`
 	RelayMode               string                         `json:"relay_mode"`
-	PeerRouteMode           string                         `json:"peer_route_mode"`
+	DirectInboundEnabled    bool                           `json:"direct_inbound_enabled"`
+	DirectOutboundEnabled   bool                           `json:"direct_outbound_enabled"`
+	RelayInboundEnabled     bool                           `json:"relay_inbound_enabled"`
+	RelayOutboundEnabled    bool                           `json:"relay_outbound_enabled"`
 	Connection              connectivity.ConnectionSummary `json:"connection"`
 }
 
@@ -51,7 +54,13 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[A
 	}
 
 	h.enrichLastSeen(agents)
-	batch := h.Connections.BuildMany(agents)
+	batch, err := h.Connections.BuildManyContext(c.RequestContext(), agents)
+	if err != nil {
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return api.PaginatedResponse[AgentResponse]{}, apiErr
+		}
+		return api.PaginatedResponse[AgentResponse]{}, api.InternalError("build connection snapshot failed", err)
+	}
 	isAdmin := c.UserInfo != nil && c.UserInfo.Role == 2
 
 	items := make([]AgentResponse, len(agents))
@@ -71,7 +80,10 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[A
 			Tags:                    a.Tags,
 			ProxyURL:                a.ProxyURL,
 			RelayMode:               a.RelayMode,
-			PeerRouteMode:           a.PeerRouteMode,
+			DirectInboundEnabled:    a.DirectInboundEnabled,
+			DirectOutboundEnabled:   a.DirectOutboundEnabled,
+			RelayInboundEnabled:     a.RelayInboundEnabled,
+			RelayOutboundEnabled:    a.RelayOutboundEnabled,
 			Connection:              connectionSummary(snapshot),
 		}
 

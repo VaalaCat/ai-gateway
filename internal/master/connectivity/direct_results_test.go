@@ -16,7 +16,7 @@ func TestDirectProbeSnapshotCheckingRetainsPreviousResultAndProjectsCompletion(t
 	service := NewService("master", Sources{}, Options{})
 	target := ProbeTarget{AgentID: "target", Name: "Target", Addresses: []protocol.Address{{URL: "https://target", Tag: "wan"}}}
 	service.MarkDirectProbeChecking("source", 1, target, "fp", 1)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "fp", Network: "unreachable", Identity: "unknown",
 		CheckedAt: 100, LatencyMS: 8, ReasonCode: "direct_connect",
 	}, 1)
@@ -26,7 +26,7 @@ func TestDirectProbeSnapshotCheckingRetainsPreviousResultAndProjectsCompletion(t
 	require.Equal(t, "unreachable", checking.Network)
 	require.Equal(t, "direct_connect", checking.LastError.Code)
 
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "fp", Network: "reachable", Identity: "verified",
 		Eligible: true, CheckedAt: 120, LatencyMS: 3,
 	}, 2)
@@ -70,7 +70,7 @@ func TestDirectProbeSnapshotIsCopyIsolated(t *testing.T) {
 	service := NewService("master", Sources{}, Options{})
 	target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 	service.MarkDirectProbeChecking("source", 1, target, "fp", 1)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "fp", Network: "reachable", Identity: "invalid",
 		CheckedAt: 100, ReasonCode: "identity_malformed",
 	}, 1)
@@ -105,7 +105,7 @@ func TestDirectProbeResultNormalizesPublicIdentity(t *testing.T) {
 			service := NewService("master", Sources{}, Options{})
 			target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 			service.MarkDirectProbeChecking("source", 1, target, "fp", 1)
-			service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+			service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 				TargetAgentID: "target", AddressFingerprint: "fp", Network: "reachable",
 				Identity: test.identity, CheckedAt: 100,
 			}, 1)
@@ -168,7 +168,7 @@ func TestDirectProbeResultNormalizesUntrustedDiagnosticFields(t *testing.T) {
 			service := NewService("master", Sources{}, Options{Logger: zap.New(core)})
 			target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 			service.MarkDirectProbeChecking("source", 1, target, "fp", 1)
-			service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+			service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 				TargetAgentID: "target", AddressFingerprint: "fp", Network: test.network,
 				Identity: test.identity, Eligible: test.eligible, CheckedAt: 100, ReasonCode: test.reasonCode,
 			}, 1)
@@ -195,11 +195,11 @@ func TestDirectProbeResultRejectsOlderFingerprintCompletion(t *testing.T) {
 	target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 	service.MarkDirectProbeChecking("source", 1, target, "old-fp", 1)
 	service.MarkDirectProbeChecking("source", 1, target, "new-fp", 2)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "new-fp", Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: 200,
 	}, 2)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "old-fp", Network: "unreachable",
 		Identity: "unknown", CheckedAt: 300, ReasonCode: "direct_connect",
 	}, 1)
@@ -216,11 +216,11 @@ func TestDirectProbeResultRejectsOlderGenerationForSameFingerprint(t *testing.T)
 	target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 	service.MarkDirectProbeChecking("source", 1, target, "fp", 1)
 	service.MarkDirectProbeChecking("source", 1, target, "fp", 2)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "fp", Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: 200,
 	}, 2)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "fp", Network: "unreachable",
 		Identity: "unknown", CheckedAt: 300, ReasonCode: "direct_connect",
 	}, 1)
@@ -241,7 +241,7 @@ func TestDirectProbeCancelRejectsOlderGenerationWhileNewProbeChecks(t *testing.T
 	checking := service.Build(models.Agent{AgentID: "source"}).Direct.Targets["target"]
 	require.True(t, checking.Checking)
 	require.Equal(t, uint64(2), checking.ProbeGeneration)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target", AddressFingerprint: "fp", Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: 200,
 	}, 2)
@@ -257,7 +257,7 @@ func TestDirectProbeMarkUsesPerTargetGenerationHighWater(t *testing.T) {
 		markAndCompleteProbeForTest(service, "source", target, "new-fp", 2, 200)
 
 		service.MarkDirectProbeChecking("source", 1, target, "old-fp", 1)
-		service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+		service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 			TargetAgentID: target.AgentID, AddressFingerprint: "old-fp", Network: "unreachable",
 			Identity: "unknown", CheckedAt: 300, ReasonCode: "direct_connect",
 		}, 1)
@@ -309,14 +309,14 @@ func TestDirectProbeStateRejectsStaleSourceGenerationLifecycle(t *testing.T) {
 	target := ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "https://target"}}}
 
 	service.MarkDirectProbeChecking("source", 2, target, "gen2-fp", 7)
-	service.ApplyDirectProbeResult("source", 2, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 2, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "gen2-fp", Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: 200,
 	}, 7)
 	service.Forget("source", 1)
 
 	service.MarkDirectProbeChecking("source", 1, target, "gen1-late-fp", 99)
-	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: "gen1-late-fp", Network: "unreachable",
 		Identity: "unknown", CheckedAt: 300, ReasonCode: "direct_connect",
 	}, 99)
@@ -337,7 +337,7 @@ func TestDirectProbeStateRejectsStaleSourceGenerationLifecycle(t *testing.T) {
 
 func markAndCompleteProbeForTest(service *Service, sourceID string, target ProbeTarget, fingerprint string, generation uint64, checkedAt int64) {
 	service.MarkDirectProbeChecking(sourceID, 1, target, fingerprint, generation)
-	service.ApplyDirectProbeResult(sourceID, 1, target, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult(sourceID, 1, target, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: target.AgentID, AddressFingerprint: fingerprint, Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: checkedAt,
 	}, generation)

@@ -1,7 +1,9 @@
 package monitoring
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -19,6 +21,37 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+type monitoringFailingFinder struct {
+	failAt string
+}
+
+func (f monitoringFailingFinder) fail(stage string) error {
+	if f.failAt == stage {
+		return dao.ErrLogDatabaseUnavailable
+	}
+	return nil
+}
+
+func (f monitoringFailingFinder) ChannelMetrics(dao.ObsRange) ([]dao.ChannelMetric, error) {
+	return nil, f.fail("channels")
+}
+
+func (f monitoringFailingFinder) AgentMetrics(dao.ObsRange) ([]dao.AgentMetric, error) {
+	return nil, f.fail("agents")
+}
+
+func (f monitoringFailingFinder) ErrorDistribution(by string, _ dao.ObsRange, _ dao.Scope) ([]dao.ErrBucket, error) {
+	return nil, f.fail("errors_" + by)
+}
+
+func (f monitoringFailingFinder) DashboardKpis(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiBundle, error) {
+	return dao.KpiBundle{}, f.fail("dashboard")
+}
+
+func (f monitoringFailingFinder) CacheSaving(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.CacheSaving, error) {
+	return dao.CacheSaving{}, f.fail("cache")
+}
+
 // newMonitoringTestCtx 构造 Handler + DB + Application 三件套,形与 dashboard_test / log_test 对齐。
 func newMonitoringTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	t.Helper()
@@ -29,6 +62,9 @@ func newMonitoringTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
+	if err := db.AutoMigrate(&models.BillingHourlyBucket{}); err != nil {
+		t.Fatalf("migrate billing hourly fixture: %v", err)
+	}
 	if err := models.SeedDefaultUserGroup(db); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
@@ -36,7 +72,7 @@ func newMonitoringTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 		t.Fatalf("seed user: %v", err)
 	}
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	application.SetEventBus(eventbus.NewMemoryBus())
 	return &Handler{}, db, application
 }
@@ -50,6 +86,45 @@ func makeMonitoringCtx(t *testing.T, application app.Application, userID uint, i
 		App:          application,
 		UserInfo:     &app.UserInfo{UserID: userID, GroupID: 1},
 		OwnerContext: t.Context(),
+	}
+}
+
+func TestPerformanceOnlyHandlersReturn503WhenLogDatabaseUnavailable(t *testing.T) {
+	_, _, application := newMonitoringTestCtx(t)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	application.SetLogDB(nil)
+	start, end := monitoringDayRange()
+	ctx := makeMonitoringCtx(t, application, 1, true)
+
+	_, err := (&Handler{}).Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day"})
+	requireLogDatabaseUnavailable(t, err)
+}
+
+func TestMonitoringInsightsReturns503ForEveryMidQueryLogDisconnect(t *testing.T) {
+	for _, failAt := range []string{"channels", "agents", "errors_stage", "errors_channel", "dashboard", "cache"} {
+		t.Run(failAt, func(t *testing.T) {
+			h, _, application := newMonitoringTestCtx(t)
+			finder := monitoringFailingFinder{failAt: failAt}
+			h.MonitoringDataFinder = func(app.Application, context.Context) MonitoringDataFinder { return finder }
+			start, end := monitoringDayRange()
+
+			_, err := h.Insights(makeMonitoringCtx(t, application, 1, true), InsightsRequest{Start: start, End: end, Gran: "day"})
+			requireLogDatabaseUnavailable(t, err)
+		})
+	}
+}
+
+func requireLogDatabaseUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected log database unavailable error")
+	}
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v (%T), want *api.APIError", err, err)
+	}
+	if apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != "LogDatabaseUnavailable" {
+		t.Fatalf("api error = %+v, want 503 LogDatabaseUnavailable", apiErr)
 	}
 }
 
@@ -78,6 +153,15 @@ func seedHourlyBucket(t *testing.T, db *gorm.DB, date string, hour int, channelI
 		SumStreamCompletionTokens: sumComp,
 	}).Error; err != nil {
 		t.Fatalf("seed hourly bucket: %v", err)
+	}
+	if err := db.Create(&models.BillingHourlyBucket{
+		Date: date, Hour: hour, UserID: 1, TokenID: channelID, ChannelID: channelID,
+		OwnerType: "admin", ModelName: modelName, ChannelName: "ch-test",
+		RequestCount: reqs, SuccessCount: success, FailedCount: failed,
+		PromptTokens: prompt, CacheReadTokens: cacheRead, InputCost: inputCost,
+		TotalCost: reqs * 10,
+	}).Error; err != nil {
+		t.Fatalf("seed billing hourly bucket: %v", err)
 	}
 }
 

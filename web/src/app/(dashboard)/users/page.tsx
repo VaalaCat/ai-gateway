@@ -12,6 +12,7 @@ import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,8 +62,7 @@ function UsersPageContent() {
   const t = useTranslations("users");
   const tc = useTranslations("common");
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
 
   const filterSpec = useMemo(() => ({
     search: { kind: "text", placeholder: tc("search") },
@@ -80,11 +80,7 @@ function UsersPageContent() {
     },
   } satisfies FilterSpec), [t, tc]);
 
-  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
-  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
-    setPage(1);
-    setFilterValuesRaw(next);
-  };
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading } = useUsers({
     page,
@@ -102,12 +98,7 @@ function UsersPageContent() {
   const targetId = searchParams.get("id");
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
-    if (newPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(newPageSize);
-    } else {
-      setPage(newPage);
-    }
+    setPagination(newPageSize === pageSize ? newPage : 1, newPageSize);
   };
 
   const createMutation = useCreateUser();

@@ -204,7 +204,7 @@ func newAgentFullSyncFixture(t *testing.T, databaseAddresses string, runtimeList
 	}).Error)
 
 	application := appcontainer.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	hub := NewHub(application, zap.NewNop(), nil, func() int64 { return 42 }, nil, HubOptions{MasterInstanceID: "master-a"})
 	router := gin.New()
 	router.GET("/ws/agent", hub.HandleWS)

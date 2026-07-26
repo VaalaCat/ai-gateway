@@ -1,6 +1,8 @@
 package dao
 
 import (
+	"fmt"
+
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"gorm.io/gorm"
@@ -20,6 +22,7 @@ type AdminAgentQuery interface {
 
 type AdminAgentMutation interface {
 	Create(agent *models.Agent) error
+	CreateWithTransportPolicy(agent *models.Agent) error
 	Update(id uint, updates map[string]any) error
 	UpdateIfRelayConfigMatches(id uint, expectedMode, expectedURI string, updates map[string]any) (bool, error)
 	Delete(id uint) error
@@ -33,18 +36,18 @@ type adminAgentMutation struct{ ctx *baseContext }
 
 func (q *adminAgentQuery) GetByID(id uint) (*models.Agent, error) {
 	var agent models.Agent
-	err := q.ctx.GetDB().First(&agent, id).Error
+	err := q.ctx.GetCoreDB().First(&agent, id).Error
 	return &agent, err
 }
 
 func (q *adminAgentQuery) GetByAgentID(agentID string) (*models.Agent, error) {
 	var agent models.Agent
-	err := q.ctx.GetDB().Where("agent_id = ?", agentID).First(&agent).Error
+	err := q.ctx.GetCoreDB().Where("agent_id = ?", agentID).First(&agent).Error
 	return &agent, err
 }
 
 func (q *adminAgentQuery) List(opts ListOptions, filter AgentListFilter) ([]models.Agent, int64, error) {
-	db := q.ctx.GetDB().Model(&models.Agent{})
+	db := q.ctx.GetCoreDB().Model(&models.Agent{})
 	if filter.Search != "" {
 		like := "%" + filter.Search + "%"
 		db = db.Where("name LIKE ?", like)
@@ -63,19 +66,19 @@ func (q *adminAgentQuery) List(opts ListOptions, filter AgentListFilter) ([]mode
 
 func (q *adminAgentQuery) ListByAgentIDs(ids []string) ([]models.Agent, error) {
 	var agents []models.Agent
-	err := q.ctx.GetDB().Where("agent_id IN ?", ids).Find(&agents).Error
+	err := q.ctx.GetCoreDB().Where("agent_id IN ?", ids).Find(&agents).Error
 	return agents, err
 }
 
 func (q *adminAgentQuery) ListActive(excludeAgentID string) ([]models.Agent, error) {
 	var agents []models.Agent
-	err := q.ctx.GetDB().Where("agent_id != ? AND status = 1", excludeAgentID).Find(&agents).Error
+	err := q.ctx.GetCoreDB().Where("agent_id != ? AND status = 1", excludeAgentID).Find(&agents).Error
 	return agents, err
 }
 
 func (q *adminAgentQuery) MaxID() (uint, error) {
 	var maxID uint
-	err := q.ctx.GetDB().Model(&models.Agent{}).
+	err := q.ctx.GetCoreDB().Model(&models.Agent{}).
 		Select("COALESCE(MAX(id), 0)").
 		Scan(&maxID).Error
 	return maxID, err
@@ -89,7 +92,7 @@ func (q *adminAgentQuery) ListKeyset(afterID, snapshotMaxID uint, limit int) ([]
 	if limit > protocol.FullSyncMaxPageSize {
 		limit = protocol.FullSyncMaxPageSize
 	}
-	err := q.ctx.GetDB().
+	err := q.ctx.GetCoreDB().
 		Where("id > ? AND id <= ?", afterID, snapshotMaxID).
 		Order("id ASC").
 		Limit(limit).
@@ -102,18 +105,44 @@ func (q *adminAgentQuery) CountThroughID(snapshotMaxID uint) (int64, error) {
 		return 0, nil
 	}
 	var total int64
-	err := q.ctx.GetDB().Model(&models.Agent{}).
+	err := q.ctx.GetCoreDB().Model(&models.Agent{}).
 		Where("id <= ?", snapshotMaxID).
 		Count(&total).Error
 	return total, err
 }
 
 func (m *adminAgentMutation) Create(agent *models.Agent) error {
-	return m.ctx.GetDB().Create(agent).Error
+	return m.ctx.GetCoreDB().Create(agent).Error
+}
+
+func (m *adminAgentMutation) CreateWithTransportPolicy(agent *models.Agent) error {
+	policy := map[string]any{
+		"direct_inbound_enabled":  agent.DirectInboundEnabled,
+		"direct_outbound_enabled": agent.DirectOutboundEnabled,
+		"relay_inbound_enabled":   agent.RelayInboundEnabled,
+		"relay_outbound_enabled":  agent.RelayOutboundEnabled,
+	}
+	return m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
+		if err := tx.Omit(
+			"DirectInboundEnabled",
+			"DirectOutboundEnabled",
+			"RelayInboundEnabled",
+			"RelayOutboundEnabled",
+		).Create(agent).Error; err != nil {
+			return fmt.Errorf("create agent: %w", err)
+		}
+		if err := tx.Model(&models.Agent{}).Where("id = ?", agent.ID).Updates(policy).Error; err != nil {
+			return fmt.Errorf("update agent transport policy: %w", err)
+		}
+		if err := tx.First(agent, agent.ID).Error; err != nil {
+			return fmt.Errorf("read back agent: %w", err)
+		}
+		return nil
+	})
 }
 
 func (m *adminAgentMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetDB().Model(&models.Agent{}).Where("id = ?", id).Updates(updates).Error
+	return m.ctx.GetCoreDB().Model(&models.Agent{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (m *adminAgentMutation) UpdateIfRelayConfigMatches(
@@ -121,7 +150,7 @@ func (m *adminAgentMutation) UpdateIfRelayConfigMatches(
 	expectedMode, expectedURI string,
 	updates map[string]any,
 ) (bool, error) {
-	result := m.ctx.GetDB().Model(&models.Agent{}).
+	result := m.ctx.GetCoreDB().Model(&models.Agent{}).
 		Where("id = ? AND relay_mode = ? AND COALESCE(relay_uri, '') = ?", id, expectedMode, expectedURI).
 		Updates(updates)
 	if result.Error != nil {
@@ -131,11 +160,11 @@ func (m *adminAgentMutation) UpdateIfRelayConfigMatches(
 }
 
 func (m *adminAgentMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.Agent{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.Agent{}, id).Error
 }
 
 func (m *adminAgentMutation) UpdateLastSeen(agentID string, lastSeen int64) error {
-	return m.ctx.GetDB().Model(&models.Agent{}).Where("agent_id = ?", agentID).
+	return m.ctx.GetCoreDB().Model(&models.Agent{}).Where("agent_id = ?", agentID).
 		Update("last_seen", maxLastSeenExpr(lastSeen)).Error
 }
 
@@ -148,7 +177,7 @@ func maxLastSeenExpr(lastSeen int64) clause.Expr {
 }
 
 func (m *adminAgentMutation) UpdateHTTPAddresses(agentID string, addresses string) error {
-	return m.ctx.GetDB().Model(&models.Agent{}).Where("agent_id = ?", agentID).Update("http_addresses", addresses).Error
+	return m.ctx.GetCoreDB().Model(&models.Agent{}).Where("agent_id = ?", agentID).Update("http_addresses", addresses).Error
 }
 
 // BatchUpdateLastSeen updates multiple agents' last_seen in a single transaction.
@@ -159,7 +188,7 @@ func (m *adminAgentMutation) BatchUpdateLastSeen(updates map[string]int64) error
 	if len(updates) == 0 {
 		return nil
 	}
-	return m.ctx.GetDB().Transaction(func(tx *gorm.DB) error {
+	return m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
 		for agentID, ts := range updates {
 			if err := tx.Model(&models.Agent{}).
 				Where("agent_id = ?", agentID).

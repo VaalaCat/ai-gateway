@@ -1,10 +1,16 @@
 package common
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestParseProviderErrorTypeFromBoundedJSONPrefix(t *testing.T) {
+	body := []byte(`{"error":{"type":"invalid_request_error","message":"` + strings.Repeat("x", 1024))
+	require.Equal(t, "invalid_request_error", ParseProviderErrorType(body))
+}
 
 // TestParseProviderErrorType_Anthropic 验证 Anthropic body 形态:
 // {"type":"error", "error":{"type":"invalid_request_error", ...}} 能拿到内嵌 type。

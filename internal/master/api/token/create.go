@@ -18,6 +18,10 @@ import (
 
 func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.Token], error) {
 	scope := middleware.GetScope(c.Context)
+	traceMode, err := models.NormalizeTokenTraceModeForWrite(req.TraceMode)
+	if err != nil {
+		return api.Created[models.Token]{}, api.BadRequestError(err.Error(), err)
+	}
 
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
@@ -33,6 +37,7 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		Name:         req.Name,
 		Status:       consts.StatusEnabled,
 		TraceEnabled: req.TraceEnabled,
+		TraceMode:    traceMode,
 		BYOKOnly:     req.BYOKOnly,
 	}
 

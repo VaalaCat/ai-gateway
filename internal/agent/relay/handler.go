@@ -257,14 +257,28 @@ func (h *Handler) Relay(c *gin.Context) {
 }
 
 // finishRelay 把 publisher.Publish + writeResponse 串成一个收尾步骤，避免主流程重复。
-// 任一 phase 失败都先走 publisher 再回 HTTP，保证 UsageLog 不漏。
+// 只有最终 local upstream-status 失败先写响应，供 trace 捕获客户端 Body。
 func (h *Handler) finishRelay(rctx *state.RelayContext) {
+	if capturesFinalClientError(rctx) {
+		h.writeResponse(rctx)
+		rctx.State.Recorder.RefreshLastAttemptClientResponse()
+		h.publisher.Publish(rctx)
+		return
+	}
 	h.publisher.Publish(rctx)
 	h.writeResponse(rctx)
 }
 
+func capturesFinalClientError(rctx *state.RelayContext) bool {
+	if rctx == nil || rctx.State == nil || rctx.State.Recorder == nil || rctx.State.Execution.AgentRoutePath != app.RoutePathLocal {
+		return false
+	}
+	var upstream *common.UpstreamError
+	return errors.As(rctx.State.Err, &upstream) && upstream.Status > 0
+}
+
 // newRelayContext 把 *gin.Context 包装成 *RelayContext 并显式构造 request-scoped Recorder。
-// Recorder 的 enabled 标志直接读 UserInfo.TraceEnabled（trace.Enabled 哨兵语义），
+// Recorder 的捕获模式由 UserInfo 的 trace 配置规范化得到，
 // maxBodySize 走 AgentCache.TraceMaxBodySize。Handler 不再依赖任何 middleware 注入。
 func (h *Handler) newRelayContext(c *gin.Context) *state.RelayContext {
 	rctx := NewContext(c, h.Agent)
@@ -282,6 +296,9 @@ func (h *Handler) newRelayContext(c *gin.Context) *state.RelayContext {
 func (h *Handler) writeResponse(rctx *state.RelayContext) {
 	if rctx.State.Execution.Outcome.Written {
 		return
+	}
+	if capturesFinalClientError(rctx) {
+		rctx.Writer = rctx.State.Recorder.WrapClientWriter(rctx.Writer)
 	}
 	if rctx.State.StreamOpened {
 		// 流已开（哪怕只发过保活）：错误只能走 SSE error event，回不了 JSON。

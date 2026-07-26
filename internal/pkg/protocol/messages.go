@@ -17,9 +17,9 @@ const (
 	AgentAuthSigningKeysMaxCount    = 8
 	AgentAuthKeyIDMaxLength         = 128
 	AgentAuthAlgorithmEdDSA         = "EdDSA"
-	AgentCapabilityTunnelV1         = "agent_tunnel_v1"
+	AgentCapabilityTunnelV2         = "agent_tunnel_v2"
 	AgentCapabilityForwardV1        = "agent_forward_ticket_v1"
-	AgentCapabilityDirectIngressV1  = "agent_direct_ingress_v1"
+	AgentCapabilityDirectTunnelV1   = "agent_direct_tunnel_v1"
 	AgentCapabilityRelayHTTPPingV1  = "agent_relay_http_ping_v1"
 	AgentCapabilityTokenRoutingV1   = "agent_token_routing_v1"
 )

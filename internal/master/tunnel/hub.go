@@ -5,13 +5,14 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -38,18 +39,19 @@ const (
 )
 
 var (
-	errHubClosed           = errors.New("master tunnel: hub closed")
-	errInvalidTicket       = errors.New("master tunnel: invalid relay ticket")
-	errInvalidHello        = errors.New("master tunnel: invalid HELLO")
-	errWrongMaster         = errors.New("master tunnel: wrong master")
-	errTargetDisabled      = errors.New("master tunnel: target disabled")
-	errTargetCapability    = errors.New("master tunnel: target lacks tunnel capability")
-	errTargetNotFound      = errors.New("master tunnel: target not found")
-	errRelayNotReady       = errors.New("master tunnel: target relay session not ready")
-	errSessionNotFound     = errors.New("master tunnel: session not found")
-	errGenerationNotFound  = errors.New("master tunnel: generation not found")
-	errGenerationExhausted = errors.New("master tunnel: session generation exhausted")
-	errHubDraining         = errors.New("master tunnel: hub draining")
+	errHubClosed               = errors.New("master tunnel: hub closed")
+	errInvalidTicket           = errors.New("master tunnel: invalid relay ticket")
+	errInvalidHello            = errors.New("master tunnel: invalid HELLO")
+	errWrongMaster             = errors.New("master tunnel: wrong master")
+	errTargetDisabled          = errors.New("master tunnel: target disabled")
+	errTargetCapability        = errors.New("master tunnel: target lacks tunnel capability")
+	errRelayConnectionDisabled = errors.New("master tunnel: relay connection disabled")
+	errTargetNotFound          = errors.New("master tunnel: target not found")
+	errRelayNotReady           = errors.New("master tunnel: target relay session not ready")
+	errSessionNotFound         = errors.New("master tunnel: session not found")
+	errGenerationNotFound      = errors.New("master tunnel: generation not found")
+	errGenerationExhausted     = errors.New("master tunnel: session generation exhausted")
+	errHubDraining             = errors.New("master tunnel: hub draining")
 )
 
 type AgentSessions struct {
@@ -74,22 +76,10 @@ type AgentLookup interface {
 	Capabilities(agentID string) []string
 }
 
-type AdmissionGate struct{ enabled atomic.Bool }
-
-func (g *AdmissionGate) Set(enabled bool) { g.enabled.Store(enabled) }
-func (g *AdmissionGate) AllowNew() bool   { return g != nil && g.enabled.Load() }
-func (g *AdmissionGate) RejectionCode() string {
-	if g.AllowNew() {
-		return ""
-	}
-	return wire.ErrorCodeRelayFallbackDisabled
-}
-
 type HubOptions struct {
 	InstanceID      string
 	Signer          *masteragentauth.Signer
 	Agents          AgentLookup
-	Admission       *AdmissionGate
 	Limits          wire.Limits
 	DrainTimeout    time.Duration
 	Logger          *zap.Logger
@@ -162,20 +152,17 @@ func NewHub(opts HubOptions) *Hub {
 	if isNilAgentLookup(opts.Agents) {
 		opts.Agents = nil
 	}
-	if opts.Admission == nil {
-		opts.Admission = &AdmissionGate{}
-	}
 	if opts.Logger == nil {
 		opts.Logger = zap.NewNop()
 	}
 	if opts.DrainTimeout <= 0 {
 		opts.DrainTimeout = defaultDrainTimeout
 	}
-	if normalized, err := wire.NormalizeV1Limits(opts.Limits); err == nil {
+	if normalized, err := wire.NormalizeV2Limits(opts.Limits); err == nil {
 		opts.Limits = normalized
 	} else {
 		opts.Limits = wire.Limits{
-			MaxMetadataBytes: wire.MaxV1PayloadBytes, MaxDataBytes: wire.MaxV1PayloadBytes,
+			MaxMetadataBytes: wire.MaxV2PayloadBytes, MaxDataBytes: wire.MaxV2PayloadBytes,
 			InitialStreamWindow: 256 * 1024, MaxQueuedSessionBytes: 4 * 1024 * 1024, MaxConcurrentStreams: 128,
 		}
 	}
@@ -220,7 +207,7 @@ func (h *Hub) HandleWS(c *gin.Context) {
 		return
 	}
 	agent, err := h.opts.Agents.GetByAgentID(handlerCtx, claims.AgentID)
-	if err != nil || agent == nil || agent.Status != consts.StatusEnabled {
+	if err != nil || !h.relayConnectionAllowed(agent) {
 		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
@@ -237,6 +224,13 @@ func (h *Hub) HandleWS(c *gin.Context) {
 	}
 	defer h.untrackConnection(conn)
 	h.serveConn(conn, closeOwner, claims)
+}
+
+func (h *Hub) relayConnectionAllowed(agent *models.Agent) bool {
+	if h == nil || h.opts.Agents == nil || agent == nil || agent.Status != consts.StatusEnabled || agent.RelayMode == consts.RelayModeDisabled {
+		return false
+	}
+	return slices.Contains(h.opts.Agents.Capabilities(agent.AgentID), protocol.AgentCapabilityTunnelV2)
 }
 
 func (h *Hub) beginHandler() bool {
@@ -357,7 +351,7 @@ func (h *Hub) serveConn(conn *websocket.Conn, closeOwner *wire.ConnectionCloseOw
 		_ = closeOwner.Close()
 		return
 	}
-	welcome, _ := json.Marshal(wire.Welcome{NonceProof: string(proof), MasterInstanceID: h.opts.InstanceID, SessionGeneration: generation, Capabilities: []string{protocol.AgentCapabilityTunnelV1}, Limits: runtimeSettings.Limits})
+	welcome, _ := json.Marshal(wire.Welcome{NonceProof: string(proof), MasterInstanceID: h.opts.InstanceID, SessionGeneration: generation, Capabilities: []string{protocol.AgentCapabilityTunnelV2}, Limits: runtimeSettings.Limits})
 	ctx, cancel := context.WithCancelCause(h.ctx)
 	sessionConn := &closeOwnedMasterConn{sessionConn: conn, closeOwner: closeOwner}
 	session := newSession(h, sessionConn, claims.AgentID, generation, hello.DesiredGeneration, runtimeSettings.Limits, ctx, cancel)
@@ -478,9 +472,12 @@ func (h *Hub) registerUnauthenticated(s *Session) error {
 }
 
 func relayMessageReadLimit(limits wire.Limits) int64 {
-	payloadLimit := limits.MaxMetadataBytes
-	if limits.MaxDataBytes > payloadLimit {
-		payloadLimit = limits.MaxDataBytes
+	payloadLimit := int64(0)
+	for _, frameType := range []wire.Type{wire.FrameOpen, wire.FrameRequestData, wire.FrameAttemptResult} {
+		limit, err := wire.FramePayloadLimit(frameType, limits)
+		if err == nil && limit > payloadLimit {
+			payloadLimit = limit
+		}
 	}
 	return int64(wire.HeaderSize) + payloadLimit
 }
@@ -611,7 +608,7 @@ func (h *Hub) runtimeSettings() RuntimeSettings {
 		return settings
 	}
 	configured := h.opts.RuntimeSettings()
-	if normalized, err := wire.NormalizeV1Limits(configured.Limits); err == nil {
+	if normalized, err := wire.NormalizeV2Limits(configured.Limits); err == nil {
 		settings.Limits = normalized
 	}
 	if configured.DrainTimeout > 0 {
@@ -686,7 +683,7 @@ func (h *Hub) GetRelayRuntime(agentID string) (connectivity.RelayRuntimeFact, bo
 		}
 	}
 	for _, capability := range h.opts.Agents.Capabilities(agentID) {
-		if capability == protocol.AgentCapabilityTunnelV1 {
+		if capability == protocol.AgentCapabilityTunnelV2 {
 			fact.Support = "supported"
 			break
 		}
@@ -811,18 +808,64 @@ func (h *Hub) validateTarget(ctx context.Context, id string) error {
 	if agent.Status != consts.StatusEnabled {
 		return errTargetDisabled
 	}
-	for _, capability := range h.opts.Agents.Capabilities(id) {
-		if capability == protocol.AgentCapabilityTunnelV1 {
-			return nil
-		}
+	if agent.RelayMode == consts.RelayModeDisabled {
+		return errRelayConnectionDisabled
+	}
+	if h.targetSupportsTunnel(id) {
+		return nil
 	}
 	return errTargetCapability
 }
+
+func (h *Hub) authorizeRelayOpen(ctx context.Context, sourceAgentID, targetAgentID string) (*Session, error) {
+	if h == nil || h.opts.Agents == nil {
+		return nil, errSessionNotFound
+	}
+	source, err := h.opts.Agents.GetByAgentID(ctx, sourceAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("authorize relay source %q: %w", sourceAgentID, err)
+	}
+	if source == nil || source.Status != consts.StatusEnabled {
+		return nil, errSessionNotFound
+	}
+	if !source.RelayOutboundEnabled {
+		return nil, relayOpenPolicyError{code: consts.RouteErrorSourceRelayOutboundDisabled}
+	}
+	target, err := h.opts.Agents.GetByAgentID(ctx, targetAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("authorize relay target %q: %w", targetAgentID, err)
+	}
+	if target == nil {
+		return nil, errors.Join(errSessionNotFound, errTargetNotFound)
+	}
+	if target.Status != consts.StatusEnabled {
+		return nil, errTargetDisabled
+	}
+	if !target.RelayInboundEnabled {
+		return nil, relayOpenPolicyError{code: consts.RouteErrorTargetRelayInboundDisabled}
+	}
+	if target.RelayMode == consts.RelayModeDisabled {
+		return nil, errRelayConnectionDisabled
+	}
+	if !h.targetSupportsTunnel(targetAgentID) {
+		return nil, errTargetCapability
+	}
+	return h.activeTargetSession(targetAgentID)
+}
+
+type relayOpenPolicyError struct{ code string }
+
+func (e relayOpenPolicyError) Error() string      { return e.code }
+func (e relayOpenPolicyError) ReasonCode() string { return e.code }
 
 func (h *Hub) activeTarget(ctx context.Context, id string) (*Session, error) {
 	if err := h.validateTarget(ctx, id); err != nil {
 		return nil, err
 	}
+	return h.activeTargetSession(id)
+}
+
+func (h *Hub) activeTargetSession(id string) (*Session, error) {
 	h.mu.RLock()
 	set := h.sessions[id]
 	var target *Session
@@ -834,6 +877,15 @@ func (h *Hub) activeTarget(ctx context.Context, id string) (*Session, error) {
 		return nil, errors.Join(errSessionNotFound, errRelayNotReady)
 	}
 	return target, nil
+}
+
+func (h *Hub) targetSupportsTunnel(id string) bool {
+	for _, capability := range h.opts.Agents.Capabilities(id) {
+		if capability == protocol.AgentCapabilityTunnelV2 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Hub) addSwitch(sw *Switch) error {
@@ -911,7 +963,6 @@ func (h *Hub) DrainAll(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("master tunnel: nil context")
 	}
-	h.opts.Admission.Set(false)
 	h.mu.Lock()
 	h.draining = true
 	candidates := make([]*Session, 0)

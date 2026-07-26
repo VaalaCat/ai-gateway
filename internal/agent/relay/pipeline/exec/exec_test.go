@@ -108,7 +108,7 @@ func newTestExecutorRctx(plan state.AttemptPlan, agent app.AgentApplication) *st
 			Body:     []byte(`{"model":"x"}`),
 			UserInfo: &app.UserInfo{TokenID: 1},
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0), Plan: plan},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0), Plan: plan},
 	}
 }
 
@@ -752,7 +752,7 @@ func TestRun_AttemptRecordHasTrace(t *testing.T) {
 		rctx := &state.RelayContext{
 			Context: nil, Agent: &stubExecAgent{},
 			Input: state.RelayInput{Body: []byte(`{"model":"x"}`), UserInfo: &app.UserInfo{TokenID: 1}},
-			State: &state.RelayState{Recorder: trace.NewRecorder(false, 0), Plan: plan},
+			State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0), Plan: plan},
 		}
 		e.Run(rctx)
 		if got := rctx.State.Execution.History[0].HasTrace; got {
@@ -773,7 +773,7 @@ func TestRun_AttemptRecordHasTrace(t *testing.T) {
 		rctx := &state.RelayContext{
 			Context: nil, Agent: &stubExecAgent{},
 			Input: state.RelayInput{Body: []byte(`{"model":"x"}`), UserInfo: &app.UserInfo{TokenID: 1}},
-			State: &state.RelayState{Recorder: trace.NewRecorder(false, 0), Plan: plan},
+			State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0), Plan: plan},
 		}
 		e.Run(rctx)
 		if got := rctx.State.Execution.History[0].HasTrace; !got {
@@ -793,7 +793,7 @@ func TestRun_AttemptRecordHasTrace(t *testing.T) {
 		rctx := &state.RelayContext{
 			Context: nil, Agent: &stubExecAgent{},
 			Input: state.RelayInput{Body: []byte(`{"model":"x"}`), UserInfo: &app.UserInfo{TokenID: 1}},
-			State: &state.RelayState{Recorder: trace.NewRecorder(true, 0), Plan: plan}, // 开 trace
+			State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureFull, 0), Plan: plan}, // 开 trace
 		}
 		e.Run(rctx)
 		if got := rctx.State.Execution.History[0].HasTrace; !got {
@@ -1041,12 +1041,12 @@ func agentPathIDs(paths []models.AgentPathRecord) []string {
 }
 
 func TestExecutorRemoteWireDispatchesFoldIntoSingleAttemptRetries(t *testing.T) {
-	raw, err := attemptwire.EncodeResult(attemptwire.AttemptProxyResult{
+	raw, err := attemptwire.EncodeResultJSON(attemptwire.AttemptProxyResult{
 		Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true,
 		Dispatches: 3,
 	})
 	require.NoError(t, err)
-	wireResult, err := attemptwire.DecodeResult(raw)
+	wireResult, err := attemptwire.DecodeResultJSON(raw)
 	require.NoError(t, err)
 	outcome := outcomeFromAttemptResult("target-a", app.RoutePathDirect, tunnel.Committed, wireResult)
 	outcome.AgentPaths = []models.AgentPathRecord{{
@@ -1103,7 +1103,7 @@ func TestExecutorRemoteAttemptTracesFollowFallbackSequence(t *testing.T) {
 	succeeded.Trace = &trace.TraceRecord{InboundPath: "/second", Verbose: true}
 	remote := &recordingRemoteExecutor{outcomes: []AttemptOutcome{failed, succeeded}}
 	rctx := portExecutorContext(portAttempt(1), portAttempt(2))
-	rctx.State.Recorder = trace.NewRecorder(false, 0)
+	rctx.State.Recorder = trace.NewRecorder(trace.CaptureOff, 0)
 
 	(&Executor{SourceAgentID: "source", Routes: routes, Remote: remote}).Run(rctx)
 

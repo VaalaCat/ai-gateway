@@ -21,7 +21,7 @@ func capabilityTestContext(t *testing.T, isAdmin bool) (*app.Context, *gorm.DB) 
 	require.NoError(t, err)
 	require.NoError(t, models.AutoMigrate(db))
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Set(consts.CtxKeyRequestScope, &middleware.RequestScope{IsAdmin: isAdmin, UserID: 7})
 	return &app.Context{Context: ginCtx, App: application, OwnerContext: t.Context()}, db

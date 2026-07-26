@@ -11,6 +11,7 @@ import type {
   BillingOverviewResponse,
   BillingRebuildRequest,
   BillingRebuildSubmitResponse,
+  ChannelModelBreakdownResponse,
   RebuildJob,
   RebuildJobListResponse,
   BillingTokenDailyQueryParams,
@@ -125,6 +126,30 @@ export function useChannelBillingDaily(
       );
     },
     enabled: (options.enabled ?? true) && channelId != null,
+  });
+}
+
+// useChannelModelBreakdown: 单渠道按 model_name 分组的用量/计费细分(billed+raw),给
+// Billing channel tab 行展开用。start/end 为 unix 秒(同 ObsRange 约定,非 date string,
+// 端点自己转换,别再套 localDateRangeToUTCRange)。channelId 为 undefined 时不发请求
+// (展开态才拉,折叠行不占带宽)。
+export function useChannelModelBreakdown(
+  channelId: number | undefined,
+  start: number,
+  end: number,
+) {
+  return useQuery({
+    queryKey: ["billing-channel-model-breakdown", channelId, start, end],
+    queryFn: () =>
+      api.get<ChannelModelBreakdownResponse>(
+        `/stats/channel-model-breakdown${buildQuery({
+          channel_id: channelId,
+          start,
+          end,
+        })}`,
+      ),
+    enabled: channelId !== undefined,
+    staleTime: 60_000,
   });
 }
 

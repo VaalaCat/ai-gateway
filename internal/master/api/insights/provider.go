@@ -49,31 +49,38 @@ var registry = map[string]InsightProvider{
 }
 
 // providerCtx 是 Context 的默认实现。
-// 除了对外暴露的 DAO/Scope,还存了 *gorm.DB 给 provider 内部走 raw 聚合
+// 除了对外暴露的 DAO/Scope,还存了 log DB 和 layout 对应的 request-log model
+// 给 provider 内部走 raw 聚合
 // (有些 entity-scoped 查询用 dao 已封好的 method 表达不出来,
 // 如 by agent_id 的 hourly trend);通过 rawDB() 内部方法访问。
 type providerCtx struct {
-	q     dao.AdminQuery
-	s     dao.Scope
-	scope *middleware.RequestScope
-	db    *gorm.DB
+	q               dao.AdminQuery
+	s               dao.Scope
+	scope           *middleware.RequestScope
+	db              *gorm.DB
+	requestLogModel any
+	requestLogErr   error
 }
 
 func (p *providerCtx) DAO() dao.AdminQuery                    { return p.q }
 func (p *providerCtx) Scope() dao.Scope                       { return p.s }
 func (p *providerCtx) RequestScope() *middleware.RequestScope { return p.scope }
 func (p *providerCtx) rawDB() *gorm.DB                        { return p.db }
+func (p *providerCtx) requestLogs() (*gorm.DB, any, error) {
+	return p.db, p.requestLogModel, p.requestLogErr
+}
 
 // newProviderCtx 由 handler 构造 providerCtx;
 // admin/user scope 都转成 dao.Scope (Phase 1 主要 admin 用,user scope 检查放在 handler 里)。
 func newProviderCtx(ctx context.Context, application app.Application, scope *middleware.RequestScope) Context {
 	daoCtx := dao.NewContextWithContext(application, ctx)
 	q := dao.NewAdminQuery(daoCtx)
+	logDB, requestLogModel, requestLogErr := daoCtx.RequestLogModel()
 	s := dao.Scope{}
 	if scope != nil {
 		s = dao.Scope{IsAdmin: scope.IsAdmin, UserID: scope.UserID}
 	}
-	return &providerCtx{q: q, s: s, scope: scope, db: daoCtx.GetDB()}
+	return &providerCtx{q: q, s: s, scope: scope, db: logDB, requestLogModel: requestLogModel, requestLogErr: requestLogErr}
 }
 
 // parseObsRange 是 insights 端点的统一 query 缺省值解析。

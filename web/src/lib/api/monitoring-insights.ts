@@ -23,8 +23,10 @@ export interface ChannelMetric {
   name: string;
   requests: number;
   error_ratio: number;
+  ttft_avg_ms: number;
   ttft_p95_ms: number;
   tps_avg: number;
+  tps_p5: number;
   latency_p95_ms: number;
   spark_24h: number[];
 }
@@ -35,8 +37,10 @@ export interface AgentMetric {
   online: boolean;
   last_seen: number;
   requests: number;
+  ttft_avg_ms: number;
   ttft_p95_ms: number;
   tps_avg: number;
+  tps_p5: number;
   latency_p95_ms: number;
   spark_24h: number[];
 }

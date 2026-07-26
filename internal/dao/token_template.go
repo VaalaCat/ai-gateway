@@ -21,12 +21,12 @@ type adminTokenTemplateMutation struct{ ctx *baseContext }
 
 func (q *adminTokenTemplateQuery) GetByID(id uint) (*models.TokenTemplate, error) {
 	var tpl models.TokenTemplate
-	err := q.ctx.GetDB().First(&tpl, id).Error
+	err := q.ctx.GetCoreDB().First(&tpl, id).Error
 	return &tpl, err
 }
 
 func (q *adminTokenTemplateQuery) List(opts ListOptions, filter TokenTemplateListFilter) ([]models.TokenTemplate, int64, error) {
-	db := q.ctx.GetDB().Model(&models.TokenTemplate{})
+	db := q.ctx.GetCoreDB().Model(&models.TokenTemplate{})
 	db = applyTokenTemplateFilter(db, filter)
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
@@ -49,13 +49,13 @@ func applyTokenTemplateFilter(db *gorm.DB, filter TokenTemplateListFilter) *gorm
 }
 
 func (m *adminTokenTemplateMutation) Create(tpl *models.TokenTemplate) error {
-	return m.ctx.GetDB().Create(tpl).Error
+	return m.ctx.GetCoreDB().Create(tpl).Error
 }
 
 func (m *adminTokenTemplateMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetDB().Model(&models.TokenTemplate{}).Where("id = ?", id).Updates(updates).Error
+	return m.ctx.GetCoreDB().Model(&models.TokenTemplate{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (m *adminTokenTemplateMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.TokenTemplate{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.TokenTemplate{}, id).Error
 }

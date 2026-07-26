@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestTrace_500Error(t *testing.T) {
 	userID := env.CreateUserWithQuota("trace500user", 100000)
 	env.CreateChannel("err500-ch", 1, "sk-secret-key-for-500-test", mockUpstream.URL, "gpt-4o")
 	env.CreateModelConfig("gpt-4o")
-	apiKey := env.CreateTokenWithTrace(userID, "trace500-token")
+	apiKey := createTraceToken(t, env, userID, "trace500-token", true, models.TokenTraceModeHeaders, false)
 	env.SyncFromMaster()
 
 	requestID := fmt.Sprintf("trace500-%s", t.Name())
@@ -39,8 +40,8 @@ func TestTrace_500Error(t *testing.T) {
 	env.WaitForLogs()
 
 	// Verify usage log created
-	var usageLog models.UsageLog
-	result := env.Srv.DB.Where("request_id = ?", requestID).First(&usageLog)
+	var usageLog models.RequestLog
+	result := env.RequestLogDB(t).Where("request_id = ?", requestID).First(&usageLog)
 	if result.Error != nil {
 		t.Fatalf("no usage log found: %v", result.Error)
 	}
@@ -48,9 +49,10 @@ func TestTrace_500Error(t *testing.T) {
 		t.Errorf("expected total_cost=0 for failed request, got %d", usageLog.TotalCost)
 	}
 
+	// behavior change: none; failed attempts intentionally override headers mode to full.
 	// Verify trace record created
-	var trace models.UsageLogTrace
-	result = env.Srv.DB.Where("request_id = ?", requestID).First(&trace)
+	var trace models.RequestTrace
+	result = env.RequestTraceDB(t).Where("request_id = ?", requestID).First(&trace)
 	if result.Error != nil {
 		t.Fatalf("no trace record found: %v", result.Error)
 	}
@@ -69,6 +71,12 @@ func TestTrace_500Error(t *testing.T) {
 	}
 	if trace.ResponseBody == "" {
 		t.Error("response_body should not be empty")
+	}
+	if trace.ClientResponseBody == "" {
+		t.Error("client_response_body should not be empty")
+	}
+	if trace.ClientResponseBody != w.Body.String() {
+		t.Errorf("client_response_body = %q, want actual response %q", trace.ClientResponseBody, w.Body.String())
 	}
 
 	// Verify API key is masked in trace
@@ -141,8 +149,8 @@ func TestTrace_4xxError(t *testing.T) {
 
 	env.WaitForLogs()
 
-	var trace models.UsageLogTrace
-	result := env.Srv.DB.Where("request_id = ?", requestID).First(&trace)
+	var trace models.RequestTrace
+	result := env.RequestTraceDB(t).Where("request_id = ?", requestID).First(&trace)
 	if result.Error != nil {
 		t.Fatalf("no trace record found: %v", result.Error)
 	}
@@ -180,8 +188,8 @@ func TestTrace_ConnectionError(t *testing.T) {
 
 	env.WaitForLogs()
 
-	var trace models.UsageLogTrace
-	result := env.Srv.DB.Where("request_id = ?", requestID).First(&trace)
+	var trace models.RequestTrace
+	result := env.RequestTraceDB(t).Where("request_id = ?", requestID).First(&trace)
 	if result.Error != nil {
 		t.Fatalf("no trace record found: %v", result.Error)
 	}
@@ -211,84 +219,98 @@ func TestRelay_TraceEnabled(t *testing.T) {
 	env.CreateChannel("trace-en-ch", 1, "sk-test", upstream.URL, "gpt-4o")
 	env.CreateModelConfig("gpt-4o")
 
-	// Create token with trace_enabled=true via admin API
-	resp := env.DoAdmin("POST", "/api/admin/tokens", map[string]any{
-		"user_id": userID, "name": "trace-on-token", "trace_enabled": true,
-	})
-	if resp.StatusCode != 201 {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create token: %d %s", resp.StatusCode, body)
+	for _, tc := range []struct {
+		name      string
+		enabled   bool
+		mode      models.TokenTraceMode
+		legacy    bool
+		wantTrace bool
+		wantBody  bool
+	}{
+		{name: "off success", mode: models.TokenTraceModeHeaders},
+		{name: "legacy full", enabled: true, legacy: true, wantTrace: true, wantBody: true},
+		{name: "headers success", enabled: true, mode: models.TokenTraceModeHeaders, wantTrace: true},
+		{name: "full success", enabled: true, mode: models.TokenTraceModeFull, wantTrace: true, wantBody: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			apiKey := createTraceToken(t, env, userID, "trace-"+strings.ReplaceAll(tc.name, " ", "-"), tc.enabled, tc.mode, tc.legacy)
+			env.SyncFromMaster()
+			requestID := fmt.Sprintf("trace-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), time.Now().UnixNano())
+
+			w := env.SendChatWithHeaders(apiKey, "gpt-4o", "hello", map[string]string{
+				consts.HeaderXRequestID: requestID,
+			})
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+			}
+			env.WaitForLogs()
+
+			var usage models.RequestLog
+			if err := env.RequestLogDB(t).Where("request_id = ?", requestID).First(&usage).Error; err != nil {
+				t.Fatalf("no usage log found: %v", err)
+			}
+			if usage.HasTrace != tc.wantTrace {
+				t.Fatalf("HasTrace=%v want=%v", usage.HasTrace, tc.wantTrace)
+			}
+
+			var got models.RequestTrace
+			err := env.RequestTraceDB(t).Where("request_id = ?", requestID).First(&got).Error
+			if !tc.wantTrace {
+				if err == nil {
+					t.Fatal("trace row exists for off success")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("no trace record found: %v", err)
+			}
+			if got.InboundPath != "/v1/chat/completions" || got.InboundHeaders == "" || got.OutboundHeaders == "" || got.ResponseHeaders == "" {
+				t.Fatalf("trace metadata incomplete: %+v", got)
+			}
+			if tc.wantBody {
+				if got.InboundBody == "" || got.OutboundBody == "" || got.ResponseBody == "" || got.ClientResponseBody == "" {
+					t.Fatalf("full trace has empty body field: %+v", got)
+				}
+				return
+			}
+			if got.InboundBody != "" || got.OutboundBody != "" || got.ResponseBody != "" || got.ClientResponseBody != "" {
+				t.Fatalf("header-only trace persisted body: %+v", got)
+			}
+		})
+	}
+}
+
+func createTraceToken(
+	t *testing.T,
+	env *testEnv,
+	userID uint,
+	name string,
+	enabled bool,
+	mode models.TokenTraceMode,
+	legacy bool,
+) string {
+	t.Helper()
+	body := map[string]any{"user_id": userID, "name": name, "trace_enabled": enabled}
+	if mode != "" {
+		body["trace_mode"] = mode
+	}
+	resp := env.DoAdmin("POST", "/api/admin/tokens", body)
+	if resp.StatusCode != http.StatusCreated {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create token: %d %s", resp.StatusCode, raw)
 	}
 	var tokenResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&tokenResp)
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("decode token: %v", err)
+	}
 	resp.Body.Close()
-	apiKeyOn := tokenResp["key"].(string)
-
-	env.SyncFromMaster()
-
-	// Send a successful request with trace_enabled=true
-	requestIDOn := fmt.Sprintf("trace-on-%d", time.Now().UnixNano())
-	w := env.SendChatWithHeaders(apiKeyOn, "gpt-4o", "hello", map[string]string{
-		consts.HeaderXRequestID: requestIDOn,
-	})
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	key := tokenResp["key"].(string)
+	if legacy {
+		if err := env.Srv.DB.Model(&models.Token{}).Where("key = ?", key).Update("trace_mode", "").Error; err != nil {
+			t.Fatalf("clear legacy trace mode: %v", err)
+		}
 	}
-
-	env.WaitForLogs()
-
-	// Verify UsageLog has has_trace=true
-	var usageLogOn models.UsageLog
-	result := env.Srv.DB.Where("request_id = ?", requestIDOn).First(&usageLogOn)
-	if result.Error != nil {
-		t.Fatalf("no usage log found for trace-on request: %v", result.Error)
-	}
-	if !usageLogOn.HasTrace {
-		t.Error("expected has_trace=true for token with trace_enabled=true")
-	}
-
-	// Verify UsageLogTrace record exists
-	var traceOn models.UsageLogTrace
-	result = env.Srv.DB.Where("request_id = ?", requestIDOn).First(&traceOn)
-	if result.Error != nil {
-		t.Fatalf("no trace record found for trace-on request: %v", result.Error)
-	}
-	if traceOn.InboundPath != "/v1/chat/completions" {
-		t.Errorf("inbound_path = %q, want /v1/chat/completions", traceOn.InboundPath)
-	}
-
-	// ---- Now test with trace_enabled=false (default) ----
-
-	// CreateToken helper creates with trace_enabled=false by default
-	apiKeyOff := env.CreateToken(userID, "trace-off-token")
-	env.SyncFromMaster()
-
-	requestIDOff := fmt.Sprintf("trace-off-%d", time.Now().UnixNano())
-	w = env.SendChatWithHeaders(apiKeyOff, "gpt-4o", "hello again", map[string]string{
-		consts.HeaderXRequestID: requestIDOff,
-	})
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	env.WaitForLogs()
-
-	// Verify UsageLog has has_trace=false
-	var usageLogOff models.UsageLog
-	result = env.Srv.DB.Where("request_id = ?", requestIDOff).First(&usageLogOff)
-	if result.Error != nil {
-		t.Fatalf("no usage log found for trace-off request: %v", result.Error)
-	}
-	if usageLogOff.HasTrace {
-		t.Error("expected has_trace=false for token with trace_enabled=false")
-	}
-
-	// Verify NO UsageLogTrace record exists
-	var traceOff models.UsageLogTrace
-	result = env.Srv.DB.Where("request_id = ?", requestIDOff).First(&traceOff)
-	if result.Error == nil {
-		t.Error("expected no trace record for token with trace_enabled=false, but found one")
-	}
+	return key
 }
 
 // Ensure imports are referenced.

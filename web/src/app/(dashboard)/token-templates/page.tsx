@@ -10,6 +10,7 @@ import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,8 +43,7 @@ export default function TokenTemplatesPage() {
   const t = useTranslations("tokenTemplates");
   const tc = useTranslations("common");
 
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
 
   const filterSpec = useMemo(() => ({
     search: { kind: "text", placeholder: tc("search") },
@@ -63,12 +63,7 @@ export default function TokenTemplatesPage() {
   );
   const [colVis, setColVis] = useResponsiveColumnVisibility(visConfig);
 
-  const [filterValues, setFilterValuesRaw] = useFilterState(filterSpec);
-
-  const setFilterValues = (next: Parameters<typeof setFilterValuesRaw>[0]) => {
-    setPage(1);
-    setFilterValuesRaw(next);
-  };
+  const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
   const { data, isLoading } = useTokenTemplates({
     page,
@@ -82,12 +77,7 @@ export default function TokenTemplatesPage() {
   const pageCount = Math.ceil(total / pageSize) || 1;
 
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
-    if (newPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(newPageSize);
-    } else {
-      setPage(newPage);
-    }
+    setPagination(newPageSize === pageSize ? newPage : 1, newPageSize);
   };
 
   const createMutation = useCreateTokenTemplate();

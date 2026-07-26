@@ -51,7 +51,8 @@ export function stringifyOtherSettings(s: ChannelOtherSettings): string {
 export function parseEndpoints(raw: string): EndpointConfig {
   if (!raw) return {};
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
   }

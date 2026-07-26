@@ -38,7 +38,13 @@ func (h *Handler) callDiagnostic(c *app.Context, req AgentIDQuery, method string
 	if err != nil {
 		return nil, api.NotFoundError("agent not found")
 	}
-	snapshot := h.Connections.Build(*agent)
+	snapshot, err := h.Connections.BuildContext(c.RequestContext(), *agent)
+	if err != nil {
+		if apiErr := requestContextAPIError(c); apiErr != nil {
+			return nil, apiErr
+		}
+		return nil, api.InternalError("build connection snapshot failed", err)
+	}
 	if snapshot.Control.State != "connected" || snapshot.Control.SessionGeneration == 0 {
 		return nil, controlDisconnectedAPIError()
 	}

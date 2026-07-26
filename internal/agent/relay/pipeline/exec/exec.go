@@ -10,6 +10,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/resilience"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -79,6 +80,9 @@ func (e *Executor) acquireRequest(rctx *state.RelayContext) (state.RateLease, bo
 	}
 	lease, err := gate.AcquireRequest(rctx)
 	if err != nil {
+		if rctx.State.Recorder != nil {
+			rctx.State.Recorder.WithFail(trace.StageInternal, err)
+		}
 		rctx.State.Execution.Err = err
 		return nil, false
 	}
@@ -246,17 +250,29 @@ func (e *Executor) recordOutcome(
 	out.AgentRoutePath = outcome.Path
 	record := buildAttemptRecord(idx+1, attempt, route, outcome)
 	if rctx.State.Recorder != nil {
-		if outcome.Path == app.RoutePathDirect || outcome.Path == app.RoutePathRelay {
-			rctx.State.Recorder.AppendAttempt(outcome.Trace)
-		} else {
-			rctx.State.Recorder.SnapshotAttempt()
-		}
+		recordAttemptTrace(rctx.State.Recorder, outcome)
 		record.HasTrace = rctx.State.Recorder.LastSnapshotVerbose()
 	}
 	out.History = append(out.History, record)
 	if rctx.Inflight != nil {
 		rctx.Inflight.UpdateFallbackChain(out.History)
 	}
+}
+
+func recordAttemptTrace(recorder *trace.Recorder, outcome AttemptOutcome) {
+	remote := outcome.Path == app.RoutePathDirect || outcome.Path == app.RoutePathRelay
+	if remote {
+		if outcome.Result.Err != nil {
+			recorder.AppendFailedRemoteAttempt(outcome.Trace, outcome.Result.Err)
+		} else {
+			recorder.AppendAttempt(outcome.Trace)
+		}
+		return
+	}
+	if outcome.Result.Err != nil {
+		recorder.WithFail(trace.StageInternal, outcome.Result.Err)
+	}
+	recorder.SnapshotAttempt()
 }
 
 func (e *Executor) stopRouteBuild(rctx *state.RelayContext, idx int, attempt state.Attempt, err error, durationMs int) {
@@ -318,7 +334,11 @@ func (e *Executor) forgetAffinity(rctx *state.RelayContext, attempt state.Attemp
 	if !attempt.ByAffinity || e.Affinity == nil || rctx.Input.UserInfo == nil || rctx.Input.UserInfo.UserID == 0 {
 		return
 	}
-	e.Affinity.Forget(affinity.Key{UserID: rctx.Input.UserInfo.UserID, RealModel: attempt.RealModel})
+	e.Affinity.Forget(affinity.Key{
+		UserID:    rctx.Input.UserInfo.UserID,
+		TokenID:   rctx.Input.UserInfo.TokenID,
+		RealModel: attempt.RealModel,
+	})
 }
 
 func (e *Executor) sleepBeforeNextAttempt(rctx *state.RelayContext, attemptErr error) bool {

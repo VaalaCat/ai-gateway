@@ -3,6 +3,8 @@
 // p95≈60s;插值验证 p95 误差 0.25%。改档必须配套 rebuild 回填。
 package durhist
 
+import "github.com/VaalaCat/ai-gateway/internal/pkg/histutil"
+
 // NumSlots = len(Edges)+1,末槽为溢出槽(>= 最后一个上界)。
 const NumSlots = 17
 
@@ -14,47 +16,11 @@ var Edges = [NumSlots - 1]int64{
 
 // SlotIndex 返回 durationMs 落入的槽下标。
 func SlotIndex(durationMs int64) int {
-	for i, edge := range Edges {
-		if durationMs < edge {
-			return i
-		}
-	}
-	return NumSlots - 1
+	return histutil.SlotIndex(Edges[:], durationMs)
 }
 
 // EstimatePercentile 在合并后的直方图上求近似分位(p ∈ (0,1))。
 // 累计计数定位目标槽,槽内线性插值;溢出槽上界取 maxMs(来自 MaxDurationMs 聚合)。
 func EstimatePercentile(counts [NumSlots]int64, p float64, maxMs int64) int64 {
-	var total int64
-	for _, c := range counts {
-		total += c
-	}
-	if total == 0 {
-		return 0
-	}
-	target := p * float64(total)
-	var cum float64
-	for i, c := range counts {
-		if c == 0 {
-			continue
-		}
-		next := cum + float64(c)
-		if next >= target {
-			lower := int64(0)
-			if i > 0 {
-				lower = Edges[i-1]
-			}
-			upper := maxMs
-			if i < NumSlots-1 {
-				upper = Edges[i]
-			}
-			if upper < lower { // maxMs 缺失/异常时退化为槽下界
-				return lower
-			}
-			frac := (target - cum) / float64(c)
-			return lower + int64(frac*float64(upper-lower))
-		}
-		cum = next
-	}
-	return maxMs
+	return histutil.EstimatePercentile(Edges[:], counts[:], p, maxMs)
 }

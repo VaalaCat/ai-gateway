@@ -1,7 +1,6 @@
 package attemptproxy
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"sync/atomic"
@@ -33,7 +32,7 @@ func TestHandlerRunsOnlyBoundAttemptPipeline(t *testing.T) {
 			UserInfo: user, Model: meta.Attempt.RealModel, InboundProto: codec.ProtocolOpenAIChat,
 			Body: []byte(`{"model":"public"}`),
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	builder := &handlerBuilder{build: func(got *gin.Context, gotMeta attemptwire.AttemptProxyMeta) (*state.RelayContext, func(), error) {
 		calls = append(calls, "build")
@@ -74,6 +73,7 @@ func TestHandlerRunsOnlyBoundAttemptPipeline(t *testing.T) {
 	require.Equal(t, int32(1), dispatcher.calls.Load())
 	require.Equal(t, `{"ok":true}`, recorder.Body.String())
 	require.Equal(t, attemptwire.ModeResponse, recorder.Header().Get(attemptwire.HeaderMode))
+	require.Equal(t, attemptwire.ResultSucceeded, capturedResultFromContext(t, c).Kind)
 }
 
 func TestHandlerPassesOriginalProviderPathForLegacyAndAudio(t *testing.T) {
@@ -112,7 +112,7 @@ func TestHandlerPassesOriginalProviderPathForLegacyAndAudio(t *testing.T) {
 	}
 }
 
-func TestHandlerPreProviderRejectionsAreStableProxyRejectedJSON(t *testing.T) {
+func TestHandlerPreProviderRejectionsWriteExplicitProxyResult(t *testing.T) {
 	meta := validAttemptMeta("/v1/chat/completions")
 	tests := []struct {
 		name       string
@@ -140,7 +140,7 @@ func TestHandlerPreProviderRejectionsAreStableProxyRejectedJSON(t *testing.T) {
 				if tt.buildErr != nil {
 					return nil, nil, tt.buildErr
 				}
-				return &state.RelayContext{Context: c, State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)}}, func() {}, nil
+				return &state.RelayContext{Context: c, State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)}}, func() {}, nil
 			}}
 			finder := &handlerFinder{find: func(BoundChannelInput) (state.Attempt, error) {
 				if tt.channelErr != nil {
@@ -156,14 +156,14 @@ func TestHandlerPreProviderRejectionsAreStableProxyRejectedJSON(t *testing.T) {
 
 			NewHandler(builder, finder, provider, NewResponseExecutor()).Serve(c)
 
-			require.Equal(t, tt.wantStatus, recorder.Code)
-			require.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
-			require.Empty(t, recorder.Header().Get(attemptwire.HeaderMode))
-			var result attemptwire.AttemptProxyResult
-			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &result))
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, attemptwire.ModeControl, recorder.Header().Get(attemptwire.HeaderMode))
+			require.Empty(t, recorder.Body.String())
+			result := capturedResultFromContext(t, c)
 			require.Equal(t, attemptwire.ResultProxyRejected, result.Kind)
+			require.Equal(t, tt.wantStatus, result.HTTPStatus)
 			require.Equal(t, tt.wantReason, result.ReasonCode)
-			require.False(t, result.ProviderResultKnown)
+			require.True(t, result.ProviderResultKnown)
 			require.Equal(t, int32(0), providerCalls.Load())
 		})
 	}
@@ -173,7 +173,7 @@ func TestHandlerNilAndTypedNilDependenciesFailClosed(t *testing.T) {
 	meta := validAttemptMeta("/v1/chat/completions")
 	var typedNilDispatcher *backend.Dispatcher
 	validBuilder := &handlerBuilder{build: func(c *gin.Context, _ attemptwire.AttemptProxyMeta) (*state.RelayContext, func(), error) {
-		return &state.RelayContext{Context: c, State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)}}, func() {}, nil
+		return &state.RelayContext{Context: c, State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)}}, func() {}, nil
 	}}
 	validFinder := &handlerFinder{find: func(BoundChannelInput) (state.Attempt, error) { return state.Attempt{}, nil }}
 	validProvider := providerFunc(func(*state.RelayContext, state.Attempt) attemptexec.ProviderResult {
@@ -199,13 +199,23 @@ func TestHandlerNilAndTypedNilDependenciesFailClosed(t *testing.T) {
 			c, recorder := newAttemptTestContext(http.MethodPost, attemptwire.EndpointPath, []byte(`{"model":"public"}`))
 			c.Request = c.Request.WithContext(attemptwire.WithMeta(c.Request.Context(), meta))
 			require.NotPanics(t, func() { tt.h.Serve(c) })
-			require.Equal(t, http.StatusInternalServerError, recorder.Code)
-			var result attemptwire.AttemptProxyResult
-			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &result))
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, attemptwire.ModeControl, recorder.Header().Get(attemptwire.HeaderMode))
+			require.Empty(t, recorder.Body.String())
+			result := capturedResultFromContext(t, c)
 			require.Equal(t, attemptwire.ResultProxyRejected, result.Kind)
 			require.Equal(t, "proxy_dependencies_unavailable", result.ReasonCode)
 		})
 	}
+}
+
+func capturedResultFromContext(t *testing.T, c *gin.Context) attemptwire.AttemptProxyResult {
+	t.Helper()
+	writer, ok := attemptwire.AttemptResultWriterFromContext(c.Request.Context())
+	require.True(t, ok)
+	results, ok := writer.(*capturingAttemptResultWriter)
+	require.True(t, ok)
+	return results.single(t)
 }
 
 type handlerBuilder struct {

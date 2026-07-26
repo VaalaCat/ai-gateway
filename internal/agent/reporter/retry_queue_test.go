@@ -195,6 +195,7 @@ func TestPushItemPreservesDegradeAndBytes(t *testing.T) {
 	it := retryItem{entry: protocol.UsageLogEntry{RequestID: "a"}, attempts: 5,
 		nextAt: time.Now().Add(time.Minute), bytes: 42, degrade: DegradeStripTrace}
 	q.pushItem(it)
+	q.retryNow([]string{"a"})
 	got := q.snapshotTop(1)[0]
 	if got.attempts != 5 || got.degrade != DegradeStripTrace || got.bytes != 42 {
 		t.Fatalf("pushItem lost fields: %+v", got)

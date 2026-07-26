@@ -90,7 +90,7 @@ func newPassthroughTestCtx(t *testing.T, body []byte, isStream bool) (*state.Rel
 			IsStream:     isStream,
 			StartTime:    time.Now(),
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	return rctx, w
 }
@@ -104,7 +104,7 @@ type passthroughScriptProvider struct {
 	scripts []*script.Compiled
 }
 
-func (p passthroughScriptProvider) MatchScripts(_ uint, _ string) []*script.Compiled {
+func (p passthroughScriptProvider) MatchScripts(_ script.MatchInput) []*script.Compiled {
 	return p.scripts
 }
 
@@ -653,7 +653,7 @@ func TestPassthrough_DispatchHonorsCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req, _ := http.NewRequest(http.MethodPost, "http://10.255.255.1:9/hang", nil)
-	rec := trace.NewRecorder(false, 0)
+	rec := trace.NewRecorder(trace.CaptureOff, 0)
 
 	start := time.Now()
 	_, err := b.dispatchUpstream(ctx, req, &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, rec)
@@ -663,6 +663,96 @@ func TestPassthrough_DispatchHonorsCanceledContext(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("canceled context should fail fast, took %v", time.Since(start))
 	}
+}
+
+func TestPassthroughErrorBodyIsBoundedAndTraceKeepsTail(t *testing.T) {
+	const physicalTail = `","tail":"passthrough-physical-tail"}}`
+	body := `{"error":{"type":"invalid_request_error","message":"` + strings.Repeat("x", 96*1024) + physicalTail
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer upstream.Close()
+	rctx, _ := newPassthroughTestCtx(t, []byte(`{"model":"gpt-4o","messages":[]}`), false)
+	rctx.State.Recorder = trace.NewRecorder(trace.CaptureFull, 64)
+	got := (&Backend{}).Relay(rctx, state.Attempt{Channel: makeChannel(upstream.URL), RealModel: "gpt-4o"})
+	var upErr *common.UpstreamError
+	if !errors.As(got.Err, &upErr) {
+		t.Fatalf("err=%T %v, want UpstreamError", got.Err, got.Err)
+	}
+	if len(upErr.Body) >= len(body) {
+		t.Fatalf("bounded body len=%d, original=%d", len(upErr.Body), len(body))
+	}
+	if upErr.ProviderErrorType != "invalid_request_error" {
+		t.Fatalf("provider error type=%q", upErr.ProviderErrorType)
+	}
+	traceRecord := rctx.State.Recorder.Finalize()
+	if !strings.Contains(traceRecord.UpstreamBody, physicalTail) {
+		t.Fatalf("trace tail=%q", traceRecord.UpstreamBody)
+	}
+}
+
+func TestPassthroughErrorBodyReadErrorPropagates(t *testing.T) {
+	wantErr := errors.New("passthrough error body failed")
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Body: &passthroughErrorReadCloser{err: wantErr}}
+	result, handled := handlePassthroughErrorStatus(trace.NewRecorder(trace.CaptureFull, 64), resp, nil, "gpt-4o")
+	if !handled || !errors.Is(result.Err, wantErr) {
+		t.Fatalf("handled=%v err=%v, want read error", handled, result.Err)
+	}
+}
+
+func TestPassthroughErrorBodyCancellationUnblocksRead(t *testing.T) {
+	body := newPassthroughBlockingReadCloser()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Body: body, Request: req}
+	done := make(chan error, 1)
+	go func() {
+		result, _ := handlePassthroughErrorStatus(trace.NewRecorder(trace.CaptureFull, 64), resp, nil, "gpt-4o")
+		done <- result.Err
+	}()
+	<-body.entered
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		_ = body.Close()
+		t.Fatal("cancellation did not unblock passthrough error body")
+	}
+}
+
+type passthroughErrorReadCloser struct{ err error }
+
+func (r *passthroughErrorReadCloser) Read([]byte) (int, error) { return 0, r.err }
+func (r *passthroughErrorReadCloser) Close() error             { return nil }
+
+type passthroughBlockingReadCloser struct {
+	entered chan struct{}
+	closed  chan struct{}
+}
+
+func newPassthroughBlockingReadCloser() *passthroughBlockingReadCloser {
+	return &passthroughBlockingReadCloser{entered: make(chan struct{}), closed: make(chan struct{})}
+}
+func (r *passthroughBlockingReadCloser) Read([]byte) (int, error) {
+	select {
+	case <-r.entered:
+	default:
+		close(r.entered)
+	}
+	<-r.closed
+	return 0, errors.New("closed")
+}
+func (r *passthroughBlockingReadCloser) Close() error {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
+	return nil
 }
 
 // TestBuildPassthroughRequest_RejectsHostRewrite verifies that a malicious endpoints

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -82,7 +81,7 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 
 	newBody = applyPassthroughOverrides(upstreamReq, newBody, ch, logger)
 
-	newBody, rejected, rejRes := scripthook.RunUpstreamScripts(b.Agent, c, rctx, ch, inboundProto, modelName, upstreamReq, newBody)
+	newBody, rejected, rejRes := scripthook.RunUpstreamScripts(b.Agent, c, rctx, a, inboundProto, upstreamReq, newBody)
 	if rejected {
 		return rejRes
 	}
@@ -199,22 +198,34 @@ func handlePassthroughErrorStatus(rec *trace.Recorder, resp *http.Response, _w g
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		return state.AttemptResult{}, false
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	rec.WithUpstreamStatus(resp)
+	capture, readErr := common.ReadBoundedErrorBody(upstreamResponseContext(resp), resp.Body, common.DefaultErrorBodyLimits())
+	rec.SetUpstreamBodyCapture(capture.Tail, capture.TotalSeen, capture.Truncated)
+	if readErr != nil {
+		wrapped := fmt.Errorf("read upstream error response: %w", readErr)
+		rec.WithFail(trace.StageUpstreamStatus, wrapped)
+		return state.AttemptResult{UpstreamModel: upstreamModel, Err: wrapped}, true
+	}
+	body := capture.BoundedHead()
 	upErr := &common.UpstreamError{
 		Status:            resp.StatusCode,
 		Body:              body,
-		ProviderErrorType: common.ParseProviderErrorType(body),
+		ProviderErrorType: common.ParseProviderErrorType(capture.Head),
 		Header:            resp.Header.Clone(),
 	}
-	rec.WithUpstreamStatus(resp)
-	rec.SetUpstreamBody(body)
 	rec.WithFail(trace.StageUpstreamStatus, upErr)
 	return state.AttemptResult{
 		UpstreamModel: upstreamModel,
 		Err:           upErr,
 		// Written 留默认 false;客户端写回由 Executor 在 plan 结束时统一处理。
 	}, true
+}
+
+func upstreamResponseContext(resp *http.Response) context.Context {
+	if resp != nil && resp.Request != nil {
+		return resp.Request.Context()
+	}
+	return context.Background()
 }
 
 // applyPassthroughOverrides 把 channel 的 ParamOverride / HeaderOverride 应用到上行请求上。

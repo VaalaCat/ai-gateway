@@ -27,7 +27,11 @@ func (s *Service) MarkRelayProbeChecking(
 		s.relayProbeMu.Unlock()
 		return
 	}
-	current := state.targets[target.AgentID]
+	current, exists := state.targets[target.AgentID]
+	if exists && probeGeneration < current.ProbeGeneration {
+		s.relayProbeMu.Unlock()
+		return
+	}
 	snapshot := relayTargetBase(target, fingerprint, sourceRelayGeneration, targetRelayGeneration)
 	if current.TargetAgentID != "" {
 		snapshot.State = current.State
@@ -240,12 +244,31 @@ func normalizeRelayProbeResult(result protocol.RelayProbeResult, expectedTargetA
 		result.Stage == protocol.RelayProbeStageCommit || result.Stage == protocol.RelayProbeStageResponse
 	validReason := result.ReasonCode == "" || consts.IsConnectivityProbeErrorCode(result.ReasonCode)
 	validTarget := expectedTargetAgentID != "" && result.TargetAgentID == expectedTargetAgentID
-	if !validTarget || !validState || !validStage || !validReason || result.State == protocol.RelayProbeReachable && result.ReasonCode != "" {
+	validPolicy := validRelayProbePolicyResult(result)
+	if !validTarget || !validState || !validStage || !validReason || !validPolicy ||
+		result.State == protocol.RelayProbeReachable && result.ReasonCode != "" {
 		result.State = protocol.RelayProbeUnreachable
 		result.Stage = protocol.RelayProbeStageResponse
 		result.ReasonCode = consts.RouteErrorRelayProbeInvalidResult
+		result.PolicyDisabled = false
+		result.PolicyReasonCode = ""
 	}
 	return result
+}
+
+func validRelayProbePolicyResult(result protocol.RelayProbeResult) bool {
+	if !validConnectivityProbePolicy(result.Policy) {
+		return false
+	}
+	if !result.PolicyDisabled {
+		return result.PolicyReasonCode == ""
+	}
+	switch result.PolicyReasonCode {
+	case consts.RouteErrorSourceRelayOutboundDisabled, consts.RouteErrorTargetRelayInboundDisabled:
+		return true
+	default:
+		return false
+	}
 }
 
 func relayReasonCode(lastError *RecentError) string {

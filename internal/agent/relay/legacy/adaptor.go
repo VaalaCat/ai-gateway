@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	backendcommon "github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -31,12 +32,14 @@ func Path2RelayMode(path string) int {
 // TraceData holds raw request/response data for trace construction.
 // It is returned to the caller (handler) which bridges into Recorder.WithLegacyTrace.
 type TraceData struct {
-	OutboundURL     string
-	OutboundHeaders http.Header
-	OutboundBody    []byte
-	ResponseStatus  int
-	ResponseHeaders http.Header
-	ResponseBody    []byte
+	OutboundURL      string
+	OutboundHeaders  http.Header
+	OutboundBody     []byte
+	OutboundBodySeen int64
+	ResponseStatus   int
+	ResponseHeaders  http.Header
+	ResponseBody     []byte
+	ResponseBodySeen int64
 }
 
 // RelayResult contains the result of a legacy relay attempt.
@@ -59,20 +62,24 @@ const MaxTraceBodySize = 8 * 1024
 // It centralises TraceData construction so that each exit path only
 // needs to call collector.build() instead of repeating struct literals.
 type traceCollector struct {
-	enabled      bool
-	outboundURL  string
-	outboundBody []byte
-	respBodyBuf  bytes.Buffer
-	resp         *http.Response
+	enabled          bool
+	outboundURL      string
+	outboundBody     []byte
+	outboundBodySeen int64
+	respBodyBuf      *tailCapture
+	resp             *http.Response
 }
 
 func newTraceCollector(enabled bool) *traceCollector {
-	return &traceCollector{enabled: enabled}
+	return &traceCollector{enabled: enabled, respBodyBuf: newTailCapture(MaxTraceBodySize)}
 }
 
 func (tc *traceCollector) setOutbound(url string, body []byte) {
 	tc.outboundURL = url
-	tc.outboundBody = body
+	capture := newTailCapture(MaxTraceBodySize)
+	_, _ = capture.Write(body)
+	tc.outboundBody = append(tc.outboundBody[:0], capture.Bytes()...)
+	tc.outboundBodySeen = capture.TotalSeen()
 }
 
 func (tc *traceCollector) setResponse(resp *http.Response) {
@@ -85,7 +92,7 @@ func (tc *traceCollector) wrapBody(resp *http.Response) {
 	if !tc.enabled {
 		return
 	}
-	resp.Body = io.NopCloser(io.TeeReader(resp.Body, limitWriterFunc(&tc.respBodyBuf, MaxTraceBodySize)))
+	resp.Body = io.NopCloser(io.TeeReader(resp.Body, tc.respBodyBuf))
 }
 
 // build returns a TraceData snapshot, or nil if tracing is disabled.
@@ -94,8 +101,9 @@ func (tc *traceCollector) build() *TraceData {
 		return nil
 	}
 	td := &TraceData{
-		OutboundURL:  tc.outboundURL,
-		OutboundBody: tc.outboundBody,
+		OutboundURL:      tc.outboundURL,
+		OutboundBody:     tc.outboundBody,
+		OutboundBodySeen: tc.outboundBodySeen,
 	}
 	if tc.resp != nil {
 		td.ResponseStatus = tc.resp.StatusCode
@@ -103,18 +111,18 @@ func (tc *traceCollector) build() *TraceData {
 	}
 	if tc.respBodyBuf.Len() > 0 {
 		td.ResponseBody = tc.respBodyBuf.Bytes()
+		td.ResponseBodySeen = tc.respBodyBuf.TotalSeen()
 	}
 	return td
 }
 
-// buildWithBody returns a TraceData snapshot using an explicit response body
-// (e.g. when the body was already read before the TeeReader was installed).
-func (tc *traceCollector) buildWithBody(respBody []byte) *TraceData {
+func (tc *traceCollector) buildWithCapture(capture *tailCapture) *TraceData {
 	if !tc.enabled {
 		return nil
 	}
 	td := tc.build()
-	td.ResponseBody = respBody
+	td.ResponseBody = append([]byte(nil), capture.Bytes()...)
+	td.ResponseBodySeen = capture.TotalSeen()
 	return td
 }
 
@@ -248,11 +256,16 @@ func relayPreparedRequest(
 
 	// Retry on 5xx
 	if httpResp.StatusCode >= 500 {
-		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, MaxTraceBodySize))
-		httpResp.Body.Close()
+		traceData, readErr := readLegacyErrorResponse(c.Request.Context(), tc, httpResp)
+		if readErr != nil {
+			return RelayResult{
+				Err:   fmt.Errorf("read legacy upstream error response: %w", readErr),
+				Trace: traceData,
+			}
+		}
 		return RelayResult{
 			Err:   fmt.Errorf("upstream returned %d", httpResp.StatusCode),
-			Trace: tc.buildWithBody(respBody),
+			Trace: traceData,
 		}
 	}
 
@@ -282,6 +295,28 @@ func relayPreparedRequest(
 		Written:          true,
 		Trace:            tc.build(),
 	}
+}
+
+func readLegacyErrorResponse(ctx context.Context, tc *traceCollector, resp *http.Response) (*TraceData, error) {
+	if resp == nil || resp.Body == nil {
+		return tc.build(), nil
+	}
+	if tc == nil || !tc.enabled {
+		_ = resp.Body.Close()
+		return nil, nil
+	}
+	capture, err := backendcommon.ReadBoundedErrorBody(ctx, resp.Body, backendcommon.ErrorBodyLimits{
+		Head:    1,
+		Tail:    MaxTraceBodySize,
+		MaxRead: backendcommon.DefaultErrorBodyMaxRead,
+	})
+	traceData := tc.build()
+	traceData.ResponseBody = append([]byte(nil), capture.Tail...)
+	traceData.ResponseBodySeen = capture.TotalSeen
+	if capture.Truncated && traceData.ResponseBodySeen <= int64(len(traceData.ResponseBody)) {
+		traceData.ResponseBodySeen = int64(len(traceData.ResponseBody)) + 1
+	}
+	return traceData, err
 }
 
 func isMultipartAudioMode(relayMode int) bool {
@@ -427,24 +462,6 @@ func extractUsage(usageAny any) usageResult {
 	}
 }
 
-// limitWriter wraps an io.Writer and stops writing after n bytes.
-type limitWriter struct {
-	w io.Writer
-	n int64
-}
+type tailCapture = backendcommon.MaskingTail
 
-func (lw *limitWriter) Write(p []byte) (int, error) {
-	if lw.n <= 0 {
-		return len(p), nil // discard silently
-	}
-	if int64(len(p)) > lw.n {
-		p = p[:lw.n]
-	}
-	n, err := lw.w.Write(p)
-	lw.n -= int64(n)
-	return n, err
-}
-
-func limitWriterFunc(w io.Writer, n int64) io.Writer {
-	return &limitWriter{w: w, n: n}
-}
+func newTailCapture(limit int) *tailCapture { return backendcommon.NewMaskingTail(limit) }

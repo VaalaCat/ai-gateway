@@ -167,7 +167,7 @@ func newTestRelayContext(cache app.AgentCache, userModel string, ui *app.UserInf
 			UserInfo:        ui,
 			ForcedChannelID: forcedID,
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 }
 

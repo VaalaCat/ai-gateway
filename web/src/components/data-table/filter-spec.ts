@@ -11,6 +11,8 @@ type FilterDefBase = {
   label?: string;
   /** 可见性条件。未设置 = 总是显示。 */
   visible?: (ctx: FilterContext) => boolean;
+  /** 低频筛选:收进工具栏「筛选」Popover,不平铺。默认 false。 */
+  advanced?: boolean;
 };
 
 export type FilterDef =

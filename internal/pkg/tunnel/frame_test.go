@@ -17,7 +17,7 @@ func TestFrameGoldenEncodingUsesNetworkOrderHeader(t *testing.T) {
 	streamID := StreamID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}
 	frame := Frame{
-		Version:  1,
+		Version:  ProtocolVersion,
 		Type:     FrameRequestData,
 		StreamID: streamID,
 		Sequence: 0x10203040,
@@ -27,7 +27,7 @@ func TestFrameGoldenEncodingUsesNetworkOrderHeader(t *testing.T) {
 	encoded, err := Encode(frame, testLimits())
 	require.NoError(t, err)
 	require.Equal(t, []byte{
-		0x01, byte(FrameRequestData), 0x00, 0x00,
+		0x02, byte(FrameRequestData), 0x00, 0x00,
 		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 		0x10, 0x20, 0x30, 0x40,
@@ -47,10 +47,11 @@ func TestFrameTypeValuesAreStable(t *testing.T) {
 	require.Equal(t, Type(6), FrameRequestEnd)
 	require.Equal(t, Type(7), FrameHeaders)
 	require.Equal(t, Type(8), FrameResponseData)
-	require.Equal(t, Type(9), FrameEnd)
-	require.Equal(t, Type(10), FrameCancel)
-	require.Equal(t, Type(11), FrameReset)
-	require.Equal(t, Type(12), FrameWindowUpdate)
+	require.Equal(t, Type(9), FrameAttemptResult)
+	require.Equal(t, Type(10), FrameEnd)
+	require.Equal(t, Type(11), FrameCancel)
+	require.Equal(t, Type(12), FrameReset)
+	require.Equal(t, Type(13), FrameWindowUpdate)
 }
 
 func TestFrameRoundTripsEveryType(t *testing.T) {
@@ -65,6 +66,7 @@ func TestFrameRoundTripsEveryType(t *testing.T) {
 		FrameRequestEnd,
 		FrameHeaders,
 		FrameResponseData,
+		FrameAttemptResult,
 		FrameEnd,
 		FrameCancel,
 		FrameReset,
@@ -78,13 +80,13 @@ func TestFrameRoundTripsEveryType(t *testing.T) {
 
 			var payload []byte
 			switch frameType {
-			case FrameOpen, FrameReady, FrameHeaders, FrameEnd, FrameReset, FrameWindowUpdate:
+			case FrameOpen, FrameReady, FrameHeaders, FrameAttemptResult, FrameEnd, FrameReset, FrameWindowUpdate:
 				payload = []byte(`{"value":"metadata"}`)
 			case FrameRequestData, FrameResponseData:
 				payload = []byte{0x00, 0xff, 0x7f}
 			}
 			want := Frame{
-				Version:  1,
+				Version:  ProtocolVersion,
 				Type:     frameType,
 				StreamID: testStreamID(),
 				Sequence: 7,
@@ -116,7 +118,7 @@ func TestFrameDecodeRejectsInvalidHeaderFieldsInProtocolOrder(t *testing.T) {
 		},
 		"unknown version before type": {
 			mutate: func(data []byte) []byte {
-				data[0] = 2
+				data[0] = 1
 				data[1] = 0xff
 				return data
 			},
@@ -185,14 +187,14 @@ func TestFrameRejectsPayloadAbovePerTypeLimit(t *testing.T) {
 		name, frameType := name, frameType
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			payload := make([]byte, MaxV1PayloadBytes+1)
-			frame := Frame{Version: 1, Type: frameType, StreamID: testStreamID(), Payload: payload}
+			payload := make([]byte, MaxV2PayloadBytes+1)
+			frame := Frame{Version: ProtocolVersion, Type: frameType, StreamID: testStreamID(), Payload: payload}
 
 			_, err := Encode(frame, testLimits())
 			require.ErrorIs(t, err, ErrPayloadTooLarge)
 
 			data := make([]byte, HeaderSize+len(payload))
-			data[0] = 1
+			data[0] = ProtocolVersion
 			data[1] = byte(frameType)
 			streamID := testStreamID()
 			copy(data[4:20], streamID[:])
@@ -210,14 +212,14 @@ func TestFrameAcceptsPayloadAtPerTypeLimit(t *testing.T) {
 		frameType := frameType
 		t.Run(fmt.Sprintf("type-%d", frameType), func(t *testing.T) {
 			t.Parallel()
-			payload := make([]byte, MaxV1PayloadBytes)
+			payload := make([]byte, MaxV2PayloadBytes)
 			encoded, err := Encode(Frame{
-				Version: 1, Type: frameType, StreamID: testStreamID(), Payload: payload,
+				Version: ProtocolVersion, Type: frameType, StreamID: testStreamID(), Payload: payload,
 			}, testLimits())
 			require.NoError(t, err)
 			decoded, err := Decode(encoded, testLimits())
 			require.NoError(t, err)
-			require.Len(t, decoded.Payload, MaxV1PayloadBytes)
+			require.Len(t, decoded.Payload, MaxV2PayloadBytes)
 		})
 	}
 }
@@ -241,13 +243,13 @@ func TestFrameUsesSmallerNegotiatedPayloadLimits(t *testing.T) {
 			t.Parallel()
 			limits := testLimits()
 			tt.setLimit(&limits)
-			frame := Frame{Version: 1, Type: tt.frameType, StreamID: testStreamID(), Payload: make([]byte, 9)}
+			frame := Frame{Version: ProtocolVersion, Type: tt.frameType, StreamID: testStreamID(), Payload: make([]byte, 9)}
 
 			_, err := Encode(frame, limits)
 			require.ErrorIs(t, err, ErrPayloadTooLarge)
 
 			data := make([]byte, HeaderSize+len(frame.Payload))
-			data[0], data[1] = 1, byte(tt.frameType)
+			data[0], data[1] = ProtocolVersion, byte(tt.frameType)
 			streamID := testStreamID()
 			copy(data[4:20], streamID[:])
 			binary.BigEndian.PutUint32(data[24:28], uint32(len(frame.Payload)))
@@ -257,20 +259,20 @@ func TestFrameUsesSmallerNegotiatedPayloadLimits(t *testing.T) {
 	}
 }
 
-func TestFrameClampsNegotiatedPayloadLimitsToV1HardLimit(t *testing.T) {
+func TestFrameClampsNegotiatedPayloadLimitsToV2HardLimit(t *testing.T) {
 	t.Parallel()
 
 	limits := testLimits()
-	limits.MaxMetadataBytes = 2 * MaxV1PayloadBytes
-	limits.MaxDataBytes = 2 * MaxV1PayloadBytes
+	limits.MaxMetadataBytes = 2 * MaxV2PayloadBytes
+	limits.MaxDataBytes = 2 * MaxV2PayloadBytes
 
 	for _, frameType := range []Type{FrameOpen, FrameRequestData, FrameResponseData} {
 		frameType := frameType
 		t.Run(fmt.Sprintf("type-%d", frameType), func(t *testing.T) {
 			t.Parallel()
 			frame := Frame{
-				Version: 1, Type: frameType, StreamID: testStreamID(),
-				Payload: make([]byte, MaxV1PayloadBytes+1),
+				Version: ProtocolVersion, Type: frameType, StreamID: testStreamID(),
+				Payload: make([]byte, MaxV2PayloadBytes+1),
 			}
 			_, err := Encode(frame, limits)
 			require.ErrorIs(t, err, ErrPayloadTooLarge)
@@ -296,12 +298,12 @@ func TestFrameRejectsMissingRequiredLimits(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			frame := Frame{Version: 1, Type: tt.frameType, StreamID: testStreamID()}
+			frame := Frame{Version: ProtocolVersion, Type: tt.frameType, StreamID: testStreamID()}
 			_, err := Encode(frame, tt.limits)
 			require.ErrorIs(t, err, ErrInvalidLimits)
 
 			data := make([]byte, HeaderSize)
-			data[0], data[1] = 1, byte(tt.frameType)
+			data[0], data[1] = ProtocolVersion, byte(tt.frameType)
 			streamID := testStreamID()
 			copy(data[4:20], streamID[:])
 			_, err = Decode(data, tt.limits)
@@ -313,7 +315,7 @@ func TestFrameRejectsMissingRequiredLimits(t *testing.T) {
 func TestFrameEncodeRejectsInvalidFields(t *testing.T) {
 	t.Parallel()
 
-	valid := Frame{Version: 1, Type: FrameOpen, StreamID: testStreamID()}
+	valid := Frame{Version: ProtocolVersion, Type: FrameOpen, StreamID: testStreamID()}
 	tests := map[string]struct {
 		mutate  func(Frame) Frame
 		wantErr error
@@ -323,7 +325,7 @@ func TestFrameEncodeRejectsInvalidFields(t *testing.T) {
 			wantErr: ErrUnsupportedVersion,
 		},
 		"future version": {
-			mutate:  func(frame Frame) Frame { frame.Version = 2; return frame },
+			mutate:  func(frame Frame) Frame { frame.Version = ProtocolVersion + 1; return frame },
 			wantErr: ErrUnsupportedVersion,
 		},
 		"unknown type": {
@@ -380,7 +382,7 @@ func TestFrameErrorsDoNotExposePayload(t *testing.T) {
 
 	const secret = "super-secret-ticket"
 	data := validEncodedFrame(t, FrameOpen, []byte(secret))
-	data[0] = 2
+	data[0] = 1
 
 	_, err := Decode(data, testLimits())
 	require.Error(t, err)
@@ -390,7 +392,7 @@ func TestFrameErrorsDoNotExposePayload(t *testing.T) {
 func validEncodedFrame(t *testing.T, frameType Type, payload []byte) []byte {
 	t.Helper()
 	encoded, err := Encode(Frame{
-		Version: 1, Type: frameType, StreamID: testStreamID(), Payload: payload,
+		Version: ProtocolVersion, Type: frameType, StreamID: testStreamID(), Payload: payload,
 	}, testLimits())
 	require.NoError(t, err)
 	return encoded
@@ -402,8 +404,8 @@ func testStreamID() StreamID {
 
 func testLimits() Limits {
 	return Limits{
-		MaxMetadataBytes:      MaxV1PayloadBytes,
-		MaxDataBytes:          MaxV1PayloadBytes,
+		MaxMetadataBytes:      MaxV2PayloadBytes,
+		MaxDataBytes:          MaxV2PayloadBytes,
 		InitialStreamWindow:   256 * 1024,
 		MaxQueuedSessionBytes: 4 * 1024 * 1024,
 		MaxConcurrentStreams:  128,

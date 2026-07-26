@@ -39,13 +39,21 @@ func (h *Handler) applyRequestScripts(rctx *state.RelayContext) (bool, error) {
 	if eng == nil {
 		return false, nil
 	}
+	var userID, groupID uint
+	if info := rctx.Input.UserInfo; info != nil {
+		userID = info.UserID
+		groupID = info.GroupID
+	}
 	res := eng.Run(script.HookInput{
-		Hook:      script.HookRequest,
-		ChannelID: 0, // 入站未路由：只命中全局作用域脚本
-		Model:     rctx.Input.Model,
-		User:      scriptUserMap(rctx.Input.UserInfo),
-		Headers:   scriptHeaderMap(rctx.Context.Request.Header),
-		Body:      rctx.Input.Body,
+		Hook: script.HookRequest,
+		Match: script.MatchInput{
+			Model:   rctx.Input.Model,
+			UserID:  userID,
+			GroupID: groupID,
+		},
+		User:    scriptUserMap(rctx.Input.UserInfo),
+		Headers: scriptHeaderMap(rctx.Context.Request.Header),
+		Body:    rctx.Input.Body,
 	})
 	if res.Rejected {
 		rctx.Context.AbortWithStatusJSON(res.Status, gin.H{

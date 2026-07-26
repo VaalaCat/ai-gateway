@@ -433,3 +433,44 @@ func TestTokenAuth_PropagatesBYOKOnly(t *testing.T) {
 		})
 	}
 }
+
+func TestTokenAuth_PropagatesTraceMode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		mode    models.TokenTraceMode
+	}{
+		{name: "headers enabled", enabled: true, mode: models.TokenTraceModeHeaders},
+		{name: "disabled preserves headers", enabled: false, mode: models.TokenTraceModeHeaders},
+		{name: "legacy empty", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := cache.NewStore(nil, config.AgentCacheConfig{})
+			store.SetToken(&models.Token{
+				ID: 1, Key: "sk-valid", UserID: 1, Status: 1, ExpiredAt: -1,
+				TraceEnabled: tc.enabled, TraceMode: tc.mode,
+			})
+
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			var got *app.UserInfo
+			router.POST("/test", TokenAuth(store), func(c *gin.Context) {
+				value, _ := c.Get(consts.CtxKeyUserInfo)
+				got = value.(*app.UserInfo)
+				c.Status(http.StatusOK)
+			})
+
+			request := httptest.NewRequest(http.MethodPost, "/test", nil)
+			request.Header.Set("Authorization", "Bearer sk-valid")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d", response.Code)
+			}
+			if got.TraceEnabled != tc.enabled || got.TraceMode != tc.mode {
+				t.Fatalf("trace=(%v,%q), want (%v,%q)", got.TraceEnabled, got.TraceMode, tc.enabled, tc.mode)
+			}
+		})
+	}
+}

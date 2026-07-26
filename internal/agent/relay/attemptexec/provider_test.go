@@ -156,7 +156,7 @@ func providerTestContext(t *testing.T, body app.ReplayBody) *state.RelayContext 
 		Input: state.RelayInput{
 			Body: []byte(`{"model":"fallback"}`),
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(false, 0)},
+		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
 	}
 	if body == nil {
 		return rctx

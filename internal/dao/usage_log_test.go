@@ -1,15 +1,50 @@
 package dao
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/listfilter"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestUsageLogQueryReadsOnlyLogDatabase(t *testing.T) {
+	core := setupTestDB(t)
+	logDB := setupTestDB(t)
+	require.NoError(t, logDB.Exec("CREATE TABLE request_logs AS SELECT * FROM usage_logs WHERE 0").Error)
+	require.NoError(t, core.Create(&models.UsageLog{RequestID: "core-only", UserID: 1}).Error)
+	logOnly := models.RequestLog(models.UsageLog{RequestID: "log-only", UserID: 1})
+	require.NoError(t, logDB.Table("request_logs").Create(&logOnly).Error)
+
+	a := &testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit}
+	logs, total, err := NewAdminQuery(NewContext(a)).UsageLog().List(ListOptions{Page: 1, PageSize: 10}, UsageLogListFilter{})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	require.Equal(t, "log-only", logs[0].RequestID)
+}
+
+func TestUsageLogQueryFailsWhenSplitLogDatabaseUnavailable(t *testing.T) {
+	a := &testApp{db: setupTestDB(t), layoutMode: app.DatabaseLayoutSplit}
+	_, _, err := NewAdminQuery(NewContext(a)).UsageLog().List(ListOptions{Page: 1, PageSize: 10}, UsageLogListFilter{})
+	require.ErrorIs(t, err, ErrLogDatabaseUnavailable)
+	require.True(t, errors.Is(err, ErrLogDatabaseUnavailable))
+}
+
+func TestUsageLogQueryFailsWhenSplitLogDatabaseIsClosed(t *testing.T) {
+	logDB := setupTestDB(t)
+	sqlDB, err := logDB.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+	a := &testApp{db: setupTestDB(t), logDB: logDB, layoutMode: app.DatabaseLayoutSplit}
+	_, _, err = NewAdminQuery(NewContext(a)).UsageLog().List(ListOptions{Page: 1, PageSize: 10}, UsageLogListFilter{})
+	require.ErrorIs(t, err, ErrLogDatabaseUnavailable)
+}
 
 func TestUsageLogDAO_Admin(t *testing.T) {
 	ctx, db := setupAdminContext(t)

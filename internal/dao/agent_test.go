@@ -1,12 +1,130 @@
 package dao
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestAgentCreateWithTransportPolicyPreservesExplicitValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent models.Agent
+		want  [4]bool
+	}{
+		{
+			name: "all disabled",
+			agent: models.Agent{
+				AgentID: "agent-policy-disabled",
+				Name:    "disabled",
+			},
+			want: [4]bool{false, false, false, false},
+		},
+		{
+			name: "mixed directions",
+			agent: models.Agent{
+				AgentID:               "agent-policy-mixed",
+				Name:                  "mixed",
+				DirectInboundEnabled:  true,
+				RelayInboundEnabled:   true,
+				RelayOutboundEnabled:  false,
+				DirectOutboundEnabled: false,
+			},
+			want: [4]bool{true, false, true, false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, db := setupAdminContext(t)
+			mutation := NewAdminMutation(ctx).Agent()
+
+			require.NoError(t, mutation.CreateWithTransportPolicy(&tt.agent))
+			require.NotZero(t, tt.agent.ID)
+
+			var stored models.Agent
+			require.NoError(t, db.First(&stored, tt.agent.ID).Error)
+			require.Equal(t, tt.want[0], stored.DirectInboundEnabled)
+			require.Equal(t, tt.want[1], stored.DirectOutboundEnabled)
+			require.Equal(t, tt.want[2], stored.RelayInboundEnabled)
+			require.Equal(t, tt.want[3], stored.RelayOutboundEnabled)
+			require.Equal(t, stored, tt.agent, "caller must receive the authoritative read-back row")
+		})
+	}
+}
+
+func TestAgentCreateWithTransportPolicyRollsBackEveryFailure(t *testing.T) {
+	t.Run("create failure", func(t *testing.T) {
+		ctx, db := setupAdminContext(t)
+		mutation := NewAdminMutation(ctx).Agent()
+		sentinel := errors.New("forced create failure")
+		callbackName := "test:fail_agent_create"
+		processor := db.Callback().Create()
+		require.NoError(t, processor.Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+			if tx.Statement.Table == "agents" {
+				tx.AddError(sentinel)
+			}
+		}))
+
+		candidate := models.Agent{AgentID: "create-failure-agent", Name: "create failure"}
+		err := mutation.CreateWithTransportPolicy(&candidate)
+		require.NoError(t, processor.Remove(callbackName))
+		require.EqualError(t, err, "create agent: "+sentinel.Error())
+		require.ErrorIs(t, err, sentinel)
+
+		var count int64
+		require.NoError(t, db.Model(&models.Agent{}).Where("agent_id = ?", candidate.AgentID).Count(&count).Error)
+		require.Zero(t, count)
+	})
+
+	t.Run("policy update failure", func(t *testing.T) {
+		ctx, db := setupAdminContext(t)
+		mutation := NewAdminMutation(ctx).Agent()
+		sentinel := errors.New("forced policy update failure")
+		callbackName := "test:fail_agent_policy_update"
+		require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+			if tx.Statement.Table == "agents" {
+				tx.AddError(sentinel)
+			}
+		}))
+		t.Cleanup(func() { _ = db.Callback().Update().Remove(callbackName) })
+
+		candidate := models.Agent{AgentID: "rollback-policy-agent", Name: "rollback"}
+		err := mutation.CreateWithTransportPolicy(&candidate)
+		require.EqualError(t, err, "update agent transport policy: "+sentinel.Error())
+		require.ErrorIs(t, err, sentinel)
+
+		var count int64
+		require.NoError(t, db.Model(&models.Agent{}).Where("agent_id = ?", candidate.AgentID).Count(&count).Error)
+		require.Zero(t, count, "the first insert must roll back when the policy update fails")
+	})
+
+	t.Run("read-back failure", func(t *testing.T) {
+		ctx, db := setupAdminContext(t)
+		mutation := NewAdminMutation(ctx).Agent()
+		sentinel := errors.New("forced read-back failure")
+		callbackName := "test:fail_agent_read_back"
+		processor := db.Callback().Query()
+		require.NoError(t, processor.Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+			if tx.Statement.Table == "agents" {
+				tx.AddError(sentinel)
+			}
+		}))
+
+		candidate := models.Agent{AgentID: "read-back-failure-agent", Name: "read-back failure"}
+		err := mutation.CreateWithTransportPolicy(&candidate)
+		require.NoError(t, processor.Remove(callbackName))
+		require.EqualError(t, err, "read back agent: "+sentinel.Error())
+		require.ErrorIs(t, err, sentinel)
+
+		var count int64
+		require.NoError(t, db.Model(&models.Agent{}).Where("agent_id = ?", candidate.AgentID).Count(&count).Error)
+		require.Zero(t, count, "the insert and policy update must roll back when the read-back fails")
+	})
+}
 
 func TestAgentDAO(t *testing.T) {
 	ctx, db := setupAdminContext(t)

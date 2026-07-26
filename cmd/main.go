@@ -63,6 +63,7 @@ Examples:
 		zap.ReplaceGlobals(logger)
 		defer logger.Sync()
 
+		warnDeprecatedMasterDBPath(logger, cfg.Master)
 		logger.Info("starting master", zap.String("listen", cfg.Master.Listen))
 		srv, err := master.New(cfg, logger)
 		if err != nil {
@@ -73,6 +74,16 @@ Examples:
 		}
 		return srv.Run()
 	},
+}
+
+func warnDeprecatedMasterDBPath(logger *zap.Logger, cfg config.MasterConfig) {
+	if logger == nil || !cfg.UsesDeprecatedDBPath {
+		return
+	}
+	logger.Warn("master.db_path is deprecated and is treated as the legacy database path",
+		zap.String("legacy_db_path", cfg.LegacyDBPath),
+		zap.String("core_db_path", cfg.DBPath),
+		zap.String("log_db_path", cfg.LogDBPath))
 }
 
 var agentCmd = &cobra.Command{

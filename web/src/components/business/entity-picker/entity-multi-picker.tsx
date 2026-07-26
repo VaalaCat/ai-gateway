@@ -17,7 +17,7 @@ import {
 import { cn } from "@/lib/utils";
 import { EntityLabel } from "@/components/business/entity-label";
 import { ENTITY_ADAPTERS, type EntityName } from "./registry";
-import type { EntityAdapter } from "./types";
+import type { AdminScope, EntityAdapter } from "./types";
 import { useEntityOptions } from "./use-entity-options";
 
 const PAGE_SIZE = 50;
@@ -29,6 +29,7 @@ interface EntityMultiPickerProps {
   placeholder?: string;
   disabled?: boolean;
   className?: string;
+  scope?: AdminScope;
   /** 从下拉可选项中排除的 value（如已绑定项）。默认不排除，向后兼容。 */
   excludeIds?: string[];
 }
@@ -40,6 +41,7 @@ export function EntityMultiPicker({
   placeholder,
   disabled,
   className,
+  scope = "self",
   excludeIds,
 }: EntityMultiPickerProps) {
   const t = useTranslations("entityPicker");
@@ -47,7 +49,7 @@ export function EntityMultiPicker({
 
   const [open, setOpen] = useState(false);
   const { search, setSearch, items, isLoading, getValue, renderItem } =
-    useEntityOptions(adapter, { scope: "self", pageSize: PAGE_SIZE });
+    useEntityOptions(adapter, { scope, pageSize: PAGE_SIZE });
 
   const excludeSet = new Set(excludeIds ?? []);
   const visibleItems = items.filter((it) => !excludeSet.has(getValue(it)));
@@ -118,7 +120,14 @@ export function EntityMultiPicker({
               className="cursor-pointer"
               onClick={() => !disabled && toggle(v)}
             >
-              <EntityLabel entity={entity} id={v} showId={false} hover={false} className="truncate" />
+              <EntityLabel
+                entity={entity}
+                id={v}
+                scope={scope}
+                showId={false}
+                hover={false}
+                className="truncate"
+              />
               <X className="ml-1 size-3" />
             </Badge>
           ))}

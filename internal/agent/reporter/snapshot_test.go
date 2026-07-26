@@ -71,8 +71,8 @@ func TestSnapshotCorruptFileQuarantined(t *testing.T) {
 	u := newTestUploader(t, "http://127.0.0.1:0")
 	snap := &Snapshotter{Store: store, Uploader: u, Path: path, Logger: zap.NewNop()}
 	n, err := snap.Restore()
-	if err != nil || n != 0 {
-		t.Fatalf("corrupt restore must be graceful: n=%d err=%v", n, err)
+	if err == nil || n != 0 {
+		t.Fatalf("corrupt restore must be observable without restoring entries: n=%d err=%v", n, err)
 	}
 	if _, err := os.Stat(path + ".corrupt"); err != nil {
 		t.Fatal("corrupt file must be renamed for forensics")

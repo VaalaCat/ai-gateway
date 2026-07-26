@@ -74,7 +74,7 @@ export function ObservabilityHeader({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="space-y-1">
           <h1 className="text-2xl font-bold">{title}</h1>
           {subtitle && <p className="text-muted-foreground">{subtitle}</p>}

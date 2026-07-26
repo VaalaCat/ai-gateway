@@ -1,6 +1,8 @@
 package connectivity
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"testing"
 	"time"
@@ -16,6 +18,24 @@ type routeTargetControlSource struct {
 	capabilities map[string][]string
 }
 
+type recordingAgentTransportPolicyFinder struct {
+	calls [][]string
+	items map[string]models.Agent
+	err   error
+}
+
+func (f *recordingAgentTransportPolicyFinder) FindAgentTransportPolicies(_ context.Context, ids []string) (map[string]models.Agent, error) {
+	f.calls = append(f.calls, append([]string(nil), ids...))
+	if f.err != nil {
+		return nil, f.err
+	}
+	result := make(map[string]models.Agent, len(f.items))
+	for id, agent := range f.items {
+		result[id] = agent
+	}
+	return result, nil
+}
+
 func (s *routeTargetControlSource) GetControlSession(agentID string) (ControlSessionFact, bool) {
 	fact, ok := s.facts[agentID]
 	return fact, ok
@@ -27,7 +47,7 @@ func (s *routeTargetControlSource) Capabilities(agentID string) []string {
 
 func TestRouteTargetsUseDirectedRouteEdgesAsMembersAndKeepFullPathSummaries(t *testing.T) {
 	service, control, relay := routeTargetsServiceForTest(t)
-	source := models.Agent{AgentID: "source", PeerRouteMode: consts.PeerRouteModeDirectFirst}
+	source := models.Agent{AgentID: "source"}
 
 	first := service.Build(source).RouteTargets
 	require.Equal(t, []string{"target-a", "target-b"}, sortedRouteTargetIDs(first.Targets))
@@ -54,9 +74,107 @@ func TestRouteTargetsUseDirectedRouteEdgesAsMembersAndKeepFullPathSummaries(t *t
 	require.Equal(t, protocol.RelayProbeState(routeTargetStateUnknown), disconnected.Targets["target-a"].Relay.State)
 }
 
+func TestBuildManyContextOverlaysDirectedPoliciesWithOneBatchLookup(t *testing.T) {
+	service, _, _ := routeTargetsServiceForTest(t)
+	finder := &recordingAgentTransportPolicyFinder{items: map[string]models.Agent{
+		"target-a": {AgentID: "target-a", DirectInboundEnabled: false, RelayInboundEnabled: true},
+		"target-b": {AgentID: "target-b", DirectInboundEnabled: true, RelayInboundEnabled: false},
+	}}
+	service.options.AgentTransportPolicyFinder = finder
+	source := models.Agent{
+		AgentID: "source", DirectOutboundEnabled: true, RelayOutboundEnabled: true,
+	}
+
+	batch, err := service.BuildManyContext(t.Context(), []models.Agent{source, source})
+	require.NoError(t, err)
+	require.Equal(t, [][]string{{"target-a", "target-b"}}, finder.calls)
+	snapshot := batch.Items["source"].RouteTargets
+	require.Equal(t, consts.RouteErrorTargetDirectInboundDisabled, snapshot.Targets["target-a"].Direct.PolicyReason)
+	require.Equal(t, routeTargetStateDisabled, snapshot.Targets["target-a"].Direct.State)
+	require.Equal(t, "reachable", snapshot.Targets["target-a"].Direct.Network, "policy overlay must retain diagnostics")
+	require.False(t, snapshot.Targets["target-a"].Direct.Eligible)
+	require.Equal(t, consts.RouteErrorTargetRelayInboundDisabled, snapshot.Targets["target-b"].Relay.PolicyReason)
+	require.Equal(t, protocol.RelayProbeState(routeTargetStateDisabled), snapshot.Targets["target-b"].Relay.State)
+	require.Equal(t, 1, snapshot.Summaries.Direct.Disabled)
+	require.Equal(t, 1, snapshot.Summaries.Relay.Disabled)
+	require.Equal(t, routeTargetStateReachable, snapshot.Summaries.Relay.State, "disabled targets must not degrade enabled targets")
+}
+
+func TestBuildContextSourceOutboundPolicyHasPriorityAndAllDisabledSummary(t *testing.T) {
+	service, _, _ := routeTargetsServiceForTest(t)
+	finder := &recordingAgentTransportPolicyFinder{items: map[string]models.Agent{
+		"target-a": {AgentID: "target-a", DirectInboundEnabled: false, RelayInboundEnabled: false},
+		"target-b": {AgentID: "target-b", DirectInboundEnabled: false, RelayInboundEnabled: false},
+	}}
+	service.options.AgentTransportPolicyFinder = finder
+	snapshot, err := service.BuildContext(t.Context(), models.Agent{
+		AgentID: "source", DirectOutboundEnabled: false, RelayOutboundEnabled: false,
+	})
+	require.NoError(t, err)
+	for _, target := range snapshot.RouteTargets.Targets {
+		require.Equal(t, consts.RouteErrorSourceDirectOutboundDisabled, target.Direct.PolicyReason)
+		require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, target.Relay.PolicyReason)
+	}
+	require.Equal(t, DirectSummary{State: routeTargetStateDisabled, Disabled: 2, Total: 2}, snapshot.RouteTargets.Summaries.Direct)
+	require.Equal(t, routeTargetStateDisabled, snapshot.RouteTargets.Summaries.Relay.State)
+	require.Equal(t, 2, snapshot.RouteTargets.Summaries.Relay.Disabled)
+}
+
+func TestBuildManyContextFinderBoundaries(t *testing.T) {
+	t.Run("empty target set performs no lookup", func(t *testing.T) {
+		finder := &recordingAgentTransportPolicyFinder{}
+		service := NewService("master", Sources{}, Options{AgentTransportPolicyFinder: finder})
+		batch, err := service.BuildManyContext(t.Context(), nil)
+		require.NoError(t, err)
+		require.Empty(t, batch.Items)
+		require.Empty(t, finder.calls)
+	})
+
+	t.Run("lookup error is returned", func(t *testing.T) {
+		service, _, _ := routeTargetsServiceForTest(t)
+		finder := &recordingAgentTransportPolicyFinder{err: errors.New("database unavailable")}
+		service.options.AgentTransportPolicyFinder = finder
+		_, err := service.BuildContext(t.Context(), models.Agent{AgentID: "source", DirectOutboundEnabled: true, RelayOutboundEnabled: true})
+		require.ErrorContains(t, err, "database unavailable")
+		require.Len(t, finder.calls, 1)
+	})
+
+	t.Run("source outbound policy does not require a target finder", func(t *testing.T) {
+		service, _, _ := routeTargetsServiceForTest(t)
+		snapshot, err := service.BuildContext(t.Context(), models.Agent{
+			AgentID: "source", DirectOutboundEnabled: false, RelayOutboundEnabled: false,
+		})
+		require.NoError(t, err)
+		for _, target := range snapshot.RouteTargets.Targets {
+			require.Equal(t, consts.RouteErrorSourceDirectOutboundDisabled, target.Direct.PolicyReason)
+			require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, target.Relay.PolicyReason)
+		}
+	})
+
+	t.Run("missing target policy row stays unknown while source policy still overlays", func(t *testing.T) {
+		service, _, _ := routeTargetsServiceForTest(t)
+		finder := &recordingAgentTransportPolicyFinder{items: map[string]models.Agent{
+			"target-a": {AgentID: "target-a", DirectInboundEnabled: true, RelayInboundEnabled: true},
+		}}
+		service.options.AgentTransportPolicyFinder = finder
+
+		snapshot, err := service.BuildContext(t.Context(), models.Agent{
+			AgentID: "source", DirectOutboundEnabled: false, RelayOutboundEnabled: true,
+		})
+
+		require.NoError(t, err)
+		require.Equal(t, [][]string{{"target-a", "target-b"}}, finder.calls)
+		missing := snapshot.RouteTargets.Targets["target-b"]
+		require.Equal(t, consts.RouteErrorSourceDirectOutboundDisabled, missing.Direct.PolicyReason)
+		require.Equal(t, routeTargetStateDisabled, missing.Direct.State)
+		require.Empty(t, missing.Relay.PolicyReason, "an absent finder row is not a disabled target")
+		require.Equal(t, protocol.RelayProbeState(routeTargetStateUnsupported), missing.Relay.State)
+	})
+}
+
 func TestRouteTargetsGenerationIgnoresRouteUseTimestamps(t *testing.T) {
 	service, _, _ := routeTargetsServiceForTest(t)
-	source := models.Agent{AgentID: "source", PeerRouteMode: consts.PeerRouteModeDirectFirst}
+	source := models.Agent{AgentID: "source"}
 	before := service.Build(source).RouteTargets.Generation
 
 	require.NoError(t, service.ApplyEvents("source", protocol.RouteTelemetryBatch{
@@ -105,21 +223,26 @@ func TestRouteTargetsGenerationIsSafeForJavaScriptNumbers(t *testing.T) {
 	}
 }
 
-func TestRouteTargetsRelayOnlyPolicyDisablesDirectWithoutChangingInboundData(t *testing.T) {
+func TestRouteTargetsSourceDirectPolicyDisablesDirectWithoutChangingDiagnostics(t *testing.T) {
 	service, _, _ := routeTargetsServiceForTest(t)
-	directFirst := service.Build(models.Agent{
-		AgentID: "source", PeerRouteMode: consts.PeerRouteModeDirectFirst,
-	}).RouteTargets.Targets["target-a"]
-	relayOnly := service.Build(models.Agent{
-		AgentID: "source", PeerRouteMode: consts.PeerRouteModeRelayOnly,
-	}).RouteTargets.Targets["target-a"]
+	enabled, err := service.BuildContext(t.Context(), models.Agent{
+		AgentID: "source", DirectOutboundEnabled: true, RelayOutboundEnabled: true,
+	})
+	require.NoError(t, err)
+	disabled, err := service.BuildContext(t.Context(), models.Agent{
+		AgentID: "source", DirectOutboundEnabled: false, RelayOutboundEnabled: true,
+	})
+	require.NoError(t, err)
+	enabledTarget := enabled.RouteTargets.Targets["target-a"]
+	disabledTarget := disabled.RouteTargets.Targets["target-a"]
 
-	require.Equal(t, routeTargetStateReachable, directFirst.Direct.State)
-	require.Equal(t, routeTargetStateDisabled, relayOnly.Direct.State)
-	require.Equal(t, directFirst.Direct.Network, relayOnly.Direct.Network)
-	require.Equal(t, directFirst.Direct.Identity, relayOnly.Direct.Identity)
-	require.Equal(t, directFirst.Direct.AddressFingerprint, relayOnly.Direct.AddressFingerprint)
-	require.Equal(t, directFirst.Relay.State, relayOnly.Relay.State)
+	require.Equal(t, routeTargetStateReachable, enabledTarget.Direct.State)
+	require.Equal(t, routeTargetStateDisabled, disabledTarget.Direct.State)
+	require.Equal(t, consts.RouteErrorSourceDirectOutboundDisabled, disabledTarget.Direct.PolicyReason)
+	require.Equal(t, enabledTarget.Direct.Network, disabledTarget.Direct.Network)
+	require.Equal(t, enabledTarget.Direct.Identity, disabledTarget.Direct.Identity)
+	require.Equal(t, enabledTarget.Direct.AddressFingerprint, disabledTarget.Direct.AddressFingerprint)
+	require.Equal(t, enabledTarget.Relay.State, disabledTarget.Relay.State)
 }
 
 func TestRouteTargetsIncludeRetainedManualProbeTargets(t *testing.T) {
@@ -140,7 +263,7 @@ func TestRouteTargetsIncludeRetainedManualProbeTargets(t *testing.T) {
 		relay.facts["manual-relay"] = relayRuntimeForProbe(44)
 		target := ProbeTarget{AgentID: "manual-relay", Name: "Manual Relay", ControlGeneration: 10}
 		service.MarkRelayProbeChecking("source", 7, target, "manual-relay-fp", 100, 11, 44)
-		service.ApplyRelayProbeResult("source", 7, target, "manual-relay-fp", 100, 11, 44, protocol.RelayProbeResult{
+		service.ApplyRelayProbeResult("source", 7, target, "manual-relay-fp", 100, 11, 44, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 			TargetAgentID: "manual-relay", State: protocol.RelayProbeReachable,
 			Stage: protocol.RelayProbeStageResponse, CheckedAt: 1_000, LatencyMS: 7,
 		})
@@ -180,7 +303,7 @@ func routeTargetsServiceForTest(t *testing.T) (*Service, *routeTargetControlSour
 		},
 		capabilities: map[string][]string{
 			"source":   relayCapability,
-			"target-a": {protocol.AgentCapabilityDirectIngressV1, protocol.AgentCapabilityRelayHTTPPingV1},
+			"target-a": {protocol.AgentCapabilityDirectTunnelV1, protocol.AgentCapabilityRelayHTTPPingV1},
 		},
 	}
 	relay := &relaySourceStub{facts: map[string]RelayRuntimeFact{
@@ -200,13 +323,13 @@ func routeTargetsServiceForTest(t *testing.T) (*Service, *routeTargetControlSour
 		Addresses: []protocol.Address{{URL: "http://target-a"}},
 	}
 	service.MarkDirectProbeChecking("source", 7, directTarget, "direct-fp", 1)
-	service.ApplyDirectProbeResult("source", 7, directTarget, protocol.DirectProbeResult{
+	service.ApplyDirectProbeResult("source", 7, directTarget, protocol.DirectProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target-a", AddressFingerprint: "direct-fp", Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: 1_000, LatencyMS: 5,
 	}, 1)
 	relayTarget := ProbeTarget{AgentID: "target-a", Name: "Target A", ControlGeneration: 8}
 	service.MarkRelayProbeChecking("source", 7, relayTarget, "relay-fp", 2, 11, 22)
-	service.ApplyRelayProbeResult("source", 7, relayTarget, "relay-fp", 2, 11, 22, protocol.RelayProbeResult{
+	service.ApplyRelayProbeResult("source", 7, relayTarget, "relay-fp", 2, 11, 22, protocol.RelayProbeResult{Policy: protocol.ProbeRespectBusinessPolicy,
 		TargetAgentID: "target-a", State: protocol.RelayProbeReachable,
 		Stage: protocol.RelayProbeStageResponse, CheckedAt: 1_000, LatencyMS: 6,
 	})

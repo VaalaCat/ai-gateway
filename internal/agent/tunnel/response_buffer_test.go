@@ -30,7 +30,7 @@ func TestSessionIncomingBudgetAcrossStreamsAndCancelRelease(t *testing.T) {
 	limits.MaxQueuedSessionBytes = 4
 	w := newFairWriter(ctx, 4, time.Second, func(wire.Frame) error { return nil })
 	session := &Session{generation: 1, limits: limits, ctx: ctx, writer: w,
-		opts: defaultSessionOptions(SessionOptions{}), streams: make(map[wire.StreamID]*Stream),
+		opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), streams: make(map[wire.StreamID]*Stream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now)}
 	first := respondingBudgetStream(session, ctx, testStreamID(1))
 	second := respondingBudgetStream(session, ctx, testStreamID(2))
@@ -53,7 +53,7 @@ func TestSessionIncomingBudgetAcrossStreamsAndCancelRelease(t *testing.T) {
 }
 
 func respondingBudgetStream(session *Session, ctx context.Context, id wire.StreamID) *Stream {
-	stream := newStream(session, ctx, ctx, id, 0)
+	stream := newStream(session, ctx, id, 0, "")
 	stream.receivePhase = receiveResponding
 	stream.receiveSeq = 3
 	stream.commitState.Store(uint32(wire.Committed))

@@ -12,6 +12,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	masterlogqueue "github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
@@ -157,6 +158,29 @@ var settingDefs = map[string]struct {
 			return err == nil && n >= 5 && n <= 3600
 		},
 	},
+	consts.SettingKeyRebuildSliceSleepMs: {
+		Default: "1000",
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 0 && n <= 60000
+		},
+	},
+}
+
+func init() {
+	for key, definition := range masterlogqueue.DeliverySettingDefinitions() {
+		definition := definition
+		settingDefs[key] = struct {
+			Default  string
+			Validate func(string) bool
+		}{
+			Default: definition.Default,
+			Validate: func(value string) bool {
+				n, err := strconv.ParseInt(value, 10, 64)
+				return err == nil && n >= definition.Min && n <= definition.Max
+			},
+		}
+	}
 }
 
 type SettingsResponse struct {
@@ -266,9 +290,6 @@ func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (Set
 		return SettingsResponse{}, api.InternalError("save setting failed", err)
 	}
 
-	if value, ok := req.Settings[consts.SettingAgentRelayFallbackEnabled]; ok && h.RelayAdmission != nil {
-		h.RelayAdmission.Set(value == "1")
-	}
 	if h.RefreshProbeTimings != nil && containsProbeTimingSetting(req.Settings) {
 		h.RefreshProbeTimings(requestContext)
 	}

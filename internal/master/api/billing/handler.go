@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
 )
 
@@ -9,4 +10,5 @@ import (
 // nil, async rebuild endpoints return InternalError.
 type Handler struct {
 	Runner *billing.RebuildRunner
+	Cache  *dao.StatsCache
 }

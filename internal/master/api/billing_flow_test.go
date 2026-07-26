@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBillingTokenScope(t *testing.T) {
@@ -288,6 +289,10 @@ func TestBillingChannelScope(t *testing.T) {
 
 func TestBillingChannelRebuild(t *testing.T) {
 	srv := setupTestMaster(t)
+	// Production default is 1s inter-slice sleep (billing.rebuild_slice_sleep_ms);
+	// disable it here so this test's 24-slice rebuild finishes well within its
+	// 10s poll deadline instead of testing unrelated sleep timing.
+	srv.RebuildRunner.SetSliceSleep(0)
 	srv.RebuildRunner.Start(context.Background())
 	srv.InitAdminUser("admin", "admin123")
 	adminToken := loginHelper(t, srv, "admin", "admin123")
@@ -309,9 +314,9 @@ func TestBillingChannelRebuild(t *testing.T) {
 	}
 
 	userID := createUser("billing-rebuild-user")
-	srv.DB.Create(&models.Token{ID: 2, UserID: uint(userID), Key: "sk-rebuild", Name: "rebuild-key", Status: 1, ExpiredAt: -1})
-	srv.DB.Create(&models.Channel{ChannelCore: models.ChannelCore{ID: 21, Name: "rebuild-channel", Type: 1, Status: 1}, Key: "sk-upstream"})
-	srv.DB.Create(&models.UsageLog{
+	require.NoError(t, srv.DB.Create(&models.Token{ID: 2, UserID: uint(userID), Key: "sk-rebuild", Name: "rebuild-key", Status: 1, ExpiredAt: -1}).Error)
+	require.NoError(t, srv.DB.Create(&models.Channel{ChannelCore: models.ChannelCore{ID: 21, Name: "rebuild-channel", Type: 1, Status: 1}, Key: "sk-upstream"}).Error)
+	require.NoError(t, srv.DB.Create(&models.BillingLog{
 		RequestID:        "req-rebuild-1",
 		UserID:           uint(userID),
 		TokenID:          2,
@@ -326,8 +331,8 @@ func TestBillingChannelRebuild(t *testing.T) {
 		TotalCost:        30,
 		Status:           1,
 		CreatedAt:        time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC).Unix(),
-	})
-	srv.DB.Create(&models.UsageLog{
+	}).Error)
+	require.NoError(t, srv.DB.Create(&models.BillingLog{
 		RequestID:        "req-rebuild-2",
 		UserID:           uint(userID),
 		TokenID:          2,
@@ -342,7 +347,7 @@ func TestBillingChannelRebuild(t *testing.T) {
 		TotalCost:        50,
 		Status:           0,
 		CreatedAt:        time.Date(2026, 4, 1, 13, 0, 0, 0, time.UTC).Unix(),
-	})
+	}).Error)
 
 	// Async submit: POST returns {job_id, total_slices}; client polls
 	// GET /billing/rebuild/jobs/:id for status until terminal.

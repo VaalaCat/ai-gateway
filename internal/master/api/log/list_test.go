@@ -2,6 +2,7 @@ package log
 
 import (
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -17,6 +18,80 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestLogHandlersReturn503WhenLogDatabaseUnavailable(t *testing.T) {
+	h, _, application := newLogTestCtx(t)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	ctx := makeCtx(t, application, 1, true)
+
+	_, err := h.List(ctx, ListRequest{})
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != "LogDatabaseUnavailable" {
+		t.Fatalf("List error = %#v, want structured 503", err)
+	}
+	_, err = h.GetTrace(ctx, TraceRequest{RequestID: "missing"})
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != "LogDatabaseUnavailable" {
+		t.Fatalf("GetTrace error = %#v, want structured 503", err)
+	}
+}
+
+func TestLogHandlerReadsRecoveredDatabaseWithoutRebuild(t *testing.T) {
+	h, _, application := newLogTestCtx(t)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	ctx := makeCtx(t, application, 1, true)
+	if _, err := h.List(ctx, ListRequest{}); err == nil {
+		t.Fatal("initial List should fail while log database is unavailable")
+	}
+
+	logDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := logDB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := logDB.AutoMigrate(&models.RequestLog{}); err != nil {
+		t.Fatal(err)
+	}
+	row := models.RequestLog(models.UsageLog{RequestID: "recovered", UserID: 1})
+	if err := logDB.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	application.SetLogDB(logDB)
+
+	resp, err := h.List(ctx, ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 1 || resp.Data[0].RequestID != "recovered" {
+		t.Fatalf("response=%+v, want recovered row", resp)
+	}
+}
+
+func TestLogHandlerReturns503WhenHandoffClosesHandleBeforeQuery(t *testing.T) {
+	h, _, application := newLogTestCtx(t)
+	logDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := logDB.AutoMigrate(&models.RequestLog{}); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := logDB.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	logDB.Callback().Query().Before("gorm:query").Register("test:close_handoff_handle", func(*gorm.DB) { _ = sqlDB.Close() })
+	application.SetLogDB(logDB)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	_, err = h.List(makeCtx(t, application, 1, true), ListRequest{})
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != "LogDatabaseUnavailable" {
+		t.Fatalf("error=%#v, want structured 503", err)
+	}
+}
 
 // newLogTestCtx 构造最小 handler + DB + Application 三件套。
 func newLogTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
@@ -35,7 +110,7 @@ func newLogTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	db.Create(&models.User{ID: 2, GroupID: 1, Username: "bob"})
 
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	application.SetEventBus(eventbus.NewMemoryBus())
 	return &Handler{}, db, application
 }

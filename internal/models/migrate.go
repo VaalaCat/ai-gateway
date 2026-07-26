@@ -2,11 +2,16 @@ package models
 
 import (
 	"fmt"
+	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func AutoMigrate(db *gorm.DB) error {
+	// Transitional legacy entrypoint for production startup and legacy fixtures until
+	// the Server/DAO dual-database routing tasks enable the split layout end to end.
+	// It intentionally keeps the mixed schema and never writes a split layout marker.
 	if err := db.AutoMigrate(
 		&User{},
 		&Token{},
@@ -31,11 +36,19 @@ func AutoMigrate(db *gorm.DB) error {
 		&PrivateChannelShare{},
 		&UsageHourlyBucket{},
 		&UsageDurationHistogram{},
+		&UsageTTFTHistogram{},
+		&UsageTPSHistogram{},
+		&UsageUserTTFTHistogram{},
+		&UsageUserTPSHistogram{},
+		&LogHistoryAggregateMerge{},
 		&AdminScript{},
 		&InviteCode{},
 		&InviteRedemption{},
 		&MasterSigningKey{},
 	); err != nil {
+		return err
+	}
+	if err := dropLegacyAgentRoutingColumn(db); err != nil {
 		return err
 	}
 
@@ -54,7 +67,300 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := dropLegacyChannelBillingIndex(db); err != nil {
 		return err
 	}
-	return dropLegacyTraceRequestIDUniqueIndex(db)
+	if err := dropLegacyTraceRequestIDUniqueIndex(db); err != nil {
+		return err
+	}
+	return deleteLegacyRelayFallbackSetting(db)
+}
+
+func MigrateCoreDB(db *gorm.DB) error {
+	if err := migrateSplitDatabase(db, DatabaseRoleCore, coreModels(), migrateCoreCleanup); err != nil {
+		return fmt.Errorf("migrate core database: %w", err)
+	}
+	return nil
+}
+
+func MigrateLogDB(db *gorm.DB) error {
+	if err := migrateSplitDatabase(db, DatabaseRoleLog, logModels(), ensureRequestLogQueryIndexes); err != nil {
+		return fmt.Errorf("migrate log database: %w", err)
+	}
+	return nil
+}
+
+func migrateSplitDatabase(db *gorm.DB, role string, models []any, finish func(*gorm.DB) error) error {
+	if db == nil {
+		return fmt.Errorf("%s database is nil", role)
+	}
+	if db.Error != nil {
+		return fmt.Errorf("%s database is invalid: %w", role, db.Error)
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := ensureDatabaseLayout(tx, role); err != nil {
+			return err
+		}
+		for _, model := range models {
+			if err := tx.AutoMigrate(model); err != nil {
+				return fmt.Errorf("migrate %s schema: %w", role, err)
+			}
+		}
+		if err := finish(tx); err != nil {
+			return fmt.Errorf("finish %s schema migration: %w", role, err)
+		}
+		return nil
+	})
+}
+
+func ensureDatabaseLayout(db *gorm.DB, role string) error {
+	if !db.Migrator().HasTable(&DatabaseLayout{}) {
+		empty, err := databaseHasNoUserTables(db)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			return fmt.Errorf("unmarked non-empty database cannot be claimed as %q", role)
+		}
+		if err := db.AutoMigrate(&DatabaseLayout{}); err != nil {
+			return fmt.Errorf("create database layout schema: %w", err)
+		}
+		marker := DatabaseLayout{ID: DatabaseLayoutID, Role: role, Version: DatabaseLayoutVersion}
+		if err := db.Create(&marker).Error; err != nil {
+			return fmt.Errorf("create database layout marker: %w", err)
+		}
+		return nil
+	}
+	var layouts []DatabaseLayout
+	if err := db.Find(&layouts).Error; err != nil {
+		return fmt.Errorf("invalid database layout: read marker: %w", err)
+	}
+	if len(layouts) == 0 {
+		return fmt.Errorf("invalid database layout: marker table is empty")
+	}
+	if len(layouts) != 1 {
+		return fmt.Errorf("invalid database layout: marker count is %d, want 1", len(layouts))
+	}
+	marker := layouts[0]
+	if marker.ID != DatabaseLayoutID {
+		return fmt.Errorf("invalid database layout: marker id is %d, want %d", marker.ID, DatabaseLayoutID)
+	}
+	if marker.Role != DatabaseRoleCore && marker.Role != DatabaseRoleLog {
+		return fmt.Errorf("invalid database layout: unknown role %q", marker.Role)
+	}
+	if marker.Version != DatabaseLayoutVersion {
+		return fmt.Errorf("invalid database layout: database layout version is %d, want %d", marker.Version, DatabaseLayoutVersion)
+	}
+	if err := validateDatabaseLayoutSchema(db); err != nil {
+		return err
+	}
+	if marker.Role != role {
+		return fmt.Errorf("database layout role is %q, cannot migrate as %q", marker.Role, role)
+	}
+	return nil
+}
+
+func databaseHasNoUserTables(db *gorm.DB) (bool, error) {
+	var count int64
+	if err := db.Raw(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).Scan(&count).Error; err != nil {
+		return false, fmt.Errorf("inspect database tables: %w", err)
+	}
+	return count == 0, nil
+}
+
+func validateDatabaseLayoutSchema(db *gorm.DB) error {
+	type columnInfo struct {
+		Name    string `gorm:"column:name"`
+		NotNull int    `gorm:"column:notnull"`
+		PK      int    `gorm:"column:pk"`
+	}
+	var columns []columnInfo
+	if err := db.Raw(`PRAGMA table_info('database_layouts')`).Scan(&columns).Error; err != nil {
+		return fmt.Errorf("inspect database layout schema: %w", err)
+	}
+	want := map[string]columnInfo{
+		"id":      {Name: "id", NotNull: 1, PK: 1},
+		"role":    {Name: "role", NotNull: 1},
+		"version": {Name: "version", NotNull: 1},
+	}
+	if len(columns) != len(want) {
+		return fmt.Errorf("invalid database layout schema: got %d columns", len(columns))
+	}
+	for _, column := range columns {
+		expected, ok := want[column.Name]
+		if !ok || column.NotNull != expected.NotNull || column.PK != expected.PK {
+			return fmt.Errorf("invalid database layout schema: column %q has unexpected constraints", column.Name)
+		}
+	}
+	var createSQL string
+	if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'database_layouts'`).Scan(&createSQL).Error; err != nil {
+		return fmt.Errorf("inspect database layout checks: %w", err)
+	}
+	compactSQL := strings.Map(func(r rune) rune {
+		if r == '`' || r == '"' || r == '\'' || r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, strings.ToLower(createSQL))
+	for _, check := range []string{"check(id=1)", "check(rolein(core,log))"} {
+		if !strings.Contains(compactSQL, check) {
+			return fmt.Errorf("invalid database layout schema: missing %s", check)
+		}
+	}
+	return nil
+}
+
+func coreModels() []any {
+	return []any{
+		&User{}, &Token{}, &Channel{}, &ModelConfig{}, &Agent{}, &EnrollmentToken{},
+		&Setting{}, &AgentRoute{}, &RequestLimiter{}, &LimiterBinding{}, &TokenTemplate{},
+		&UserGroup{}, &OAuthProvider{}, &OAuthIdentity{}, &ModelRouting{}, &PrivateChannel{},
+		&PrivateChannelShare{}, &AdminScript{}, &InviteCode{}, &InviteRedemption{},
+		&MasterSigningKey{}, &TokenDailyBilling{}, &ChannelDailyBilling{}, &BillingLog{},
+		&BillingHourlyBucket{}, &BillingProjectionReceipt{}, &BillingProjectionBaseline{}, &HistoryMigration{}, &HistoryCursor{},
+	}
+}
+
+func logModels() []any {
+	return []any{
+		&RequestLog{}, &RequestTrace{}, &UsageHourlyBucket{}, &UsageDurationHistogram{},
+		&UsageTTFTHistogram{}, &UsageTPSHistogram{}, &UsageUserTTFTHistogram{},
+		&UsageUserTPSHistogram{},
+		&LogHistoryAggregateMerge{}, &HistoryCursor{},
+	}
+}
+
+func migrateCoreCleanup(db *gorm.DB) error {
+	steps := []func(*gorm.DB) error{
+		backfillBillingProjectionReceipts,
+		ensureBillingProjectionBaseline,
+		dropLegacyAgentRoutingColumn,
+		ensureModelRoutingOwnerIndex,
+		backfillPasswordSet,
+		ensureUserEmailUniqueIndex,
+		ensureBillingHourlyQueryIndexes,
+		dropLegacyChannelBillingIndex,
+		deleteLegacyRelayFallbackSetting,
+	}
+	for _, step := range steps {
+		if err := step(db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func backfillBillingProjectionReceipts(db *gorm.DB) error {
+	if err := db.Exec(`UPDATE billing_projection_receipts
+		SET billing_log_id = COALESCE((
+			SELECT id FROM billing_logs WHERE billing_logs.request_id = billing_projection_receipts.request_id
+		), 0), state = ?
+		WHERE billing_log_id = 0`, BillingProjectionApplied).Error; err != nil {
+		return fmt.Errorf("backfill billing projection receipts: %w", err)
+	}
+	var invalid int64
+	if err := db.Model(&BillingProjectionReceipt{}).
+		Where("billing_log_id = 0 OR state NOT IN ?", []BillingProjectionState{BillingProjectionPending, BillingProjectionApplied}).
+		Count(&invalid).Error; err != nil {
+		return fmt.Errorf("validate billing projection receipts: %w", err)
+	}
+	if invalid > 0 {
+		return fmt.Errorf("validate billing projection receipts: %d invalid rows", invalid)
+	}
+	return nil
+}
+
+func ensureBillingProjectionBaseline(db *gorm.DB) error {
+	var existing int64
+	if err := db.Model(&BillingProjectionBaseline{}).Where("id = ?", BillingProjectionBaselineID).Count(&existing).Error; err != nil {
+		return fmt.Errorf("read billing projection baseline: %w", err)
+	}
+	if existing > 0 {
+		return nil
+	}
+	var watermark uint
+	if err := db.Model(&BillingLog{}).Select("COALESCE(MAX(id), 0)").Scan(&watermark).Error; err != nil {
+		return fmt.Errorf("read billing projection baseline watermark: %w", err)
+	}
+	baseline := BillingProjectionBaseline{ID: BillingProjectionBaselineID, BillingLogHighWatermark: watermark}
+	if err := db.Create(&baseline).Error; err != nil {
+		return fmt.Errorf("create billing projection baseline: %w", err)
+	}
+	return nil
+}
+
+func ensureBillingHourlyQueryIndexes(db *gorm.DB) error {
+	wanted := map[string][]string{
+		"idx_bhb_model_user":  {"model_name", "date", "hour", "user_id"},
+		"idx_bhb_user_token":  {"user_id", "token_id", "date", "hour", "model_name"},
+		"idx_bhb_user_window": {"user_id", "date", "hour", "model_name"},
+		"idx_bhb_window_user": {"date", "hour", "user_id"},
+	}
+	for _, name := range []string{"idx_bhb_model_user", "idx_bhb_user_token", "idx_bhb_user_window", "idx_bhb_window_user"} {
+		var rows []struct{ Name string }
+		if err := db.Raw("PRAGMA index_info(" + name + ")").Scan(&rows).Error; err != nil {
+			return fmt.Errorf("inspect billing hourly index %s: %w", name, err)
+		}
+		columns := make([]string, 0, len(rows))
+		for _, row := range rows {
+			columns = append(columns, row.Name)
+		}
+		if strings.Join(columns, ",") == strings.Join(wanted[name], ",") {
+			continue
+		}
+		if err := db.Exec("DROP INDEX IF EXISTS " + name).Error; err != nil {
+			return fmt.Errorf("drop stale billing hourly index %s: %w", name, err)
+		}
+		if err := db.Migrator().CreateIndex(&BillingHourlyBucket{}, name); err != nil {
+			return fmt.Errorf("create billing hourly index %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func ensureRequestLogQueryIndexes(db *gorm.DB) error {
+	indexes := []struct {
+		name string
+		sql  string
+	}{
+		{name: "idx_request_logs_created_id", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_created_id ON request_logs(created_at DESC, id DESC)`},
+		{name: "idx_request_logs_user_created_model", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_user_created_model ON request_logs(user_id, created_at DESC, model_name)`},
+		{name: "idx_request_logs_model_created_user", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_model_created_user ON request_logs(model_name, created_at DESC, user_id)`},
+		{name: "idx_request_logs_status_created_duration", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_status_created_duration ON request_logs(status, created_at, duration)`},
+		{name: "idx_request_logs_agent_status_created", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_agent_status_created ON request_logs(agent_id, status, created_at DESC)`},
+		{name: "idx_request_logs_pchan_created_model", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_pchan_created_model ON request_logs(private_channel_id, created_at, model_name)`},
+		{name: "idx_request_logs_window_stats", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_window_stats ON request_logs(created_at, status, duration)`},
+		{name: "idx_request_logs_user_window_stats", sql: `CREATE INDEX IF NOT EXISTS idx_request_logs_user_window_stats ON request_logs(user_id, created_at, status, duration)`},
+	}
+	for _, index := range indexes {
+		if db.Migrator().HasIndex(&RequestLog{}, index.name) {
+			continue
+		}
+		if err := db.Exec(index.sql).Error; err != nil {
+			return fmt.Errorf("create request log index %s: %w", index.name, err)
+		}
+	}
+	return nil
+}
+
+func dropLegacyAgentRoutingColumn(db *gorm.DB) error {
+	column := strings.Join([]string{"peer", "route", "mode"}, "_")
+	if !db.Migrator().HasColumn(&Agent{}, column) {
+		return nil
+	}
+	if err := db.Exec(
+		"ALTER TABLE ? DROP COLUMN ?",
+		clause.Table{Name: "agents"},
+		clause.Column{Name: column},
+	).Error; err != nil {
+		return fmt.Errorf("drop legacy agent routing column: %w", err)
+	}
+	return nil
+}
+
+func deleteLegacyRelayFallbackSetting(db *gorm.DB) error {
+	return db.Where("key = ?", legacyRelayFallbackSettingKey()).Delete(&Setting{}).Error
+}
+
+func legacyRelayFallbackSettingKey() string {
+	return "agent." + strings.Join([]string{"relay", "fallback", "enabled"}, "_")
 }
 
 func ensureModelRoutingOwnerIndex(db *gorm.DB) error {

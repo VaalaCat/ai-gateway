@@ -28,7 +28,7 @@ var (
 )
 
 type RelayProberOptions struct {
-	Link            app.RelayLink
+	Link            app.ProbeStreamOpener
 	RelayGeneration func() uint64
 	Now             func() time.Time
 	Timeout         time.Duration
@@ -40,7 +40,7 @@ type RelayProbeMetricRecorder interface {
 }
 
 type RelayProber struct {
-	link            app.RelayLink
+	link            app.ProbeStreamOpener
 	relayGeneration func() uint64
 	now             func() time.Time
 	timeout         time.Duration
@@ -68,6 +68,7 @@ func (p *RelayProber) Probe(ctx context.Context, target protocol.RelayProbeTarge
 			State:         protocol.RelayProbeUnknown,
 			CheckedAt:     time.Now().Unix(),
 			ReasonCode:    consts.RouteErrorRelayProbeInvalidResult,
+			Policy:        target.Policy,
 		}
 	}
 	defer func() {
@@ -80,8 +81,10 @@ func (p *RelayProber) Probe(ctx context.Context, target protocol.RelayProbeTarge
 		TargetAgentID: target.TargetAgentID,
 		State:         protocol.RelayProbeUnknown,
 		CheckedAt:     startedAt.Unix(),
+		Policy:        target.Policy,
 	}
-	if ctx == nil || target.TargetAgentID == "" || target.SourceRelayGeneration == 0 || target.TargetRelayGeneration == 0 {
+	if ctx == nil || target.TargetAgentID == "" || target.SourceRelayGeneration == 0 || target.TargetRelayGeneration == 0 ||
+		!validProbePolicy(target.Policy) {
 		result.ReasonCode = consts.RouteErrorRelayProbeInvalidResult
 		return result
 	}
@@ -97,41 +100,41 @@ func (p *RelayProber) Probe(ctx context.Context, target protocol.RelayProbeTarge
 		return result
 	}
 
-	stream, err := p.link.OpenStream(probeCtx, app.RelayRequest{
-		Purpose:       wire.StreamPurposeConnectivityProbe,
+	stream, err := p.link.OpenProbeStream(probeCtx, app.ProbeStreamRequest{
 		TargetAgentID: target.TargetAgentID,
 		RequestID:     "relay-connectivity-probe",
-		Method:        http.MethodGet,
-		Path:          "/ping",
-		Header:        make(http.Header),
-		BodyLength:    0,
 		Remaining:     relayProbeRemaining(probeCtx, p.timeout),
+		Policy:        target.Policy,
 	})
 	if err != nil {
 		return p.failed(result, startedAt, protocol.RelayProbeUnavailable, protocol.RelayProbeStageOpen, probeCtx, err, consts.RouteErrorRelayNotReady)
 	}
+	if stream == nil {
+		result.LatencyMS = p.now().Sub(startedAt).Milliseconds()
+		result.State = protocol.RelayProbeUnavailable
+		result.Stage = protocol.RelayProbeStageOpen
+		result.ReasonCode = consts.RouteErrorRelayNotReady
+		return result
+	}
 	defer stream.Close()
-	if err := stream.Commit(probeCtx); err != nil {
-		stream.Cancel(err)
-		fallback := consts.RouteErrorRelayCommitUncertain
-		if stream.CommitState() == wire.PreCommit {
-			fallback = consts.RouteErrorRelayNotReady
-		}
-		return p.failed(result, startedAt, protocol.RelayProbeUnavailable, protocol.RelayProbeStageCommit, probeCtx, err, fallback)
-	}
-	if err := stream.Upload(probeCtx, bytes.NewReader(nil)); err != nil {
-		stream.Cancel(err)
-		return p.failed(result, startedAt, protocol.RelayProbeUnreachable, protocol.RelayProbeStageCommit, probeCtx, err, consts.RouteErrorRelayCommitUncertain)
-	}
-
 	response := newRelayProbeResponse()
-	if err := stream.CopyResponse(probeCtx, response); err != nil {
+	stage, err := commitUploadAndCopyProbe(probeCtx, stream, response)
+	if err != nil {
 		stream.Cancel(err)
 		reason := consts.RouteErrorRelayResponseInterrupted
-		if errors.Is(err, errRelayProbeBodyTooLarge) {
+		state := protocol.RelayProbeUnreachable
+		if stage == protocol.RelayProbeStageCommit {
+			reason = consts.RouteErrorRelayCommitUncertain
+			if stream.CommitState() != wire.Committed {
+				state = protocol.RelayProbeUnavailable
+			}
+			if stream.CommitState() == wire.PreCommit {
+				reason = consts.RouteErrorRelayNotReady
+			}
+		} else if errors.Is(err, errRelayProbeBodyTooLarge) {
 			reason = consts.RouteErrorRelayProbeBodyTooLarge
 		}
-		return p.failed(result, startedAt, protocol.RelayProbeUnreachable, protocol.RelayProbeStageResponse, probeCtx, err, reason)
+		return p.failed(result, startedAt, state, stage, probeCtx, err, reason)
 	}
 	result.LatencyMS = p.now().Sub(startedAt).Milliseconds()
 	result.Stage = protocol.RelayProbeStageResponse
@@ -192,6 +195,13 @@ func (p *RelayProber) failed(
 	result.LatencyMS = p.now().Sub(startedAt).Milliseconds()
 	result.State = state
 	result.Stage = stage
+	if isTargetPolicyReset(err, result.Policy, consts.RouteErrorTargetRelayInboundDisabled) {
+		result.State = protocol.RelayProbeReachable
+		result.ReasonCode = ""
+		result.PolicyDisabled = true
+		result.PolicyReasonCode = consts.RouteErrorTargetRelayInboundDisabled
+		return result
+	}
 	result.ReasonCode = relayProbeFailureCode(ctx, err, fallback)
 	if result.ReasonCode == consts.RouteErrorRequestCancelled {
 		result.State = protocol.RelayProbeUnknown

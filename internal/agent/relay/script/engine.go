@@ -15,7 +15,7 @@ const (
 
 // ScriptProvider 返回命中（已按 scope 过滤 + enabled）的已编译脚本，按 Priority 升序。
 type ScriptProvider interface {
-	MatchScripts(channelID uint, model string) []*Compiled
+	MatchScripts(MatchInput) []*Compiled
 }
 
 // Engine 在 relay 挂点执行脚本。并发安全：每次执行新建独立 *goja.Runtime。
@@ -35,14 +35,13 @@ func NewEngine(provider ScriptProvider, logger *zap.Logger, timeout time.Duratio
 
 // HookInput 是一次钩子执行的输入。
 type HookInput struct {
-	Hook      string            // HookRequest / HookUpstream / HookResponse
-	ChannelID uint              // 0 = 尚未路由
-	Model     string
-	User      map[string]any
-	Headers   map[string]string
-	Channel   map[string]any // 出站/响应阶段为 {id,name}
-	Protocol  string         // 上游协议（出站/响应）
-	Body      []byte
+	Hook     string // HookRequest / HookUpstream / HookResponse
+	Match    MatchInput
+	User     map[string]any
+	Headers  map[string]string
+	Channel  map[string]any // 出站/响应阶段为 {id,name}
+	Protocol string         // 上游协议（出站/响应）
+	Body     []byte
 }
 
 // HeaderOp 是脚本对请求头的一次写操作。Remove=true 表示删除该头，
@@ -72,7 +71,7 @@ func (e *Engine) Run(in HookInput) HookResult {
 	if e == nil || e.provider == nil {
 		return res
 	}
-	for _, sc := range e.provider.MatchScripts(in.ChannelID, in.Model) {
+	for _, sc := range e.provider.MatchScripts(in.Match) {
 		out := e.runOne(sc, in)
 		if out.Rejected {
 			return out
@@ -135,7 +134,7 @@ func (e *Engine) runOne(sc *Compiled, in HookInput) (res HookResult) {
 		e.failOpen(sc, in.Hook, err)
 		return keep
 	}
-	_ = ctxObj.Set("model", in.Model)
+	_ = ctxObj.Set("model", in.Match.Model)
 	_ = ctxObj.Set("user", in.User)
 	_ = ctxObj.Set("headers", in.Headers)
 	if in.Channel != nil {

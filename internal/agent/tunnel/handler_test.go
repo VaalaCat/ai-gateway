@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,8 +20,38 @@ import (
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
 
+type targetDirectPathDisabledRecorder struct {
+	events []agentproxy.DirectPathDisabledEvent
+}
+
+func (r *targetDirectPathDisabledRecorder) RecordDirectPathDisabled(event agentproxy.DirectPathDisabledEvent) {
+	r.events = append(r.events, event)
+}
+
+func TestTargetDirectInboundPolicyRecordsRespectButNotBypass(t *testing.T) {
+	recorder := &targetDirectPathDisabledRecorder{}
+	handler := NewTargetHandler(TargetHandlerOptions{
+		TargetAgentID: "target-a", DirectInboundEnabled: func() bool { return false },
+		RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler(),
+		DirectPathDisabled: recorder,
+	})
+	respect := wire.Open{
+		ProbePolicy: wire.ProbeRespectBusinessPolicy, Method: http.MethodGet, Path: "/ping",
+		SourceAgentID: "source-a", TargetAgentID: "target-a", RemainingNanos: 1, ResponseWindow: 1,
+	}
+	requirePolicyOpenFailure(t, handler.ValidateOpen(respect, agentproxy.IngressKindDirectTunnel), consts.RouteErrorTargetDirectInboundDisabled)
+	require.Equal(t, []agentproxy.DirectPathDisabledEvent{{
+		SourceAgentID: "source-a", TargetAgentID: "target-a", Reason: agentproxy.DirectPathDisabledTargetInbound,
+	}}, recorder.events)
+
+	bypass := respect
+	bypass.ProbePolicy = wire.ProbeBypassBusinessPolicy
+	require.NoError(t, handler.ValidateOpen(bypass, agentproxy.IngressKindDirectTunnel))
+	require.Len(t, recorder.events, 1, "bypass probe must not count a business-policy decision")
+}
+
 func TestTargetHandlerAllowsBoundAttemptsForProviderEndpoints(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler()})
 	allowed := []string{
 		"/v1/chat/completions",
 		"/v1/completions",
@@ -35,10 +66,66 @@ func TestTargetHandlerAllowsBoundAttemptsForProviderEndpoints(t *testing.T) {
 	}
 	for _, path := range allowed {
 		t.Run(path, func(t *testing.T) {
-			err := handler.ValidateOpen(validBoundTunnelOpen(path))
+			err := handler.ValidateOpen(validBoundTunnelOpen(path), agentproxy.IngressKindRelayTunnel)
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestTargetHandlerAttemptAdmissionUsesIngressDirectionAndStablePolicyCode(t *testing.T) {
+	tests := []struct {
+		name        string
+		ingressKind string
+		direct      bool
+		relay       bool
+		wantCode    string
+	}{
+		{name: "direct allowed", ingressKind: agentproxy.IngressKindDirectTunnel, direct: true},
+		{name: "relay allowed", ingressKind: agentproxy.IngressKindRelayTunnel, relay: true},
+		{name: "direct disabled", ingressKind: agentproxy.IngressKindDirectTunnel, relay: true, wantCode: consts.RouteErrorTargetDirectInboundDisabled},
+		{name: "relay disabled", ingressKind: agentproxy.IngressKindRelayTunnel, direct: true, wantCode: consts.RouteErrorTargetRelayInboundDisabled},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewTargetHandler(TargetHandlerOptions{
+				TargetAgentID:        "target-a",
+				DirectInboundEnabled: func() bool { return test.direct },
+				RelayInboundEnabled:  func() bool { return test.relay },
+				SourceEnabled:        func(string) bool { return true },
+				Router:               http.NotFoundHandler(),
+			})
+			err := handler.ValidateOpen(validBoundTunnelOpen("/v1/responses"), test.ingressKind)
+			if test.wantCode == "" {
+				require.NoError(t, err)
+				return
+			}
+			requirePolicyOpenFailure(t, err, test.wantCode)
+		})
+	}
+}
+
+func requirePolicyOpenFailure(t *testing.T, err error, code string) {
+	t.Helper()
+	require.Error(t, err)
+	var failure interface {
+		Stage() string
+		ReasonCode() string
+		CountsForCircuit() bool
+	}
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, "policy", failure.Stage())
+	require.Equal(t, code, failure.ReasonCode())
+	require.False(t, failure.CountsForCircuit())
+	var reset interface{ ResetCode() string }
+	require.ErrorAs(t, err, &reset)
+	require.Equal(t, code, reset.ResetCode())
+}
+
+func TestPathPolicyErrorResetCodeFailsClosedForUnknownReason(t *testing.T) {
+	err := newPathPolicyError("internal_policy_detail")
+	var reset interface{ ResetCode() string }
+	require.ErrorAs(t, err, &reset)
+	require.Equal(t, consts.RouteErrorRelayProtocol, reset.ResetCode())
 }
 
 func TestTargetHandlerRequiresBoundAttemptBeforeBusinessRouter(t *testing.T) {
@@ -60,7 +147,7 @@ func TestTargetHandlerRequiresBoundAttemptBeforeBusinessRouter(t *testing.T) {
 		{
 			name: "connectivity probe without attempt",
 			open: wire.Open{
-				Purpose: wire.StreamPurposeConnectivityProbe, Method: http.MethodGet, Path: "/ping",
+				ProbePolicy: wire.ProbeBypassBusinessPolicy, Method: http.MethodGet, Path: "/ping",
 				TargetAgentID: "target-a", RemainingNanos: 1, ResponseWindow: 1,
 			},
 			wantCalls: 1,
@@ -78,16 +165,16 @@ func TestTargetHandlerRequiresBoundAttemptBeforeBusinessRouter(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
-			handler := NewTargetHandler("target-a", func() bool { return true }, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
 				require.Equal(t, test.open.Method, r.Method)
 				require.Equal(t, test.open.Path, r.URL.Path)
 				w.WriteHeader(http.StatusNoContent)
-			}))
+			})})
 
-			err := handler.ValidateOpen(test.open)
+			err := handler.ValidateOpen(test.open, agentproxy.IngressKindRelayTunnel)
 			if err == nil {
-				req, buildErr := handler.BuildRequest(t.Context(), test.open, wire.StreamID{1}, http.NoBody)
+				req, buildErr := handler.BuildRequest(t.Context(), test.open, wire.StreamID{1}, http.NoBody, agentproxy.IngressKindRelayTunnel)
 				require.NoError(t, buildErr)
 				handler.ServeHTTP(httptest.NewRecorder(), req)
 			}
@@ -104,7 +191,7 @@ func TestTargetHandlerRequiresBoundAttemptBeforeBusinessRouter(t *testing.T) {
 
 func TestTargetHandlerRejectsUntrustedOpenMetadata(t *testing.T) {
 	enabled := true
-	handler := NewTargetHandler("target-a", func() bool { return enabled }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return enabled }, Router: http.NotFoundHandler()})
 	tests := []struct {
 		name string
 		open wire.Open
@@ -124,23 +211,25 @@ func TestTargetHandlerRejectsUntrustedOpenMetadata(t *testing.T) {
 		{name: "bad response window", open: wire.Open{Method: http.MethodPost, Path: "/v1/responses", TargetAgentID: "target-a", ResponseWindow: 0}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) { require.Error(t, handler.ValidateOpen(test.open)) })
+		t.Run(test.name, func(t *testing.T) {
+			require.Error(t, handler.ValidateOpen(test.open, agentproxy.IngressKindRelayTunnel))
+		})
 	}
 
 	enabled = false
 	require.Error(t, handler.ValidateOpen(wire.Open{
 		Method: http.MethodPost, Path: "/v1/responses", TargetAgentID: "target-a", ResponseWindow: 1,
-	}))
+	}, agentproxy.IngressKindRelayTunnel))
 }
 
 func TestTargetHandlerValidatesBoundAttemptEnvelopeAndProviderPath(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler()})
 	valid := validTunnelAttemptMeta()
 	base := wire.Open{
 		Method: http.MethodPost, Path: attemptwire.EndpointPath, TargetAgentID: "target-a",
 		ResponseWindow: 1, RouteID: 0, Hop: 1, Attempt: &valid,
 	}
-	require.NoError(t, handler.ValidateOpen(base), "RouteID zero is valid for a hard route")
+	require.NoError(t, handler.ValidateOpen(base, agentproxy.IngressKindRelayTunnel), "RouteID zero is valid for a hard route")
 
 	invalid := validTunnelAttemptMeta()
 	invalid.Attempt.RealModel = ""
@@ -163,54 +252,99 @@ func TestTargetHandlerValidatesBoundAttemptEnvelopeAndProviderPath(t *testing.T)
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			require.ErrorIs(t, handler.ValidateOpen(test.open), test.err)
+			require.ErrorIs(t, handler.ValidateOpen(test.open, agentproxy.IngressKindRelayTunnel), test.err)
 		})
 	}
 }
 
 func TestTargetHandlerAllowsOnlyBoundedConnectivityProbeWhenBusinessRelayIsDisabled(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return false }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return false }, Router: http.NotFoundHandler()})
 	tests := []struct {
 		name    string
 		open    wire.Open
 		allowed bool
+		wantErr error
 	}{
 		{
 			name: "bounded connectivity probe",
 			open: wire.Open{
-				Purpose: wire.StreamPurposeConnectivityProbe, Method: http.MethodGet, Path: "/ping",
+				ProbePolicy: wire.ProbeBypassBusinessPolicy, Method: http.MethodGet, Path: "/ping",
 				TargetAgentID: "target-a", RemainingNanos: 1, ResponseWindow: 1,
 			},
 			allowed: true,
 		},
 		{
-			name: "probe purpose on another path",
+			name: "respect policy keeps inbound gate",
 			open: wire.Open{
-				Purpose: wire.StreamPurposeConnectivityProbe, Method: http.MethodGet, Path: "/v1/models",
+				ProbePolicy: wire.ProbeRespectBusinessPolicy, Method: http.MethodGet, Path: "/ping",
 				TargetAgentID: "target-a", RemainingNanos: 1, ResponseWindow: 1,
 			},
+			wantErr: newPathPolicyError(consts.RouteErrorTargetRelayInboundDisabled),
+		},
+		{
+			name: "probe purpose on another path",
+			open: wire.Open{
+				ProbePolicy: wire.ProbeBypassBusinessPolicy, Method: http.MethodGet, Path: "/v1/models",
+				TargetAgentID: "target-a", RemainingNanos: 1, ResponseWindow: 1,
+			},
+			wantErr: errTargetPath,
 		},
 		{
 			name: "unmarked ping",
 			open: wire.Open{
 				Method: http.MethodGet, Path: "/ping", TargetAgentID: "target-a", RemainingNanos: 1, ResponseWindow: 1,
 			},
+			wantErr: errTargetPath,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := handler.ValidateOpen(test.open)
+			err := handler.ValidateOpen(test.open, agentproxy.IngressKindRelayTunnel)
 			if test.allowed {
 				require.NoError(t, err)
 				return
 			}
-			require.ErrorIs(t, err, errTargetUnavailable)
+			if test.name == "respect policy keeps inbound gate" {
+				requirePolicyOpenFailure(t, err, consts.RouteErrorTargetRelayInboundDisabled)
+				return
+			}
+			require.ErrorIs(t, err, test.wantErr)
 		})
 	}
 }
 
+func TestTargetHandlerRejectsBypassAttemptAndMalformedProbe(t *testing.T) {
+	handler := NewTargetHandler(TargetHandlerOptions{
+		TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler(),
+	})
+	attempt := validTunnelAttemptMeta()
+	tests := []wire.Open{
+		{
+			ProbePolicy: wire.ProbeBypassBusinessPolicy, Method: http.MethodPost, Path: attemptwire.EndpointPath,
+			TargetAgentID: "target-a", Hop: 1, ResponseWindow: 1, Attempt: &attempt,
+		},
+		{
+			ProbePolicy: wire.ProbeBypassBusinessPolicy, Method: http.MethodPost, Path: "/ping",
+			TargetAgentID: "target-a", RemainingNanos: 1, ResponseWindow: 1,
+		},
+		{
+			ProbePolicy: wire.ProbeBypassBusinessPolicy, Method: http.MethodGet, Path: "/ping",
+			Header: map[string][]string{"X-Probe": {"invalid"}}, TargetAgentID: "target-a",
+			RemainingNanos: 1, ResponseWindow: 1,
+		},
+	}
+	for _, open := range tests {
+		err := handler.ValidateOpen(open, agentproxy.IngressKindRelayTunnel)
+		require.Error(t, err)
+		var reset interface{ ResetCode() string }
+		if errors.As(err, &reset) {
+			require.Equal(t, consts.RouteErrorRelayProtocol, reset.ResetCode())
+		}
+	}
+}
+
 func TestTargetHandlerValidatesEveryOpenHeader(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler()})
 	base := validBoundTunnelOpen("/v1/responses")
 	valid := []map[string][]string{
 		nil,
@@ -221,7 +355,7 @@ func TestTargetHandlerValidatesEveryOpenHeader(t *testing.T) {
 	for _, header := range valid {
 		open := base
 		open.Header = header
-		require.NoError(t, handler.ValidateOpen(open), "valid header %#v", header)
+		require.NoError(t, handler.ValidateOpen(open, agentproxy.IngressKindRelayTunnel), "valid header %#v", header)
 	}
 
 	invalid := []map[string][]string{
@@ -234,12 +368,12 @@ func TestTargetHandlerValidatesEveryOpenHeader(t *testing.T) {
 	for _, header := range invalid {
 		open := base
 		open.Header = header
-		require.ErrorIs(t, handler.ValidateOpen(open), errTargetMetadata, "invalid header %#v", header)
+		require.ErrorIs(t, handler.ValidateOpen(open, agentproxy.IngressKindRelayTunnel), errTargetMetadata, "invalid header %#v", header)
 	}
 }
 
 func TestTargetHandlerRejectsUpgradeHeadersRegardlessOfCase(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler()})
 	base := wire.Open{
 		Method: http.MethodPost, Path: "/v1/responses", TargetAgentID: "target-a", ResponseWindow: 1,
 	}
@@ -256,13 +390,13 @@ func TestTargetHandlerRejectsUpgradeHeadersRegardlessOfCase(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			open := base
 			open.Header = test.header
-			require.ErrorIs(t, handler.ValidateOpen(open), errTargetMetadata)
+			require.ErrorIs(t, handler.ValidateOpen(open, agentproxy.IngressKindRelayTunnel), errTargetMetadata)
 		})
 	}
 }
 
 func TestTargetHandlerBuildRequestCanonicalizesAndMergesBusinessHeaders(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler()})
 	open := validBoundTunnelOpen("/v1/responses")
 	open.Header = map[string][]string{
 		"authorization": {"Bearer business-token"},
@@ -273,7 +407,7 @@ func TestTargetHandlerBuildRequestCanonicalizesAndMergesBusinessHeaders(t *testi
 		"x-business":    {"lowercase"},
 	}
 
-	req, err := handler.BuildRequest(t.Context(), open, wire.StreamID{7}, io.NopCloser(strings.NewReader("")))
+	req, err := handler.BuildRequest(t.Context(), open, wire.StreamID{7}, io.NopCloser(strings.NewReader("")), agentproxy.IngressKindRelayTunnel)
 	require.NoError(t, err)
 	require.Equal(t, "Bearer business-token", req.Header.Get("Authorization"))
 	require.Equal(t, "application/json", req.Header.Get("Content-Type"))
@@ -285,7 +419,7 @@ func TestTargetHandlerBuildRequestCanonicalizesAndMergesBusinessHeaders(t *testi
 }
 
 func TestTargetHandlerBuildRequestStripsCaseInsensitiveTransportAndAgentHeaders(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler()})
 	open := validBoundTunnelOpen("/v1/responses")
 	open.Header = map[string][]string{
 		"connection":                            {"x-extension, X-Other-Extension"},
@@ -307,7 +441,7 @@ func TestTargetHandlerBuildRequestStripsCaseInsensitiveTransportAndAgentHeaders(
 		strings.ToLower(consts.HeaderXAgentRouteID):       {"999"},
 	}
 
-	req, err := handler.BuildRequest(t.Context(), open, wire.StreamID{8}, io.NopCloser(strings.NewReader("")))
+	req, err := handler.BuildRequest(t.Context(), open, wire.StreamID{8}, io.NopCloser(strings.NewReader("")), agentproxy.IngressKindRelayTunnel)
 	require.NoError(t, err)
 	for _, key := range []string{
 		"Connection", "X-Extension", "X-Other-Extension", "Proxy-Connection", "Keep-Alive",
@@ -323,9 +457,10 @@ func TestTargetHandlerBuildRequestStripsCaseInsensitiveTransportAndAgentHeaders(
 
 func TestTargetHandlerBuildRequestStripsTransportAndAgentHeaders(t *testing.T) {
 	var captured *http.Request
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		captured = r
-	}))
+	})})
+
 	open := validBoundTunnelOpen("/v1/responses")
 	open.RouteID = 9
 	open.SourceAgentID = "source-a"
@@ -339,7 +474,7 @@ func TestTargetHandlerBuildRequestStripsTransportAndAgentHeaders(t *testing.T) {
 	}
 	body := io.NopCloser(strings.NewReader("abc"))
 	ctx := context.WithValue(t.Context(), struct{}{}, "parent")
-	req, err := handler.BuildRequest(ctx, open, wire.StreamID{7}, body)
+	req, err := handler.BuildRequest(ctx, open, wire.StreamID{7}, body, agentproxy.IngressKindRelayTunnel)
 	require.NoError(t, err)
 	handler.ServeHTTP(http.ResponseWriter(&discardResponseWriter{header: make(http.Header)}), req)
 
@@ -357,33 +492,31 @@ func TestTargetHandlerBuildRequestStripsTransportAndAgentHeaders(t *testing.T) {
 	meta, ok := agentproxy.IngressMetaFromContext(req.Context())
 	require.True(t, ok)
 	require.Equal(t, agentproxy.IngressMeta{
-		Kind: "tunnel", SourceAgentID: "source-a", RouteID: 9, StreamID: wire.StreamID{7}, Hop: 1,
+		Kind: agentproxy.IngressKindRelayTunnel, SourceAgentID: "source-a", RouteID: 9, StreamID: wire.StreamID{7}, Hop: 1,
 		Attempt: open.Attempt,
 	}, meta)
 }
 
 func TestTargetHandlerBuildRequestInstallsTrustedBoundAttemptContext(t *testing.T) {
-	handler := NewTargetHandler("target-a", func() bool { return true }, http.NotFoundHandler())
+	handler := NewTargetHandler(TargetHandlerOptions{TargetAgentID: "target-a", RelayInboundEnabled: func() bool { return true }, Router: http.NotFoundHandler()})
 	meta := validTunnelAttemptMeta()
 	wantMeta := meta
 	open := wire.Open{
 		Method: http.MethodPost, Path: attemptwire.EndpointPath, TargetAgentID: "target-a", RouteID: 0,
 		SourceAgentID: "source-a", Hop: 1, BodyLength: 0, ResponseWindow: 1, Attempt: &meta,
 		Header: map[string][]string{
-			attemptwire.HeaderMeta: {`{"attempt":"forged"}`},
-			consts.HeaderXAgentID:  {"forged-source"},
+			consts.HeaderXAgentID: {"forged-source"},
 		},
 	}
 	streamID := wire.StreamID{9}
-	req, err := handler.BuildRequest(t.Context(), open, streamID, http.NoBody)
+	req, err := handler.BuildRequest(t.Context(), open, streamID, http.NoBody, agentproxy.IngressKindRelayTunnel)
 	require.NoError(t, err)
 	require.Equal(t, http.MethodPost, req.Method)
 	require.Equal(t, attemptwire.EndpointPath, req.URL.Path)
-	require.Empty(t, req.Header.Get(attemptwire.HeaderMeta))
 
 	ingress, ok := agentproxy.IngressMetaFromContext(req.Context())
 	require.True(t, ok)
-	require.Equal(t, agentproxy.IngressKindTunnel, ingress.Kind)
+	require.Equal(t, agentproxy.IngressKindRelayTunnel, ingress.Kind)
 	require.Equal(t, "source-a", ingress.SourceAgentID)
 	require.Zero(t, ingress.RouteID)
 	require.Equal(t, streamID, ingress.StreamID)
@@ -428,7 +561,7 @@ func TestTargetFinalizeReleasesAcceptedInboundBudget(t *testing.T) {
 	limits := testLimits(1)
 	writer := newFairWriter(ctx, limits.MaxQueuedSessionBytes, time.Second, func(wire.Frame) error { return nil })
 	session := &Session{
-		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{}), ctx: ctx, writer: writer,
+		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), ctx: ctx, writer: writer,
 		streams: make(map[wire.StreamID]*Stream), targets: make(map[wire.StreamID]*targetStream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now),
 	}
@@ -449,7 +582,7 @@ func TestTargetDeliverySaturationDoesNotDeadlockFinalize(t *testing.T) {
 	limits := testLimits(2)
 	writer := newFairWriter(ctx, limits.MaxQueuedSessionBytes, time.Second, func(wire.Frame) error { return nil })
 	session := &Session{
-		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{}), ctx: ctx, writer: writer,
+		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), ctx: ctx, writer: writer,
 		streams: make(map[wire.StreamID]*Stream), targets: make(map[wire.StreamID]*targetStream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now),
 	}
@@ -498,7 +631,7 @@ func TestTargetCancelUnblocksSaturatedDeliveryBeforeFinalize(t *testing.T) {
 	limits.MaxQueuedSessionBytes = 512
 	writer := newFairWriter(ctx, limits.MaxQueuedSessionBytes, 15*time.Second, func(wire.Frame) error { return nil })
 	session := &Session{
-		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{}), ctx: ctx, writer: writer,
+		generation: 1, limits: limits, opts: defaultSessionOptions(SessionOptions{Direction: SessionDirectionRelay}), ctx: ctx, writer: writer,
 		streams: make(map[wire.StreamID]*Stream), targets: make(map[wire.StreamID]*targetStream),
 		tombstones: newTombstoneStore(8, time.Second, time.Now),
 	}

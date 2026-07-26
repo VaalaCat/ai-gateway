@@ -21,6 +21,12 @@ function connection(seq: number): ConnectionSnapshot {
     observed_at: seq,
     agent_id: "agent-a",
     admin_status: 1,
+    transport_policy: {
+      direct_inbound: { configured: true, effective: true },
+      direct_outbound: { configured: true, effective: true },
+      relay_inbound: { configured: true, effective: true },
+      relay_outbound: { configured: true, effective: true },
+    },
     control: {
       state: "connected",
       health: "healthy",
@@ -56,6 +62,7 @@ function connection(seq: number): ConnectionSnapshot {
     direct: {
       summary: {
         state: "unknown",
+        disabled: 0,
         reachable: 0,
         degraded: 0,
         unreachable: 0,
@@ -67,6 +74,7 @@ function connection(seq: number): ConnectionSnapshot {
     target_summaries: {
       direct: {
         state: "unknown",
+        disabled: 0,
         reachable: 0,
         degraded: 0,
         unreachable: 0,
@@ -75,6 +83,7 @@ function connection(seq: number): ConnectionSnapshot {
       },
       relay: {
         state: "unknown",
+        disabled: 0,
         reachable: 0,
         unreachable: 0,
         unavailable: 0,
@@ -99,7 +108,10 @@ function detail(value: ConnectionSnapshot): AgentDetail {
     proxy_url: "",
     relay_mode: "inherit",
     relay_uri: "",
-    peer_route_mode: "direct_first",
+    direct_inbound_enabled: true,
+    direct_outbound_enabled: true,
+    relay_inbound_enabled: true,
+    relay_outbound_enabled: true,
     last_seen: 1,
     created_at: 1,
     runtime: null,
@@ -124,6 +136,7 @@ function summary(
     snapshot_epoch: value.snapshot_epoch,
     snapshot_seq: value.snapshot_seq,
     observed_at: value.observed_at,
+    transport_policy: value.transport_policy,
     control: value.control,
     relay: {
       support: value.relay.support,
@@ -267,6 +280,41 @@ describe("useAgentConnections", () => {
 
     await waitFor(() => expect(result.current.data?.snapshot_seq).toBe(10));
     expect(result.current.routeTargetsPage?.snapshot_seq).toBe(3);
+  });
+
+  it("retains a mismatched Route Targets page until a matching detail is accepted", async () => {
+    const first = connection(10);
+    first.direct.generation = 3;
+    const firstDetail = detail(first);
+    firstDetail.route_targets.snapshot_seq = 3;
+    const later = connection(11);
+    later.observed_at = 11;
+    later.direct.generation = 4;
+    const laterDetail = detail(later);
+    laterDetail.route_targets.snapshot_seq = 4;
+    vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(() => jsonResponse(firstDetail))
+      .mockImplementationOnce(() => jsonResponse(laterDetail));
+    const queryClient = createTestQueryClient();
+    const { result, rerender } = renderHook(
+      ({ listSummary }: { listSummary?: ConnectionSummary }) =>
+        useAgentConnections(7, listSummary),
+      {
+        initialProps: { listSummary: undefined as ConnectionSummary | undefined },
+        wrapper: queryClientWrapper(queryClient),
+      },
+    );
+    await waitFor(() => expect(result.current.routeTargetsPage?.snapshot_seq).toBe(3));
+    expect(result.current.routeTargetsCurrent).toBe(true);
+
+    rerender({ listSummary: summary(later) });
+    await waitFor(() => expect(result.current.data?.snapshot_seq).toBe(11));
+    expect(result.current.routeTargetsPage?.snapshot_seq).toBe(3);
+    expect(result.current.routeTargetsCurrent).toBe(false);
+
+    await act(async () => void (await result.current.refetch()));
+    await waitFor(() => expect(result.current.routeTargetsPage?.snapshot_seq).toBe(4));
+    expect(result.current.routeTargetsCurrent).toBe(true);
   });
 
   it("does not let an in-flight older detail overwrite a newer summary", async () => {
@@ -523,10 +571,16 @@ describe("useAgentConnections", () => {
   it("keeps stale when a successful response is older than the retained snapshot", async () => {
     const first = connection(4);
     const older = connection(3);
+    const firstDetail = detail(first);
+    firstDetail.route_targets.snapshot_seq = 40;
+    firstDetail.route_targets.next_cursor = "latest-cursor";
+    const olderDetail = detail(older);
+    olderDetail.route_targets.snapshot_seq = 30;
+    olderDetail.route_targets.next_cursor = "incoming-older-cursor";
     vi.spyOn(globalThis, "fetch")
-      .mockImplementationOnce(() => jsonResponse(detail(first)))
+      .mockImplementationOnce(() => jsonResponse(firstDetail))
       .mockRejectedValueOnce(new Error("network unavailable"))
-      .mockImplementationOnce(() => jsonResponse(detail(older)));
+      .mockImplementationOnce(() => jsonResponse(olderDetail));
     const queryClient = createTestQueryClient();
     const { result } = renderHook(() => useAgentConnections(7), {
       wrapper: queryClientWrapper(queryClient),
@@ -540,6 +594,13 @@ describe("useAgentConnections", () => {
     await waitFor(() => expect(result.current.isFetching).toBe(false));
     expect(result.current.data).toEqual(first);
     expect(result.current.stale).toBe(true);
+    expect(result.current.routeTargetsPage).toMatchObject({
+      snapshot_epoch: "epoch-a",
+      snapshot_seq: 40,
+      observed_at: 4,
+      next_cursor: "latest-cursor",
+    });
+    expect(result.current.routeTargetsCurrent).toBe(true);
   });
 
   it("keeps stale when a retired epoch arrives after a network error", async () => {
@@ -554,11 +615,19 @@ describe("useAgentConnections", () => {
       snapshot_epoch: "epoch-a",
       observed_at: 30,
     };
+    const firstDetail = detail(first);
+    firstDetail.route_targets.next_cursor = "epoch-a-cursor";
+    const restartedDetail = detail(restarted);
+    restartedDetail.route_targets.snapshot_seq = 10;
+    restartedDetail.route_targets.next_cursor = "latest-epoch-b-cursor";
+    const retiredDetail = detail(retiredLate);
+    retiredDetail.route_targets.snapshot_seq = 99;
+    retiredDetail.route_targets.next_cursor = "retired-epoch-a-cursor";
     vi.spyOn(globalThis, "fetch")
-      .mockImplementationOnce(() => jsonResponse(detail(first)))
-      .mockImplementationOnce(() => jsonResponse(detail(restarted)))
+      .mockImplementationOnce(() => jsonResponse(firstDetail))
+      .mockImplementationOnce(() => jsonResponse(restartedDetail))
       .mockRejectedValueOnce(new Error("network unavailable"))
-      .mockImplementationOnce(() => jsonResponse(detail(retiredLate)));
+      .mockImplementationOnce(() => jsonResponse(retiredDetail));
     const queryClient = createTestQueryClient();
     const { result } = renderHook(() => useAgentConnections(7), {
       wrapper: queryClientWrapper(queryClient),
@@ -573,6 +642,13 @@ describe("useAgentConnections", () => {
 
     expect(result.current.data).toEqual(restarted);
     expect(result.current.stale).toBe(true);
+    expect(result.current.routeTargetsPage).toMatchObject({
+      snapshot_epoch: "epoch-b",
+      snapshot_seq: 10,
+      observed_at: 20,
+      next_cursor: "latest-epoch-b-cursor",
+    });
+    expect(result.current.routeTargetsCurrent).toBe(true);
   });
 
   it("does not mark retained data stale when a request is aborted", async () => {

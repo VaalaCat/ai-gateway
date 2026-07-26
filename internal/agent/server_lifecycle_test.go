@@ -2,24 +2,36 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	agentauthcache "github.com/VaalaCat/ai-gateway/internal/agent/agentauth"
 	agentcache "github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/reporter"
+	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/config"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/models"
+	pkgagentauth "github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -28,7 +40,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/sourcegraph/conc"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 	"go.uber.org/zap"
 )
@@ -40,6 +54,104 @@ func (lifecycleDirectBody) Open() (io.ReadCloser, error) { return http.NoBody, n
 func (lifecycleDirectBody) Bytes(int64) ([]byte, error)  { return nil, nil }
 func (lifecycleDirectBody) Close() error                 { return nil }
 
+type lifecycleDirectOpener struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+type lifecycleIgnoringDirectDialer struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (d *lifecycleIgnoringDirectDialer) DialDirectSession(context.Context, agenttunnel.DirectSessionDialRequest) (*agenttunnel.Session, error) {
+	d.once.Do(func() { close(d.started) })
+	<-d.release
+	return nil, errors.New("released blocked direct dial")
+}
+
+type lifecycleForwardCredentials struct{}
+
+func (lifecycleForwardCredentials) CachedForwardCredential() (agentauthcache.ForwardCredential, error) {
+	return agentauthcache.ForwardCredential{Ticket: pkgagentauth.ForwardTicket("ticket-a"), ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (o *lifecycleDirectOpener) OpenAttemptStream(
+	context.Context,
+	agentproxy.DirectSessionTarget,
+	app.AttemptStreamRequest,
+) (app.AttemptStream, error) {
+	return &lifecycleDirectStream{opener: o}, nil
+}
+
+func (o *lifecycleDirectOpener) BuildDirectAttemptTransport(
+	context.Context, agentproxy.DirectSessionTarget,
+) (agentproxy.DirectAttemptTransport, error) {
+	return &lifecycleDirectTransport{opener: o}, nil
+}
+
+type lifecycleDirectTransport struct{ opener *lifecycleDirectOpener }
+
+func (*lifecycleDirectTransport) TransportIdentity() agentproxy.DirectTransportIdentity {
+	return agentproxy.DirectTransportIdentity{1}
+}
+
+func (t *lifecycleDirectTransport) AcquireAttemptStream(
+	context.Context,
+) (agentproxy.DirectAttemptStreamReservation, error) {
+	return &lifecycleDirectReservation{transport: t}, nil
+}
+
+type lifecycleDirectReservation struct {
+	transport *lifecycleDirectTransport
+}
+
+func (r *lifecycleDirectReservation) TransportIdentity() agentproxy.DirectTransportIdentity {
+	return r.transport.TransportIdentity()
+}
+
+func (*lifecycleDirectReservation) AddressFingerprint() string { return "fp" }
+
+func (r *lifecycleDirectReservation) OpenAttemptStream(
+	ctx context.Context, req app.AttemptStreamRequest,
+) (app.AttemptStream, error) {
+	return r.transport.opener.OpenAttemptStream(ctx, agentproxy.DirectSessionTarget{}, req)
+}
+
+func (*lifecycleDirectReservation) Release() {}
+
+type lifecycleDirectStream struct {
+	opener *lifecycleDirectOpener
+	commit wire.CommitState
+}
+
+func (s *lifecycleDirectStream) Commit(context.Context) error {
+	s.commit = wire.Committed
+	return nil
+}
+
+func (*lifecycleDirectStream) Upload(context.Context, io.Reader) error { return nil }
+
+func (s *lifecycleDirectStream) CopyAttemptResponse(
+	ctx context.Context,
+	dst http.ResponseWriter,
+) (attemptwire.AttemptProxyResult, error) {
+	dst.Header().Set("Content-Type", "text/event-stream")
+	dst.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(dst, "data: ready\n\n")
+	if flusher, ok := dst.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	s.opener.once.Do(func() { close(s.opener.started) })
+	<-ctx.Done()
+	return attemptwire.AttemptProxyResult{}, context.Cause(ctx)
+}
+
+func (s *lifecycleDirectStream) CommitState() wire.CommitState { return s.commit }
+func (*lifecycleDirectStream) Cancel(error)                    {}
+func (*lifecycleDirectStream) Close() error                    { return nil }
+
 type blockingSubscribeBus struct {
 	app.EventBus
 	entered chan struct{}
@@ -48,22 +160,198 @@ type blockingSubscribeBus struct {
 	calls   atomic.Int32
 }
 
+type lifecycleUsageUploadResult struct {
+	report protocol.UsageReport
+	err    error
+}
+
+func newLifecycleUsageUploadBarrier(results chan<- lifecycleUsageUploadResult, release <-chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/agents/usage" {
+			http.NotFound(w, r)
+			return
+		}
+
+		body := io.Reader(r.Body)
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			zr, err := gzip.NewReader(r.Body)
+			if err != nil {
+				results <- lifecycleUsageUploadResult{err: err}
+				http.Error(w, "invalid gzip usage report", http.StatusBadRequest)
+				return
+			}
+			defer zr.Close()
+			body = zr
+		}
+		var report protocol.UsageReport
+		if err := json.NewDecoder(body).Decode(&report); err != nil {
+			results <- lifecycleUsageUploadResult{err: err}
+			http.Error(w, "invalid usage report", http.StatusBadRequest)
+			return
+		}
+		results <- lifecycleUsageUploadResult{report: report}
+		select {
+		case <-release:
+			w.WriteHeader(http.StatusNoContent)
+		case <-r.Context().Done():
+		}
+	})
+}
+
+func TestLifecycleUsageUploadBarrierRoutesAndDecodesReports(t *testing.T) {
+	t.Run("gzip usage report", func(t *testing.T) {
+		plain, err := json.Marshal(protocol.UsageReport{
+			AgentID: "embedded",
+			Logs:    []protocol.UsageLogEntry{{RequestID: "first-request"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var encoded bytes.Buffer
+		zw := gzip.NewWriter(&encoded)
+		if _, err := zw.Write(plain); err != nil {
+			t.Fatal(err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		results := make(chan lifecycleUsageUploadResult, 1)
+		release := make(chan struct{})
+		close(release)
+		req := httptest.NewRequest(http.MethodPost, "/api/agents/usage", &encoded)
+		req.Header.Set("Content-Encoding", "gzip")
+		response := httptest.NewRecorder()
+
+		newLifecycleUsageUploadBarrier(results, release).ServeHTTP(response, req)
+
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusNoContent)
+		}
+		got := <-results
+		if got.err != nil || len(got.report.Logs) != 1 || got.report.Logs[0].RequestID != "first-request" {
+			t.Fatalf("usage result = %+v, want first-request", got)
+		}
+	})
+
+	t.Run("malformed usage report", func(t *testing.T) {
+		results := make(chan lifecycleUsageUploadResult, 1)
+		response := httptest.NewRecorder()
+		newLifecycleUsageUploadBarrier(results, make(chan struct{})).ServeHTTP(
+			response,
+			httptest.NewRequest(http.MethodPost, "/api/agents/usage", strings.NewReader("{")),
+		)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+		}
+		if got := <-results; got.err == nil {
+			t.Fatal("malformed usage report returned nil error")
+		}
+	})
+
+	for _, request := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "control websocket", method: http.MethodGet, path: "/ws/agent"},
+		{name: "wrong usage method", method: http.MethodGet, path: "/api/agents/usage"},
+		{name: "unrelated post", method: http.MethodPost, path: "/other"},
+	} {
+		t.Run(request.name, func(t *testing.T) {
+			results := make(chan lifecycleUsageUploadResult, 1)
+			response := httptest.NewRecorder()
+			newLifecycleUsageUploadBarrier(results, make(chan struct{})).ServeHTTP(
+				response,
+				httptest.NewRequest(request.method, request.path, nil),
+			)
+			if response.Code < 400 {
+				t.Fatalf("status = %d, want non-success", response.Code)
+			}
+			select {
+			case got := <-results:
+				t.Fatalf("non-usage request produced upload result: %+v", got)
+			default:
+			}
+		})
+	}
+}
+
+func TestShutdownOrdersDirectOwnersBeforeRelayAndControl(t *testing.T) {
+	pool := agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		Limits: func() wire.Limits { return wire.Limits{} }, MaxSessions: func() int { return 1 },
+		IdleTimeout: func() time.Duration { return time.Hour }, DrainTimeout: func() time.Duration { return time.Second },
+	})
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: pool})
+	var mu sync.Mutex
+	var phases []string
+	forwarderObservedDirectDone := false
+	relayObservedForwarderDone := false
+	srv := &Server{DirectSessionPool: pool, directForwarder: forwarder}
+	srv.recordShutdownPhase = func(phase string) {
+		mu.Lock()
+		phases = append(phases, phase)
+		if phase == "forwarder_close" {
+			select {
+			case <-pool.Done():
+				forwarderObservedDirectDone = true
+			default:
+			}
+		}
+		if phase == "relay_control_close" {
+			select {
+			case <-forwarder.Done():
+				relayObservedForwarderDone = true
+			default:
+			}
+		}
+		mu.Unlock()
+	}
+	require.NoError(t, srv.Shutdown(t.Context()))
+	require.Equal(t, []string{
+		"direct_drain", "root_cancel", "direct_close", "forwarder_close", "relay_control_close",
+	}, phases)
+	require.True(t, forwarderObservedDirectDone, "direct owners must finish before forwarder close")
+	require.True(t, relayObservedForwarderDone, "forwarder must finish before relay/control close")
+	requireServerLifecycleDone(t, pool.Done())
+}
+
+func TestShutdownDeadlineDoesNotWaitForBlockedDirectPoolDialer(t *testing.T) {
+	dialer := &lifecycleIgnoringDirectDialer{started: make(chan struct{}), release: make(chan struct{})}
+	pool := agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		SourceAgentID: "source-a", Dialer: dialer, Credentials: lifecycleForwardCredentials{},
+		Limits: func() wire.Limits { return wire.Limits{} }, MaxSessions: func() int { return 1 },
+		IdleTimeout: func() time.Duration { return time.Hour }, DrainTimeout: func() time.Duration { return time.Second },
+	})
+	srv := &Server{DirectSessionPool: pool}
+	openDone := make(chan error, 1)
+	go func() {
+		_, err := pool.OpenProbeStream(context.Background(), agentproxy.DirectSessionTarget{
+			TargetAgentID: "target-a", AddressFingerprint: "fp-a",
+			WebSocketURL: &url.URL{Scheme: "https", Host: "target.invalid"},
+		}, agentproxy.ProbeStreamRequest{TargetAgentID: "target-a", Remaining: time.Minute, Policy: wire.ProbeBypassBusinessPolicy})
+		openDone <- err
+	}()
+	requireServerLifecycleDone(t, dialer.started)
+	defer func() {
+		close(dialer.release)
+		requireServerLifecycleDone(t, pool.Done())
+		<-openDone
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, srv.Shutdown(ctx), context.DeadlineExceeded)
+	requireServerLifecycleDone(t, srv.Done())
+	select {
+	case <-pool.Done():
+		t.Fatal("pool unexpectedly stopped while external dialer remains blocked")
+	default:
+	}
+}
+
 func TestShutdownCancelsInfiniteDirectSSEBeforeHTTPDrain(t *testing.T) {
 	upstreamStarted := make(chan struct{})
-	var startOnce sync.Once
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "data: ready\n\n")
-		w.(http.Flusher).Flush()
-		startOnce.Do(func() { close(upstreamStarted) })
-		<-r.Context().Done()
-	}))
-	defer upstream.Close()
-	target, err := url.Parse(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	opener := &lifecycleDirectOpener{started: upstreamStarted}
 	attempt := attemptwire.AttemptProxyMeta{
 		Attempt: attemptwire.BoundAttempt{
 			Channel:   attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7},
@@ -71,11 +359,14 @@ func TestShutdownCancelsInfiniteDirectSSEBeforeHTTPDrain(t *testing.T) {
 		},
 		RequestPath: "/v1/responses",
 	}
-	direct := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
+	direct := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: opener})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = direct.Forward(r.Context(), agentproxy.DirectRequest{
-			TargetAgentID: "target", AddressFingerprint: "fp", TargetURL: target,
-			Request: r, Body: lifecycleDirectBody{}, ForwardTicket: "ticket", Attempt: &attempt,
+			Target: agentproxy.DirectSessionTarget{
+				TargetAgentID: "target", AddressFingerprint: "fp",
+				WebSocketURL: &url.URL{Scheme: "http", Host: "target.invalid"},
+			},
+			Request: r, Body: lifecycleDirectBody{}, Attempt: attempt,
 		}, w)
 	})
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -115,6 +406,149 @@ func TestShutdownCancelsInfiniteDirectSSEBeforeHTTPDrain(t *testing.T) {
 	case <-direct.Done():
 	default:
 		t.Fatal("DirectForwarder.Done remained open when Server.Done closed")
+	}
+}
+
+func TestShutdownDeadlineDoesNotWaitForeverForDirectTunnelHandler(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	claims := pkgagentauth.ForwardClaims{
+		SourceAgentID: "source-a",
+		Capability:    protocol.AgentCapabilityForwardV1,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Audience: jwt.ClaimStrings{"agent-forward"}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+			IssuedAt: jwt.NewNumericDate(now),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	token.Header["kid"] = "shutdown-key"
+	rawTicket, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var handlerOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHandler) }) }
+	defer release()
+	targetHandler := agenttunnel.NewTargetHandler(agenttunnel.TargetHandlerOptions{
+		TargetAgentID:       "target-a",
+		RelayInboundEnabled: func() bool { return true },
+		Router: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			handlerOnce.Do(func() { close(handlerStarted) })
+			<-releaseHandler
+		}),
+	})
+	limits := wire.Limits{
+		MaxMetadataBytes: 64 * 1024, MaxDataBytes: 64 * 1024, InitialStreamWindow: 64 * 1024,
+		MaxQueuedSessionBytes: 1024 * 1024, MaxConcurrentStreams: 2,
+	}
+	ingress := agenttunnel.NewDirectTunnelIngress(agenttunnel.DirectTunnelIngressOptions{
+		TargetAgentID: "target-a",
+		FindAgentByID: func(agentID string) *models.Agent {
+			if agentID == "source-a" || agentID == "target-a" {
+				return &models.Agent{AgentID: agentID, Status: consts.StatusEnabled}
+			}
+			return nil
+		},
+		LoadAuth: func() agentproxy.ForwardAuthSnapshot {
+			return agentproxy.ForwardAuthSnapshot{
+				Capabilities: []string{protocol.AgentCapabilityForwardV1},
+				SigningKeys: []pkgagentauth.PublicKey{{
+					KeyID: "shutdown-key", Algorithm: protocol.AgentAuthAlgorithmEdDSA, Key: append([]byte(nil), publicKey...),
+				}},
+			}
+		},
+		Limits: limits, TargetHandler: targetHandler, HandshakeTimeout: time.Second, DrainTimeout: time.Second,
+	})
+	router := gin.New()
+	router.GET(agenttunnel.DirectTunnelPath, ingress.Handle)
+	tunnelServer := httptest.NewServer(router)
+	t.Cleanup(tunnelServer.Close)
+
+	session, err := agenttunnel.NewDirectDialer(agenttunnel.DirectDialerOptions{HandshakeTimeout: time.Second}).DialDirectSession(
+		t.Context(), agenttunnel.DirectSessionDialRequest{
+			SourceAgentID: "source-a", TargetAgentID: "target-a", TargetURL: tunnelServer.URL,
+			Credential: agentauthcache.ForwardCredential{
+				Ticket: pkgagentauth.ForwardTicket(rawTicket), ExpiresAt: now.Add(time.Hour),
+			},
+			Limits: limits,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	go func() { runDone <- session.Run(runCtx) }()
+	attempt := attemptwire.AttemptProxyMeta{
+		Attempt: attemptwire.BoundAttempt{
+			Channel:   attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7},
+			RealModel: "gpt-4o", Mode: attemptwire.ModeNative,
+		},
+		RequestPath: "/v1/responses",
+	}
+	stream, err := session.OpenAttemptStream(t.Context(), agentproxy.AttemptStreamRequest{
+		TargetAgentID: "target-a", Method: http.MethodPost, Path: attemptwire.EndpointPath,
+		Hop: 1, BodyLength: 0, Attempt: attempt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Upload(t.Context(), http.NoBody); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("direct target handler did not start")
+	}
+
+	srv := &Server{DirectTunnelIngress: ingress}
+	root := srv.lifecycleContext()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	cancelShutdown()
+	if !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown = %v, want deadline exceeded", shutdownErr)
+	}
+	select {
+	case <-root.Done():
+	case <-time.After(250 * time.Millisecond):
+		release()
+		<-runDone
+		t.Fatal("shutdown finalizer waited on DirectTunnelIngress.Done after its deadline")
+	}
+	select {
+	case <-srv.Done():
+	case <-time.After(time.Second):
+		release()
+		<-runDone
+		t.Fatal("Server.Done did not close while the direct handler ignored cancellation")
+	}
+
+	release()
+	select {
+	case <-ingress.Done():
+	case <-time.After(time.Second):
+		t.Fatal("DirectTunnelIngress.Done did not close after handler release")
+	}
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("outgoing direct session did not stop")
+	}
+	if got := ingress.Snapshot(); got != (agenttunnel.IngressSnapshot{}) {
+		t.Fatalf("direct ingress resources after handler release = %+v", got)
 	}
 }
 
@@ -574,27 +1008,125 @@ func TestLifecycleResourceCountsTrackRelayInflight(t *testing.T) {
 	}
 }
 
+func TestLifecycleResourceCountsIncludeDirectPool(t *testing.T) {
+	defer goleak.VerifyNone(t, serverLifecycleGoleakOptions()...)
+	pool := agenttunnel.NewDirectSessionPool(agenttunnel.DirectSessionPoolOptions{
+		SourceAgentID: "agent-a",
+		MaxSessions:   func() int { return 4 },
+		IdleTimeout:   func() time.Duration { return time.Minute },
+		DrainTimeout:  func() time.Duration { return time.Second },
+		Limits:        func() wire.Limits { return wire.Limits{} },
+	})
+	srv := &Server{DirectSessionPool: pool}
+	if got := srv.ResourceCountsForTest(); got != (app.ResourceCounts{Timers: 1}) {
+		t.Fatalf("running direct pool resources = %+v, want one sweep timer", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := pool.Close(ctx); err != nil {
+		t.Fatalf("close direct pool: %v", err)
+	}
+	select {
+	case <-pool.Done():
+	case <-ctx.Done():
+		t.Fatal("direct pool did not close")
+	}
+	if got := srv.ResourceCountsForTest(); got != (app.ResourceCounts{}) {
+		t.Fatalf("closed direct pool contributed resources: %+v", got)
+	}
+}
+
+func TestConstructorBodyStoreFailureDoesNotLeakDirectPool(t *testing.T) {
+	constructors := []struct {
+		name string
+		new  func(*config.AgentRuntimeConfig, *zap.Logger) (*Server, error)
+	}{
+		{
+			name: "standalone",
+			new: func(cfg *config.AgentRuntimeConfig, logger *zap.Logger) (*Server, error) {
+				if err := os.WriteFile(
+					cfg.Agent.CredentialsFile,
+					[]byte(`{"agent_id":"standalone-test","secret":"secret"}`),
+					0o600,
+				); err != nil {
+					return nil, err
+				}
+				return New(cfg, logger)
+			},
+		},
+		{
+			name: "embedded",
+			new: func(cfg *config.AgentRuntimeConfig, logger *zap.Logger) (*Server, error) {
+				return NewEmbedded(cfg, logger, &enrollment.Credentials{AgentID: "embedded-test", Secret: "secret"})
+			},
+		},
+	}
+
+	for _, tt := range constructors {
+		t.Run(tt.name, func(t *testing.T) {
+			options := append(serverLifecycleGoleakOptions(), goleak.IgnoreCurrent())
+			defer goleak.VerifyNone(t, options...)
+
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "request-bodies"), []byte("block directory creation"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+				Listen:          ":0",
+				MasterURL:       "http://localhost:9999",
+				CredentialsFile: filepath.Join(dir, "agent_credentials.json"),
+			}}
+
+			srv, err := tt.new(cfg, zap.NewNop())
+			if srv != nil {
+				t.Fatal("constructor returned a Server after BodyStore failure")
+			}
+			if err == nil || !strings.Contains(err.Error(), "create request body store") {
+				t.Fatalf("constructor error = %v, want request body store failure", err)
+			}
+		})
+	}
+}
+
 func serverLifecycleGoleakOptions() []goleak.Option {
 	return []goleak.Option{
 		goleak.IgnoreTopFunction("github.com/bytedance/gopkg/cache/asynccache.(*sharedTicker).tick"),
 	}
 }
 
-func TestLifecycleFallbackDisabledRejectsNewRelayStream(t *testing.T) {
+func TestLifecycleRelayInboundDisabledRejectsNewRelayStream(t *testing.T) {
 	store := agentcache.NewStore(nil, config.AgentCacheConfig{})
+	store.SetAgent(&models.Agent{
+		AgentID: "target-a", Status: consts.StatusEnabled,
+		DirectInboundEnabled: true, DirectOutboundEnabled: true, RelayOutboundEnabled: true,
+	})
+	store.SetAgent(&models.Agent{
+		AgentID: "source-a", Status: consts.StatusEnabled,
+		DirectInboundEnabled: true, DirectOutboundEnabled: true,
+		RelayInboundEnabled: true, RelayOutboundEnabled: true,
+	})
 	srv := &Server{
 		Creds:  &enrollment.Credentials{AgentID: "target-a"},
 		Store:  store,
 		Router: gin.New(),
 	}
 	handler := srv.NewTunnelTargetHandler(nil)
-	err := handler.ValidateOpen(wire.Open{
-		Method: http.MethodPost, Path: "/v1/chat/completions", TargetAgentID: "target-a",
-		ResponseWindow: 1,
-	})
-	if err == nil {
-		t.Fatal("fallback disabled admitted a Relay Stream")
+	attempt := attemptwire.AttemptProxyMeta{
+		Attempt: attemptwire.BoundAttempt{
+			Channel:   attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7},
+			RealModel: "gpt-4o", Mode: attemptwire.ModePassthrough,
+		},
+		RequestPath: "/v1/chat/completions",
 	}
+	err := handler.ValidateOpen(wire.Open{
+		Method: http.MethodPost, Path: attemptwire.EndpointPath,
+		SourceAgentID: "source-a", TargetAgentID: "target-a", Hop: 1,
+		ResponseWindow: 1, Attempt: &attempt,
+	}, agentproxy.IngressKindRelayTunnel)
+	require.Error(t, err)
+	var failure interface{ ReasonCode() string }
+	require.ErrorAs(t, err, &failure)
+	require.Equal(t, consts.RouteErrorTargetRelayInboundDisabled, failure.ReasonCode())
 }
 
 func TestLifecycleEmbeddedAgentJoinsOwnedResources(t *testing.T) {
@@ -1172,6 +1704,24 @@ func testRunDoesNotServeFirstUsageRequestBeforeStartupReady(
 	srv := newLifecycleEmbeddedServer(t)
 	srv.Cfg.Agent.Listen = "127.0.0.1:0"
 	baseBus := eventbus.NewMemoryBus()
+	usageEntries := make(chan protocol.UsageLogEntry, 2)
+	usageSub, err := events.SubscribeUsageCompleted(baseBus, func(_ context.Context, entry protocol.UsageLogEntry) error {
+		usageEntries <- entry
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("subscribe usage observer: %v", err)
+	}
+	t.Cleanup(func() { _ = usageSub.Unsubscribe() })
+
+	uploadResults := make(chan lifecycleUsageUploadResult, 1)
+	releaseUpload := make(chan struct{})
+	var releaseUploadOnce sync.Once
+	releaseUsageUpload := func() { releaseUploadOnce.Do(func() { close(releaseUpload) }) }
+	master := httptest.NewServer(newLifecycleUsageUploadBarrier(uploadResults, releaseUpload))
+	defer master.Close()
+	defer releaseUsageUpload()
+	srv.Cfg.Agent.MasterURL = master.URL
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -1233,9 +1783,37 @@ func testRunDoesNotServeFirstUsageRequestBeforeStartupReady(
 	if servedBeforeReady {
 		t.Errorf("Run served the first request before %s installed subscriptions", dependency)
 	}
+	select {
+	case entry := <-usageEntries:
+		if entry.RequestID != "first-request" {
+			t.Errorf("usage request_id = %q, want first-request", entry.RequestID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first request did not publish usage.completed")
+	}
+	select {
+	case entry := <-usageEntries:
+		t.Errorf("unexpected second usage.completed entry: request_id=%q", entry.RequestID)
+	default:
+	}
+	select {
+	case result := <-uploadResults:
+		if result.err != nil {
+			t.Fatalf("decode usage upload: %v", result.err)
+		}
+		if len(result.report.Logs) != 1 || result.report.Logs[0].RequestID != "first-request" {
+			t.Fatalf("usage upload logs = %+v, want only first-request", result.report.Logs)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first request usage did not enter uploader")
+	}
 	if got := srv.Reporter.PendingCount(); got != 1 {
 		t.Errorf("Reporter.PendingCount() = %d, want first request usage retained", got)
 	}
+	if got := srv.Reporter.QueueSnapshot(); got.StoreLen != 1 || got.RetryLen != 0 {
+		t.Errorf("first request usage queue = %+v, want one retained main-queue entry", got)
+	}
+	releaseUsageUpload()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

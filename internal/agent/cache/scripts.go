@@ -73,11 +73,11 @@ func (ss *scriptStore) count() int {
 }
 
 // MatchScripts 实现 script.ScriptProvider：命中 enabled + scope 的脚本，按 Priority 升序。
-func (ss *scriptStore) MatchScripts(channelID uint, model string) []*script.Compiled {
+func (ss *scriptStore) MatchScripts(input script.MatchInput) []*script.Compiled {
 	ss.mu.RLock()
 	entries := make([]scriptEntry, 0, len(ss.items))
 	for _, e := range ss.items {
-		if e.enabled && e.compiled != nil && script.MatchScope(e.compiled.Scope, channelID, model) {
+		if e.enabled && e.compiled != nil && script.MatchScope(e.compiled.Scope, input) {
 			entries = append(entries, e)
 		}
 	}
@@ -107,8 +107,8 @@ func (s *Store) LoadScripts(list []models.AdminScript) {
 }
 
 // MatchScripts 实现 script.ScriptProvider，转发给内部 scriptStore。
-func (s *Store) MatchScripts(channelID uint, model string) []*script.Compiled {
-	return s.scripts.MatchScripts(channelID, model)
+func (s *Store) MatchScripts(input script.MatchInput) []*script.Compiled {
+	return s.scripts.MatchScripts(input)
 }
 
 // ScriptEngine 返回共享的脚本执行引擎。

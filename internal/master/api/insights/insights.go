@@ -1,6 +1,10 @@
 package insights
 
 import (
+	"errors"
+	"net/http"
+
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -17,12 +21,12 @@ import (
 //     Phase 1: 简化为 monitoring 同策略,整页 admin-only 也行,但 spec 要求按 type 区分,
 //     我们仅在 user/token 维度做这个检查。
 //  6. provider.Meta 失败 → 透传 (Meta 内部决定 404 / 500 等)。
-//  7. 其余子查询失败被静默吞掉 (插件式 entity-insight 不要因为一项失败炸掉整页)。
+//  7. 日志库不可用统一返回 503；其余子查询失败被静默吞掉。
 func (h *Handler) Get(c *app.Context, req GetRequest) (GetResponse, error) {
 	if req.Type == "" || req.ID == "" {
 		return GetResponse{}, api.BadRequestError("type and id are required", nil)
 	}
-	provider, ok := registry[req.Type]
+	provider, ok := h.insightProvider(req.Type)
 	if !ok {
 		return GetResponse{}, api.ErrorWithCode(404, "InsightTypeUnsupported",
 			"unknown insight type: "+req.Type,
@@ -46,6 +50,15 @@ func (h *Handler) Get(c *app.Context, req GetRequest) (GetResponse, error) {
 	if err := authorizeForType(req.Type, req.ID, scope); err != nil {
 		return GetResponse{}, err
 	}
+	if h.LogDatabaseReady != nil && !h.LogDatabaseReady() {
+		return GetResponse{}, api.ErrorWithCode(http.StatusServiceUnavailable, "LogDatabaseUnavailable", "log database is temporarily unavailable", nil)
+	}
+	if _, err := dao.NewContextWithContext(c.App, c.RequestContext()).LogDB(); err != nil {
+		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+			return GetResponse{}, api.ErrorWithCode(http.StatusServiceUnavailable, "LogDatabaseUnavailable", "log database is temporarily unavailable", nil)
+		}
+		return GetResponse{}, err
+	}
 
 	ctx := newProviderCtx(c.RequestContext(), c.App, scope)
 
@@ -62,12 +75,27 @@ func (h *Handler) Get(c *app.Context, req GetRequest) (GetResponse, error) {
 		}
 	}
 
-	// 子查询都是 best-effort:错误时退化为零值,不阻断主响应。
-	summary, _ := provider.Summary(ctx, req.ID, r)
-	trend, _ := provider.Trend(ctx, req.ID, r)
-	stage, _ := provider.StageLatency(ctx, req.ID, r)
-	breakdown, _ := provider.Breakdown(ctx, req.ID, r)
-	errs, _ := provider.RecentErrors(ctx, req.ID, r, 10)
+	// 普通子查询错误保持 best-effort；日志库在查询中失联则明确返回 503。
+	summary, err := provider.Summary(ctx, req.ID, r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return GetResponse{}, logDatabaseUnavailableError()
+	}
+	trend, err := provider.Trend(ctx, req.ID, r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return GetResponse{}, logDatabaseUnavailableError()
+	}
+	stage, err := provider.StageLatency(ctx, req.ID, r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return GetResponse{}, logDatabaseUnavailableError()
+	}
+	breakdown, err := provider.Breakdown(ctx, req.ID, r)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return GetResponse{}, logDatabaseUnavailableError()
+	}
+	errs, err := provider.RecentErrors(ctx, req.ID, r, 10)
+	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+		return GetResponse{}, logDatabaseUnavailableError()
+	}
 
 	return GetResponse{
 		Meta:    meta,
@@ -82,10 +110,23 @@ func (h *Handler) Get(c *app.Context, req GetRequest) (GetResponse, error) {
 	}, nil
 }
 
+func (h *Handler) insightProvider(insightType string) (InsightProvider, bool) {
+	if h.InsightProviderFinder != nil {
+		return h.InsightProviderFinder(insightType)
+	}
+	provider, ok := registry[insightType]
+	return provider, ok
+}
+
+func logDatabaseUnavailableError() error {
+	return api.ErrorWithCode(http.StatusServiceUnavailable, "LogDatabaseUnavailable", "log database is temporarily unavailable", nil)
+}
+
 // authorizeForType 处理 type 层面的访问控制 (Phase 1):
-//   user/token 维度:非 admin 时只能查自己 (id == scope.UserID 字符串)。
-//   其它维度:Phase 1 视为 admin-only;非 admin 不阻断 (provider 会限制结果),
-//   留给后续 type-specific provider 决定。
+//
+//	user/token 维度:非 admin 时只能查自己 (id == scope.UserID 字符串)。
+//	其它维度:Phase 1 视为 admin-only;非 admin 不阻断 (provider 会限制结果),
+//	留给后续 type-specific provider 决定。
 func authorizeForType(insightType, id string, scope *middleware.RequestScope) error {
 	if scope == nil {
 		return api.ForbiddenError("missing request scope")

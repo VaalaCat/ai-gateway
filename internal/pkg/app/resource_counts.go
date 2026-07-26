@@ -18,4 +18,13 @@ type ResourceCounts struct {
 	Timers           int64
 	Transports       int64
 	RelaySockets     int64
+
+	DirectOutgoingActive     int64
+	DirectOutgoingCandidates int64
+	DirectOutgoingDraining   int64
+	DirectIncomingActive     int64
+	DirectIncomingCandidates int64
+	DirectIncomingDraining   int64
+	DirectStreams            int64
+	DirectSockets            int64
 }

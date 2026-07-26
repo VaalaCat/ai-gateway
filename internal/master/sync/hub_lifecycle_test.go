@@ -33,7 +33,7 @@ func TestControlHubCloseOwnsUpgradeBeforeSessionInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	application := appcontainer.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	hub := NewHub(application, zap.NewNop(), nil, func() int64 { return 0 }, nil, HubOptions{})
 	pendingTracked := make(chan struct{})
 	releaseInstall := make(chan struct{})
@@ -127,7 +127,7 @@ func TestControlHubCloseCancelsBlockedCredentialRecheck(t *testing.T) {
 	}
 
 	application := appcontainer.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	hub := NewHub(application, zap.NewNop(), nil, func() int64 { return 0 }, nil, HubOptions{})
 	router := gin.New()
 	router.GET("/ws/agent", hub.HandleWS)
@@ -179,7 +179,7 @@ func TestControlHubCloseCancelsBlockedFullSyncDAO(t *testing.T) {
 		t.Fatal(err)
 	}
 	application := appcontainer.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	hub := NewHub(application, zap.NewNop(), nil, func() int64 { return 0 }, nil, HubOptions{})
 	hub.Heartbeat = NewHeartbeatTracker(application, zap.NewNop(), 0)
 	queryEntered := make(chan struct{}, 1)

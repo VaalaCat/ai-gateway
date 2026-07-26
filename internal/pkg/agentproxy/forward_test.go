@@ -1,18 +1,13 @@
 package agentproxy_test
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
@@ -31,6 +25,7 @@ import (
 type directReplayBody struct {
 	data       []byte
 	openErr    error
+	readErr    error
 	opens      atomic.Int64
 	closes     atomic.Int64
 	bodyCloses atomic.Int64
@@ -46,7 +41,11 @@ func (b *directReplayBody) Open() (io.ReadCloser, error) {
 	if b.openErr != nil {
 		return nil, b.openErr
 	}
-	return &countedReadCloser{Reader: bytes.NewReader(b.data), closed: &b.closes}, nil
+	reader := io.Reader(bytes.NewReader(b.data))
+	if b.readErr != nil {
+		reader = io.MultiReader(reader, errorReader{err: b.readErr})
+	}
+	return &countedReadCloser{Reader: reader, closed: &b.closes}, nil
 }
 func (b *directReplayBody) Bytes(limit int64) ([]byte, error) {
 	if int64(len(b.data)) > limit {
@@ -57,51 +56,161 @@ func (b *directReplayBody) Bytes(limit int64) ([]byte, error) {
 func (b *directReplayBody) Close() error { b.bodyCloses.Add(1); return nil }
 
 type countedReadCloser struct {
-	*bytes.Reader
+	io.Reader
 	closed *atomic.Int64
 }
 
 func (r *countedReadCloser) Close() error { r.closed.Add(1); return nil }
 
-type trackedInboundBody struct {
-	*strings.Reader
-	closes atomic.Int64
+type blockingDirectReadCloser struct {
+	started chan struct{}
+	closed  chan struct{}
+	once    sync.Once
 }
 
-func (b *trackedInboundBody) Close() error {
-	b.closes.Add(1)
+func newBlockingDirectReadCloser() *blockingDirectReadCloser {
+	return &blockingDirectReadCloser{started: make(chan struct{}), closed: make(chan struct{})}
+}
+
+func (r *blockingDirectReadCloser) Read([]byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	<-r.closed
+	return 0, context.Canceled
+}
+
+func (r *blockingDirectReadCloser) Close() error {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
 	return nil
 }
 
-type flushingResponseWriter struct {
-	header  http.Header
-	status  int
-	body    bytes.Buffer
-	flushes atomic.Int64
+type blockingDirectReplayBody struct {
+	directReplayBody
+	reader *blockingDirectReadCloser
 }
 
-func (w *flushingResponseWriter) Header() http.Header         { return w.header }
-func (w *flushingResponseWriter) WriteHeader(status int)      { w.status = status }
-func (w *flushingResponseWriter) Write(p []byte) (int, error) { return w.body.Write(p) }
-func (w *flushingResponseWriter) Flush()                      { w.flushes.Add(1) }
+func (b *blockingDirectReplayBody) Open() (io.ReadCloser, error) {
+	b.opens.Add(1)
+	return b.reader, nil
+}
 
-func directRequest(t *testing.T, target string, body *directReplayBody) agentproxy.DirectRequest {
-	t.Helper()
-	targetURL, err := url.Parse(target)
-	require.NoError(t, err)
-	request := httptest.NewRequest(http.MethodPost, "http://source/v1/messages?q=1", strings.NewReader("stale"))
-	request.Header.Set(consts.HeaderXAgentID, "forged")
-	request.Header.Set(consts.HeaderXAgentTag, "forged-tag")
-	request.Header.Set(consts.HeaderXAgentAddressTag, "forged-address")
-	request.Header.Set("Connection", "keep-alive, X-Hop")
-	request.Header.Set("X-Hop", "secret")
-	request.Header.Set("Content-Length", "999")
-	request.ContentLength = 999
-	meta := directAttemptMeta("/v1/messages")
-	return agentproxy.DirectRequest{
-		TargetAgentID: "target-a", RouteID: 7, Hop: 1, AddressFingerprint: "fp-a",
-		TargetURL: targetURL, Request: request, Body: body,
-		ForwardTicket: agentauth.ForwardTicket("forward-ticket"), Attempt: &meta,
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+
+type failingResponseWriter struct {
+	header http.Header
+	err    error
+}
+
+func (w *failingResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (*failingResponseWriter) WriteHeader(int) {}
+func (w *failingResponseWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type cancellationAwareAttemptStream struct {
+	helperRelayStream
+	sourceClosable chan bool
+}
+
+type directAttemptStreamOpenerFunc func(
+	context.Context, agentproxy.DirectSessionTarget, agentproxy.AttemptStreamRequest,
+) (agentproxy.AttemptStream, error)
+
+type directAttemptTransportFunc struct {
+	open               func(context.Context, agentproxy.AttemptStreamRequest) (agentproxy.AttemptStream, error)
+	addressFingerprint string
+}
+
+func (directAttemptTransportFunc) TransportIdentity() agentproxy.DirectTransportIdentity {
+	return agentproxy.DirectTransportIdentity{1}
+}
+
+func (f directAttemptTransportFunc) AcquireAttemptStream(
+	context.Context,
+) (agentproxy.DirectAttemptStreamReservation, error) {
+	return &directAttemptStreamReservationFunc{
+		identity: f.TransportIdentity(), addressFingerprint: f.addressFingerprint, open: f.open,
+	}, nil
+}
+
+type directAttemptStreamReservationFunc struct {
+	identity           agentproxy.DirectTransportIdentity
+	addressFingerprint string
+	open               func(context.Context, agentproxy.AttemptStreamRequest) (agentproxy.AttemptStream, error)
+	release            func()
+	releaseOnce        sync.Once
+}
+
+func (r *directAttemptStreamReservationFunc) TransportIdentity() agentproxy.DirectTransportIdentity {
+	return r.identity
+}
+
+func (r *directAttemptStreamReservationFunc) AddressFingerprint() string {
+	return r.addressFingerprint
+}
+
+func (r *directAttemptStreamReservationFunc) OpenAttemptStream(
+	ctx context.Context, request agentproxy.AttemptStreamRequest,
+) (agentproxy.AttemptStream, error) {
+	return r.open(ctx, request)
+}
+
+func (r *directAttemptStreamReservationFunc) Release() {
+	r.releaseOnce.Do(func() {
+		if r.release != nil {
+			r.release()
+		}
+	})
+}
+
+func (f directAttemptStreamOpenerFunc) BuildDirectAttemptTransport(
+	_ context.Context, target agentproxy.DirectSessionTarget,
+) (agentproxy.DirectAttemptTransport, error) {
+	return directAttemptTransportFunc{
+		addressFingerprint: target.AddressFingerprint,
+		open: func(ctx context.Context, request agentproxy.AttemptStreamRequest) (agentproxy.AttemptStream, error) {
+			return f(ctx, target, request)
+		},
+	}, nil
+}
+
+func (f directAttemptStreamOpenerFunc) OpenAttemptStream(
+	ctx context.Context, target agentproxy.DirectSessionTarget, request agentproxy.AttemptStreamRequest,
+) (agentproxy.AttemptStream, error) {
+	return f(ctx, target, request)
+}
+
+func (s *cancellationAwareAttemptStream) Upload(ctx context.Context, source io.Reader) error {
+	*s.order = append(*s.order, "upload")
+	closer, ok := source.(io.Closer)
+	s.sourceClosable <- ok
+	if !ok {
+		return errors.New("attempt upload source is not closable")
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := source.Read(make([]byte, 1))
+		readDone <- err
+	}()
+	select {
+	case err := <-readDone:
+		return err
+	case <-ctx.Done():
+		if err := closer.Close(); err != nil {
+			return err
+		}
+		return <-readDone
 	}
 }
 
@@ -115,433 +224,6 @@ func directAttemptMeta(path string) attemptwire.AttemptProxyMeta {
 	}
 }
 
-func ownedDirectForTest(t *testing.T) *agentproxy.DirectForwarder {
-	t.Helper()
-	direct := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	t.Cleanup(func() { require.NoError(t, direct.Close(context.Background())) })
-	return direct
-}
-
-func TestDirectForwardResponseCopyAndRequestSanitization(t *testing.T) {
-	var gotBody, gotHop, gotLength, gotSelector, gotConnection string
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		gotBody, gotHop = string(body), r.Header.Get(consts.HeaderXAgentHop)
-		gotLength, gotSelector = r.Header.Get("Content-Length"), r.Header.Get(consts.HeaderXAgentID)
-		gotConnection = r.Header.Get("X-Hop")
-		w.Header().Set("X-Upstream", "yes")
-		w.Header().Set("Connection", "X-Private")
-		w.Header().Set("X-Private", "secret")
-		w.Header().Set(consts.HeaderXAgentForwardTicket, "must-not-escape")
-		w.Header().Set(consts.HeaderXAgentRouteID, "must-not-escape")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte("ordinary-response"))
-	}))
-	defer target.Close()
-	body := &directReplayBody{data: []byte("fresh")}
-	f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	t.Cleanup(func() { _ = f.Close(context.Background()) })
-	w := httptest.NewRecorder()
-	out := f.Forward(context.Background(), directRequest(t, target.URL, body), w)
-	require.NoError(t, out.Err)
-	require.True(t, out.ResponseStarted)
-	require.Equal(t, tunnel.Committed, out.Commit)
-	require.Equal(t, http.StatusCreated, w.Code)
-	require.Equal(t, "ordinary-response", w.Body.String())
-	require.Equal(t, "yes", w.Header().Get("X-Upstream"))
-	require.Empty(t, w.Header().Get("X-Private"))
-	require.Empty(t, w.Header().Get(consts.HeaderXAgentForwardTicket))
-	require.Empty(t, w.Header().Get(consts.HeaderXAgentRouteID))
-	require.Equal(t, "fresh", gotBody)
-	require.Equal(t, "1", gotHop)
-	require.Equal(t, "5", gotLength)
-	require.Empty(t, gotSelector)
-	require.Empty(t, gotConnection)
-	require.Equal(t, int64(1), body.opens.Load())
-	require.Equal(t, int64(1), body.closes.Load())
-	require.Zero(t, body.bodyCloses.Load(), "Forward must not close shared ReplayBody")
-}
-
-func TestDirectForwardEmptyPOSTHasNoChunkedBody(t *testing.T) {
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		data, err := io.ReadAll(r.Body)
-		require.NoError(t, err)
-		require.Empty(t, data)
-		require.Empty(t, r.TransferEncoding)
-		require.Zero(t, r.ContentLength)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer target.Close()
-	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
-	request := directRequest(t, target.URL, &directReplayBody{})
-	outcome := forwarder.Forward(context.Background(), request, httptest.NewRecorder())
-	require.NoError(t, outcome.Err)
-}
-
-func TestDirectForwardEveryHTTPStatusIsCommittedWithoutFallbackSignal(t *testing.T) {
-	for _, status := range []int{401, 429, 500, 502} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) }))
-			defer target.Close()
-			f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-			defer f.Close(context.Background())
-			w := httptest.NewRecorder()
-			out := f.Forward(context.Background(), directRequest(t, target.URL, &directReplayBody{}), w)
-			require.NoError(t, out.Err)
-			require.Equal(t, tunnel.Committed, out.Commit)
-			require.True(t, out.ResponseStarted)
-			require.Equal(t, status, w.Code)
-		})
-	}
-}
-
-func TestDirectForwardNoReplayClassifiesRealBeforeWriteFailures(t *testing.T) {
-	t.Run("dns", func(t *testing.T) {
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
-			DialContext: func(context.Context, string, string) (net.Conn, error) {
-				return nil, &net.DNSError{Err: "no such host", Name: "missing.invalid", IsNotFound: true}
-			},
-		})
-		defer f.Close(context.Background())
-		out := f.Forward(context.Background(), directRequest(t, "http://missing.invalid", &directReplayBody{}), httptest.NewRecorder())
-		require.Error(t, out.Err)
-		require.Equal(t, tunnel.PreCommit, out.Commit)
-		require.Equal(t, "direct_dns", out.Code)
-		require.False(t, out.ResponseStarted)
-	})
-
-	t.Run("tcp refusal", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		require.NoError(t, err)
-		address := ln.Addr().String()
-		require.NoError(t, ln.Close())
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-		defer f.Close(context.Background())
-		out := f.Forward(context.Background(), directRequest(t, "http://"+address, &directReplayBody{}), httptest.NewRecorder())
-		require.Error(t, out.Err)
-		require.Equal(t, tunnel.PreCommit, out.Commit)
-		require.Equal(t, "direct_connect", out.Code)
-	})
-
-	t.Run("dial timeout before connection", func(t *testing.T) {
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
-			DialContext: func(context.Context, string, string) (net.Conn, error) {
-				return nil, context.DeadlineExceeded
-			},
-		})
-		defer f.Close(context.Background())
-		out := f.Forward(context.Background(), directRequest(t, "http://timeout.invalid", &directReplayBody{}), httptest.NewRecorder())
-		require.Error(t, out.Err)
-		require.Equal(t, tunnel.PreCommit, out.Commit)
-		require.Equal(t, "direct_connect", out.Code)
-	})
-
-	t.Run("dial-local cancellation before connection", func(t *testing.T) {
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
-			DialContext: func(context.Context, string, string) (net.Conn, error) {
-				return nil, context.Canceled
-			},
-		})
-		defer f.Close(context.Background())
-		out := f.Forward(context.Background(), directRequest(t, "http://cancelled.invalid", &directReplayBody{}), httptest.NewRecorder())
-		require.Error(t, out.Err)
-		require.Equal(t, tunnel.PreCommit, out.Commit)
-		require.Equal(t, "direct_connect", out.Code)
-	})
-
-	t.Run("tls handshake", func(t *testing.T) {
-		plain := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		defer plain.Close()
-		target := "https" + strings.TrimPrefix(plain.URL, "http")
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}) //nolint:gosec -- deliberate broken TLS endpoint
-		defer f.Close(context.Background())
-		out := f.Forward(context.Background(), directRequest(t, target, &directReplayBody{}), httptest.NewRecorder())
-		require.Error(t, out.Err)
-		require.Equal(t, tunnel.PreCommit, out.Commit)
-		require.Equal(t, "direct_tls", out.Code)
-	})
-}
-
-func TestDirectForwardClassifiesPostConnectFailuresAsUncertain(t *testing.T) {
-	t.Run("connection closes after request may be written", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		require.NoError(t, err)
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			conn, acceptErr := ln.Accept()
-			if acceptErr == nil {
-				buf := make([]byte, 4096)
-				_, _ = conn.Read(buf)
-				_ = conn.Close()
-			}
-		}()
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-		defer f.Close(context.Background())
-		out := f.Forward(context.Background(), directRequest(t, "http://"+ln.Addr().String(), &directReplayBody{data: []byte("body")}), httptest.NewRecorder())
-		_ = ln.Close()
-		<-done
-		require.Error(t, out.Err)
-		require.Equal(t, tunnel.CommitUncertain, out.Commit)
-		require.False(t, out.ResponseStarted)
-	})
-
-	t.Run("response header timeout", func(t *testing.T) {
-		target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { time.Sleep(100 * time.Millisecond) }))
-		defer target.Close()
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{ResponseHeaderTimeout: 10 * time.Millisecond})
-		defer f.Close(context.Background())
-		out := f.Forward(context.Background(), directRequest(t, target.URL, &directReplayBody{}), httptest.NewRecorder())
-		require.Error(t, out.Err)
-		require.Equal(t, tunnel.CommitUncertain, out.Commit)
-	})
-
-	t.Run("caller cancellation", func(t *testing.T) {
-		started := make(chan struct{})
-		var startedOnce sync.Once
-		target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-			startedOnce.Do(func() { close(started) })
-			<-time.After(time.Second)
-		}))
-		defer target.Close()
-		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{CircuitFailureThreshold: 1})
-		defer f.Close(context.Background())
-		ctx, cancel := context.WithCancel(context.Background())
-		go func() { <-started; cancel() }()
-		out := f.Forward(ctx, directRequest(t, target.URL, &directReplayBody{}), httptest.NewRecorder())
-		require.ErrorIs(t, out.Err, context.Canceled)
-		require.Equal(t, tunnel.CommitUncertain, out.Commit)
-		second := f.Forward(context.Background(), directRequest(t, target.URL, &directReplayBody{}), httptest.NewRecorder())
-		require.NotEqual(t, "direct_circuit_open", second.Code, "caller cancellation must not count as circuit failure")
-	})
-}
-
-func TestDirectForwardProxyCONNECTFailureIsCommitUncertain(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close()
-		reader := bufio.NewReader(conn)
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil || !strings.HasPrefix(line, "CONNECT ") {
-			return
-		}
-		for {
-			line, readErr = reader.ReadString('\n')
-			if readErr != nil || line == "\r\n" {
-				break
-			}
-		}
-		_, _ = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	}()
-	proxyURL, err := url.Parse("http://" + listener.Addr().String())
-	require.NoError(t, err)
-	request := directRequest(t, "https://target.invalid", &directReplayBody{})
-	request.ProxyURL = proxyURL
-	f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	defer f.Close(context.Background())
-	out := f.Forward(context.Background(), request, httptest.NewRecorder())
-	_ = listener.Close()
-	<-done
-	require.Error(t, out.Err)
-	require.Equal(t, tunnel.CommitUncertain, out.Commit)
-	require.False(t, out.ResponseStarted)
-}
-
-func TestDirectForwardInterruptedSSEDisconnectRemainsCommitted(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		conn, acceptErr := ln.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close()
-		buf := make([]byte, 4096)
-		_, _ = conn.Read(buf)
-		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 50\r\n\r\ndata: one\n\n")
-	}()
-	f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	defer f.Close(context.Background())
-	w := httptest.NewRecorder()
-	out := f.Forward(context.Background(), directRequest(t, "http://"+ln.Addr().String(), &directReplayBody{}), w)
-	_ = ln.Close()
-	<-done
-	require.Error(t, out.Err)
-	require.Equal(t, tunnel.Committed, out.Commit)
-	require.True(t, out.ResponseStarted)
-	require.Contains(t, w.Body.String(), "data: one")
-}
-
-func TestDirectResponseCopyFlushesStreamingBodyAndCopiesTrailers(t *testing.T) {
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Trailer", "X-Usage")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "data: one\n\n")
-		w.(http.Flusher).Flush()
-		w.Header().Set("X-Usage", "9")
-	}))
-	defer target.Close()
-	f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	defer f.Close(context.Background())
-	w := &flushingResponseWriter{header: make(http.Header)}
-	out := f.Forward(context.Background(), directRequest(t, target.URL, &directReplayBody{}), w)
-	require.NoError(t, out.Err)
-	require.Equal(t, tunnel.Committed, out.Commit)
-	require.Equal(t, http.StatusOK, w.status)
-	require.Contains(t, w.body.String(), "data: one")
-	require.Positive(t, w.flushes.Load())
-	require.Equal(t, "9", w.header.Get("X-Usage"))
-}
-
-func TestDirectResponseCopyForwardsDeclaredAndDynamicTrailersOverHTTP(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Trailer", "X-Declared, "+consts.HeaderXAgentForwardTicket)
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "response")
-		w.Header().Set("X-Declared", "declared-value")
-		w.Header().Set(consts.HeaderXAgentForwardTicket, "declared-secret")
-		w.Header().Set(http.TrailerPrefix+"X-Dynamic", "dynamic-value")
-		w.Header().Set(http.TrailerPrefix+consts.HeaderXAgentRouteID, "dynamic-secret")
-	}))
-	defer upstream.Close()
-	targetURL, err := url.Parse(upstream.URL)
-	require.NoError(t, err)
-	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
-	outcomes := make(chan agentproxy.DirectOutcome, 1)
-	meta := directAttemptMeta("/v1/chat/completions")
-	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		outcomes <- forwarder.Forward(r.Context(), agentproxy.DirectRequest{
-			TargetAgentID:      "target-a",
-			AddressFingerprint: "fp-a",
-			TargetURL:          targetURL,
-			Request:            r,
-			Body:               &directReplayBody{},
-			ForwardTicket:      agentauth.ForwardTicket("forward-ticket"),
-			Attempt:            &meta,
-		}, w)
-	}))
-	defer downstream.Close()
-
-	response, err := http.Post(downstream.URL, consts.ContentTypeJSON, http.NoBody) //nolint:noctx -- httptest request is bounded by local server cleanup
-	require.NoError(t, err)
-	_, err = io.Copy(io.Discard, response.Body)
-	require.NoError(t, err)
-	require.NoError(t, response.Body.Close())
-	outcome := <-outcomes
-	require.NoError(t, outcome.Err)
-	require.Equal(t, "declared-value", response.Trailer.Get("X-Declared"))
-	require.Equal(t, "dynamic-value", response.Trailer.Get("X-Dynamic"))
-	t.Run("declared reserved trailer", func(t *testing.T) {
-		require.Empty(t, response.Trailer.Get(consts.HeaderXAgentForwardTicket))
-	})
-	t.Run("dynamic reserved trailer", func(t *testing.T) {
-		require.Empty(t, response.Trailer.Get(consts.HeaderXAgentRouteID))
-	})
-}
-
-func TestDirectForwardThreeRealFailuresOpenCircuitAndAdminReset(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	address := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{CircuitFailureThreshold: 3, CircuitOpenDuration: time.Minute})
-	defer f.Close(context.Background())
-	request := directRequest(t, "http://"+address, &directReplayBody{})
-	for range 3 {
-		out := f.Forward(context.Background(), request, httptest.NewRecorder())
-		require.Error(t, out.Err)
-	}
-	blocked := f.Forward(context.Background(), request, httptest.NewRecorder())
-	require.Equal(t, tunnel.PreCommit, blocked.Commit)
-	require.Equal(t, "direct_circuit_open", blocked.Code)
-	f.ResetCircuit("target-a", "fp-a")
-	afterReset := f.Forward(context.Background(), request, httptest.NewRecorder())
-	require.NotEqual(t, "direct_circuit_open", afterReset.Code)
-}
-
-func TestDirectForwardRejectsNilOpenedReaderBeforeRoundTrip(t *testing.T) {
-	f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{})
-	defer f.Close(context.Background())
-	request := directRequest(t, "http://unused.invalid", &directReplayBody{})
-	request.Body = &nilReaderReplayBody{}
-	out := f.Forward(context.Background(), request, httptest.NewRecorder())
-	require.Error(t, out.Err)
-	require.Equal(t, tunnel.PreCommit, out.Commit)
-	require.Equal(t, "direct_body", out.Code)
-}
-
-type routeDirectStub func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome
-
-func (f routeDirectStub) Forward(ctx context.Context, req agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
-	return f(ctx, req, dst)
-}
-
-func TestPrepareDirectTargetUsesOneAddressSnapshot(t *testing.T) {
-	prepared, err := agentproxy.PrepareDirectTarget(agentproxy.DirectTargetSnapshot{
-		AgentID:       "target-a",
-		HTTPAddresses: `[{"url":"http://private.example:8139","tag":"private"},{"url":"https://public.example:8140","tag":"public"}]`,
-		AgentProxyURL: "http://target-proxy.example:3128", GlobalProxyURL: "http://global-proxy.example:3128",
-		AddressTag: "public", PreferredTag: "private",
-	})
-	require.NoError(t, err)
-	require.Equal(t, "https://public.example:8140", prepared.TargetURL.String())
-	require.Equal(t, "http://target-proxy.example:3128", prepared.ProxyURL.String())
-	require.NotEmpty(t, prepared.AddressFingerprint)
-
-	_, err = agentproxy.PrepareDirectTarget(agentproxy.DirectTargetSnapshot{AgentID: "target-a", HTTPAddresses: `[{"url":"://bad","tag":"public"}]`, AddressTag: "public"})
-	require.Error(t, err)
-}
-
-func TestExecuteDirectTransportBuildsRequestForOneFrozenTarget(t *testing.T) {
-	var got agentproxy.DirectRequest
-	direct := routeDirectStub(func(_ context.Context, request agentproxy.DirectRequest, _ http.ResponseWriter) agentproxy.DirectOutcome {
-		got = request
-		return agentproxy.DirectOutcome{Commit: tunnel.Committed}
-	})
-	body := &directReplayBody{data: []byte("body")}
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	meta := attemptwire.AttemptProxyMeta{
-		Attempt: attemptwire.BoundAttempt{
-			Channel:   attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7},
-			RealModel: "gpt-4o", Mode: attemptwire.ModeNative,
-		},
-		RequestPath: "/v1/responses",
-	}
-	prepared := agentproxy.PreparedDirectTarget{
-		AddressFingerprint: "fingerprint", TargetURL: parseURLForForwardTest(t, "https://target.example:8140"),
-		ProxyURL: parseURLForForwardTest(t, "http://proxy.example:3128"),
-	}
-
-	outcome := agentproxy.ExecuteDirectTransport(t.Context(), direct, agentproxy.DirectTransportRequest{
-		TargetAgentID: "target-a", RouteID: 0, Hop: 8, PreparedTarget: prepared,
-		Request: request, Body: body, ForwardTicket: agentauth.ForwardTicket("ticket"), Attempt: &meta,
-	}, httptest.NewRecorder())
-
-	require.NoError(t, outcome.Err)
-	require.Equal(t, "target-a", got.TargetAgentID)
-	require.Zero(t, got.RouteID)
-	require.Equal(t, uint8(8), got.Hop)
-	require.Equal(t, prepared.AddressFingerprint, got.AddressFingerprint)
-	require.Equal(t, prepared.TargetURL, got.TargetURL)
-	require.Equal(t, prepared.ProxyURL, got.ProxyURL)
-	require.Same(t, request, got.Request)
-	require.Same(t, body, got.Body)
-	require.Equal(t, agentauth.ForwardTicket("ticket"), got.ForwardTicket)
-	require.Equal(t, meta, *got.Attempt)
-}
-
 func parseURLForForwardTest(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(raw)
@@ -549,14 +231,814 @@ func parseURLForForwardTest(t *testing.T, raw string) *url.URL {
 	return parsed
 }
 
+func frozenDirectTarget(t *testing.T) agentproxy.DirectSessionTarget {
+	return agentproxy.DirectSessionTarget{
+		TargetAgentID: "target-a", AddressFingerprint: "fp-a",
+		WebSocketURL: parseURLForForwardTest(t, "https://target-a.example:8443"),
+	}
+}
+
+// directRequest builds a DirectRequest carrying forged managed headers so tests
+// can prove they are stripped before the request reaches the attempt stream.
+func directRequest(t *testing.T, body *directReplayBody) agentproxy.DirectRequest {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "http://source/v1/messages?q=1", nil)
+	request.Header.Set("Authorization", "Bearer original")
+	request.Header.Set(consts.HeaderXAgentID, "forged")
+	request.Header.Set(consts.HeaderXAgentForwardTicket, "forged-ticket")
+	request.Header.Set(consts.HeaderXAgentRouteID, "forged-route")
+	request.Header.Set("Connection", "keep-alive, X-Hop")
+	request.Header.Set("X-Hop", "secret")
+	request.Header.Set("Content-Length", "999")
+	request.ContentLength = 999
+	return agentproxy.DirectRequest{
+		Target: frozenDirectTarget(t), RouteID: 7, RequestID: "request-a", Hop: 1,
+		Request: request, Body: body, Attempt: directAttemptMeta("/v1/messages"),
+	}
+}
+
+// fakeDirectOpener is the frozen-target attempt stream opener the pool provides.
+type fakeDirectOpener struct {
+	target                   agentproxy.DirectSessionTarget
+	request                  agentproxy.AttemptStreamRequest
+	stream                   *helperRelayStream
+	err                      error
+	buildErr                 error
+	buildNil                 bool
+	acquireErr               error
+	returnReservationOnError bool
+	afterAcquire             func()
+	identity                 agentproxy.DirectTransportIdentity
+	actualIdentity           agentproxy.DirectTransportIdentity
+	actualAddressFingerprint string
+	omitActualIdentity       bool
+	panicOpen                bool
+	calls                    atomic.Int64
+	releases                 atomic.Int64
+}
+
+func (o *fakeDirectOpener) BuildDirectAttemptTransport(
+	_ context.Context, target agentproxy.DirectSessionTarget,
+) (agentproxy.DirectAttemptTransport, error) {
+	if o.buildErr != nil {
+		return nil, o.buildErr
+	}
+	if o.buildNil {
+		return nil, nil
+	}
+	o.target = target
+	identity := o.identity
+	if identity == (agentproxy.DirectTransportIdentity{}) {
+		identity = agentproxy.DirectTransportIdentity{1}
+	}
+	actualIdentity := o.actualIdentity
+	actualAddressFingerprint := o.actualAddressFingerprint
+	if !o.omitActualIdentity {
+		if actualIdentity == (agentproxy.DirectTransportIdentity{}) {
+			actualIdentity = identity
+		}
+		if actualAddressFingerprint == "" {
+			actualAddressFingerprint = target.AddressFingerprint
+		}
+	}
+	return &fakeDirectTransport{
+		opener: o, target: target, identity: identity,
+		actualIdentity: actualIdentity, actualAddressFingerprint: actualAddressFingerprint,
+	}, nil
+}
+
+type fakeDirectTransport struct {
+	opener                   *fakeDirectOpener
+	target                   agentproxy.DirectSessionTarget
+	identity                 agentproxy.DirectTransportIdentity
+	actualIdentity           agentproxy.DirectTransportIdentity
+	actualAddressFingerprint string
+}
+
+func (t *fakeDirectTransport) TransportIdentity() agentproxy.DirectTransportIdentity {
+	return t.identity
+}
+
+func (t *fakeDirectTransport) AcquireAttemptStream(
+	context.Context,
+) (agentproxy.DirectAttemptStreamReservation, error) {
+	reservation := &fakeDirectReservation{
+		opener: t.opener, target: t.target,
+		identity: t.actualIdentity, addressFingerprint: t.actualAddressFingerprint,
+	}
+	if t.opener.afterAcquire != nil {
+		t.opener.afterAcquire()
+	}
+	if t.opener.acquireErr != nil && !t.opener.returnReservationOnError {
+		return nil, t.opener.acquireErr
+	}
+	return reservation, t.opener.acquireErr
+}
+
+type fakeDirectReservation struct {
+	opener             *fakeDirectOpener
+	target             agentproxy.DirectSessionTarget
+	identity           agentproxy.DirectTransportIdentity
+	addressFingerprint string
+	releaseOnce        sync.Once
+}
+
+func (r *fakeDirectReservation) TransportIdentity() agentproxy.DirectTransportIdentity {
+	return r.identity
+}
+
+func (r *fakeDirectReservation) AddressFingerprint() string {
+	return r.addressFingerprint
+}
+
+func (r *fakeDirectReservation) OpenAttemptStream(
+	ctx context.Context, req agentproxy.AttemptStreamRequest,
+) (agentproxy.AttemptStream, error) {
+	if r.opener.panicOpen {
+		panic("fake direct reservation open panic")
+	}
+	return r.opener.OpenAttemptStream(ctx, r.target, req)
+}
+
+func (r *fakeDirectReservation) Release() {
+	r.releaseOnce.Do(func() { r.opener.releases.Add(1) })
+}
+
+func (o *fakeDirectOpener) OpenAttemptStream(
+	_ context.Context, target agentproxy.DirectSessionTarget, req agentproxy.AttemptStreamRequest,
+) (agentproxy.AttemptStream, error) {
+	o.calls.Add(1)
+	o.target = target
+	o.request = req
+	if o.err != nil {
+		return nil, o.err
+	}
+	return o.stream, nil
+}
+
+// fakeOpenError implements the directOpenFailure interface for classification.
+type fakeOpenError struct {
+	stage     string
+	code      string
+	counts    bool
+	countOnce bool
+	claimed   atomic.Bool
+}
+
+type policyResetError string
+
+func (e policyResetError) Error() string     { return string(e) }
+func (e policyResetError) ResetCode() string { return string(e) }
+
+func (e *fakeOpenError) Error() string      { return "direct open failed: " + e.code }
+func (e *fakeOpenError) Stage() string      { return e.stage }
+func (e *fakeOpenError) ReasonCode() string { return e.code }
+func (e *fakeOpenError) CountsForCircuit() bool {
+	return e.counts && (!e.countOnce || e.claimed.CompareAndSwap(false, true))
+}
+
+func ownedDirectForTest(t *testing.T, builder agentproxy.DirectAttemptTransportBuilder) *agentproxy.DirectForwarder {
+	t.Helper()
+	direct := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: builder})
+	t.Cleanup(func() { require.NoError(t, direct.Close(context.Background())) })
+	return direct
+}
+
+func TestDirectForwardOpensStreamWithoutPerRequestCredentials(t *testing.T) {
+	order := make([]string, 0, 5)
+	opener := &fakeDirectOpener{stream: &helperRelayStream{order: &order, commit: tunnel.Committed}}
+	f := ownedDirectForTest(t, opener)
+	body := &directReplayBody{data: []byte("fresh")}
+	recorder := httptest.NewRecorder()
+
+	outcome := f.Forward(context.Background(), directRequest(t, body), recorder)
+
+	require.NoError(t, outcome.Err)
+	require.Equal(t, tunnel.Committed, outcome.Commit)
+	require.True(t, outcome.ResponseStarted)
+	require.Equal(t, int64(1), opener.calls.Load())
+	require.Equal(t, int64(1), opener.releases.Load())
+	require.Equal(t, "target-a", opener.target.TargetAgentID)
+	require.Equal(t, http.MethodPost, opener.request.Method)
+	require.Equal(t, attemptwire.EndpointPath, opener.request.Path)
+	require.Equal(t, uint8(1), opener.request.Hop)
+	require.Equal(t, directAttemptMeta("/v1/messages"), opener.request.Attempt)
+	require.Equal(t, "Bearer original", opener.request.Header.Get("Authorization"))
+	require.Empty(t, opener.request.Header.Get(consts.HeaderXAgentForwardTicket), "forward ticket must not ride the request")
+	require.Empty(t, opener.request.Header.Get(consts.HeaderXAgentRouteID))
+	require.Empty(t, opener.request.Header.Get(consts.HeaderXAgentID))
+	require.Empty(t, opener.request.Header.Get("X-Hop"), "hop-by-hop headers must be stripped")
+	require.Equal(t, []string{"commit", "upload", "copy", "close"}, order)
+	require.Equal(t, "fresh", opener.stream.uploaded)
+	require.Equal(t, http.StatusAccepted, recorder.Code)
+	require.Zero(t, body.bodyCloses.Load(), "Forward must not close shared ReplayBody")
+}
+
+func TestDirectForwardOpenFailureStaysPreCommitForRelayFallback(t *testing.T) {
+	opener := &fakeDirectOpener{err: &fakeOpenError{stage: "dial", code: "direct_connect", counts: true}}
+	f := ownedDirectForTest(t, opener)
+
+	outcome := f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+
+	require.Error(t, outcome.Err)
+	require.Equal(t, tunnel.PreCommit, outcome.Commit)
+	require.False(t, outcome.ResponseStarted)
+	require.Nil(t, outcome.AttemptResult)
+}
+
+func TestDirectForwardTransportBuildFailureStaysOutsideCircuit(t *testing.T) {
+	builder := &fakeDirectOpener{buildErr: &fakeOpenError{stage: "credentials", code: "unavailable", counts: true}}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: builder, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Minute,
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	for range 3 {
+		outcome := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+		require.Equal(t, agentproxy.CodeDirectAuthUnavailable, outcome.Code)
+	}
+	require.Zero(t, forwarder.ResourceCount(), "local build failures must not allocate circuit state")
+	require.Zero(t, builder.calls.Load())
+
+	builder.buildErr = nil
+	builder.err = &fakeOpenError{stage: "dial", code: "failed", counts: true}
+	failed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, failed.Code)
+	blocked := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectCircuitOpen, blocked.Code)
+}
+
+func TestDirectForwardAcquireFailureUsesPlannedCircuitAndReleasesReservation(t *testing.T) {
+	builder := &fakeDirectOpener{
+		identity: agentproxy.DirectTransportIdentity{2}, actualIdentity: agentproxy.DirectTransportIdentity{1},
+		acquireErr: &fakeOpenError{stage: "dial", code: "failed", counts: true}, returnReservationOnError: true,
+	}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: builder, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Minute,
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	failed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, failed.Code)
+	require.Zero(t, builder.calls.Load())
+	require.Equal(t, int64(1), builder.releases.Load())
+
+	plannedBlocked := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectCircuitOpen, plannedBlocked.Code)
+	builder.identity = agentproxy.DirectTransportIdentity{1}
+	otherPlannedAllowed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, otherPlannedAllowed.Code)
+	require.Equal(t, int64(2), builder.releases.Load())
+}
+
+func TestDirectForwardRejectsMissingOrNilTransportBuilder(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		builder agentproxy.DirectAttemptTransportBuilder
+	}{
+		{name: "missing builder"},
+		{name: "nil transport", builder: &fakeDirectOpener{buildNil: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: test.builder})
+			t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+			outcome := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+			require.Equal(t, agentproxy.CodeDirectDisabled, outcome.Code)
+			require.Zero(t, forwarder.ResourceCount())
+		})
+	}
+}
+
+func TestDirectForwardFallbackOutcomeUpdatesActualTransportCircuit(t *testing.T) {
+	transportErr := errors.New("fallback transport interrupted")
+	order := make([]string, 0, 8)
+	builder := &fakeDirectOpener{
+		identity:       agentproxy.DirectTransportIdentity{2},
+		actualIdentity: agentproxy.DirectTransportIdentity{1},
+		stream: &helperRelayStream{
+			order: &order, commit: tunnel.CommitUncertain, commitErr: transportErr,
+		},
+	}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: builder, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Minute,
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	fallback := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.ErrorIs(t, fallback.Err, transportErr)
+
+	builder.identity = agentproxy.DirectTransportIdentity{1}
+	builder.actualIdentity = agentproxy.DirectTransportIdentity{1}
+	builder.err = &fakeOpenError{stage: "dial", code: "failed", counts: true}
+	actualBlocked := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectCircuitOpen, actualBlocked.Code, "fallback outcome must update actual identity A")
+
+	builder.identity = agentproxy.DirectTransportIdentity{2}
+	builder.actualIdentity = agentproxy.DirectTransportIdentity{2}
+	plannedAllowed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, plannedAllowed.Code, "planned identity B permit must be canceled after fallback to A")
+}
+
+func TestDirectForwardRejectsFallbackWhenActualTransportCircuitIsOpen(t *testing.T) {
+	order := make([]string, 0, 8)
+	builder := &fakeDirectOpener{
+		identity: agentproxy.DirectTransportIdentity{1},
+		err:      &fakeOpenError{stage: "dial", code: "failed", counts: true},
+	}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: builder, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Minute,
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	failed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, failed.Code)
+
+	builder.identity = agentproxy.DirectTransportIdentity{2}
+	builder.actualIdentity = agentproxy.DirectTransportIdentity{1}
+	builder.err = nil
+	builder.stream = &helperRelayStream{order: &order, commit: tunnel.Committed}
+	fallback := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectCircuitOpen, fallback.Code)
+	require.Empty(t, order, "denied fallback must not open a stream")
+	require.Equal(t, int64(1), builder.calls.Load(), "actual OPEN circuit must reject before OpenAttemptStream")
+	require.Equal(t, int64(2), builder.releases.Load())
+}
+
+func TestDirectForwardFallbackOpenFailureUpdatesActualTransportCircuit(t *testing.T) {
+	builder := &fakeDirectOpener{
+		identity:       agentproxy.DirectTransportIdentity{2},
+		actualIdentity: agentproxy.DirectTransportIdentity{1},
+		err:            &fakeOpenError{stage: "stream", code: "failed", counts: true},
+	}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: builder, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Minute,
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	fallbackFailed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, fallbackFailed.Code)
+
+	builder.identity = agentproxy.DirectTransportIdentity{1}
+	builder.actualIdentity = agentproxy.DirectTransportIdentity{1}
+	actualBlocked := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectCircuitOpen, actualBlocked.Code)
+
+	builder.identity = agentproxy.DirectTransportIdentity{2}
+	builder.actualIdentity = agentproxy.DirectTransportIdentity{2}
+	plannedAllowed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, plannedAllowed.Code)
+	require.Equal(t, int64(2), builder.releases.Load())
+}
+
+func TestDirectForwardRejectsIncompleteActualTransportIdentityBeforeOpen(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		identity           agentproxy.DirectTransportIdentity
+		addressFingerprint string
+	}{
+		{name: "missing identity and address"},
+		{name: "zero identity with address", addressFingerprint: "fp-a"},
+		{name: "identity without address", identity: agentproxy.DirectTransportIdentity{2}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			order := make([]string, 0, 4)
+			body := &directReplayBody{data: []byte("must-not-open")}
+			builder := &fakeDirectOpener{
+				identity: agentproxy.DirectTransportIdentity{2}, omitActualIdentity: true,
+				actualIdentity: test.identity, actualAddressFingerprint: test.addressFingerprint,
+				stream: &helperRelayStream{order: &order, commit: tunnel.Committed},
+			}
+			forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: builder})
+			t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+			outcome := forwarder.Forward(t.Context(), directRequest(t, body), httptest.NewRecorder())
+			require.Equal(t, agentproxy.CodeDirectDisabled, outcome.Code)
+			require.Error(t, outcome.Err)
+			require.Zero(t, builder.calls.Load(), "identity validation must precede OpenAttemptStream")
+			require.Equal(t, int64(1), builder.releases.Load())
+			require.Empty(t, order)
+			require.Zero(t, body.opens.Load(), "identity validation must precede request body and COMMIT")
+			require.Zero(t, forwarder.ResourceCount(), "planned circuit permit must be released")
+		})
+	}
+}
+
+func TestDirectForwardCancellationAfterAcquireReleasesWithoutOpen(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	builder := &fakeDirectOpener{afterAcquire: cancel}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: builder})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	outcome := forwarder.Forward(ctx, directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.ErrorIs(t, outcome.Err, context.Canceled)
+	require.Zero(t, builder.calls.Load())
+	require.Equal(t, int64(1), builder.releases.Load())
+	require.Zero(t, forwarder.ResourceCount())
+}
+
+func TestDirectForwardOpenPanicReleasesReservationAndCircuitPermit(t *testing.T) {
+	builder := &fakeDirectOpener{panicOpen: true}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: builder})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	func() {
+		defer func() { require.Equal(t, "fake direct reservation open panic", recover()) }()
+		forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	}()
+	require.Equal(t, int64(1), builder.releases.Load())
+	require.Zero(t, forwarder.ResourceCount(), "panic must release the active circuit permit")
+}
+
+func TestDirectForwardCircuitOpensOnlyForCountingOpenFailures(t *testing.T) {
+	t.Run("one-shot classification keeps connect code and opens circuit", func(t *testing.T) {
+		opener := &fakeDirectOpener{err: &fakeOpenError{stage: "dial", code: "failed", counts: true, countOnce: true}}
+		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+			Transports: opener, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Minute,
+		})
+		t.Cleanup(func() { require.NoError(t, f.Close(context.Background())) })
+
+		failed := f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+		require.Equal(t, agentproxy.CodeDirectConnect, failed.Code)
+		blocked := f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+		require.Equal(t, agentproxy.CodeDirectCircuitOpen, blocked.Code)
+	})
+
+	t.Run("connection failures open the circuit", func(t *testing.T) {
+		opener := &fakeDirectOpener{err: &fakeOpenError{stage: "dial", code: "direct_connect", counts: true}}
+		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+			Transports: opener, CircuitFailureThreshold: 3, CircuitOpenDuration: time.Minute,
+		})
+		t.Cleanup(func() { require.NoError(t, f.Close(context.Background())) })
+		for range 3 {
+			require.Error(t, f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Err)
+		}
+		blocked := f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+		require.Equal(t, agentproxy.CodeDirectCircuitOpen, blocked.Code)
+		f.ResetCircuit("target-a", "fp-a")
+		require.NotEqual(t, agentproxy.CodeDirectCircuitOpen,
+			f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Code)
+	})
+
+	t.Run("capacity and invalid target never open the circuit", func(t *testing.T) {
+		opener := &fakeDirectOpener{err: &fakeOpenError{stage: "pool", code: "direct_session_capacity", counts: false}}
+		f := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+			Transports: opener, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Minute,
+		})
+		t.Cleanup(func() { require.NoError(t, f.Close(context.Background())) })
+		for range 3 {
+			require.Error(t, f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Err)
+		}
+		after := f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+		require.NotEqual(t, agentproxy.CodeDirectCircuitOpen, after.Code, "capacity rejection must not count as a circuit failure")
+	})
+}
+
+func TestDirectForwardPostOpenTransportFailuresOpenCircuit(t *testing.T) {
+	transportErr := errors.New("direct transport interrupted")
+	for _, test := range []struct {
+		name   string
+		stream func(*[]string) *helperRelayStream
+	}{
+		{name: "commit acknowledgement", stream: func(order *[]string) *helperRelayStream {
+			return &helperRelayStream{order: order, commit: tunnel.CommitUncertain, commitErr: transportErr}
+		}},
+		{name: "upload", stream: func(order *[]string) *helperRelayStream {
+			return &helperRelayStream{order: order, commit: tunnel.Committed, uploadErr: transportErr}
+		}},
+		{name: "response result", stream: func(order *[]string) *helperRelayStream {
+			return &helperRelayStream{order: order, commit: tunnel.Committed, copyErr: transportErr}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			order := make([]string, 0, 10)
+			opener := &fakeDirectOpener{stream: test.stream(&order)}
+			forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+				Transports: opener, CircuitFailureThreshold: 2, CircuitOpenDuration: time.Minute,
+			})
+			t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+			for range 2 {
+				outcome := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+				require.ErrorIs(t, outcome.Err, transportErr)
+			}
+			blocked := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+			require.Equal(t, agentproxy.CodeDirectCircuitOpen, blocked.Code)
+			require.Equal(t, int64(2), opener.calls.Load(), "an open circuit must not open another stream")
+		})
+	}
+}
+
+func TestDirectForwardPreservesBodyCloserDuringCancellation(t *testing.T) {
+	order := make([]string, 0, 5)
+	stream := &cancellationAwareAttemptStream{
+		helperRelayStream: helperRelayStream{order: &order, commit: tunnel.Committed},
+		sourceClosable:    make(chan bool, 1),
+	}
+	openerWithStream := directAttemptStreamOpenerFunc(func(
+		context.Context, agentproxy.DirectSessionTarget, agentproxy.AttemptStreamRequest,
+	) (agentproxy.AttemptStream, error) {
+		return stream, nil
+	})
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{Transports: openerWithStream})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	body := &blockingDirectReplayBody{reader: newBlockingDirectReadCloser()}
+	request := directRequest(t, &body.directReplayBody)
+	request.Body = body
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan agentproxy.AttemptTransportOutcome, 1)
+	go func() { done <- forwarder.Forward(ctx, request, httptest.NewRecorder()) }()
+
+	require.True(t, <-stream.sourceClosable, "Upload source must preserve the ReplayBody reader's Close method")
+	select {
+	case <-body.reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("body read did not start")
+	}
+	cancel()
+	select {
+	case outcome := <-done:
+		require.ErrorIs(t, outcome.Err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("Forward remained blocked after request cancellation")
+	}
+	select {
+	case <-body.reader.closed:
+	case <-time.After(time.Second):
+		t.Fatal("request body reader was not closed on cancellation")
+	}
+	require.Equal(t, []string{"commit", "upload", "close"}, order)
+}
+
+func TestDirectForwardHalfOpenBodyFailureDoesNotRecoverOrCount(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	transitions := make([]agentproxy.DirectCircuitTransition, 0, 4)
+	opener := &fakeDirectOpener{err: &fakeOpenError{stage: "dial", code: agentproxy.CodeDirectConnect, counts: true}}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: opener, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Second,
+		Now: func() time.Time { return now },
+		OnCircuitTransition: func(transition agentproxy.DirectCircuitTransition) {
+			transitions = append(transitions, transition)
+		},
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	require.Error(t, forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Err)
+	now = now.Add(time.Second)
+	order := make([]string, 0, 4)
+	opener.err = nil
+	opener.stream = &helperRelayStream{order: &order, commit: tunnel.PreCommit}
+	bodyErr := errors.New("local replay body unavailable")
+	for range 2 {
+		request := directRequest(t, &directReplayBody{openErr: bodyErr})
+		outcome := forwarder.Forward(t.Context(), request, httptest.NewRecorder())
+		require.ErrorIs(t, outcome.Err, bodyErr)
+		require.NotEqual(t, agentproxy.CodeDirectCircuitOpen, outcome.Code)
+	}
+	require.Equal(t, []agentproxy.DirectCircuitTransition{
+		{TargetAgentID: "target-a", State: "open"},
+		{TargetAgentID: "target-a", State: "half_open"},
+		{TargetAgentID: "target-a", State: "half_open"},
+	}, transitions, "a local body failure must neither recover nor re-open the half-open circuit")
+}
+
+func TestDirectForwardHalfOpenLocalIOFailureDoesNotRecoverOrCount(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body *directReplayBody
+		dst  func(error) http.ResponseWriter
+	}{
+		{
+			name: "request body read",
+			body: &directReplayBody{data: []byte("prefix"), readErr: errors.New("local request body read failed")},
+			dst:  func(error) http.ResponseWriter { return httptest.NewRecorder() },
+		},
+		{
+			name: "client response write",
+			body: &directReplayBody{},
+			dst: func(err error) http.ResponseWriter {
+				return &failingResponseWriter{err: err}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0)
+			transitions := make([]agentproxy.DirectCircuitTransition, 0, 4)
+			opener := &fakeDirectOpener{err: &fakeOpenError{stage: "dial", code: agentproxy.CodeDirectConnect, counts: true}}
+			forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+				Transports: opener, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Second,
+				Now: func() time.Time { return now },
+				OnCircuitTransition: func(transition agentproxy.DirectCircuitTransition) {
+					transitions = append(transitions, transition)
+				},
+			})
+			t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+			require.Error(t, forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Err)
+			now = now.Add(time.Second)
+			order := make([]string, 0, 8)
+			opener.err = nil
+			opener.stream = &helperRelayStream{order: &order, commit: tunnel.Committed}
+			localErr := test.body.readErr
+			if localErr == nil {
+				localErr = errors.New("local client response write failed")
+			}
+
+			for range 2 {
+				outcome := forwarder.Forward(t.Context(), directRequest(t, test.body), test.dst(localErr))
+				require.ErrorIs(t, outcome.Err, localErr)
+				require.NotEqual(t, agentproxy.CodeDirectCircuitOpen, outcome.Code)
+			}
+			require.Equal(t, []agentproxy.DirectCircuitTransition{
+				{TargetAgentID: "target-a", State: "open"},
+				{TargetAgentID: "target-a", State: "half_open"},
+				{TargetAgentID: "target-a", State: "half_open"},
+			}, transitions)
+		})
+	}
+}
+
+func TestDirectForwardSuccessfulHTTPResultRecoversHalfOpenCircuit(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	transitions := make([]agentproxy.DirectCircuitTransition, 0, 4)
+	opener := &fakeDirectOpener{err: &fakeOpenError{stage: "dial", code: agentproxy.CodeDirectConnect, counts: true}}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: opener, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Second,
+		Now: func() time.Time { return now },
+		OnCircuitTransition: func(transition agentproxy.DirectCircuitTransition) {
+			transitions = append(transitions, transition)
+		},
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	require.Error(t, forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Err)
+	now = now.Add(time.Second)
+	order := make([]string, 0, 8)
+	opener.err = nil
+	opener.stream = &helperRelayStream{
+		order: &order, commit: tunnel.Committed,
+		copyResult: attemptwire.AttemptProxyResult{Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true},
+	}
+	recovered := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.NoError(t, recovered.Err)
+	require.Equal(t, attemptwire.ResultProviderFailed, recovered.AttemptResult.Kind,
+		"a valid provider failure Result still proves the Direct transport is healthy")
+	require.NoError(t, forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Err)
+	require.Equal(t, []agentproxy.DirectCircuitTransition{
+		{TargetAgentID: "target-a", State: "open"},
+		{TargetAgentID: "target-a", State: "half_open"},
+		{TargetAgentID: "target-a", State: "closed"},
+	}, transitions)
+}
+
+func TestDirectForwardTargetInboundPolicyResetPreservesHalfOpenCircuit(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	transitions := make([]agentproxy.DirectCircuitTransition, 0, 4)
+	opener := &fakeDirectOpener{err: &fakeOpenError{stage: "dial", code: agentproxy.CodeDirectConnect, counts: true}}
+	forwarder := agentproxy.NewDirectForwarder(agentproxy.DirectForwarderOptions{
+		Transports: opener, CircuitFailureThreshold: 1, CircuitOpenDuration: time.Second,
+		Now: func() time.Time { return now },
+		OnCircuitTransition: func(transition agentproxy.DirectCircuitTransition) {
+			transitions = append(transitions, transition)
+		},
+	})
+	t.Cleanup(func() { require.NoError(t, forwarder.Close(context.Background())) })
+
+	failed := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+	require.Equal(t, agentproxy.CodeDirectConnect, failed.Code)
+	require.Equal(t, []agentproxy.DirectCircuitTransition{{TargetAgentID: "target-a", State: "open"}}, transitions)
+
+	now = now.Add(time.Second)
+	order := make([]string, 0, 3)
+	opener.err = nil
+	opener.stream = &helperRelayStream{
+		order: &order, commit: tunnel.PreCommit,
+		commitErr: policyResetError(consts.RouteErrorTargetDirectInboundDisabled),
+	}
+	for range 2 {
+		outcome := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+		require.Equal(t, tunnel.PreCommit, outcome.Commit)
+		require.Equal(t, consts.RouteErrorTargetDirectInboundDisabled, outcome.Code)
+	}
+
+	require.Equal(t, []agentproxy.DirectCircuitTransition{
+		{TargetAgentID: "target-a", State: "open"},
+		{TargetAgentID: "target-a", State: "half_open"},
+		{TargetAgentID: "target-a", State: "half_open"},
+	}, transitions, "policy RESET must release permits without recovering transport health")
+}
+
+func TestDirectForwardCommitUncertainDoesNotSignalFallback(t *testing.T) {
+	order := make([]string, 0, 5)
+	opener := &fakeDirectOpener{stream: &helperRelayStream{
+		order: &order, commit: tunnel.CommitUncertain, commitErr: errors.New("lost ack"),
+	}}
+	f := ownedDirectForTest(t, opener)
+
+	outcome := f.Forward(context.Background(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
+
+	require.Error(t, outcome.Err)
+	require.Equal(t, tunnel.CommitUncertain, outcome.Commit)
+}
+
+func TestDirectForwardRejectsNilOpenedReaderBeforeCommit(t *testing.T) {
+	order := make([]string, 0, 5)
+	opener := &fakeDirectOpener{stream: &helperRelayStream{order: &order, commit: tunnel.PreCommit}}
+	f := ownedDirectForTest(t, opener)
+	request := directRequest(t, &directReplayBody{})
+	request.Body = &nilReaderReplayBody{}
+
+	outcome := f.Forward(context.Background(), request, httptest.NewRecorder())
+
+	require.Error(t, outcome.Err)
+	require.Equal(t, tunnel.PreCommit, outcome.Commit)
+	require.NotContains(t, order, "commit", "body failure must precede commit")
+}
+
+func TestDirectForwardRejectsInvalidInputWithoutOpening(t *testing.T) {
+	opener := &fakeDirectOpener{stream: &helperRelayStream{commit: tunnel.Committed}}
+	f := ownedDirectForTest(t, opener)
+	request := directRequest(t, &directReplayBody{})
+	request.Attempt = attemptwire.AttemptProxyMeta{} // invalid
+
+	outcome := f.Forward(context.Background(), request, httptest.NewRecorder())
+
+	require.Error(t, outcome.Err)
+	require.Equal(t, tunnel.PreCommit, outcome.Commit)
+	require.Equal(t, agentproxy.CodeDirectInvalidInput, outcome.Code)
+	require.Zero(t, opener.calls.Load(), "invalid attempt must not open a stream")
+}
+
+type routeDirectStub func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome
+
+func (f routeDirectStub) Forward(ctx context.Context, req agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+	return f(ctx, req, dst)
+}
+
+func TestPrepareDirectTargetFreezesOneAddressSnapshot(t *testing.T) {
+	prepared, err := agentproxy.PrepareDirectTarget(agentproxy.DirectTargetSnapshot{
+		AgentID:       "target-a",
+		HTTPAddresses: `[{"url":"http://private.example:8139","tag":"private"},{"url":"https://public.example:8140","tag":"public"}]`,
+		AgentProxyURL: "http://target-proxy.example:3128", GlobalProxyURL: "http://global-proxy.example:3128",
+		AddressTag: "public", PreferredTag: "private",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "target-a", prepared.TargetAgentID)
+	require.Equal(t, "https://public.example:8140", prepared.WebSocketURL.String())
+	require.Equal(t, "http://target-proxy.example:3128", prepared.ProxyURL.String())
+	require.NotEmpty(t, prepared.AddressFingerprint)
+
+	_, err = agentproxy.PrepareDirectTarget(agentproxy.DirectTargetSnapshot{AgentID: "target-a", HTTPAddresses: `[{"url":"://bad","tag":"public"}]`, AddressTag: "public"})
+	require.Error(t, err)
+}
+
+func TestPrepareDirectTargetMalformedProxyDoesNotExposeSecrets(t *testing.T) {
+	_, err := agentproxy.PrepareDirectTarget(agentproxy.DirectTargetSnapshot{
+		AgentID:       "target-a",
+		HTTPAddresses: `[{"url":"https://target.example","tag":"public"}]`,
+		AddressTag:    "public",
+		AgentProxyURL: "http://proxy-user-secret:proxy-password-secret@proxy.example/%zz?token=proxy-query-secret",
+	})
+	require.Error(t, err)
+	for _, secret := range []string{"proxy-user-secret", "proxy-password-secret", "proxy-query-secret"} {
+		require.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestExecuteDirectTransportBuildsRequestForOneFrozenTarget(t *testing.T) {
+	var got agentproxy.DirectRequest
+	direct := routeDirectStub(func(_ context.Context, request agentproxy.DirectRequest, _ http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		got = request
+		return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed}
+	})
+	body := &directReplayBody{data: []byte("body")}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	meta := directAttemptMeta("/v1/responses")
+	prepared := frozenDirectTarget(t)
+
+	outcome := agentproxy.ExecuteDirectTransport(t.Context(), direct, agentproxy.DirectTransportRequest{
+		TargetAgentID: "target-a", RouteID: 4, RequestID: "request-a", Hop: 1, PreparedTarget: prepared,
+		Request: request, Body: body, Attempt: meta,
+	}, httptest.NewRecorder())
+
+	require.NoError(t, outcome.Err)
+	require.Equal(t, prepared, got.Target)
+	require.Equal(t, uint(4), got.RouteID)
+	require.Equal(t, "request-a", got.RequestID)
+	require.Same(t, request, got.Request)
+	require.Same(t, body, got.Body)
+	require.Equal(t, meta, got.Attempt)
+}
+
 type helperRelayLink struct {
-	request agentproxy.RelayRequest
+	request agentproxy.AttemptStreamRequest
 	stream  *helperRelayStream
 	order   *[]string
 	err     error
 }
 
-func (l *helperRelayLink) OpenStream(_ context.Context, request agentproxy.RelayRequest) (agentproxy.RelayStream, error) {
+func (l *helperRelayLink) OpenAttemptStream(_ context.Context, request agentproxy.AttemptStreamRequest) (agentproxy.AttemptStream, error) {
 	*l.order = append(*l.order, "open")
 	l.request = request
 	if l.err != nil {
@@ -566,13 +1048,15 @@ func (l *helperRelayLink) OpenStream(_ context.Context, request agentproxy.Relay
 }
 
 type helperRelayStream struct {
-	order     *[]string
-	commit    tunnel.CommitState
-	commitErr error
-	uploadErr error
-	copyErr   error
-	uploaded  string
-	cancelErr error
+	order      *[]string
+	commit     tunnel.CommitState
+	commitErr  error
+	uploadErr  error
+	copyErr    error
+	copyResult attemptwire.AttemptProxyResult
+	afterCopy  func()
+	uploaded   string
+	cancelErr  error
 }
 
 func TestExecuteRelayTransportRejectsMissingAttemptBeforeSideEffects(t *testing.T) {
@@ -602,17 +1086,29 @@ func (s *helperRelayStream) Commit(context.Context) error {
 
 func (s *helperRelayStream) Upload(_ context.Context, source io.Reader) error {
 	*s.order = append(*s.order, "upload")
-	body, _ := io.ReadAll(source)
+	body, err := io.ReadAll(source)
 	s.uploaded = string(body)
+	if err != nil {
+		return err
+	}
 	return s.uploadErr
 }
 
-func (s *helperRelayStream) CopyResponse(_ context.Context, dst http.ResponseWriter) error {
+func (s *helperRelayStream) CopyAttemptResponse(_ context.Context, dst http.ResponseWriter) (attemptwire.AttemptProxyResult, error) {
 	*s.order = append(*s.order, "copy")
 	dst.Header().Set("X-Provider", "ok")
 	dst.WriteHeader(http.StatusAccepted)
-	_, _ = dst.Write([]byte("response"))
-	return s.copyErr
+	result := s.copyResult
+	if result.Kind == "" {
+		result.Kind = attemptwire.ResultSucceeded
+	}
+	if _, err := dst.Write([]byte("response")); err != nil {
+		return result, err
+	}
+	if s.afterCopy != nil {
+		s.afterCopy()
+	}
+	return result, s.copyErr
 }
 
 func (s *helperRelayStream) CommitState() tunnel.CommitState { return s.commit }
@@ -630,7 +1126,6 @@ func TestExecuteRelayTransportPreservesAttemptRequestAndLifecycle(t *testing.T) 
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses?stream=true", nil)
 	request.Header.Set("Authorization", "Bearer original")
 	request.Header.Set(consts.HeaderXAgentForwardTicket, "forged")
-	request.Header.Set(attemptwire.HeaderMeta, "forged-meta")
 	meta := attemptwire.AttemptProxyMeta{
 		Attempt: attemptwire.BoundAttempt{
 			Channel:   attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7},
@@ -653,13 +1148,78 @@ func TestExecuteRelayTransportPreservesAttemptRequestAndLifecycle(t *testing.T) 
 	require.Equal(t, attemptwire.EndpointPath, link.request.Path)
 	require.Equal(t, uint8(1), link.request.Hop)
 	require.Zero(t, link.request.RouteID)
-	require.Equal(t, meta, *link.request.Attempt)
+	require.Equal(t, meta, link.request.Attempt)
 	require.Equal(t, "Bearer original", link.request.Header.Get("Authorization"))
 	require.Empty(t, link.request.Header.Get(consts.HeaderXAgentForwardTicket))
-	require.Empty(t, link.request.Header.Get(attemptwire.HeaderMeta))
 	require.Equal(t, "request-body", stream.uploaded)
 	require.Equal(t, http.StatusAccepted, recorder.Code)
 	require.Equal(t, "response", recorder.Body.String())
+}
+
+func TestExecuteRelayTransportPreservesAttemptResultOnInterruptedResponse(t *testing.T) {
+	order := make([]string, 0, 5)
+	interrupted := errors.New("result received but End was lost")
+	want := attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true, ProviderDispatched: true,
+		Dispatches: 2, PromptTokens: 17, CompletionTokens: 3,
+	}
+	stream := &helperRelayStream{
+		order: &order, commit: tunnel.Committed, copyErr: interrupted, copyResult: want,
+	}
+	link := &helperRelayLink{stream: stream, order: &order}
+	meta := directAttemptMeta("/v1/responses")
+
+	outcome := agentproxy.ExecuteRelayTransport(t.Context(), link, agentproxy.RelayTransportRequest{
+		TargetAgentID: "target-a", RequestID: "request-a",
+		Request: httptest.NewRequest(http.MethodPost, "/v1/responses", nil),
+		Body:    &directReplayBody{}, Attempt: &meta,
+	}, httptest.NewRecorder())
+
+	require.ErrorIs(t, outcome.Err, interrupted)
+	require.Equal(t, tunnel.Committed, outcome.Commit)
+	require.Equal(t, "response", outcome.Stage)
+	require.Equal(t, agentproxy.CodeRelayResponseInterrupted, outcome.Code)
+	require.True(t, outcome.ResponseStarted)
+	require.NotNil(t, outcome.AttemptResult)
+	require.Equal(t, want, *outcome.AttemptResult)
+}
+
+func TestExecuteRelayTransportTreatsCompletedResultAsSuccessWhenContextEndsInsideCopy(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cause error
+	}{
+		{name: "canceled", cause: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			want := attemptwire.AttemptProxyResult{
+				Kind: attemptwire.ResultSucceeded, ProviderResultKnown: true, ProviderDispatched: true,
+				Dispatches: 1, PromptTokens: 19, ResponseStarted: true,
+			}
+			order := make([]string, 0, 5)
+			stream := &helperRelayStream{
+				order: &order, commit: tunnel.Committed, copyResult: want,
+				afterCopy: func() { cancel(test.cause) },
+			}
+			link := &helperRelayLink{stream: stream, order: &order}
+			meta := directAttemptMeta("/v1/responses")
+
+			outcome := agentproxy.ExecuteRelayTransport(ctx, link, agentproxy.RelayTransportRequest{
+				TargetAgentID: "target-a", RequestID: "request-a",
+				Request: httptest.NewRequest(http.MethodPost, "/v1/responses", nil),
+				Body:    &directReplayBody{}, Attempt: &meta,
+			}, httptest.NewRecorder())
+
+			require.NoError(t, outcome.Err)
+			require.Equal(t, "response", outcome.Stage)
+			require.Empty(t, outcome.Code)
+			require.True(t, outcome.ResponseStarted)
+			require.NotNil(t, outcome.AttemptResult)
+			require.Equal(t, want, *outcome.AttemptResult)
+		})
+	}
 }
 
 func TestExecuteRelayTransportClassifiesPreCommitUncertainAndCancellation(t *testing.T) {

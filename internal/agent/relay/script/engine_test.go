@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -13,7 +14,7 @@ import (
 
 type stubProvider struct{ scripts []*Compiled }
 
-func (s stubProvider) MatchScripts(_ uint, _ string) []*Compiled { return s.scripts }
+func (s stubProvider) MatchScripts(_ MatchInput) []*Compiled { return s.scripts }
 
 func mustCompile(t testing.TB, name string, prio int, code string) *Compiled {
 	t.Helper()
@@ -27,7 +28,30 @@ func engineWith(timeout time.Duration, scripts ...*Compiled) *Engine {
 }
 
 func reqInput(body string) HookInput {
-	return HookInput{Hook: HookRequest, Model: "m", Body: []byte(body)}
+	return HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: []byte(body)}
+}
+
+type scopeProvider struct{ scripts []*Compiled }
+
+func (p scopeProvider) MatchScripts(input MatchInput) []*Compiled {
+	var matched []*Compiled
+	for _, sc := range p.scripts {
+		if MatchScope(sc.Scope, input) {
+			matched = append(matched, sc)
+		}
+	}
+	return matched
+}
+
+func TestRun_UsesMatchInputForScopeAndContextModel(t *testing.T) {
+	modelScript := mustCompile(t, "model", 0, `function onRequest(ctx){ ctx.body.model = ctx.model }`)
+	modelScript.Scope = models.ScriptScope{ModelNames: []string{"gpt-4o"}}
+	userScript := mustCompile(t, "user", 1, `function onRequest(ctx){ ctx.body.user = true }`)
+	userScript.Scope = models.ScriptScope{UserIDs: []uint{42}}
+	e := NewEngine(scopeProvider{scripts: []*Compiled{modelScript, userScript}}, zap.NewNop(), time.Second)
+
+	res := e.Run(HookInput{Hook: HookRequest, Match: MatchInput{Source: attemptproxy.SourceAdmin, ChannelID: 1, Model: "gpt-4o", UserID: 7}, Body: []byte(`{}`)})
+	assert.JSONEq(t, `{"model":"gpt-4o"}`, string(res.Body))
 }
 
 func TestRun_ModifiesBody(t *testing.T) {
@@ -67,7 +91,7 @@ func TestRun_TimeoutFailOpen(t *testing.T) {
 	start := time.Now()
 	res := e.Run(reqInput(`{"a":1}`))
 	assert.Less(t, time.Since(start), 2*time.Second)
-	assert.False(t, res.Changed)               // fail-open：原 body 透传
+	assert.False(t, res.Changed) // fail-open：原 body 透传
 	assert.JSONEq(t, `{"a":1}`, string(res.Body))
 }
 
@@ -131,14 +155,14 @@ func TestRun_TamperedParseIsolated(t *testing.T) {
 func TestRun_EmptyBodyFailOpen(t *testing.T) {
 	// 空 body：parse 会失败，应 fail-open 放行原 body 而不 panic
 	e := engineWith(time.Second, mustCompile(t, "empty", 0, `function onRequest(ctx){ ctx.body.x = 1 }`))
-	res := e.Run(HookInput{Hook: HookRequest, Model: "m", Body: []byte("")})
+	res := e.Run(HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: []byte("")})
 	assert.False(t, res.Changed)
 	assert.Equal(t, []byte(""), res.Body)
 }
 
 func TestRun_NilBodyFailOpen(t *testing.T) {
 	e := engineWith(time.Second, mustCompile(t, "nilbody", 0, `function onRequest(ctx){ ctx.body.x = 1 }`))
-	res := e.Run(HookInput{Hook: HookRequest, Model: "m", Body: nil})
+	res := e.Run(HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: nil})
 	assert.False(t, res.Changed)
 }
 
@@ -177,7 +201,7 @@ func TestRun_HeaderOnlySkipsBodyParse(t *testing.T) {
 	// body 是非法 JSON：只改 header 的脚本从不访问 ctx.body，不应触发 parse，header 照常生效。
 	e := engineWith(time.Second, mustCompile(t, "h", 0,
 		`function onRequest(ctx){ ctx.setHeader("X-Foo","bar") }`))
-	res := e.Run(HookInput{Hook: HookRequest, Model: "m", Body: []byte("not json at all")})
+	res := e.Run(HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: []byte("not json at all")})
 	assert.False(t, res.Rejected)
 	assert.False(t, res.Changed)
 	require.Len(t, res.HeaderOps, 1)
@@ -189,7 +213,7 @@ func TestRun_ReadingNonJSONBodyFailOpen(t *testing.T) {
 	// 对照：脚本读了非法 JSON body → getter parse 失败 → 整体 fail-open。
 	e := engineWith(time.Second, mustCompile(t, "r", 0,
 		`function onRequest(ctx){ ctx.setHeader("X-Foo","bar"); var x = ctx.body.k }`))
-	res := e.Run(HookInput{Hook: HookRequest, Model: "m", Body: []byte("not json")})
+	res := e.Run(HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: []byte("not json")})
 	assert.False(t, res.Changed)
 	assert.Empty(t, res.HeaderOps) // fail-open 丢弃该脚本全部改动（含 header）
 	assert.Equal(t, []byte("not json"), res.Body)
@@ -199,7 +223,7 @@ func TestRun_SetBodyOnNonJSONOriginal(t *testing.T) {
 	// 原 body 非法 JSON，脚本整体替换 ctx.body → 视作已改，发出新 body。
 	e := engineWith(time.Second, mustCompile(t, "s", 0,
 		`function onRequest(ctx){ ctx.body = { ok: true } }`))
-	res := e.Run(HookInput{Hook: HookRequest, Model: "m", Body: []byte("garbage")})
+	res := e.Run(HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: []byte("garbage")})
 	assert.True(t, res.Changed)
 	assert.JSONEq(t, `{"ok":true}`, string(res.Body))
 }
@@ -236,7 +260,7 @@ func TestRun_SelfHealsAfterError(t *testing.T) {
 	// 制造一次 fail-open（读非法 JSON body 抛错 → 丢弃 runtime），下一次正常请求仍成功。
 	e := engineWith(time.Second, mustCompile(t, "s", 0,
 		`function onRequest(ctx){ ctx.body.x = (ctx.body.x||0) + 1 }`))
-	bad := e.Run(HookInput{Hook: HookRequest, Model: "m", Body: []byte("nope")})
+	bad := e.Run(HookInput{Hook: HookRequest, Match: MatchInput{Model: "m"}, Body: []byte("nope")})
 	assert.False(t, bad.Changed)
 	good := e.Run(reqInput(`{}`))
 	assert.JSONEq(t, `{"x":1}`, string(good.Body))

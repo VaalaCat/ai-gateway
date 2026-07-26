@@ -145,7 +145,7 @@ func pickTestModel(requested string, ch models.Channel) string {
 }
 
 func getOrCreateTestToken(daoCtx dao.Context, bus app.EventBus) (*models.Token, error) {
-	db := daoCtx.GetDB()
+	db := daoCtx.GetCoreDB()
 	m := dao.NewAdminMutation(daoCtx)
 
 	var existing models.Token

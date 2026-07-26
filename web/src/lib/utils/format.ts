@@ -26,6 +26,21 @@ export function formatDuration(ms: number): string {
   return `${h}h ${m}m`;
 }
 
+/**
+ * "avg / percentile" 速度列渲染;任一值缺失/为 0(该维度尚无 stream 累计数据)显示 "—"。
+ * monitoring overview 与 dashboard 共用同一份实现(Task 16 收敛去重);0 通常代表
+ * "本窗口无 stream 请求",视同缺失更清晰。
+ */
+export function formatAvgPercentile(
+  avg: number | undefined,
+  percentile: number | undefined,
+  fmt: (v: number) => string,
+): string {
+  const avgStr = avg ? fmt(avg) : "—";
+  const percentileStr = percentile ? fmt(percentile) : "—";
+  return `${avgStr} / ${percentileStr}`;
+}
+
 /** 1 美元 = 100000 quota 单位(后端 cost 字段以此为单位) */
 export const UNIT_QUOTA_SCALE = 100_000;
 

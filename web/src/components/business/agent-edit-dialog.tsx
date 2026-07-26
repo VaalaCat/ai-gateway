@@ -10,6 +10,7 @@ import {
   AgentRelayConfigFields,
   validateRelayURI,
 } from "@/components/business/agent-relay-config-fields";
+import { AgentTransportPolicyFields } from "@/components/business/agent-transport-policy-fields";
 import { StatusSelect } from "@/components/business/status-select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -23,20 +24,16 @@ import {
 } from "@/components/ui/dialog";
 import {
   Field,
-  FieldDescription,
   FieldGroup,
-  FieldLegend,
-  FieldSet,
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useAgentDetail, useUpdateAgent } from "@/lib/api/agents";
 import { formatErrorToast } from "@/lib/api/error-toast";
-import type { AgentDetail, AgentPatch, PeerRouteMode, RelayMode } from "@/lib/types";
+import type { AgentDetail, AgentPatch, AgentTransportPolicy, RelayMode } from "@/lib/types";
 
-interface EditForm {
+interface EditForm extends AgentTransportPolicy {
   name: string;
   status: string;
   tags: string;
@@ -44,7 +41,6 @@ interface EditForm {
   proxy_url: string;
   relay_mode: RelayMode;
   relay_uri: string;
-  peer_route_mode: PeerRouteMode;
 }
 
 function formFromDetail(detail: AgentDetail): EditForm {
@@ -56,7 +52,10 @@ function formFromDetail(detail: AgentDetail): EditForm {
     proxy_url: detail.proxy_url,
     relay_mode: detail.relay_mode,
     relay_uri: detail.relay_uri,
-    peer_route_mode: detail.peer_route_mode,
+    direct_inbound_enabled: detail.direct_inbound_enabled,
+    direct_outbound_enabled: detail.direct_outbound_enabled,
+    relay_inbound_enabled: detail.relay_inbound_enabled,
+    relay_outbound_enabled: detail.relay_outbound_enabled,
   };
 }
 
@@ -70,7 +69,10 @@ function buildAgentPatch(detail: AgentDetail, form: EditForm): AgentPatch {
     proxy_url: form.proxy_url,
     relay_mode: form.relay_mode,
     relay_uri: form.relay_uri,
-    peer_route_mode: form.peer_route_mode,
+    direct_inbound_enabled: form.direct_inbound_enabled,
+    direct_outbound_enabled: form.direct_outbound_enabled,
+    relay_inbound_enabled: form.relay_inbound_enabled,
+    relay_outbound_enabled: form.relay_outbound_enabled,
   };
   const baseline = {
     name: detail.name,
@@ -80,7 +82,10 @@ function buildAgentPatch(detail: AgentDetail, form: EditForm): AgentPatch {
     proxy_url: detail.proxy_url,
     relay_mode: detail.relay_mode,
     relay_uri: detail.relay_uri,
-    peer_route_mode: detail.peer_route_mode,
+    direct_inbound_enabled: detail.direct_inbound_enabled,
+    direct_outbound_enabled: detail.direct_outbound_enabled,
+    relay_inbound_enabled: detail.relay_inbound_enabled,
+    relay_outbound_enabled: detail.relay_outbound_enabled,
   };
   for (const key of Object.keys(values) as Array<keyof typeof values>) {
     if (values[key] !== baseline[key]) {
@@ -212,24 +217,11 @@ function LoadedAgentEditor({ agentId, initialDetail, refreshError, onRetry, onCl
           onModeChange={(relay_mode) => setForm({ ...form, relay_mode })}
           onURIChange={(relay_uri) => setForm({ ...form, relay_uri })}
         />
-        <FieldSet>
-          <FieldLegend variant="label">{t("peerRouteMode")}</FieldLegend>
-          <FieldDescription>{t("peerRouteModeDescription")}</FieldDescription>
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            value={form.peer_route_mode}
-            disabled={update.isPending}
-            onValueChange={(value) => {
-              if (value === "direct_first" || value === "relay_only") {
-                setForm({ ...form, peer_route_mode: value });
-              }
-            }}
-          >
-            <ToggleGroupItem value="direct_first">{t("peerRouteDirectFirst")}</ToggleGroupItem>
-            <ToggleGroupItem value="relay_only">{t("peerRouteRelayOnly")}</ToggleGroupItem>
-          </ToggleGroup>
-        </FieldSet>
+        <AgentTransportPolicyFields
+          value={form}
+          disabled={update.isPending}
+          onChange={(transportPolicy) => setForm({ ...form, ...transportPolicy })}
+        />
       </FieldGroup>
       {submitError ? (
         <Alert variant="destructive" role="alert"><AlertDescription>{submitError}</AlertDescription></Alert>

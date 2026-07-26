@@ -5,12 +5,14 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 )
 
 const (
-	ProtocolVersion   uint8 = 1
+	ProtocolVersion   uint8 = 2
 	HeaderSize              = 28
-	MaxV1PayloadBytes       = 64 * 1024
+	MaxV2PayloadBytes       = 64 * 1024
 )
 
 type StreamID [16]byte
@@ -26,6 +28,7 @@ const (
 	FrameRequestEnd
 	FrameHeaders
 	FrameResponseData
+	FrameAttemptResult
 	FrameEnd
 	FrameCancel
 	FrameReset
@@ -67,7 +70,7 @@ func Encode(frame Frame, limits Limits) ([]byte, error) {
 	if err := validateFrameFields(frame.Version, frame.Type, frame.Flags); err != nil {
 		return nil, err
 	}
-	limit, err := payloadLimit(frame.Type, limits)
+	limit, err := FramePayloadLimit(frame.Type, limits)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +108,7 @@ func Decode(message []byte, limits Limits) (Frame, error) {
 	if uint64(payloadBytes) != uint64(len(message)-HeaderSize) {
 		return Frame{}, ErrPayloadLengthMismatch
 	}
-	limit, err := payloadLimit(frameType, limits)
+	limit, err := FramePayloadLimit(frameType, limits)
 	if err != nil {
 		return Frame{}, err
 	}
@@ -147,7 +150,8 @@ func validateFrameFields(version uint8, frameType Type, flags uint16) error {
 	return nil
 }
 
-func payloadLimit(frameType Type, limits Limits) (int64, error) {
+// FramePayloadLimit returns the negotiated payload ceiling for one frame type.
+func FramePayloadLimit(frameType Type, limits Limits) (int64, error) {
 	limit := limits.MaxMetadataBytes
 	if frameType == FrameRequestData || frameType == FrameResponseData {
 		limit = limits.MaxDataBytes
@@ -155,8 +159,12 @@ func payloadLimit(frameType Type, limits Limits) (int64, error) {
 	if limit <= 0 {
 		return 0, ErrInvalidLimits
 	}
-	if limit > MaxV1PayloadBytes {
-		limit = MaxV1PayloadBytes
+	if limit > MaxV2PayloadBytes {
+		limit = MaxV2PayloadBytes
+	}
+	// behavior change: Result obeys the negotiated metadata ceiling as well as its wire hard cap.
+	if frameType == FrameAttemptResult && limit > attemptwire.MaxResultWireBytes {
+		limit = attemptwire.MaxResultWireBytes
 	}
 	return limit, nil
 }

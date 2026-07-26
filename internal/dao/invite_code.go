@@ -30,18 +30,18 @@ type adminInviteCodeMutation struct{ ctx *baseContext }
 
 func (q *adminInviteCodeQuery) GetByID(id uint) (*models.InviteCode, error) {
 	var ic models.InviteCode
-	err := q.ctx.GetDB().First(&ic, id).Error
+	err := q.ctx.GetCoreDB().First(&ic, id).Error
 	return &ic, err
 }
 
 func (q *adminInviteCodeQuery) GetByCode(code string) (*models.InviteCode, error) {
 	var ic models.InviteCode
-	err := q.ctx.GetDB().Where("code = ?", code).First(&ic).Error
+	err := q.ctx.GetCoreDB().Where("code = ?", code).First(&ic).Error
 	return &ic, err
 }
 
 func (q *adminInviteCodeQuery) ListAll(opts ListOptions, filter InviteCodeListFilter) ([]models.InviteCode, int64, error) {
-	db := q.ctx.GetDB().Model(&models.InviteCode{})
+	db := q.ctx.GetCoreDB().Model(&models.InviteCode{})
 	if filter.CreatorID != nil {
 		db = db.Where("creator_id = ?", *filter.CreatorID)
 	}
@@ -59,23 +59,23 @@ func (q *adminInviteCodeQuery) ListAll(opts ListOptions, filter InviteCodeListFi
 
 func (q *adminInviteCodeQuery) CountActiveByCreator(creatorID uint, now int64) (int64, error) {
 	var total int64
-	err := q.ctx.GetDB().Model(&models.InviteCode{}).
+	err := q.ctx.GetCoreDB().Model(&models.InviteCode{}).
 		Where("creator_id = ? AND used_count < max_uses AND (expires_at = 0 OR expires_at > ?)", creatorID, now).
 		Count(&total).Error
 	return total, err
 }
 
 func (m *adminInviteCodeMutation) Create(code *models.InviteCode) error {
-	return m.ctx.GetDB().Create(code).Error
+	return m.ctx.GetCoreDB().Create(code).Error
 }
 
 func (m *adminInviteCodeMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.InviteCode{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.InviteCode{}, id).Error
 }
 
 func (m *adminInviteCodeMutation) Redeem(code string, now int64) (*models.InviteCode, error) {
 	var ic models.InviteCode
-	err := m.ctx.GetDB().Transaction(func(tx *gorm.DB) error {
+	err := m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.InviteCode{}).
 			Where("code = ? AND used_count < max_uses AND (expires_at = 0 OR expires_at > ?)", code, now).
 			Update("used_count", gorm.Expr("used_count + 1"))
@@ -94,5 +94,5 @@ func (m *adminInviteCodeMutation) Redeem(code string, now int64) (*models.Invite
 }
 
 func (m *adminInviteCodeMutation) RecordRedemption(r *models.InviteRedemption) error {
-	return m.ctx.GetDB().Create(r).Error
+	return m.ctx.GetCoreDB().Create(r).Error
 }

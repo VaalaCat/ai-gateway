@@ -21,18 +21,18 @@ type adminModelConfigMutation struct{ ctx *baseContext }
 
 func (q *adminModelConfigQuery) GetByID(id uint) (*models.ModelConfig, error) {
 	var config models.ModelConfig
-	err := q.ctx.GetDB().First(&config, id).Error
+	err := q.ctx.GetCoreDB().First(&config, id).Error
 	return &config, err
 }
 
 func (q *adminModelConfigQuery) GetByModelName(name string) (*models.ModelConfig, error) {
 	var config models.ModelConfig
-	err := q.ctx.GetDB().Where("model_name = ?", name).First(&config).Error
+	err := q.ctx.GetCoreDB().Where("model_name = ?", name).First(&config).Error
 	return &config, err
 }
 
 func (q *adminModelConfigQuery) List(opts ListOptions, filter ModelConfigListFilter) ([]models.ModelConfig, int64, error) {
-	db := q.ctx.GetDB().Model(&models.ModelConfig{})
+	db := q.ctx.GetCoreDB().Model(&models.ModelConfig{})
 	if filter.Search != "" {
 		like := "%" + filter.Search + "%"
 		db = db.Where("model_name LIKE ?", like)
@@ -54,22 +54,22 @@ func (q *adminModelConfigQuery) List(opts ListOptions, filter ModelConfigListFil
 
 func (q *adminModelConfigQuery) ListAll() ([]models.ModelConfig, error) {
 	var configs []models.ModelConfig
-	err := q.ctx.GetDB().Find(&configs).Error
+	err := q.ctx.GetCoreDB().Find(&configs).Error
 	return configs, err
 }
 
 func (m *adminModelConfigMutation) Create(config *models.ModelConfig) error {
-	return m.ctx.GetDB().Create(config).Error
+	return m.ctx.GetCoreDB().Create(config).Error
 }
 
 func (m *adminModelConfigMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetDB().Model(&models.ModelConfig{}).Where("id = ?", id).Updates(updates).Error
+	return m.ctx.GetCoreDB().Model(&models.ModelConfig{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (m *adminModelConfigMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.ModelConfig{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.ModelConfig{}, id).Error
 }
 
 func (m *adminModelConfigMutation) DeleteByModelName(name string) error {
-	return m.ctx.GetDB().Where("model_name = ?", name).Delete(&models.ModelConfig{}).Error
+	return m.ctx.GetCoreDB().Where("model_name = ?", name).Delete(&models.ModelConfig{}).Error
 }

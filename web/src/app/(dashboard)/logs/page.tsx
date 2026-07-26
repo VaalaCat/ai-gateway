@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef, Row } from "@tanstack/react-table";
-import { ChevronRight, KeyRound, RefreshCw } from "lucide-react";
+import { ChevronRight, CircleAlert, KeyRound, RefreshCw } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
@@ -13,6 +13,7 @@ import { usePaginationState } from "@/components/data-table/use-pagination-state
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Dialog,
   DialogContent,
@@ -42,6 +43,7 @@ import { KpiGrid } from "@/components/business/kpi-grid";
 import { formatDuration, formatFactor, formatMoneyCompact } from "@/lib/utils/format";
 import { useLogs } from "@/lib/api/logs";
 import { useLogsInsights } from "@/lib/api/logs-insights";
+import { ApiError } from "@/lib/api/client";
 import { useChannels } from "@/lib/api/channels";
 import { useBYOKChannels } from "@/lib/api/byok-channels";
 import { useAuth } from "@/lib/auth";
@@ -54,7 +56,6 @@ const defaultColumnVisibility = {
   user_id: false,
   upstream_model: false,
   token_name: false,
-  first_response_ms: false,
   inbound_protocol: false,
   outbound_protocol: false,
   is_stream: false,
@@ -94,12 +95,13 @@ function LogsPageContent() {
 
   const filterSpec = useMemo(() => ({
     time: { kind: "time", defaultDays: 7, maxHourDays: 7 },
-    user_id: { kind: "picker", entity: "user", visible: (ctx: { isAdmin: boolean }) => ctx.isAdmin },
-    token_id: { kind: "picker", entity: "token" },
-    channel_id: { kind: "picker", entity: "channel", visible: (ctx: { isAdmin: boolean }) => ctx.isAdmin },
+    user_id: { kind: "picker", entity: "user", advanced: true, visible: (ctx: { isAdmin: boolean }) => ctx.isAdmin },
+    token_id: { kind: "picker", entity: "token", advanced: true },
+    channel_id: { kind: "picker", entity: "channel", advanced: true, visible: (ctx: { isAdmin: boolean }) => ctx.isAdmin },
     private_channel_id: {
       kind: "picker",
       entity: "byok-channel",
+      advanced: true,
       visible: (ctx: { isAdmin: boolean; hasOwnBYOK?: unknown }) => ctx.isAdmin || Boolean(ctx.hasOwnBYOK),
     },
     model_name: { kind: "picker", entity: "model" },
@@ -131,7 +133,7 @@ function LogsPageContent() {
     },
   );
 
-  const { data, isLoading, isFetching, refetch } = useLogs(
+  const { data, error, isError, isLoading, isFetching, refetch } = useLogs(
     {
       page,
       page_size: pageSize,
@@ -151,6 +153,12 @@ function LogsPageContent() {
   const logs = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
+  const loadError = isError
+    ? error
+    : insights.isError
+      ? insights.error
+      : null;
+  const logDatabaseUnavailable = loadError instanceof ApiError && loadError.status === 503;
 
   // 陈旧书签(?page=99 但只有 14 页)自动回退到最后一页,避免空表格死角。
   // total===0 不回退(空结果集合法停在第 1/1 页);pageCount 恒 >=1,回退后 page<=pageCount,不会再触发,无死循环。
@@ -404,6 +412,19 @@ function LogsPageContent() {
         cell: ({ row }) => <DurationCell ms={row.original.first_response_ms} />,
       },
       {
+        id: "tps",
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={t("tps")} />
+        ),
+        cell: ({ row }) => {
+          const gen = row.original.duration - row.original.first_response_ms;
+          const tps = row.original.is_stream && gen > 0 && row.original.completion_tokens > 0
+            ? (row.original.completion_tokens * 1000 / gen)
+            : null;
+          return <span className="tabular-nums">{tps === null ? "—" : tps.toFixed(1)}</span>;
+        },
+      },
+      {
         accessorKey: "inbound_protocol",
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={t("inboundProtocol")} />
@@ -533,8 +554,28 @@ function LogsPageContent() {
         <p className="text-muted-foreground mt-1">{t("description")}</p>
       </div>
 
+      {loadError ? (
+        <Alert variant="destructive" role="alert">
+          <CircleAlert />
+          <AlertTitle>{t(logDatabaseUnavailable ? "logDatabaseUnavailable" : "loadFailed")}</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>{t(logDatabaseUnavailable ? "logDatabaseUnavailableDescription" : "loadFailedDescription")}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isFetching || insights.isFetching}
+              onClick={() => void Promise.all([refetch(), insights.refetch()])}
+            >
+              <RefreshCw className={isFetching || insights.isFetching ? "animate-spin" : undefined} />
+              {t("retry")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
       {/* Row 1: 5 KpiGrid */}
-      {(() => {
+      {!loadError && (() => {
         const total = insights.data?.totals.total ?? 0;
         const failed = insights.data?.totals.failed ?? 0;
         const failedPct = total > 0 ? (failed / total) * 100 : 0;
@@ -582,7 +623,7 @@ function LogsPageContent() {
         );
       })()}
 
-      <DataTable
+      {!loadError && <DataTable
         columns={columns}
         data={logs}
         loading={isLoading}
@@ -601,6 +642,7 @@ function LogsPageContent() {
             value={filterValues}
             onChange={setFilterValues}
             context={{ hasOwnBYOK }}
+            filtersOnOwnRow
             secondaryContent={
               <Select
                 value={autoRefreshMs === null ? "off" : String(autoRefreshMs)}
@@ -627,7 +669,7 @@ function LogsPageContent() {
             ]}
           />
         }
-      />
+      />}
 
       <Dialog open={!!rawLog} onOpenChange={(open) => { if (!open) setRawLog(null); }}>
         <DialogContent className="sm:max-w-3xl">

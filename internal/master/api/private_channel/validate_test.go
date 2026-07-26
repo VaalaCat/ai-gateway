@@ -8,18 +8,10 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
-
-// stubApp satisfies app.Application by embedding the interface and overriding only GetDB.
-// Calls to any other method will panic — validators only use GetDB so those panics never fire.
-type stubApp struct {
-	app.Application
-	db *gorm.DB
-}
-
-func (s *stubApp) GetDB() *gorm.DB { return s.db }
 
 func newValidatorTestCtx(t *testing.T, userID, groupID uint) *app.Context {
 	t.Helper()
@@ -36,10 +28,15 @@ func newValidatorTestCtx(t *testing.T, userID, groupID uint) *app.Context {
 		t.Fatalf("seed default group: %v", err)
 	}
 	// Seed user so group membership exists
-	db.Create(&models.User{ID: userID, GroupID: groupID, Username: "testuser"})
+	require.NoError(t, db.Create(&models.User{ID: userID, GroupID: groupID, Username: "testuser"}).Error)
+
+	application := app.NewApplication()
+	application.SetCoreDB(db)
+	application.SetLogDB(db)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutLegacySingle)
 
 	return &app.Context{
-		App:          &stubApp{db: db},
+		App:          application,
 		UserInfo:     &app.UserInfo{UserID: userID, GroupID: groupID},
 		OwnerContext: t.Context(),
 	}
@@ -66,7 +63,7 @@ func TestValidateBaseURLAllowlist_SystemMatch(t *testing.T) {
 
 func TestValidateBaseURLAllowlist_AdminMatch(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: `["https://my.corp.com/llm"]`})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: `["https://my.corp.com/llm"]`}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"base_url": "https://my.corp.com/llm/v1"})
 	if err := validateBaseURLAllowlistCtx(c); err != nil {
 		t.Fatalf("admin allowlist should match: %v", err)
@@ -91,7 +88,7 @@ func TestValidateBaseURLAllowlist_EmptyPass(t *testing.T) {
 
 func TestValidateBaseURLAllowlist_CorruptSettingFallsBackToSystem(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: "not-json"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: "not-json"}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"base_url": "https://api.openai.com/v1"})
 	if err := validateBaseURLAllowlistCtx(c); err != nil {
 		t.Fatalf("system prefix still works when admin allowlist is corrupt: %v", err)
@@ -148,7 +145,7 @@ func TestValidateBaseURLAllowlist_PathSegmentPrefix(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			appCtx := newValidatorTestCtx(t, 1, 1)
-			appCtx.App.GetDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: `["https://api.example.com/v1"]`})
+			require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: `["https://api.example.com/v1"]`}).Error)
 			ctx := newCreateCtx(appCtx, 1, 1, map[string]any{"base_url": c.url})
 			err := validateBaseURLAllowlistCtx(ctx)
 			if (err != nil) != c.wantErr {
@@ -161,7 +158,7 @@ func TestValidateBaseURLAllowlist_PathSegmentPrefix(t *testing.T) {
 func TestValidateBaseURLAllowlist_HostMustMatchIncludingPort(t *testing.T) {
 	// Allowlist with explicit port — channel must match it.
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: `["https://corp.example.com:8443/llm"]`})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_base_url_allowlist", Value: `["https://corp.example.com:8443/llm"]`}).Error)
 
 	// Exact host:port matches.
 	ok := newCreateCtx(appCtx, 1, 1, map[string]any{"base_url": "https://corp.example.com:8443/llm/v1"})
@@ -203,7 +200,7 @@ func TestValidateBaseURLAllowlist_EmptyAllowedOnCreate(t *testing.T) {
 
 func TestValidateModelsSubsetOfModelConfigs_AllPresent(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.ModelConfig{ModelName: "gpt-4o"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"models": []string{"gpt-4o"}})
 	if err := validateModelsSubsetOfModelConfigsCtx(c); err != nil {
 		t.Fatal(err)
@@ -212,7 +209,7 @@ func TestValidateModelsSubsetOfModelConfigs_AllPresent(t *testing.T) {
 
 func TestValidateModelsSubsetOfModelConfigs_Rejects(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.ModelConfig{ModelName: "gpt-4o"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"models": []string{"gpt-99"}})
 	if err := validateModelsSubsetOfModelConfigsCtx(c); err == nil {
 		t.Fatal("unknown model should reject")
@@ -221,10 +218,10 @@ func TestValidateModelsSubsetOfModelConfigs_Rejects(t *testing.T) {
 
 func TestValidateUserUnderChannelLimit_Overflow(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.Setting{Key: "byok_max_channels_per_user", Value: "2"})
-	db := appCtx.App.GetDB()
-	db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "a", Status: 1})
-	db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "b", Status: 1})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_max_channels_per_user", Value: "2"}).Error)
+	db := appCtx.App.GetCoreDB()
+	require.NoError(t, db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "a", Status: 1}).Error)
+	require.NoError(t, db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "b", Status: 1}).Error)
 
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	if err := validateUserUnderChannelLimitCtx(c); err == nil {
@@ -234,7 +231,7 @@ func TestValidateUserUnderChannelLimit_Overflow(t *testing.T) {
 
 func TestValidateNameUniquePerOwner_Conflict(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "dup", Status: 1})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "dup", Status: 1}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"name": "dup"})
 	if err := validateNameUniquenessCtx(c); err == nil {
 		t.Fatal("duplicate name should conflict")
@@ -243,7 +240,7 @@ func TestValidateNameUniquePerOwner_Conflict(t *testing.T) {
 
 func TestValidateBYOKEnabledForUser_GlobalOff(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.Setting{Key: "byok_enabled", Value: "false"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_enabled", Value: "false"}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	if err := validateBYOKEnabledForUserCtx(c); err == nil {
 		t.Fatal("global off should reject")
@@ -252,9 +249,9 @@ func TestValidateBYOKEnabledForUser_GlobalOff(t *testing.T) {
 
 func TestValidateBYOKEnabledForUser_GroupOverrideOff(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
+	db := appCtx.App.GetCoreDB()
 	f := false
-	db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_enabled", &f)
+	require.NoError(t, db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_enabled", &f).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	if err := validateBYOKEnabledForUserCtx(c); err == nil {
 		t.Fatal("group override off should reject")
@@ -273,7 +270,7 @@ func TestValidateModelMappingTargets_Empty(t *testing.T) {
 
 func TestValidateModelMappingTargets_KeyMissing(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.ModelConfig{ModelName: "gpt-4o"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"model_mapping": map[string]string{"unknown": "gpt-4o"}})
 	if err := validateModelMappingTargetsCtx(c); err == nil {
 		t.Fatal("mapping key not in ModelConfig should reject")
@@ -285,7 +282,7 @@ func TestValidateModelMappingTargets_KeyMissing(t *testing.T) {
 // (旧: value も ModelConfig 必須だったが、BYOK 対応で緩和。intentional behavior change)
 func TestValidateModelMappingTargets_ValueMissing(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.ModelConfig{ModelName: "gpt-4o"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"model_mapping": map[string]string{"gpt-4o": "unknown"}})
 	// target (value) は任意文字列を許容するため、エラーにならない。
 	if err := validateModelMappingTargetsCtx(c); err != nil {
@@ -295,9 +292,9 @@ func TestValidateModelMappingTargets_ValueMissing(t *testing.T) {
 
 func TestValidateModelMappingTargets_BothPresent(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o"})
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o-mini"})
+	db := appCtx.App.GetCoreDB()
+	require.NoError(t, db.Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
+	require.NoError(t, db.Create(&models.ModelConfig{ModelName: "gpt-4o-mini"}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"model_mapping": map[string]string{"gpt-4o-mini": "gpt-4o"}})
 	if err := validateModelMappingTargetsCtx(c); err != nil {
 		t.Fatalf("both key and value registered should pass: %v", err)
@@ -317,7 +314,7 @@ func TestValidateUserUnderChannelLimit_BelowLimit(t *testing.T) {
 
 func TestValidateNameUniquePerOwner_UniqueName(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "existing", Status: 1})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "existing", Status: 1}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"name": "fresh-name"})
 	if err := validateNameUniquenessCtx(c); err != nil {
 		t.Fatalf("unique name should pass: %v", err)
@@ -326,7 +323,7 @@ func TestValidateNameUniquePerOwner_UniqueName(t *testing.T) {
 
 func TestValidateNameUniquePerOwner_DifferentOwner(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1) // current user is owner 1
-	appCtx.App.GetDB().Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 99, Name: "shared-name", Status: 1})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 99, Name: "shared-name", Status: 1}).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{"name": "shared-name"})
 	// Different owner has the name — current owner can reuse
 	if err := validateNameUniquenessCtx(c); err != nil {
@@ -345,9 +342,9 @@ func TestValidateBYOKEnabledForUser_DefaultPass(t *testing.T) {
 
 func TestValidateBYOKEnabledForUser_GroupOverrideOn(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
+	db := appCtx.App.GetCoreDB()
 	tr := true
-	db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_enabled", &tr)
+	require.NoError(t, db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_enabled", &tr).Error)
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	if err := validateBYOKEnabledForUserCtx(c); err != nil {
 		t.Fatalf("group override on should pass: %v", err)
@@ -358,8 +355,8 @@ func TestValidateBYOKEnabledForUser_GroupOverrideOn(t *testing.T) {
 
 func TestRunValidators_CreatePath_RunsAll(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o"})
+	db := appCtx.App.GetCoreDB()
+	require.NoError(t, db.Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
 
 	q := dao.NewAdminQuery(dao.NewContext(appCtx.App))
 	c := ValidatorCtx{
@@ -387,8 +384,8 @@ func TestRunValidators_CreatePath_RunsAll(t *testing.T) {
 
 func TestRunValidators_PatchPath_SkipsCleanFields(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o"})
+	db := appCtx.App.GetCoreDB()
+	require.NoError(t, db.Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
 
 	q := dao.NewAdminQuery(dao.NewContext(appCtx.App))
 	// Patch only `weight` — even though base_url in Req is disallowed, base_url validator
@@ -411,8 +408,8 @@ func TestRunValidators_PatchPath_SkipsCleanFields(t *testing.T) {
 
 func TestRunValidators_PatchPath_RunsDirtyFields(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o"})
+	db := appCtx.App.GetCoreDB()
+	require.NoError(t, db.Create(&models.ModelConfig{ModelName: "gpt-4o"}).Error)
 
 	q := dao.NewAdminQuery(dao.NewContext(appCtx.App))
 	// Patch model_mapping with an unregistered source (key) — should reject.
@@ -435,7 +432,7 @@ func TestRunValidators_PatchPath_RunsDirtyFields(t *testing.T) {
 func TestRunValidators_AlwaysRunsBYOKEnabledCheck(t *testing.T) {
 	appCtx := newValidatorTestCtx(t, 1, 1)
 	// Globally disable BYOK.
-	appCtx.App.GetDB().Create(&models.Setting{Key: "byok_enabled", Value: "false"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_enabled", Value: "false"}).Error)
 
 	q := dao.NewAdminQuery(dao.NewContext(appCtx.App))
 	// Patch a field unrelated to BYOK toggle — runner must STILL reject.
@@ -474,9 +471,9 @@ func (s *apiErrShape) message() string { return s.err.Error() }
 func TestValidateByokQuota_Disabled_GroupOverrideZero(t *testing.T) {
 	// Group overrides BYOKMaxChannels = 0 → quota disabled.
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
+	db := appCtx.App.GetCoreDB()
 	zero := 0
-	db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_max_channels", &zero)
+	require.NoError(t, db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_max_channels", &zero).Error)
 
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	err := validateUserUnderChannelLimitCtx(c)
@@ -491,7 +488,7 @@ func TestValidateByokQuota_Disabled_GroupOverrideZero(t *testing.T) {
 func TestValidateByokQuota_Disabled_SystemSettingZero(t *testing.T) {
 	// No group override; global setting byok_max_channels_per_user = 0 → disabled.
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	appCtx.App.GetDB().Create(&models.Setting{Key: "byok_max_channels_per_user", Value: "0"})
+	require.NoError(t, appCtx.App.GetCoreDB().Create(&models.Setting{Key: "byok_max_channels_per_user", Value: "0"}).Error)
 
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	err := validateUserUnderChannelLimitCtx(c)
@@ -506,11 +503,11 @@ func TestValidateByokQuota_Disabled_SystemSettingZero(t *testing.T) {
 func TestValidateByokQuota_Reached(t *testing.T) {
 	// Group BYOKMaxChannels = 2; already 2 channels → quota reached.
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
+	db := appCtx.App.GetCoreDB()
 	two := 2
-	db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_max_channels", &two)
-	db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "a", Status: 1})
-	db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "b", Status: 1})
+	require.NoError(t, db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_max_channels", &two).Error)
+	require.NoError(t, db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "a", Status: 1}).Error)
+	require.NoError(t, db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "b", Status: 1}).Error)
 
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	err := validateUserUnderChannelLimitCtx(c)
@@ -525,10 +522,10 @@ func TestValidateByokQuota_Reached(t *testing.T) {
 func TestValidateByokQuota_AvailableSlot(t *testing.T) {
 	// Group BYOKMaxChannels = 2; 1 existing → 1 slot left → pass.
 	appCtx := newValidatorTestCtx(t, 1, 1)
-	db := appCtx.App.GetDB()
+	db := appCtx.App.GetCoreDB()
 	two := 2
-	db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_max_channels", &two)
-	db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "a", Status: 1})
+	require.NoError(t, db.Model(&models.UserGroup{}).Where("id = 1").Update("byok_max_channels", &two).Error)
+	require.NoError(t, db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "a", Status: 1}).Error)
 
 	c := newCreateCtx(appCtx, 1, 1, map[string]any{})
 	if err := validateUserUnderChannelLimitCtx(c); err != nil {

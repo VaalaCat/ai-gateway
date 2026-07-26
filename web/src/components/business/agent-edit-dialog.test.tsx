@@ -31,36 +31,47 @@ vi.mock("next-intl", () => ({
     "agents.connection.relayModeCustom": "Custom",
     "agents.connection.relayModeDisabled": "Disabled",
     "agents.connection.relayUri": "Relay URI",
-    "agents.peerRouteMode": "Peer route mode",
-    "agents.peerRouteModeDescription": "Choose the outbound peer route policy.",
-    "agents.peerRouteDirectFirst": "Direct first",
-    "agents.peerRouteRelayOnly": "Relay only",
+    "agents.transportPolicy.title": "Transport policy",
+    "agents.transportPolicy.inbound": "Inbound",
+    "agents.transportPolicy.outbound": "Outbound",
+    "agents.transportPolicy.direct": "Direct",
+    "agents.transportPolicy.relay": "Relay",
+    "agents.transportPolicy.direct_inbound_enabled": "Allow Direct inbound traffic",
+    "agents.transportPolicy.direct_outbound_enabled": "Allow Direct outbound traffic",
+    "agents.transportPolicy.relay_inbound_enabled": "Allow Relay inbound traffic",
+    "agents.transportPolicy.relay_outbound_enabled": "Allow Relay outbound traffic",
   } as Record<string, string>)[`${namespace}.${key}`] ?? key,
 }));
 
 function detail(): AgentDetail {
   return {
-    id: 7, agent_id: "agent-a", name: "Agent A", status: 1, tags: "edge", proxy_url: "http://proxy.internal:8080", relay_mode: "inherit", relay_uri: "", peer_route_mode: "direct_first", last_seen: 1, created_at: 1,
+    id: 7, agent_id: "agent-a", name: "Agent A", status: 1, tags: "edge", proxy_url: "http://proxy.internal:8080", relay_mode: "inherit", relay_uri: "", direct_inbound_enabled: true, direct_outbound_enabled: false, relay_inbound_enabled: true, relay_outbound_enabled: false, last_seen: 1, created_at: 1,
     http_addresses: '[{"url":"http://runtime.example:8139","tag":"effective"}]',
     configured_http_addresses: '[{"url":"http://10.0.0.7:8139","tag":"internal"}]',
     effective_http_addresses: '[{"url":"http://runtime.example:8139","tag":"effective"}]',
     runtime: null,
     connection: {
       version: "v1", snapshot_epoch: "epoch", snapshot_seq: 1, observed_at: 1, agent_id: "agent-a", admin_status: 1,
+      transport_policy: {
+        direct_inbound: { configured: true, effective: true },
+        direct_outbound: { configured: false, effective: false },
+        relay_inbound: { configured: true, effective: true },
+        relay_outbound: { configured: false, effective: false },
+      },
       control: { state: "connected", health: "healthy", reason_codes: [], session_generation: 1, connected_at: 1, heartbeat_at: 1, runtime_reported_at: 1, last_seen: 1 },
       relay: { support: "supported", config: "configured", availability: "ready", accepting_new_streams: true, convergence: "converged", desired: { mode: "inherit", configured_uri: "", effective_uri: "wss://global.example.com/ws", desired_generation: 1 }, active: { uri: "wss://global.example.com/ws", active_generation: 1, session_generation: 1, connected_at: 1, streams: 2, retry_at: 0 }, recent_errors: [] },
-      direct: { summary: { state: "unknown", reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: 0 }, targets: {} },
+      direct: { summary: { state: "unknown", disabled: 0, reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: 0 }, targets: {} },
       target_summaries: {
-        direct: { state: "unknown", reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: 0 },
-        relay: { state: "unknown", reachable: 0, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 0 },
+        direct: { state: "unknown", disabled: 0, reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: 0 },
+        relay: { state: "unknown", disabled: 0, reachable: 0, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 0 },
       },
       allowed_operations: [],
     },
     route_targets: {
       snapshot_epoch: "epoch", snapshot_seq: 1, observed_at: 1,
       summaries: {
-        direct: { state: "unknown", reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: 0 },
-        relay: { state: "unknown", reachable: 0, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 0 },
+        direct: { state: "unknown", disabled: 0, reachable: 0, degraded: 0, unreachable: 0, stale: 0, total: 0 },
+        relay: { state: "unknown", disabled: 0, reachable: 0, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 0 },
       },
       data: [], limit: 20,
     },
@@ -154,20 +165,95 @@ describe("AgentEditDialog", () => {
     expect(updateMutation.mutateAsync).not.toHaveBeenCalled();
   });
 
-  it("submits relay-only as an independent outbound routing policy", async () => {
+  it("reflects all four transport directions from authoritative detail", () => {
+    detailState.data = detail();
+    detailState.isLoading = false;
+    render(<AgentEditDialog open agentId={7} onOpenChange={vi.fn()} />);
+
+    expect(screen.getByRole("switch", { name: "Allow Direct inbound traffic" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Allow Direct outbound traffic" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Allow Relay inbound traffic" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Allow Relay outbound traffic" })).not.toBeChecked();
+  });
+
+  it("submits only the changed transport direction", async () => {
     detailState.data = detail();
     detailState.isLoading = false;
     updateMutation.mutateAsync.mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<AgentEditDialog open agentId={7} onOpenChange={vi.fn()} />);
 
-    await user.click(screen.getByRole("radio", { name: "Relay only" }));
+    await user.click(screen.getByRole("switch", { name: "Allow Relay outbound traffic" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(updateMutation.mutateAsync).toHaveBeenCalledWith({
       id: 7,
-      peer_route_mode: "relay_only",
+      relay_outbound_enabled: true,
     });
+  });
+
+  it("keeps a changed transport direction after save fails", async () => {
+    detailState.data = detail();
+    detailState.isLoading = false;
+    updateMutation.mutateAsync.mockRejectedValueOnce(new Error("save failed"));
+    const user = userEvent.setup();
+    render(<AgentEditDialog open agentId={7} onOpenChange={vi.fn()} />);
+
+    const relayOutbound = screen.getByRole("switch", { name: "Allow Relay outbound traffic" });
+    await user.click(relayOutbound);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("save failed");
+    expect(relayOutbound).toBeChecked();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("does not let a background refresh replace a dirty transport draft or baseline", async () => {
+    const first = detail();
+    detailState.data = first;
+    detailState.isLoading = false;
+    updateMutation.mutateAsync.mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    const { rerender } = render(<AgentEditDialog open agentId={7} onOpenChange={vi.fn()} />);
+    const relayOutbound = screen.getByRole("switch", { name: "Allow Relay outbound traffic" });
+    await user.click(relayOutbound);
+
+    detailState.data = {
+      ...first,
+      relay_outbound_enabled: true,
+      connection: { ...first.connection, snapshot_seq: 2, observed_at: 2 },
+    };
+    rerender(<AgentEditDialog open agentId={7} onOpenChange={vi.fn()} />);
+
+    expect(relayOutbound).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(updateMutation.mutateAsync).toHaveBeenCalledWith({ id: 7, relay_outbound_enabled: true });
+  });
+
+  it("keeps Relay directions editable when RelayMode is disabled", async () => {
+    const value = detail();
+    detailState.data = {
+      ...value,
+      relay_mode: "disabled",
+      connection: {
+        ...value.connection,
+        relay: {
+          ...value.connection.relay,
+          config: "disabled",
+          desired: { ...value.connection.relay.desired, mode: "disabled" },
+        },
+      },
+    };
+    detailState.isLoading = false;
+    const user = userEvent.setup();
+    render(<AgentEditDialog open agentId={7} onOpenChange={vi.fn()} />);
+
+    const relayInbound = screen.getByRole("switch", { name: "Allow Relay inbound traffic" });
+    const relayOutbound = screen.getByRole("switch", { name: "Allow Relay outbound traffic" });
+    expect(relayInbound).toBeEnabled();
+    expect(relayOutbound).toBeEnabled();
+    await user.click(relayOutbound);
+    expect(relayOutbound).toBeChecked();
   });
 
   it("preserves a dirty draft when background detail data gets a new object identity", async () => {

@@ -2,19 +2,154 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/stretchr/testify/require"
 )
+
+type apiAgentTransportPolicyFinder struct {
+	mu       sync.Mutex
+	calls    [][]string
+	contexts []context.Context
+	policies map[string]models.Agent
+	err      error
+	onFind   func()
+}
+
+func (f *apiAgentTransportPolicyFinder) FindAgentTransportPolicies(ctx context.Context, ids []string) (map[string]models.Agent, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, append([]string(nil), ids...))
+	f.contexts = append(f.contexts, ctx)
+	f.mu.Unlock()
+	if f.onFind != nil {
+		f.onFind()
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.policies, nil
+}
+
+func TestConnectionSnapshotConsumersUseRequestContextBuilds(t *testing.T) {
+	t.Run("policy lookup failure is mapped by every consumer", func(t *testing.T) {
+		db := setupTestDB(t)
+		source := models.Agent{
+			AgentID: "source", Name: "source", Status: consts.StatusEnabled,
+			DirectInboundEnabled: true, DirectOutboundEnabled: true,
+			RelayInboundEnabled: true, RelayOutboundEnabled: true,
+		}
+		require.NoError(t, db.Create(&source).Error)
+		finder := &apiAgentTransportPolicyFinder{err: fmt.Errorf("policy database unavailable")}
+		control := &apiControlSource{facts: map[string]connectivity.ControlSessionFact{
+			source.AgentID: {Generation: 1, ConnectedAt: 900, HeartbeatAt: 990},
+		}}
+		connections := newRouteTargetsServiceWithOptions(
+			"epoch-context-error", source.AgentID,
+			connectivity.Sources{Control: control},
+			connectivity.Options{AgentTransportPolicyFinder: finder},
+			"target-a",
+		)
+		var rpcCalls atomic.Int32
+		h := &Handler{
+			Connections:       connections,
+			GetOnlineAgentIDs: func() []string { return []string{source.AgentID} },
+			HubCallSession: func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+				rpcCalls.Add(1)
+				return json.RawMessage(`[]`), nil
+			},
+		}
+		ctx := newTestContext(t, db)
+		id := strconv.Itoa(int(source.ID))
+
+		tests := []struct {
+			name string
+			call func() error
+		}{
+			{name: "list", call: func() error { _, err := h.List(ctx, ListRequest{}); return err }},
+			{name: "online", call: func() error { _, err := h.Online(ctx, api.EmptyRequest{}); return err }},
+			{name: "detail", call: func() error { _, err := h.Detail(ctx, DetailRequest{ID: id}); return err }},
+			{name: "diagnostics", call: func() error { _, err := h.ConnectionDiagnostics(ctx, DiagnosticsRequest{ID: id}); return err }},
+			{name: "inflight", call: func() error { _, err := h.GetInflight(ctx, AgentIDQuery{ID: id}); return err }},
+			{name: "all inflight", call: func() error { _, err := h.GetAllInflight(ctx, api.EmptyRequest{}); return err }},
+			{name: "route targets", call: func() error { _, err := h.RouteTargets(ctx, RouteTargetsRequest{ID: id}); return err }},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				apiErr := requireAPIError(t, tt.call())
+				require.Equal(t, 500, apiErr.Status)
+				require.Equal(t, "build connection snapshot failed", apiErr.Message)
+				require.ErrorContains(t, apiErr.Cause, "policy database unavailable")
+			})
+		}
+		require.Zero(t, rpcCalls.Load())
+	})
+
+	t.Run("finder cancellation keeps the public request error", func(t *testing.T) {
+		db := setupTestDB(t)
+		source := models.Agent{
+			AgentID: "source", Name: "source", Status: consts.StatusEnabled,
+			DirectOutboundEnabled: true, RelayOutboundEnabled: true,
+		}
+		require.NoError(t, db.Create(&source).Error)
+		ctx := newTestContext(t, db)
+		requestCtx, cancel := context.WithCancel(ctx.Request.Context())
+		ctx.Request = ctx.Request.WithContext(requestCtx)
+		finder := &apiAgentTransportPolicyFinder{err: context.Canceled, onFind: cancel}
+		h := &Handler{Connections: newRouteTargetsServiceWithOptions(
+			"epoch-context-cancel", source.AgentID,
+			connectivity.Sources{}, connectivity.Options{AgentTransportPolicyFinder: finder},
+			"target-a",
+		)}
+
+		_, err := h.RouteTargets(ctx, RouteTargetsRequest{ID: strconv.Itoa(int(source.ID))})
+		require.Equal(t, "request_canceled", requireAPIError(t, err).Code)
+	})
+
+	t.Run("target inbound policy is overlaid with the request context", func(t *testing.T) {
+		type contextKey string
+		const key contextKey = "request-marker"
+		db := setupTestDB(t)
+		source := models.Agent{
+			AgentID: "source", Name: "source", Status: consts.StatusEnabled,
+			DirectOutboundEnabled: true, RelayOutboundEnabled: true,
+		}
+		require.NoError(t, db.Create(&source).Error)
+		finder := &apiAgentTransportPolicyFinder{policies: map[string]models.Agent{
+			"target-a": {AgentID: "target-a", DirectInboundEnabled: false, RelayInboundEnabled: false},
+		}}
+		h := &Handler{Connections: newRouteTargetsServiceWithOptions(
+			"epoch-context-success", source.AgentID,
+			connectivity.Sources{}, connectivity.Options{AgentTransportPolicyFinder: finder},
+			"target-a",
+		)}
+		ctx := newTestContext(t, db)
+		requestCtx := context.WithValue(ctx.Request.Context(), key, "expected")
+		ctx.Request = ctx.Request.WithContext(requestCtx)
+
+		page, err := h.RouteTargets(ctx, RouteTargetsRequest{ID: strconv.Itoa(int(source.ID))})
+		require.NoError(t, err)
+		require.Len(t, page.Data, 1)
+		require.Equal(t, consts.RouteErrorTargetDirectInboundDisabled, page.Data[0].Direct.PolicyReason)
+		require.Equal(t, consts.RouteErrorTargetRelayInboundDisabled, page.Data[0].Relay.PolicyReason)
+		finder.mu.Lock()
+		defer finder.mu.Unlock()
+		require.Len(t, finder.contexts, 1)
+		require.Equal(t, "expected", finder.contexts[0].Value(key))
+	})
+}
 
 func TestRouteTargetsCursorKeepsTheOriginalSnapshotAndSortsByTargetAgentID(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
@@ -348,7 +483,16 @@ func newRouteTargetsFixture(t *testing.T, epoch string, now *time.Time, targets 
 }
 
 func newRouteTargetsService(epoch, sourceID string, targetIDs ...string) *connectivity.Service {
-	service := connectivity.NewService(epoch, connectivity.Sources{}, connectivity.Options{})
+	return newRouteTargetsServiceWithOptions(epoch, sourceID, connectivity.Sources{}, connectivity.Options{}, targetIDs...)
+}
+
+func newRouteTargetsServiceWithOptions(
+	epoch, sourceID string,
+	sources connectivity.Sources,
+	options connectivity.Options,
+	targetIDs ...string,
+) *connectivity.Service {
+	service := connectivity.NewService(epoch, sources, options)
 	events := make([]protocol.RouteEvent, 0, len(targetIDs))
 	for generation, targetID := range targetIDs {
 		target := connectivity.ProbeTarget{AgentID: targetID, Name: targetID, Addresses: []protocol.Address{{URL: "https://" + targetID + ".example"}}}

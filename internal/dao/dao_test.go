@@ -12,10 +12,14 @@ import (
 
 // testApp satisfies dao.AppProvider for testing.
 type testApp struct {
-	db *gorm.DB
+	db         *gorm.DB
+	logDB      *gorm.DB
+	layoutMode app.DatabaseLayoutMode
 }
 
-func (a *testApp) GetDB() *gorm.DB { return a.db }
+func (a *testApp) GetCoreDB() *gorm.DB                           { return a.db }
+func (a *testApp) GetLogDB() *gorm.DB                            { return a.logDB }
+func (a *testApp) GetDatabaseLayoutMode() app.DatabaseLayoutMode { return a.layoutMode }
 
 func TestSetupTestDBClosesOwnedDatabaseAfterTestCleanup(t *testing.T) {
 	var ping func() error
@@ -51,7 +55,26 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	if err := db.AutoMigrate(&models.BillingHourlyBucket{}); err != nil {
+		t.Fatalf("migrate billing hourly fixture: %v", err)
+	}
 	return db
+}
+
+func setupStrictSplitDBs(t *testing.T) (*gorm.DB, *gorm.DB) {
+	t.Helper()
+	open := func(role string, migrate func(*gorm.DB) error) *gorm.DB {
+		db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+		require.NoError(t, err)
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		t.Cleanup(func() { _ = sqlDB.Close() })
+		require.NoError(t, migrate(db), role)
+		return db
+	}
+	return open("core", models.MigrateCoreDB), open("log", models.MigrateLogDB)
 }
 
 func setupTestApp(t *testing.T) (*testApp, *gorm.DB) {

@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -9,6 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
 
@@ -19,6 +23,16 @@ const (
 	targetReceivingRequest
 	targetRequestEnded
 	targetTerminal
+)
+
+type targetResponsePhase uint8
+
+const (
+	targetResponseWaitingHeaders targetResponsePhase = iota
+	targetResponseStreaming
+	targetResponseResultEnqueued
+	targetResponseFailed
+	targetResponseEnded
 )
 
 type targetFrame struct {
@@ -47,8 +61,12 @@ type targetStream struct {
 	responseCredit *creditWindow
 	committed      bool
 
-	sequenceMu       sync.Mutex
-	sequence         uint32
+	sequenceMu    sync.Mutex
+	sequence      uint32
+	responsePhase targetResponsePhase
+	resultWritten bool
+	resultErr     error
+
 	resetOnce        sync.Once
 	deliveryStopOnce sync.Once
 	pipeReader       *io.PipeReader
@@ -59,24 +77,42 @@ type targetStream struct {
 
 func (s *Session) handleTargetOpen(ctx context.Context, frame wire.Frame) {
 	var open wire.Open
-	if frame.Sequence != 1 || wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes) != nil ||
-		s.opts.TargetHandler == nil || s.opts.TargetHandler.ValidateOpen(open) != nil ||
-		open.ResponseWindow > wire.MaxV1StreamWindowBytes {
-		s.rejectTargetOpen(ctx, frame.StreamID, "open")
+	if frame.Sequence != 1 || wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes) != nil || open.ResponseWindow > wire.MaxV2StreamWindowBytes {
+		s.rejectTargetOpen(ctx, frame.StreamID, "open", errStreamProtocol)
+		return
+	}
+	if err := s.admitTargetOpen(&open); err != nil {
+		s.rejectTargetOpen(ctx, frame.StreamID, pathFailureStage(err, "open"), err)
 		return
 	}
 	target := newTargetStream(s, frame.StreamID, open)
 	if err := s.admitTarget(target); err != nil {
 		target.stopTTL()
 		target.cancel(err)
-		s.rejectTargetOpen(ctx, frame.StreamID, "admission")
+		s.rejectTargetOpen(ctx, frame.StreamID, pathFailureStage(err, "admission"), err)
 		return
 	}
 	go target.run()
 }
 
-func (s *Session) rejectTargetOpen(ctx context.Context, id wire.StreamID, stage string) {
-	payload, _ := wire.EncodeMetadata(wire.Reset{Code: wire.ErrorCodeRelayProtocol, Stage: stage}, s.limits.MaxMetadataBytes)
+func (s *Session) admitTargetOpen(open *wire.Open) error {
+	if s == nil || open == nil || s.opts.TargetHandler == nil || s.opts.Direction == SessionDirectionDirectOutgoing {
+		return errStreamProtocol
+	}
+	if s.opts.Direction == SessionDirectionDirectIncoming {
+		open.SourceAgentID = s.opts.BoundSourceAgentID
+		// behavior change: each new DirectIncoming OPEN rechecks local target status.
+		if open.SourceAgentID == "" || !s.opts.Now().Before(s.opts.AdmissionDeadline) ||
+			s.opts.SourceEnabled == nil || !s.opts.SourceEnabled(open.SourceAgentID) ||
+			s.opts.TargetStatusEnabled == nil || !s.opts.TargetStatusEnabled() {
+			return errTargetUnavailable
+		}
+	}
+	return s.opts.TargetHandler.ValidateOpen(*open, s.opts.IngressKind)
+}
+
+func (s *Session) rejectTargetOpen(ctx context.Context, id wire.StreamID, stage string, cause error) {
+	payload, _ := wire.EncodeMetadata(wire.Reset{Code: targetResetCode(cause), Stage: stage}, s.limits.MaxMetadataBytes)
 	_ = s.writer.Replace(ctx, wire.Frame{
 		Version: wire.ProtocolVersion, Type: wire.FrameReset, StreamID: id, Sequence: 1, Payload: payload,
 	}, nil)
@@ -122,7 +158,11 @@ func (st *targetStream) run() {
 		case err := <-st.workerDone:
 			st.workerDone = nil
 			if err != nil {
-				st.sendReset("handler", err)
+				stage := "handler"
+				if st.attemptResultFailed() {
+					stage = "attempt_result"
+				}
+				st.sendReset(stage, err)
 			}
 			return
 		}
@@ -231,7 +271,7 @@ func (st *targetStream) handleWindowUpdate(payload []byte) bool {
 
 func (st *targetStream) startWorker() error {
 	reader, writer := io.Pipe()
-	req, err := st.session.opts.TargetHandler.BuildRequest(st.ctx, st.open, st.id, reader)
+	req, err := st.session.opts.TargetHandler.BuildRequest(st.ctx, st.open, st.id, reader, st.session.opts.IngressKind)
 	if err != nil {
 		_ = reader.CloseWithError(err)
 		_ = writer.CloseWithError(err)
@@ -243,6 +283,9 @@ func (st *targetStream) startWorker() error {
 		_ = reader.CloseWithError(cause)
 		_ = writer.CloseWithError(cause)
 	})
+	if st.open.Attempt != nil {
+		req = req.WithContext(attemptwire.WithAttemptResultWriter(req.Context(), st))
+	}
 	response := newTunnelResponseWriter(st.ctx, st.session.limits.MaxMetadataBytes, st.session.limits.MaxDataBytes, st.sendResponseFrame)
 	done := make(chan error, 1)
 	st.workerDone = done
@@ -256,8 +299,13 @@ func (st *targetStream) executeHandler(response *TunnelResponseWriter, req *http
 		if recover() != nil {
 			result = errTargetPanic
 		}
-		if result == nil {
-			result = response.finish()
+		state := st.attemptResultState()
+		if result != nil {
+			if resultErr := state.validate(); resultErr != nil {
+				result = resultErr
+			}
+		} else {
+			result = response.finish(state)
 		}
 		_ = req.Body.Close()
 		done <- result
@@ -266,18 +314,119 @@ func (st *targetStream) executeHandler(response *TunnelResponseWriter, req *http
 	result = response.resetError()
 }
 
+var (
+	errAttemptResultAlreadyWritten = errors.New("agent tunnel: attempt result already written")
+	errAttemptResultBeforeHeaders  = errors.New("agent tunnel: attempt result written before response headers")
+	errAttemptResultMissing        = errors.New("agent tunnel: attempt result missing")
+)
+
+var _ attemptwire.AttemptResultWriter = (*targetStream)(nil)
+
+func (st *targetStream) WriteAttemptResult(result attemptwire.AttemptProxyResult) error {
+	if st == nil {
+		return errAttemptResultMissing
+	}
+	st.sequenceMu.Lock()
+	defer st.sequenceMu.Unlock()
+	if st.resultWritten {
+		if st.resultErr == nil {
+			st.resultErr = errAttemptResultAlreadyWritten
+		}
+		st.responsePhase = targetResponseFailed
+		return errAttemptResultAlreadyWritten
+	}
+	st.resultWritten = true
+	if st.responsePhase != targetResponseStreaming {
+		st.resultErr = errAttemptResultBeforeHeaders
+		st.responsePhase = targetResponseFailed
+		return st.resultErr
+	}
+	resultLimit, limitErr := wire.FramePayloadLimit(wire.FrameAttemptResult, st.session.limits)
+	if limitErr != nil {
+		st.resultErr = limitErr
+		st.responsePhase = targetResponseFailed
+		st.observeDirectResultEncodeFailure(limitErr)
+		return limitErr
+	}
+	payload, encodeErr := attemptwire.EncodeResultJSONWithin(result, int(resultLimit))
+	if encodeErr != nil {
+		st.resultErr = encodeErr
+		st.responsePhase = targetResponseFailed
+		st.observeDirectResultEncodeFailure(encodeErr)
+		return encodeErr
+	}
+	enqueueErr := st.enqueueLocked(st.ctx, wire.FrameAttemptResult, payload, false)
+	st.resultErr = enqueueErr
+	if enqueueErr != nil {
+		st.responsePhase = targetResponseFailed
+		return enqueueErr
+	}
+	st.responsePhase = targetResponseResultEnqueued
+	return nil
+}
+
+func (st *targetStream) observeDirectResultEncodeFailure(err error) {
+	if st.session == nil || st.session.opts.Direction != SessionDirectionDirectIncoming {
+		return
+	}
+	kind := pkgmetrics.ResultInvalid
+	if errors.Is(err, attemptwire.ErrResultTooLarge) {
+		kind = pkgmetrics.ResultTooLarge
+	}
+	st.session.opts.Metrics.ObserveDirectResultFrame(kind, pkgmetrics.DirectReasonProtocol)
+	st.session.opts.directLogs.ResultProtocolFailed(directLogEvent{
+		SourceAgentID: st.session.opts.directSourceAgentID, TargetAgentID: st.session.opts.directTargetAgentID,
+		Stage: "result", ReasonCode: string(kind), SessionGeneration: st.session.generation,
+		StreamID: hex.EncodeToString(st.id[:]), TargetInbound: true, ResultKind: string(kind),
+	}, "", err)
+}
+
+func (st *targetStream) attemptResultState() attemptResultState {
+	if st == nil {
+		return attemptResultState{required: true, err: errAttemptResultMissing}
+	}
+	st.sequenceMu.Lock()
+	defer st.sequenceMu.Unlock()
+	return attemptResultState{
+		required: st.open.Attempt != nil,
+		written:  st.resultWritten,
+		err:      st.resultErr,
+	}
+}
+
+func (st *targetStream) attemptResultFailed() bool {
+	state := st.attemptResultState()
+	return state.required && (!state.written || state.err != nil)
+}
+
 func (st *targetStream) sendResponseFrame(ctx context.Context, frameType wire.Type, payload []byte) error {
 	if frameType == wire.FrameResponseData {
 		if err := st.responseCredit.Take(ctx, int64(len(payload)), st.session.opts.WindowStallTimeout); err != nil {
 			return err
 		}
 	}
-	return st.enqueue(ctx, frameType, payload, false)
+	st.sequenceMu.Lock()
+	defer st.sequenceMu.Unlock()
+	if !st.responseFrameAllowedLocked(frameType) {
+		return errStreamProtocol
+	}
+	if err := st.enqueueLocked(ctx, frameType, payload, false); err != nil {
+		if frameType == wire.FrameHeaders {
+			st.responsePhase = targetResponseWaitingHeaders
+		}
+		return err
+	}
+	st.advanceResponsePhaseLocked(frameType)
+	return nil
 }
 
 func (st *targetStream) enqueue(ctx context.Context, frameType wire.Type, payload []byte, replace bool) error {
 	st.sequenceMu.Lock()
 	defer st.sequenceMu.Unlock()
+	return st.enqueueLocked(ctx, frameType, payload, replace)
+}
+
+func (st *targetStream) enqueueLocked(ctx context.Context, frameType wire.Type, payload []byte, replace bool) error {
 	next, err := wire.NextSequence(st.sequence)
 	if err != nil {
 		return err
@@ -287,6 +436,31 @@ func (st *targetStream) enqueue(ctx context.Context, frameType wire.Type, payloa
 		return st.session.writer.Replace(ctx, frame, func(sequence uint32) { st.sequence = sequence })
 	}
 	return st.session.writer.Enqueue(ctx, frame, func() { st.sequence = next })
+}
+
+func (st *targetStream) responseFrameAllowedLocked(frameType wire.Type) bool {
+	switch frameType {
+	case wire.FrameHeaders:
+		return st.responsePhase == targetResponseWaitingHeaders
+	case wire.FrameResponseData:
+		return st.responsePhase == targetResponseStreaming
+	case wire.FrameEnd:
+		if st.open.Attempt != nil {
+			return st.responsePhase == targetResponseResultEnqueued
+		}
+		return st.responsePhase == targetResponseStreaming
+	default:
+		return false
+	}
+}
+
+func (st *targetStream) advanceResponsePhaseLocked(frameType wire.Type) {
+	switch frameType {
+	case wire.FrameHeaders:
+		st.responsePhase = targetResponseStreaming
+	case wire.FrameEnd:
+		st.responsePhase = targetResponseEnded
+	}
 }
 
 func (st *targetStream) protocolViolation(stage string) bool {
@@ -306,6 +480,10 @@ func (st *targetStream) sendReset(stage string, cause error) {
 }
 
 func targetResetCode(cause error) string {
+	var failure interface{ ReasonCode() string }
+	if errors.As(cause, &failure) && consts.IsPublicRouteErrorCode(failure.ReasonCode()) {
+		return failure.ReasonCode()
+	}
 	switch {
 	case errors.Is(cause, errWindowStalled):
 		return wire.ErrorCodeStreamWindowTimeout
@@ -313,7 +491,7 @@ func targetResetCode(cause error) string {
 		return wire.ErrorCodeRequestDeadline
 	case errors.Is(cause, context.Canceled):
 		return wire.ErrorCodeRequestCancelled
-	case errors.Is(cause, errStreamClosed):
+	case errors.Is(cause, errStreamClosed), errors.Is(cause, errSessionClosed):
 		return wire.ErrorCodeSessionClosed
 	default:
 		return wire.ErrorCodeRelayProtocol

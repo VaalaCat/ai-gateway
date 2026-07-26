@@ -42,14 +42,18 @@ type ProbeCaller interface {
 }
 
 type ProbeTarget struct {
-	AgentID           string
-	Name              string
-	Tags              []string
-	Addresses         []protocol.Address
-	EffectiveProxy    string
-	ControlGeneration uint64
-	Capabilities      []string
-	PeerRouteMode     string
+	AgentID               string
+	Name                  string
+	Tags                  []string
+	Addresses             []protocol.Address
+	EffectiveProxy        string
+	ControlGeneration     uint64
+	Capabilities          []string
+	DirectInboundEnabled  bool
+	DirectOutboundEnabled bool
+	RelayInboundEnabled   bool
+	RelayOutboundEnabled  bool
+	RelayMode             string
 }
 
 type ProbeTargetFinder interface {
@@ -91,6 +95,7 @@ type probeJobKey struct {
 	targetAgentID string
 	fingerprint   string
 	path          probePath
+	policy        protocol.ProbePolicy
 }
 
 type probeJob struct {
@@ -106,6 +111,7 @@ type probeJob struct {
 	running               bool
 	probeGeneration       uint64
 	startedAt             time.Time
+	policyReason          string
 }
 
 type probeHistory struct {
@@ -414,12 +420,12 @@ func (s *Scheduler) enqueueManualSession(ctx context.Context, sourceID string, e
 	keys := make([]probeJobKey, 0, len(targets)*2)
 	pending := make(map[string]int, len(targets))
 	for _, target := range targets {
-		paths := s.prepareProbePaths(sourceID, expectedControlGeneration, source, target)
+		paths := s.prepareProbePaths(sourceID, expectedControlGeneration, source, target, protocol.ProbeBypassBusinessPolicy)
 		pending[target.AgentID] = len(paths)
 		for _, path := range paths {
 			prepared = append(prepared, preparedManualJob{target: target, path: path})
 			keys = append(keys, probeJobKey{
-				sourceID: sourceID, targetAgentID: target.AgentID, fingerprint: path.fingerprint, path: path.kind,
+				sourceID: sourceID, targetAgentID: target.AgentID, fingerprint: path.fingerprint, path: path.kind, policy: path.policy,
 			})
 		}
 	}
@@ -781,6 +787,7 @@ func (s *Scheduler) enqueueAutomatic(ctx context.Context) error {
 		edges    []protocol.RouteEdgeSnapshot
 	}
 	sources := make([]sourceEdges, 0)
+	sourceIDSet := make(map[string]struct{})
 	targetIDSet := make(map[string]struct{})
 	for _, sourceID := range s.service.RouteEdgeSources() {
 		edges := s.service.RouteEdges(sourceID)
@@ -788,9 +795,8 @@ func (s *Scheduler) enqueueAutomatic(ctx context.Context) error {
 			continue
 		}
 		sources = append(sources, sourceEdges{sourceID: sourceID, edges: edges})
-		if _, relayEnabled := s.runners[probePathRelay]; relayEnabled {
-			targetIDSet[sourceID] = struct{}{}
-		}
+		sourceIDSet[sourceID] = struct{}{}
+		targetIDSet[sourceID] = struct{}{}
 		for _, edge := range edges {
 			if edge.TargetAgentID != "" {
 				targetIDSet[edge.TargetAgentID] = struct{}{}
@@ -811,7 +817,8 @@ func (s *Scheduler) enqueueAutomatic(ctx context.Context) error {
 	}
 	byID := make(map[string]ProbeTarget, len(targets))
 	for _, target := range targets {
-		if target.AgentID != "" && (len(target.Addresses) > 0 || s.runners[probePathRelay] != nil) {
+		_, isSource := sourceIDSet[target.AgentID]
+		if target.AgentID != "" && (isSource || len(target.Addresses) > 0 || s.runners[probePathRelay] != nil) {
 			byID[target.AgentID] = cloneProbeTarget(target)
 		}
 	}
@@ -831,9 +838,9 @@ func (s *Scheduler) enqueueAutomatic(ctx context.Context) error {
 			if !exists || target.AgentID == sourceID {
 				continue
 			}
-			for _, path := range s.prepareProbePaths(sourceID, sourceGeneration, sourceTarget, target) {
+			for _, path := range s.prepareProbePaths(sourceID, sourceGeneration, sourceTarget, target, protocol.ProbeRespectBusinessPolicy) {
 				key := probeJobKey{
-					sourceID: sourceID, targetAgentID: target.AgentID, fingerprint: path.fingerprint, path: path.kind,
+					sourceID: sourceID, targetAgentID: target.AgentID, fingerprint: path.fingerprint, path: path.kind, policy: path.policy,
 				}
 				s.mu.Lock()
 				history, hasHistory := s.history[key]
@@ -909,7 +916,7 @@ func (s *Scheduler) enqueueAutomaticObserved(ctx context.Context) error {
 
 func (s *Scheduler) enqueueLocked(priority probePriority, sourceID string, sourceGeneration uint64, target ProbeTarget, fingerprint, probeID string, probeGeneration uint64) {
 	s.enqueuePathLocked(priority, sourceID, sourceGeneration, ProbeTarget{AgentID: sourceID}, target, preparedProbePath{
-		kind: probePathDirect, fingerprint: fingerprint,
+		kind: probePathDirect, fingerprint: fingerprint, policy: protocol.ProbeRespectBusinessPolicy,
 	}, probeID, probeGeneration)
 }
 
@@ -923,7 +930,10 @@ func (s *Scheduler) enqueuePathLocked(
 	probeID string,
 	probeGeneration uint64,
 ) {
-	key := probeJobKey{sourceID: sourceID, targetAgentID: target.AgentID, fingerprint: path.fingerprint, path: path.kind}
+	key := probeJobKey{
+		sourceID: sourceID, targetAgentID: target.AgentID, fingerprint: path.fingerprint,
+		path: path.kind, policy: path.policy,
+	}
 	if existing := s.jobs[key]; existing != nil {
 		if priority > existing.priority {
 			existing.priority = priority
@@ -952,6 +962,7 @@ func (s *Scheduler) enqueuePathLocked(
 		key: key, source: cloneProbeTarget(source), target: cloneProbeTarget(target), sourceGeneration: sourceGeneration,
 		sourceRelayGeneration: path.sourceRelayGeneration, targetRelayGeneration: path.targetRelayGeneration,
 		priority: priority, sequence: s.nextSequence, manualIDs: manualIDs, probeGeneration: probeGeneration,
+		policyReason: path.policyReason,
 	}
 }
 
@@ -972,7 +983,8 @@ func (s *Scheduler) failureDelay(key probeJobKey, attempt int) time.Duration {
 		}
 		delay *= 2
 	}
-	digest := sha256.Sum256([]byte(key.sourceID + "\x00" + key.targetAgentID + "\x00" + key.path.publicName() + "\x00" + key.fingerprint + "\x00" + strconv.Itoa(attempt)))
+	digest := sha256.Sum256([]byte(key.sourceID + "\x00" + key.targetAgentID + "\x00" + key.path.publicName() + "\x00" +
+		string(key.policy) + "\x00" + key.fingerprint + "\x00" + strconv.Itoa(attempt)))
 	jitterPermille := 800 + int(digest[0])*400/255
 	delay = time.Duration(int64(delay) * int64(jitterPermille) / 1000)
 	if delay > timings.FailureRetryMax {
@@ -1001,6 +1013,8 @@ func CanonicalProbeFingerprint(sourceID string, sourceGeneration uint64, target 
 type preparedProbePath struct {
 	kind                  probePath
 	fingerprint           string
+	policy                protocol.ProbePolicy
+	policyReason          string
 	sourceRelayGeneration uint64
 	targetRelayGeneration uint64
 }
@@ -1010,21 +1024,27 @@ func (s *Scheduler) prepareProbePaths(
 	sourceGeneration uint64,
 	source ProbeTarget,
 	target ProbeTarget,
+	policy protocol.ProbePolicy,
 ) []preparedProbePath {
 	paths := make([]preparedProbePath, 0, 2)
-	mode := source.PeerRouteMode
-	if mode == "" {
-		mode = consts.PeerRouteModeDirectFirst
-	}
-	if mode != consts.PeerRouteModeRelayOnly && len(target.Addresses) > 0 &&
-		slices.Contains(target.Capabilities, protocol.AgentCapabilityDirectIngressV1) {
+	directReason := directProbePolicyReason(source, target)
+	if len(target.Addresses) > 0 &&
+		slices.Contains(source.Capabilities, protocol.AgentCapabilityDirectTunnelV1) &&
+		slices.Contains(target.Capabilities, protocol.AgentCapabilityDirectTunnelV1) &&
+		(policy == protocol.ProbeBypassBusinessPolicy || directReason == "") {
 		paths = append(paths, preparedProbePath{
 			kind: probePathDirect, fingerprint: CanonicalProbeFingerprint(sourceID, sourceGeneration, target),
+			policy: policy, policyReason: directReason,
 		})
 	}
 	if s.runners[probePathRelay] == nil || s.service == nil ||
+		source.RelayMode == consts.RelayModeDisabled || target.RelayMode == consts.RelayModeDisabled ||
 		!slices.Contains(source.Capabilities, protocol.AgentCapabilityRelayHTTPPingV1) ||
 		!slices.Contains(target.Capabilities, protocol.AgentCapabilityRelayHTTPPingV1) {
+		return paths
+	}
+	relayReason := relayProbePolicyReason(source, target)
+	if policy == protocol.ProbeRespectBusinessPolicy && relayReason != "" {
 		return paths
 	}
 	sourceRelay := s.service.relayFact(sourceID)
@@ -1035,7 +1055,8 @@ func (s *Scheduler) prepareProbePaths(
 		return paths
 	}
 	paths = append(paths, preparedProbePath{
-		kind: probePathRelay,
+		kind:   probePathRelay,
+		policy: policy, policyReason: relayReason,
 		fingerprint: CanonicalRelayProbeFingerprint(
 			sourceID, sourceGeneration, sourceRelay.Active.SessionGeneration,
 			target.AgentID, target.ControlGeneration, targetRelay.Active.SessionGeneration,
@@ -1044,6 +1065,26 @@ func (s *Scheduler) prepareProbePaths(
 		targetRelayGeneration: targetRelay.Active.SessionGeneration,
 	})
 	return paths
+}
+
+func directProbePolicyReason(source, target ProbeTarget) string {
+	if !source.DirectOutboundEnabled {
+		return consts.RouteErrorSourceDirectOutboundDisabled
+	}
+	if !target.DirectInboundEnabled {
+		return consts.RouteErrorTargetDirectInboundDisabled
+	}
+	return ""
+}
+
+func relayProbePolicyReason(source, target ProbeTarget) string {
+	if !source.RelayOutboundEnabled {
+		return consts.RouteErrorSourceRelayOutboundDisabled
+	}
+	if !target.RelayInboundEnabled {
+		return consts.RouteErrorTargetRelayInboundDisabled
+	}
+	return ""
 }
 
 func CanonicalRelayProbeFingerprint(

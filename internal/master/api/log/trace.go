@@ -1,6 +1,7 @@
 package log
 
 import (
+	"errors"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
@@ -21,6 +22,9 @@ func (h *Handler) GetTrace(c *app.Context, req TraceRequest) ([]*models.UsageLog
 	if scope != nil && !scope.IsAdmin {
 		usageLog, err := q.UsageLog().GetByRequestID(req.RequestID)
 		if err != nil {
+			if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+				return nil, logDatabaseUnavailableError()
+			}
 			return nil, api.NotFoundError("trace not found")
 		}
 		if usageLog.UserID != scope.UserID {
@@ -30,6 +34,9 @@ func (h *Handler) GetTrace(c *app.Context, req TraceRequest) ([]*models.UsageLog
 
 	traces, err := q.UsageLog().GetTracesByRequestID(req.RequestID)
 	if err != nil {
+		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+			return nil, logDatabaseUnavailableError()
+		}
 		return nil, api.NotFoundError("trace not found")
 	}
 	// Find 对零行不报错,显式判空 → 404,保持既有 not-found 契约(前端按 404 优雅降级)。

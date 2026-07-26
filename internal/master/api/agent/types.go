@@ -41,26 +41,32 @@ type ListRequest struct {
 }
 
 type CreateRequest struct {
-	AgentID       string `json:"agent_id"`
-	Secret        string `json:"secret"`
-	Name          string `json:"name" binding:"required"`
-	HTTPAddresses string `json:"http_addresses"`
-	Tags          string `json:"tags"`
-	ProxyURL      string `json:"proxy_url"`
-	RelayMode     string `json:"relay_mode"`
-	RelayURI      string `json:"relay_uri"`
-	PeerRouteMode string `json:"peer_route_mode"`
+	AgentID               string `json:"agent_id"`
+	Secret                string `json:"secret"`
+	Name                  string `json:"name" binding:"required"`
+	HTTPAddresses         string `json:"http_addresses"`
+	Tags                  string `json:"tags"`
+	ProxyURL              string `json:"proxy_url"`
+	RelayMode             string `json:"relay_mode"`
+	RelayURI              string `json:"relay_uri"`
+	DirectInboundEnabled  *bool  `json:"direct_inbound_enabled"`
+	DirectOutboundEnabled *bool  `json:"direct_outbound_enabled"`
+	RelayInboundEnabled   *bool  `json:"relay_inbound_enabled"`
+	RelayOutboundEnabled  *bool  `json:"relay_outbound_enabled"`
 }
 
 type AgentPatch struct {
-	Name          *string `json:"name"`
-	Status        *int    `json:"status"`
-	Tags          *string `json:"tags"`
-	HTTPAddresses *string `json:"http_addresses"`
-	ProxyURL      *string `json:"proxy_url"`
-	RelayMode     *string `json:"relay_mode"`
-	RelayURI      *string `json:"relay_uri"`
-	PeerRouteMode *string `json:"peer_route_mode"`
+	Name                  *string `json:"name"`
+	Status                *int    `json:"status"`
+	Tags                  *string `json:"tags"`
+	HTTPAddresses         *string `json:"http_addresses"`
+	ProxyURL              *string `json:"proxy_url"`
+	RelayMode             *string `json:"relay_mode"`
+	RelayURI              *string `json:"relay_uri"`
+	DirectInboundEnabled  *bool   `json:"direct_inbound_enabled"`
+	DirectOutboundEnabled *bool   `json:"direct_outbound_enabled"`
+	RelayInboundEnabled   *bool   `json:"relay_inbound_enabled"`
+	RelayOutboundEnabled  *bool   `json:"relay_outbound_enabled"`
 }
 
 type UpdateRequest struct {

@@ -1,7 +1,6 @@
 package exec
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,11 +17,12 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
 
-const reasonAttemptResultMissing = "attempt_result_missing"
+const (
+	reasonAttemptResultInterrupted = "attempt_result_interrupted"
+)
 
 var reservedAttemptResponseMetadata = [...]string{
 	attemptwire.HeaderMode,
-	attemptwire.TrailerResult,
 }
 
 type attemptResponseReceiver struct {
@@ -32,10 +32,46 @@ type attemptResponseReceiver struct {
 	mode            string
 	wroteHeader     bool
 	responseStarted bool
-	resultDeclared  bool
 	declared        map[string]struct{}
-	control         bytes.Buffer
-	controlTooLarge bool
+	protocolErr     error
+}
+
+type remoteTraceResponseWriter struct {
+	http.ResponseWriter
+	written       int
+	writeObserved bool
+}
+
+func newRemoteTraceResponseWriter(writer http.ResponseWriter) *remoteTraceResponseWriter {
+	if writer == nil {
+		return nil
+	}
+	return &remoteTraceResponseWriter{ResponseWriter: writer}
+}
+
+func (w *remoteTraceResponseWriter) Write(body []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(body)
+	w.writeObserved = true
+	if n > 0 {
+		w.written += n
+	}
+	return n, err
+}
+
+func (w *remoteTraceResponseWriter) CorrectClientResponseBody(record *trace.TraceRecord) {
+	if w == nil || !w.writeObserved || record == nil {
+		return
+	}
+	if w.written >= len(record.ClientResponseBody) {
+		return
+	}
+	record.ClientResponseBody = record.ClientResponseBody[:w.written]
+}
+
+func (w *remoteTraceResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func newAttemptResponseReceiver(client http.ResponseWriter) *attemptResponseReceiver {
@@ -56,8 +92,19 @@ func (r *attemptResponseReceiver) WriteHeader(status int) {
 	r.wroteHeader = true
 	r.status = status
 	r.mode = strings.TrimSpace(r.header.Get(attemptwire.HeaderMode))
-	r.resultDeclared = headerDeclares(r.header, attemptwire.TrailerResult)
-	if r.mode != attemptwire.ModeResponse || r.client == nil {
+	switch r.mode {
+	case attemptwire.ModeResponse:
+	case attemptwire.ModeControl:
+		if status != http.StatusOK {
+			r.protocolErr = attemptwire.ErrInvalidContract
+		}
+		return
+	default:
+		r.protocolErr = attemptwire.ErrInvalidContract
+		return
+	}
+	if r.client == nil {
+		r.protocolErr = errors.New("attempt response client unavailable")
 		return
 	}
 	r.declared = declaredTrailerNames(r.header)
@@ -80,16 +127,8 @@ func (r *attemptResponseReceiver) Write(body []byte) (int, error) {
 		r.responseStarted = true
 		return r.client.Write(body)
 	}
-	if r.control.Len()+len(body) > attemptwire.MaxResultWireBytes {
-		r.controlTooLarge = true
-		remaining := attemptwire.MaxResultWireBytes + 1 - r.control.Len()
-		if remaining > 0 {
-			_, _ = r.control.Write(body[:min(remaining, len(body))])
-		}
-		return len(body), nil
-	}
-	_, _ = r.control.Write(body)
-	return len(body), nil
+	r.protocolErr = attemptwire.ErrInvalidContract
+	return 0, r.protocolErr
 }
 
 func (r *attemptResponseReceiver) Flush() {
@@ -118,77 +157,48 @@ func (r *attemptResponseReceiver) Unwrap() http.ResponseWriter {
 	return r.client
 }
 
-func (r *attemptResponseReceiver) Finish(
+func (r *attemptResponseReceiver) FinishWithResult(
 	executionAgentID string,
 	path app.RoutePath,
 	commit tunnel.CommitState,
+	result attemptwire.AttemptProxyResult,
+	transportCode string,
 	transportErr error,
 ) AttemptOutcome {
 	if r == nil {
-		return missingAttemptResult(executionAgentID, path, transportErr)
+		return interruptedRemoteTransportOutcome(executionAgentID, path, commit, false, transportCode, transportErr)
 	}
-	if errors.Is(transportErr, context.Canceled) || errors.Is(transportErr, context.DeadlineExceeded) {
-		return canceledAttemptOutcome(executionAgentID, path, commit, r.responseStarted, transportErr)
+	if result.Validate() != nil {
+		return interruptedRemoteTransportOutcome(
+			executionAgentID, path, commit, r.responseStarted, transportCode,
+			errors.Join(transportErr, r.protocolErr, attemptwire.ErrInvalidContract),
+		)
 	}
 	if r.mode == attemptwire.ModeResponse {
 		r.copyProviderTrailers()
-		if transportErr != nil {
-			return missingAttemptResultWithStarted(executionAgentID, path, r.responseStarted, transportErr)
-		}
-		return r.finishResponse(executionAgentID, path, commit)
 	}
-	if transportErr != nil {
-		return missingAttemptResult(executionAgentID, path, transportErr)
-	}
-	if r.mode == attemptwire.ModeControl {
-		return r.finishControl(executionAgentID, path, commit)
-	}
-	if r.mode == "" && r.status >= http.StatusBadRequest {
-		if outcome, ok := r.finishProxyRejection(executionAgentID, path, commit); ok {
-			return outcome
-		}
-	}
-	return missingAttemptResultWithStarted(executionAgentID, path, r.responseStarted, nil)
-}
-
-func (r *attemptResponseReceiver) finishControl(executionAgentID string, path app.RoutePath, commit tunnel.CommitState) AttemptOutcome {
-	if r.status != http.StatusOK || r.controlTooLarge {
-		return missingAttemptResultWithStarted(executionAgentID, path, false, nil)
-	}
-	result, err := decodeControlResult(r.control.Bytes())
-	if err != nil || !controlResultConsistent(result) {
-		return missingAttemptResultWithStarted(executionAgentID, path, false, err)
+	contractErr := r.resultContractError(result)
+	terminalErr := errors.Join(transportErr, r.protocolErr, contractErr)
+	if terminalErr != nil {
+		return interruptedAttemptResultOutcome(executionAgentID, path, commit, result, transportCode, terminalErr)
 	}
 	return outcomeFromAttemptResult(executionAgentID, path, commit, result)
 }
 
-func (r *attemptResponseReceiver) finishResponse(executionAgentID string, path app.RoutePath, commit tunnel.CommitState) AttemptOutcome {
-	if !r.resultDeclared {
-		return missingAttemptResultWithStarted(executionAgentID, path, r.responseStarted, nil)
+func (r *attemptResponseReceiver) resultContractError(result attemptwire.AttemptProxyResult) error {
+	switch r.mode {
+	case attemptwire.ModeResponse:
+		if !responseResultConsistent(result, r.responseStarted) {
+			return attemptwire.ErrInvalidContract
+		}
+	case attemptwire.ModeControl:
+		if r.status != http.StatusOK || !controlResultConsistent(result) {
+			return attemptwire.ErrInvalidContract
+		}
+	default:
+		return attemptwire.ErrInvalidContract
 	}
-	values := headerValuesCaseInsensitive(r.header, attemptwire.TrailerResult)
-	if len(values) != 1 {
-		return missingAttemptResultWithStarted(executionAgentID, path, r.responseStarted, nil)
-	}
-	result, err := attemptwire.DecodeResult(values[0])
-	if err != nil || !responseResultConsistent(result, r.responseStarted) {
-		return missingAttemptResultWithStarted(executionAgentID, path, r.responseStarted, err)
-	}
-	return outcomeFromAttemptResult(executionAgentID, path, commit, result)
-}
-
-func (r *attemptResponseReceiver) finishProxyRejection(executionAgentID string, path app.RoutePath, commit tunnel.CommitState) (AttemptOutcome, bool) {
-	if r.controlTooLarge {
-		return AttemptOutcome{}, false
-	}
-	result, err := decodeControlResult(r.control.Bytes())
-	if err != nil || result.Kind != attemptwire.ResultProxyRejected {
-		return AttemptOutcome{}, false
-	}
-	if result.HTTPStatus == 0 {
-		result.HTTPStatus = r.status
-	}
-	return outcomeFromAttemptResult(executionAgentID, path, commit, result), true
+	return nil
 }
 
 func (r *attemptResponseReceiver) copyProviderTrailers() {
@@ -204,14 +214,16 @@ func (r *attemptResponseReceiver) copyProviderTrailers() {
 			r.client.Header()[name] = append([]string(nil), values...)
 		}
 	}
-}
-
-func decodeControlResult(raw []byte) (attemptwire.AttemptProxyResult, error) {
-	var result attemptwire.AttemptProxyResult
-	if len(raw) == 0 || len(raw) > attemptwire.MaxResultWireBytes || json.Unmarshal(raw, &result) != nil || result.Validate() != nil {
-		return attemptwire.AttemptProxyResult{}, attemptwire.ErrInvalidContract
+	for key, values := range r.header {
+		if !strings.HasPrefix(key, http.TrailerPrefix) {
+			continue
+		}
+		name := strings.TrimPrefix(key, http.TrailerPrefix)
+		if name == "" || isReservedAttemptResponseMetadata(name) {
+			continue
+		}
+		r.client.Header()[key] = append([]string(nil), values...)
 	}
-	return result, nil
 }
 
 func controlResultConsistent(result attemptwire.AttemptProxyResult) bool {
@@ -220,7 +232,7 @@ func controlResultConsistent(result attemptwire.AttemptProxyResult) bool {
 	}
 	switch result.Kind {
 	case attemptwire.ResultProviderFailed, attemptwire.ResultExecutionRejected,
-		attemptwire.ResultCommitUncertain, attemptwire.ResultCanceled:
+		attemptwire.ResultProxyRejected, attemptwire.ResultCommitUncertain, attemptwire.ResultCanceled:
 		return true
 	default:
 		return false
@@ -268,11 +280,46 @@ func outcomeFromAttemptResult(
 	return outcome
 }
 
+func interruptedAttemptResultOutcome(
+	executionAgentID string,
+	path app.RoutePath,
+	commit tunnel.CommitState,
+	result attemptwire.AttemptProxyResult,
+	transportCode string,
+	transportErr error,
+) AttemptOutcome {
+	outcome := outcomeFromAttemptResult(executionAgentID, path, commit, result)
+	outcome.Trace = traceRecordFromWireFailure(result.Trace)
+	outcome.remoteFailureFallback = result.Trace != nil && result.Trace.FailureFallback != nil
+	resultErr := outcome.Result.Err
+	outcome.Kind = AttemptCommitUncertain
+	outcome.Commit = tunnel.CommitUncertain
+	outcome.PlanAdvanceAllowed = false
+	if transportCode == "" {
+		transportCode = reasonAttemptResultInterrupted
+	}
+	outcome.ReasonCode = transportCode
+	outcome.Result.Err = errors.Join(transportErr, resultErr)
+	return outcome
+}
+
+func traceRecordFromWireFailure(wire *attemptwire.AttemptTraceWire) *trace.TraceRecord {
+	record := traceRecordFromWire(wire)
+	if record == nil || wire.FailureFallback == nil {
+		return record
+	}
+	record.InboundBody = wire.FailureFallback.InboundBody
+	record.OutboundBody = wire.FailureFallback.OutboundBody
+	record.UpstreamBody = wire.FailureFallback.ResponseBody
+	record.ClientResponseBody = wire.FailureFallback.ClientResponseBody
+	return record
+}
+
 func traceRecordFromWire(wire *attemptwire.AttemptTraceWire) *trace.TraceRecord {
 	if wire == nil {
 		return nil
 	}
-	return &trace.TraceRecord{
+	record := &trace.TraceRecord{
 		InboundPath:        wire.InboundPath,
 		InboundHeaders:     traceHeaderFromWire(wire.InboundHeaders),
 		InboundBody:        wire.InboundBody,
@@ -287,6 +334,13 @@ func traceRecordFromWire(wire *attemptwire.AttemptTraceWire) *trace.TraceRecord 
 		Timings:            map[trace.Stage]time.Duration{},
 		Verbose:            true,
 	}
+	if wire.FailureFallback != nil {
+		record.InboundBody = ""
+		record.OutboundBody = ""
+		record.UpstreamBody = ""
+		record.ClientResponseBody = ""
+	}
+	return record
 }
 
 func traceHeaderFromWire(raw string) http.Header {
@@ -345,17 +399,23 @@ func canceledAttemptOutcome(executionAgentID string, path app.RoutePath, commit 
 	}
 }
 
-func missingAttemptResult(executionAgentID string, path app.RoutePath, err error) AttemptOutcome {
-	return missingAttemptResultWithStarted(executionAgentID, path, false, err)
-}
-
-func missingAttemptResultWithStarted(executionAgentID string, path app.RoutePath, started bool, err error) AttemptOutcome {
+func interruptedRemoteTransportOutcome(
+	executionAgentID string,
+	path app.RoutePath,
+	commit tunnel.CommitState,
+	started bool,
+	code string,
+	err error,
+) AttemptOutcome {
+	if code == "" {
+		code = reasonAttemptResultInterrupted
+	}
 	if err == nil {
-		err = errors.New(reasonAttemptResultMissing)
+		err = errors.New(code)
 	}
 	return AttemptOutcome{
 		Kind: AttemptCommitUncertain, ExecutionAgentID: executionAgentID, Path: path,
-		Commit: tunnel.CommitUncertain, ResponseStarted: started, ReasonCode: reasonAttemptResultMissing,
+		Commit: tunnel.CommitUncertain, ResponseStarted: started, ReasonCode: code,
 		Result: state.AttemptResult{Err: err},
 	}
 }

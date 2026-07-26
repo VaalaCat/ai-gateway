@@ -31,6 +31,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // testEnv holds all components for an end-to-end test: master server,
@@ -48,6 +49,27 @@ type testEnv struct {
 	wsClient  *ws.Client
 	cancelCtx context.CancelFunc
 }
+
+func requestLogDB(t *testing.T, srv *master.Server) *gorm.DB {
+	t.Helper()
+	db := srv.App.GetLogDB()
+	if db == nil {
+		t.Fatal("request log database is nil")
+	}
+	return db.Table(models.RequestLog{}.TableName())
+}
+
+func requestTraceDB(t *testing.T, srv *master.Server) *gorm.DB {
+	t.Helper()
+	db := srv.App.GetLogDB()
+	if db == nil {
+		t.Fatal("request trace database is nil")
+	}
+	return db.Table(models.RequestTrace{}.TableName())
+}
+
+func (e *testEnv) RequestLogDB(t *testing.T) *gorm.DB   { return requestLogDB(t, e.Srv) }
+func (e *testEnv) RequestTraceDB(t *testing.T) *gorm.DB { return requestTraceDB(t, e.Srv) }
 
 func newTestMasterRuntimeConfig(t *testing.T, listen string) *config.MasterRuntimeConfig {
 	t.Helper()

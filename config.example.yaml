@@ -2,7 +2,9 @@ log_level: info
 
 master:
   listen: ":8140"
-  db_path: "./data/master.db"
+  core_db_path: "./data/core.db"
+  log_db_path: "./data/log.db"
+  legacy_db_path: "./data/master.db"
   jwt_secret: "replace-me"
   # (Recommended for production) BYOK encryption KEK, base64-encoded 32 random bytes.
   # Omit only for dev / single-instance deployments — we then fall back to

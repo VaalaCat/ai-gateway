@@ -82,7 +82,8 @@ func TestKeys_DeclarationOrder(t *testing.T) {
 		"agent.control_health_recovery_samples",
 		"image_inline_fetch_timeout_sec", "image_inline_max_bytes", "image_inline_concurrency",
 		"image_inline_ssrf_guard", "image_inline_host_allowlist",
-		"agent.relay_default_uri", "agent.relay_fallback_enabled",
+		"agent.relay_default_uri",
+		"agent.direct_max_sessions", "agent.direct_session_idle_timeout_seconds",
 		"agent.body_memory_threshold_bytes", "agent.body_hard_limit_bytes",
 		"agent.tunnel_max_metadata_bytes", "agent.tunnel_max_data_bytes",
 		"agent.tunnel_initial_window_bytes", "agent.tunnel_max_session_queue_bytes",
@@ -104,7 +105,8 @@ func TestAgentRelayAndTunnelSettingsSchema(t *testing.T) {
 		tag   string
 	}{
 		{"RelayDefaultURI", reflect.String, "agent.relay_default_uri", "", "", "", "agent.relay_default_uri,"},
-		{"RelayFallbackEnabled", reflect.Int, "agent.relay_fallback_enabled", "0", "0", "1", "agent.relay_fallback_enabled,0,0,1"},
+		{"DirectMaxSessions", reflect.Int, "agent.direct_max_sessions", "256", "1", "4096", "agent.direct_max_sessions,256,1,4096"},
+		{"DirectSessionIdleTimeoutSec", reflect.Int, "agent.direct_session_idle_timeout_seconds", "300", "1", "3600", "agent.direct_session_idle_timeout_seconds,300,1,3600"},
 		{"BodyMemoryThresholdBytes", reflect.Int64, "agent.body_memory_threshold_bytes", "1048576", "65536", "16777216", "agent.body_memory_threshold_bytes,1048576,65536,16777216"},
 		{"BodyHardLimitBytes", reflect.Int64, "agent.body_hard_limit_bytes", "67108864", "1048576", "268435456", "agent.body_hard_limit_bytes,67108864,1048576,268435456"},
 		{"TunnelMaxMetadataBytes", reflect.Int64, "agent.tunnel_max_metadata_bytes", "65536", "4096", "262144", "agent.tunnel_max_metadata_bytes,65536,4096,262144"},

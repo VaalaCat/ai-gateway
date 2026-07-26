@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"golang.org/x/net/http/httpguts"
 )
@@ -55,12 +58,21 @@ const (
 	receiveReady
 	receiveCommitted
 	receiveResponding
+	receiveResult
 	receiveTerminal
+)
+
+type streamKind uint8
+
+const (
+	streamKindAttempt streamKind = iota
+	streamKindProbe
 )
 
 type Stream struct {
 	session      *Session
 	id           wire.StreamID
+	requestID    string
 	generation   uint64
 	ctx          context.Context
 	cancel       context.CancelCauseFunc
@@ -94,6 +106,7 @@ type Stream struct {
 	responseOwner responseConsumer
 	receivePhase  receivePhase
 	receiveSeq    uint32
+	kind          streamKind
 
 	terminalMu              sync.Mutex
 	terminalSet             bool
@@ -102,17 +115,19 @@ type Stream struct {
 	finalTrailers           http.Header
 	finalDynamicTrailerKeys []string
 	finalTrailerSet         bool
+	attemptResult           attemptwire.AttemptProxyResult
+	resultSet               bool
 }
 
-func newStream(session *Session, sessionCtx, requestCtx context.Context, id wire.StreamID, remaining time.Duration) *Stream {
-	parent := requestCtx
+func newStream(session *Session, sessionCtx context.Context, id wire.StreamID, remaining time.Duration, requestID string) *Stream {
+	parent := sessionCtx
 	stopDeadline := func() {}
 	if remaining > 0 {
-		parent, stopDeadline = withClockTimeoutCause(requestCtx, session.opts.clock, remaining, context.DeadlineExceeded)
+		parent, stopDeadline = withClockTimeoutCause(sessionCtx, session.opts.clock, remaining, context.DeadlineExceeded)
 	}
 	ctx, cancel := context.WithCancelCause(parent)
 	stream := &Stream{
-		session: session, id: id, generation: session.generation, ctx: ctx, cancel: cancel, stopDeadline: stopDeadline,
+		session: session, id: id, requestID: requestID, generation: session.generation, ctx: ctx, cancel: cancel, stopDeadline: stopDeadline,
 		inbound: make(chan wire.Frame, 16), done: make(chan struct{}), ready: make(chan error, 1),
 		committed: make(chan error, 1), headers: make(chan headersResult, 1), responseData: newResponseBuffer(session.limits.InitialStreamWindow),
 		requestWindow:  newCreditWindowWithClock(session.limits.InitialStreamWindow, session.opts.clock),
@@ -153,11 +168,18 @@ func (st *Stream) handleFrame(frame wire.Frame) bool {
 		var err error
 		expected, err = wire.NextSequence(st.receiveSeq)
 		if err != nil {
-			return st.protocolViolation("sequence")
+			st.observeRejectedDirectResult(frame)
+			return st.frameProtocolViolation(frame, "sequence")
 		}
 	}
 	if frame.Sequence != expected {
-		return st.protocolViolation("sequence")
+		st.observeRejectedDirectResult(frame)
+		return st.frameProtocolViolation(frame, "sequence")
+	}
+	if st.resultProtocolPoisoning(frame) && st.receivePhase == receiveResult &&
+		frame.Type != wire.FrameEnd && frame.Type != wire.FrameReset && frame.Type != wire.FrameCancel {
+		st.observeRejectedDirectResult(frame)
+		return st.resultProtocolViolation("phase")
 	}
 	switch frame.Type {
 	case wire.FrameReady:
@@ -228,9 +250,38 @@ func (st *Stream) handleFrame(frame wire.Frame) bool {
 			_ = st.session.releaseIncoming(bytes)
 			return st.protocolViolation("window")
 		}
+	case wire.FrameAttemptResult:
+		if st.kind != streamKindAttempt || st.receivePhase != receiveResponding || st.resultSet {
+			st.observeDirectResultFailure(pkgmetrics.ResultInvalid, errStreamProtocol)
+			return st.resultProtocolViolation("phase")
+		}
+		resultLimit, limitErr := wire.FramePayloadLimit(wire.FrameAttemptResult, st.session.limits)
+		if limitErr != nil {
+			st.observeDirectResultFailure(pkgmetrics.ResultInvalid, limitErr)
+			return st.resultProtocolViolation("result_payload")
+		}
+		result, err := attemptwire.DecodeResultJSONWithin(frame.Payload, int(resultLimit))
+		if err != nil {
+			kind := pkgmetrics.ResultInvalid
+			if errors.Is(err, attemptwire.ErrResultTooLarge) {
+				kind = pkgmetrics.ResultTooLarge
+			}
+			st.observeDirectResultFailure(kind, err)
+			return st.resultProtocolViolation("result_payload")
+		}
+		st.terminalMu.Lock()
+		st.attemptResult = result
+		st.resultSet = true
+		st.terminalMu.Unlock()
+		st.receivePhase = receiveResult
+		st.observeDirectResultSuccess(result, len(frame.Payload))
 	case wire.FrameEnd:
-		if st.receivePhase != receiveResponding {
-			return st.protocolViolation("phase")
+		expectedPhase := receiveResult
+		if st.kind == streamKindProbe {
+			expectedPhase = receiveResponding
+		}
+		if st.receivePhase != expectedPhase {
+			return st.frameProtocolViolation(frame, "phase")
 		}
 		if len(frame.Payload) > 0 {
 			var final wire.Trailers
@@ -274,15 +325,84 @@ func (st *Stream) handleFrame(frame wire.Frame) bool {
 	return false
 }
 
+func (st *Stream) observeRejectedDirectResult(frame wire.Frame) {
+	if frame.Type == wire.FrameAttemptResult {
+		st.observeDirectResultFailure(pkgmetrics.ResultInvalid, errStreamProtocol)
+	}
+}
+
+func (st *Stream) observeDirectResultFailure(kind pkgmetrics.ResultKind, cause error) {
+	if st == nil || st.session == nil || st.session.opts.Direction != SessionDirectionDirectOutgoing {
+		return
+	}
+	st.session.opts.Metrics.ObserveDirectResultFrame(kind, pkgmetrics.DirectReasonProtocol)
+	st.session.opts.directLogs.ResultProtocolFailed(st.directResultLogEvent(string(kind)), "", cause)
+}
+
+func (st *Stream) observeDirectResultSuccess(result attemptwire.AttemptProxyResult, payloadBytes int) {
+	if st == nil || st.session == nil || st.session.opts.Direction != SessionDirectionDirectOutgoing {
+		return
+	}
+	st.session.opts.Metrics.ObserveDirectResultFrame(pkgmetrics.ResultKind(result.Kind), pkgmetrics.DirectReasonNone, payloadBytes)
+	st.session.opts.directLogs.ResultProtocolRecovered(st.directResultLogEvent(string(result.Kind)))
+}
+
+func (st *Stream) directResultLogEvent(kind string) directLogEvent {
+	return directLogEvent{
+		SourceAgentID: st.session.opts.directSourceAgentID, TargetAgentID: st.session.opts.directTargetAgentID,
+		Stage: "result", ReasonCode: kind, SessionGeneration: st.generation,
+		StreamID: hex.EncodeToString(st.id[:]), RequestID: st.requestID, SourceOutbound: true, ResultKind: kind,
+	}
+}
+
 func (st *Stream) protocolViolation(stage string) bool {
+	return st.finishProtocolViolation(stage, false)
+}
+
+func (st *Stream) frameProtocolViolation(frame wire.Frame, stage string) bool {
+	if st.resultProtocolPoisoning(frame) {
+		return st.resultProtocolViolation(stage)
+	}
+	return st.protocolViolation(stage)
+}
+
+func (st *Stream) resultProtocolViolation(stage string) bool {
+	return st.finishProtocolViolation(stage, st.session.opts.Direction == SessionDirectionDirectOutgoing)
+}
+
+func (st *Stream) resultProtocolPoisoning(frame wire.Frame) bool {
+	if st.session.opts.Direction != SessionDirectionDirectOutgoing || st.kind != streamKindAttempt {
+		return false
+	}
+	if frame.Type == wire.FrameAttemptResult {
+		return true
+	}
+	if frame.Type == wire.FrameEnd {
+		return st.receivePhase != receiveResult
+	}
+	return st.receivePhase == receiveResult && frame.Type != wire.FrameReset && frame.Type != wire.FrameCancel
+}
+
+func (st *Stream) finishProtocolViolation(stage string, poisonSession bool) bool {
 	st.receivePhase = receiveTerminal
 	st.setTerminal(errStreamProtocol)
+	if poisonSession {
+		// behavior change: an invalid Direct Result poisons its authenticated peer session;
+		// ordinary Relay stream violations retain the existing per-stream isolation.
+		st.session.setAccepting(false)
+	}
 	payload, _ := wire.EncodeMetadata(wire.Reset{
 		Code: wire.ErrorCodeRelayProtocol, Stage: stage, Committed: st.CommitState() != wire.PreCommit,
 	}, st.session.limits.MaxMetadataBytes)
 	ctx, cleanup := withClockTimeoutCause(st.session.ctx, st.session.opts.clock, st.session.opts.WriteTimeout, errControlSendTimeout)
-	_ = st.enqueueFrame(ctx, wire.FrameReset, payload, nil, true)
+	if err := st.enqueueFrame(ctx, wire.FrameReset, payload, nil, true); err == nil && poisonSession && st.session.isRunning() {
+		// behavior change: a session close cannot discard the protocol Reset that explains the eviction.
+		_ = st.session.writer.WaitStreamFlushed(ctx, st.id)
+	}
 	cleanup()
+	if poisonSession {
+		st.session.Cancel(errStreamProtocol)
+	}
 	return true
 }
 
@@ -425,33 +545,55 @@ func (st *Stream) uploadBytes(ctx context.Context, payload []byte) error {
 	return nil
 }
 
+func (st *Stream) CopyAttemptResponse(ctx context.Context, dst http.ResponseWriter) (attemptwire.AttemptProxyResult, error) {
+	if st.kind != streamKindAttempt {
+		return attemptwire.AttemptProxyResult{}, errStreamProtocol
+	}
+	return st.copyResponseFrames(ctx, dst)
+}
+
 func (st *Stream) CopyResponse(ctx context.Context, dst http.ResponseWriter) error {
+	if st.kind != streamKindProbe {
+		return errStreamProtocol
+	}
+	_, err := st.copyResponseFrames(ctx, dst)
+	return err
+}
+
+func (st *Stream) copyResponseFrames(ctx context.Context, dst http.ResponseWriter) (attemptwire.AttemptProxyResult, error) {
 	if isNilInterface(ctx) {
-		return errNilContext
+		return attemptwire.AttemptProxyResult{}, errNilContext
 	}
 	if isNilInterface(dst) {
-		return errNilResponseWriter
+		return attemptwire.AttemptProxyResult{}, errNilResponseWriter
 	}
-	if !st.responseOwner.Claim() {
-		return errCopyStarted
+	switch st.responseOwner.Claim() {
+	case responseClaimAlreadyClaimed:
+		return attemptwire.AttemptProxyResult{}, errCopyStarted
+	case responseClaimAbandoned:
+		return st.attemptResultWithError(errCopyStarted)
 	}
 	defer st.responseOwner.Finish()
+	if cause := context.Cause(ctx); cause != nil {
+		st.Cancel(cause)
+		return st.attemptResultWithError(cause)
+	}
 	opCtx, stop := st.operationContext(ctx)
 	defer stop()
 	result, err := waitHeaders(opCtx, st.headers)
 	if err != nil {
 		st.Cancel(err)
-		return err
+		return st.attemptResultWithError(err)
 	}
 	normalizedHeaders, err := normalizeResponseHeaders(http.Header(result.Header))
 	if err != nil {
 		st.Cancel(err)
-		return err
+		return st.attemptResultWithError(err)
 	}
 	normalizedTrailers, trailerKeys, err := normalizeTrailers(http.Header(result.Trailer))
 	if err != nil {
 		st.Cancel(err)
-		return err
+		return st.attemptResultWithError(err)
 	}
 	responseHeader := dst.Header()
 	copyHeaders(responseHeader, normalizedHeaders)
@@ -465,33 +607,21 @@ func (st *Stream) CopyResponse(ctx context.Context, dst http.ResponseWriter) err
 			break
 		}
 		if err != nil {
+			if st.kind == streamKindAttempt && errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), context.Canceled) && st.ctx.Err() == nil {
+				return st.finishInterruptedAttemptResponse(context.Canceled, true, 0, nil)
+			}
 			st.Cancel(err)
-			return err
+			return st.attemptResultWithError(err)
 		}
-		_ = st.session.releaseIncoming(int64(len(chunk)))
-		if _, err := dst.Write(chunk); err != nil {
-			st.Cancel(err)
-			return err
+		n, writeErr := dst.Write(chunk)
+		n, writeErr = normalizeResponseWriteCount(n, len(chunk), writeErr)
+		release := &responseChunkRelease{size: int64(len(chunk))}
+		_ = st.releaseResponseChunk(opCtx, release)
+		if result, err, done := st.finishResponseChunk(ctx, len(chunk), n, writeErr, release); done {
+			return result, err
 		}
 		if flusher, ok := dst.(http.Flusher); ok {
 			flusher.Flush()
-		}
-		if st.isTerminalSuccess() {
-			continue
-		}
-		payload, err := wire.EncodeMetadata(wire.WindowUpdate{Bytes: int64(len(chunk))}, st.session.limits.MaxMetadataBytes)
-		if err != nil {
-			return err
-		}
-		if err := st.enqueue(opCtx, wire.FrameWindowUpdate, payload); err != nil {
-			if set, terminalErr := st.getTerminal(); !set || terminalErr != nil {
-				st.Cancel(err)
-				return err
-			}
-		}
-		if err := st.responseWindow.Add(int64(len(chunk))); err != nil && !st.isTerminalSuccess() {
-			st.Cancel(err)
-			return err
 		}
 	}
 	dynamicTrailerKeys := []string(nil)
@@ -500,8 +630,14 @@ func (st *Stream) CopyResponse(ctx context.Context, dst http.ResponseWriter) err
 		dynamicTrailerKeys = dynamic
 	}
 	writeResponseTrailers(responseHeader, normalizedTrailers, trailerKeys, dynamicTrailerKeys)
-	_, terminalErr := st.getTerminal()
-	return terminalErr
+	attemptResult, resultSet, _, terminalErr := st.getAttemptResultAndTerminal()
+	if terminalErr != nil {
+		if resultSet {
+			return attemptResult, terminalErr
+		}
+		return attemptwire.AttemptProxyResult{}, terminalErr
+	}
+	return attemptResult, nil
 }
 
 func normalizeTrailers(source http.Header) (http.Header, []string, error) {
@@ -665,6 +801,7 @@ func (st *Stream) Cancel(cause error) {
 	if cause == nil {
 		cause = context.Canceled
 	}
+	st.setTerminal(cause)
 	st.responseOwner.Abandon()
 	st.cancelOnce.Do(func() { st.cancel(cause) })
 }
@@ -709,15 +846,17 @@ func (st *Stream) sendCancellation() {
 func (st *Stream) finalize() {
 	waitOperations := st.operations.Stop()
 	terminalSet, terminalErr := st.getTerminal()
-	cause := terminalErr
-	if terminalSet && terminalErr == nil {
-		cause = errStreamComplete
-	}
 	if !terminalSet {
-		cause = context.Cause(st.ctx)
+		cause := context.Cause(st.ctx)
+		if cause == nil {
+			cause = io.EOF
+		}
+		st.setTerminal(cause)
+		_, terminalErr = st.getTerminal()
 	}
-	if cause == nil {
-		cause = io.EOF
+	cause := terminalErr
+	if terminalErr == nil {
+		cause = errStreamComplete
 	}
 	st.closed.Store(true)
 	st.signalReady(cause)
@@ -727,7 +866,7 @@ func (st *Stream) finalize() {
 	st.responseWindow.Close(cause)
 	st.responseData.Close()
 	st.cancel(cause)
-	if !terminalSet || terminalErr != nil {
+	if terminalErr != nil {
 		st.responseOwner.Abandon()
 	}
 	st.stopSession()
@@ -801,6 +940,23 @@ func (st *Stream) getTerminal() (bool, error) {
 	return st.terminalSet, st.terminalErr
 }
 
+func (st *Stream) getAttemptResultAndTerminal() (attemptwire.AttemptProxyResult, bool, bool, error) {
+	st.terminalMu.Lock()
+	defer st.terminalMu.Unlock()
+	return st.attemptResult, st.resultSet, st.terminalSet, st.terminalErr
+}
+
+func (st *Stream) attemptResultWithError(err error) (attemptwire.AttemptProxyResult, error) {
+	result, resultSet, terminalSet, terminalErr := st.getAttemptResultAndTerminal()
+	if terminalSet && terminalErr != nil {
+		err = terminalErr
+	}
+	if resultSet {
+		return result, err
+	}
+	return attemptwire.AttemptProxyResult{}, err
+}
+
 func waitResult(ctx context.Context, result <-chan error) error {
 	select {
 	case err := <-result:
@@ -843,18 +999,29 @@ type responseConsumer struct {
 	done    chan struct{}
 }
 
+type responseClaimStatus uint8
+
+const (
+	responseClaimAcquired responseClaimStatus = iota
+	responseClaimAlreadyClaimed
+	responseClaimAbandoned
+)
+
 func newResponseConsumer() responseConsumer {
 	return responseConsumer{done: make(chan struct{})}
 }
 
-func (c *responseConsumer) Claim() bool {
+func (c *responseConsumer) Claim() responseClaimStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.claimed || c.closed {
-		return false
+	if c.claimed {
+		return responseClaimAlreadyClaimed
 	}
 	c.claimed = true
-	return true
+	if c.closed {
+		return responseClaimAbandoned
+	}
+	return responseClaimAcquired
 }
 
 func (c *responseConsumer) Finish() { c.close(true) }

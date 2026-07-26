@@ -24,7 +24,7 @@ func newPublicConfigTestContext(t *testing.T) (*app.Context, *gorm.DB) {
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	a := app.NewApplication()
-	a.SetDB(db)
+	a.SetCoreDB(db)
 	return &app.Context{Context: ginCtx, App: a, OwnerContext: t.Context()}, db
 }
 

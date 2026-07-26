@@ -3,11 +3,13 @@ package models
 import "gorm.io/datatypes"
 
 // ScriptScope 决定一个脚本对哪些请求生效。
-// ChannelIDs 与 ModelNames 均为空 = 全局；否则命中的 channel 或 model
-// 命中任一列表即生效。
+// 五类条件均为空 = 全局；否则命中任一条件即生效。
 type ScriptScope struct {
-	ChannelIDs []uint   `json:"channel_ids"`
-	ModelNames []string `json:"model_names"`
+	ChannelIDs        []uint   `json:"channel_ids"`
+	PrivateChannelIDs []uint   `json:"private_channel_ids"`
+	ModelNames        []string `json:"model_names"`
+	GroupIDs          []uint   `json:"group_ids"`
+	UserIDs           []uint   `json:"user_ids"`
 }
 
 // AdminScript 是管理员编写的动态 goja 脚本。仅管理员可管理。

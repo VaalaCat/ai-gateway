@@ -6,7 +6,35 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
+
+func TestApplicationCoreAndLogDatabases(t *testing.T) {
+	application := NewApplication()
+	if application.GetCoreDB() != nil || application.GetLogDB() != nil {
+		t.Fatal("new application databases must be nil")
+	}
+
+	coreDB := &gorm.DB{}
+	logDB := &gorm.DB{}
+	application.SetCoreDB(coreDB)
+	application.SetLogDB(logDB)
+	if application.GetCoreDB() != coreDB {
+		t.Fatal("GetCoreDB did not return the configured core database")
+	}
+	if application.GetLogDB() != logDB {
+		t.Fatal("GetLogDB did not return the configured log database")
+	}
+	if application.GetCoreDB() == application.GetLogDB() {
+		t.Fatal("core and log databases must remain distinct")
+	}
+
+	application.SetCoreDB(nil)
+	application.SetLogDB(nil)
+	if application.GetCoreDB() != nil || application.GetLogDB() != nil {
+		t.Fatal("application databases must support resetting to nil")
+	}
+}
 
 func TestRequestContextUsesHTTPRequestContext(t *testing.T) {
 	type requestContextKey struct{}

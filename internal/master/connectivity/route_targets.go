@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"sort"
 
-	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
@@ -72,8 +71,7 @@ func (s *Service) routeTargets(source models.Agent) RouteTargetsSnapshot {
 			TargetAgentID: targetID,
 			TargetName:    name,
 			Direct: publicDirectTarget(
-				source.PeerRouteMode,
-				s.agentSupports(targetID, protocol.AgentCapabilityDirectIngressV1),
+				s.agentSupports(targetID, protocol.AgentCapabilityDirectTunnelV1),
 				directTarget,
 			),
 			Relay: relayTarget,
@@ -84,12 +82,10 @@ func (s *Service) routeTargets(source models.Agent) RouteTargetsSnapshot {
 	return result
 }
 
-func publicDirectTarget(peerRouteMode string, targetSupportsDirectIngress bool, target DirectTargetSnapshot) RouteDirectTargetSnapshot {
+func publicDirectTarget(targetSupportsDirectTunnel bool, target DirectTargetSnapshot) RouteDirectTargetSnapshot {
 	state := routeTargetStateUnknown
 	switch {
-	case peerRouteMode == consts.PeerRouteModeRelayOnly:
-		state = routeTargetStateDisabled
-	case !targetSupportsDirectIngress:
+	case !targetSupportsDirectTunnel:
 		state = routeTargetStateUnsupported
 	case target.Checking:
 		state = routeTargetStateChecking
@@ -156,6 +152,8 @@ func summarizeRouteTargets(targets map[string]RouteTargetSnapshot) RouteTargetSu
 	}
 	for _, target := range targets {
 		switch target.Direct.State {
+		case routeTargetStateDisabled:
+			summaries.Direct.Disabled++
 		case routeTargetStateReachable:
 			summaries.Direct.Reachable++
 		case routeTargetStateDegraded:
@@ -166,6 +164,8 @@ func summarizeRouteTargets(targets map[string]RouteTargetSnapshot) RouteTargetSu
 			summaries.Direct.Stale++
 		}
 		switch string(target.Relay.State) {
+		case routeTargetStateDisabled:
+			summaries.Relay.Disabled++
 		case routeTargetStateReachable:
 			summaries.Relay.Reachable++
 		case routeTargetStateUnreachable:
@@ -189,10 +189,13 @@ func summarizeRouteTargets(targets map[string]RouteTargetSnapshot) RouteTargetSu
 }
 
 func summarizeDirectState(summary DirectSummary) string {
+	enabled := summary.Total - summary.Disabled
 	switch {
+	case enabled == 0 && summary.Disabled > 0:
+		return routeTargetStateDisabled
 	case summary.Unreachable > 0 || summary.Degraded > 0:
 		return routeTargetStateDegraded
-	case summary.Reachable == summary.Total:
+	case summary.Reachable == enabled:
 		return routeTargetStateReachable
 	default:
 		return routeTargetStateUnknown
@@ -200,10 +203,13 @@ func summarizeDirectState(summary DirectSummary) string {
 }
 
 func summarizeRelayState(summary RelayPathSummary) string {
+	enabled := summary.Total - summary.Disabled
 	switch {
+	case enabled == 0 && summary.Disabled > 0:
+		return routeTargetStateDisabled
 	case summary.Unreachable > 0 || summary.Unavailable > 0:
 		return routeTargetStateDegraded
-	case summary.Reachable == summary.Total:
+	case summary.Reachable == enabled:
 		return routeTargetStateReachable
 	default:
 		return routeTargetStateUnknown

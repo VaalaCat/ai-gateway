@@ -193,7 +193,8 @@ func (s *defaultSolver) applyAffinity(rctx *state.RelayContext, realModel string
 	if uid == 0 {
 		return ordered
 	}
-	entry, ok := s.Affinity.Lookup(affinity.Key{UserID: uid, RealModel: realModel})
+	key := affinity.Key{UserID: uid, TokenID: rctx.Input.UserInfo.TokenID, RealModel: realModel}
+	entry, ok := s.Affinity.Lookup(key)
 	if !ok {
 		return ordered
 	}
@@ -205,7 +206,7 @@ func (s *defaultSolver) applyAffinity(rctx *state.RelayContext, realModel string
 		ovr := ordered[i].Channel.Affinity.Data()
 		if !s.Affinity.Decide(affinity.Subject{UserID: uid, RealModel: realModel, ChannelEnabled: ovr.Enabled}).Apply {
 			// 强制不参与:剔除陈旧记录自愈,当作无记录(None),不设 HadAffinityEntry。
-			s.Affinity.Forget(affinity.Key{UserID: uid, RealModel: realModel})
+			s.Affinity.Forget(key)
 			return ordered
 		}
 		rctx.State.Plan.HadAffinityEntry = true

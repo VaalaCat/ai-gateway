@@ -1539,6 +1539,87 @@ func TestTokenEditRestrictions(t *testing.T) {
 	}
 }
 
+func TestTokenTraceModeAPI(t *testing.T) {
+	srv := setupTestMaster(t)
+	srv.InitAdminUser("admin", "admin123")
+	adminToken := loginHelper(t, srv, "admin", "admin123")
+	doAdmin := func(method, path string, body any) *httptest.ResponseRecorder {
+		return reqHelper(srv, adminToken, method, path, body)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		body     map[string]any
+		wantCode int
+		wantMode string
+	}{
+		{name: "omitted defaults full", body: map[string]any{"user_id": 1, "name": "trace-default"}, wantCode: http.StatusCreated, wantMode: "full"},
+		{name: "empty defaults full", body: map[string]any{"user_id": 1, "name": "trace-empty", "trace_mode": ""}, wantCode: http.StatusCreated, wantMode: "full"},
+		{name: "explicit full", body: map[string]any{"user_id": 1, "name": "trace-full", "trace_mode": "full"}, wantCode: http.StatusCreated, wantMode: "full"},
+		{name: "explicit headers", body: map[string]any{"user_id": 1, "name": "trace-headers", "trace_mode": "headers"}, wantCode: http.StatusCreated, wantMode: "headers"},
+		{name: "unknown rejected", body: map[string]any{"user_id": 1, "name": "trace-unknown", "trace_mode": "body"}, wantCode: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := doAdmin("POST", "/api/tokens", tc.body)
+			if w.Code != tc.wantCode {
+				t.Fatalf("create token: got %d want %d: %s", w.Code, tc.wantCode, w.Body.String())
+			}
+			if tc.wantMode != "" {
+				got := jsonBody(t, w)
+				if got["trace_mode"] != tc.wantMode {
+					t.Fatalf("trace_mode=%v want=%q", got["trace_mode"], tc.wantMode)
+				}
+			}
+		})
+	}
+
+	w := doAdmin("POST", "/api/admin/users", map[string]any{
+		"username": "trace-editor", "password": "pass1234", "role": 1,
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create user: %d %s", w.Code, w.Body.String())
+	}
+	userToken := loginHelper(t, srv, "trace-editor", "pass1234")
+	doUser := func(method, path string, body any) *httptest.ResponseRecorder {
+		return reqHelper(srv, userToken, method, path, body)
+	}
+
+	w = doAdmin("POST", "/api/admin/token-templates", map[string]any{
+		"name": "trace-template", "models": `[]`, "expiry_days": 30,
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create template: %d %s", w.Code, w.Body.String())
+	}
+	templateID := int(jsonBody(t, w)["id"].(float64))
+	w = doUser("POST", "/api/tokens", map[string]any{
+		"name": "trace-user-token", "template_id": templateID,
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create user token: %d %s", w.Code, w.Body.String())
+	}
+	userTokenID := int(jsonBody(t, w)["id"].(float64))
+	path := "/api/tokens/" + itoa(userTokenID)
+
+	// The new user has zero balance. Re-sending status=1 while changing only
+	// trace mode is not an enable transition and must remain allowed.
+	w = doUser("PUT", path, map[string]any{"status": 1, "trace_mode": "headers", "expired_at": 123})
+	if w.Code != http.StatusOK {
+		t.Fatalf("user update trace mode: %d %s", w.Code, w.Body.String())
+	}
+	updated := jsonBody(t, w)
+	if updated["trace_mode"] != "headers" {
+		t.Fatalf("trace_mode=%v want=headers", updated["trace_mode"])
+	}
+	if int64(updated["expired_at"].(float64)) == 123 {
+		t.Fatal("ordinary user changed restricted expired_at field")
+	}
+
+	w = doUser("PUT", path, map[string]any{"trace_mode": "body"})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid trace mode: got %d want 400: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestAdminCanReassignRegularTokenToAnotherUser(t *testing.T) {
 	srv := setupTestMaster(t)
 	srv.InitAdminUser("admin", "admin123")
@@ -1670,16 +1751,20 @@ func TestLogAccessControl(t *testing.T) {
 	}
 
 	// Insert logs directly into DB
-	srv.DB.Create(&models.UsageLog{
+	logDB := srv.App.GetLogDB()
+	require.NotNil(t, logDB)
+	adminLog := models.RequestLog(models.UsageLog{
 		UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "gpt-4o",
 		RequestID: "admin-req-1", Status: 1, PromptTokens: 100,
 		CompletionTokens: 50, InputCost: 10, OutputCost: 5, TotalCost: 15,
 	})
-	srv.DB.Create(&models.UsageLog{
+	require.NoError(t, logDB.Table(models.RequestLog{}.TableName()).Create(&adminLog).Error)
+	userLog := models.RequestLog(models.UsageLog{
 		UserID: normalUserID, TokenID: 2, ChannelID: 1, ModelName: "gpt-4o",
 		RequestID: "user-req-1", Status: 1, PromptTokens: 200,
 		CompletionTokens: 100, InputCost: 20, OutputCost: 10, TotalCost: 30,
 	})
+	require.NoError(t, logDB.Table(models.RequestLog{}.TableName()).Create(&userLog).Error)
 
 	// Admin: GET /api/logs - sees all logs
 	w = doAdmin("GET", "/api/logs", nil)
@@ -1778,21 +1863,27 @@ func TestTraceAccessControl(t *testing.T) {
 	}
 
 	// Insert usage logs and traces
-	srv.DB.Create(&models.UsageLog{
+	logDB := srv.App.GetLogDB()
+	require.NotNil(t, logDB)
+	adminLog := models.RequestLog(models.UsageLog{
 		UserID: 1, TokenID: 1, ChannelID: 1,
 		RequestID: "admin-trace-req", Status: 1, HasTrace: true,
 	})
-	srv.DB.Create(&models.UsageLogTrace{
+	require.NoError(t, logDB.Table(models.RequestLog{}.TableName()).Create(&adminLog).Error)
+	adminTrace := models.RequestTrace(models.UsageLogTrace{
 		RequestID: "admin-trace-req", InboundPath: "/v1/chat/completions",
 	})
+	require.NoError(t, logDB.Table(models.RequestTrace{}.TableName()).Create(&adminTrace).Error)
 
-	srv.DB.Create(&models.UsageLog{
+	userLog := models.RequestLog(models.UsageLog{
 		UserID: normalUserID, TokenID: 2, ChannelID: 1,
 		RequestID: "user-trace-req", Status: 1, HasTrace: true,
 	})
-	srv.DB.Create(&models.UsageLogTrace{
+	require.NoError(t, logDB.Table(models.RequestLog{}.TableName()).Create(&userLog).Error)
+	userTrace := models.RequestTrace(models.UsageLogTrace{
 		RequestID: "user-trace-req", InboundPath: "/v1/chat/completions",
 	})
+	require.NoError(t, logDB.Table(models.RequestTrace{}.TableName()).Create(&userTrace).Error)
 
 	// Admin: GET /api/logs/admin-trace-req/trace - succeeds
 	w = doAdmin("GET", "/api/logs/admin-trace-req/trace", nil)

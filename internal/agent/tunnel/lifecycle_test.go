@@ -16,9 +16,9 @@ import (
 func TestSessionInvalidConstructionIsTerminalAndNilSafe(t *testing.T) {
 	invalid := testLimits(1)
 	invalid.MaxDataBytes = 0
-	session := NewSession(nil, 1, invalid, SessionOptions{})
+	session := NewSession(nil, 1, invalid, SessionOptions{Direction: SessionDirectionRelay})
 	require.ErrorIs(t, session.Run(t.Context()), errNilConnection)
-	_, err := session.OpenStream(t.Context(), agentproxy.RelayRequest{})
+	_, err := session.OpenAttemptStream(t.Context(), agentproxy.AttemptStreamRequest{})
 	require.ErrorIs(t, err, errNilConnection)
 	require.NoError(t, session.Close(t.Context()))
 	session.Cancel(context.Canceled)
@@ -32,8 +32,8 @@ func TestSessionInvalidConstructionIsTerminalAndNilSafe(t *testing.T) {
 func TestSessionInvalidLimitsCloseConnectionAndUseStableError(t *testing.T) {
 	conn := newMemorySessionConn()
 	limits := testLimits(1)
-	limits.InitialStreamWindow = wire.MaxV1StreamWindowBytes + 1
-	session := newSession(conn, 1, limits, SessionOptions{})
+	limits.InitialStreamWindow = wire.MaxV2StreamWindowBytes + 1
+	session := newSession(conn, 1, limits, SessionOptions{Direction: SessionDirectionRelay})
 	require.ErrorIs(t, session.Run(t.Context()), wire.ErrInvalidLimits)
 	select {
 	case <-conn.closed:
@@ -48,9 +48,9 @@ func TestSessionInvalidLimitsCloseConnectionAndUseStableError(t *testing.T) {
 }
 
 func TestSessionPublicAPIsRejectNilContext(t *testing.T) {
-	session := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{})
+	session := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 	require.ErrorIs(t, session.Run(nil), errNilContext)
-	_, err := session.OpenStream(nil, agentproxy.RelayRequest{})
+	_, err := session.OpenAttemptStream(nil, agentproxy.AttemptStreamRequest{})
 	require.ErrorIs(t, err, errNilContext)
 	require.ErrorIs(t, session.Close(nil), errNilContext)
 	session.Cancel(context.Canceled)
@@ -58,7 +58,7 @@ func TestSessionPublicAPIsRejectNilContext(t *testing.T) {
 
 func TestSessionCloseAndCancelBeforeRunAreTerminal(t *testing.T) {
 	for _, closeSession := range []bool{false, true} {
-		session := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{})
+		session := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 		if closeSession {
 			require.NoError(t, session.Close(t.Context()))
 		} else {
@@ -77,7 +77,7 @@ func TestSessionCloseAndCancelBeforeRunAreTerminal(t *testing.T) {
 
 func TestSessionConcurrentRunAndCloseHasOneTerminalOwner(t *testing.T) {
 	for range 100 {
-		session := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{})
+		session := newSession(newMemorySessionConn(), 1, testLimits(1), SessionOptions{Direction: SessionDirectionRelay})
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); _ = session.Run(t.Context()) }()
@@ -97,8 +97,8 @@ func TestSessionNormalizesPayloadLimitsBeforeUploadAllocation(t *testing.T) {
 	limits.MaxDataBytes = math.MaxInt64
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	session := newSession(newMemorySessionConn(), 1, limits, SessionOptions{})
-	require.EqualValues(t, wire.MaxV1PayloadBytes, session.limits.MaxDataBytes)
+	session := newSession(newMemorySessionConn(), 1, limits, SessionOptions{Direction: SessionDirectionRelay})
+	require.EqualValues(t, wire.MaxV2PayloadBytes, session.limits.MaxDataBytes)
 	written := make(chan wire.Frame, 1)
 	session.ctx = ctx
 	session.writer = newFairWriter(ctx, session.limits.MaxQueuedSessionBytes, time.Second, func(frame wire.Frame) error {
@@ -106,11 +106,11 @@ func TestSessionNormalizesPayloadLimitsBeforeUploadAllocation(t *testing.T) {
 		return nil
 	})
 	go session.writer.Run()
-	stream := newStream(session, ctx, t.Context(), testStreamID(81), 0)
+	stream := newStream(session, ctx, testStreamID(81), 0, "")
 	stream.commitState.Store(uint32(wire.Committed))
 	reader := &sizingEOFReader{}
 	require.NoError(t, stream.Upload(t.Context(), reader))
-	require.LessOrEqual(t, reader.size, wire.MaxV1PayloadBytes)
+	require.LessOrEqual(t, reader.size, wire.MaxV2PayloadBytes)
 	<-written
 	stream.abortBeforeRun(context.Canceled)
 }

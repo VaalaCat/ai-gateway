@@ -39,6 +39,10 @@ function useChart() {
   return context
 }
 
+function useOptionalChartConfig() {
+  return React.useContext(ChartContext)?.config ?? {}
+}
+
 function ChartContainer({
   id,
   className,
@@ -114,7 +118,28 @@ ${colorConfig
   )
 }
 
-const ChartTooltip = RechartsPrimitive.Tooltip
+function ChartTooltip({
+  offset = 10,
+  allowEscapeViewBox = { x: false, y: false },
+  wrapperStyle,
+  ...props
+}: React.ComponentProps<typeof RechartsPrimitive.Tooltip>) {
+  return (
+    <RechartsPrimitive.Tooltip
+      offset={offset}
+      allowEscapeViewBox={allowEscapeViewBox}
+      wrapperStyle={{
+        ...wrapperStyle,
+        boxSizing: "border-box",
+        maxWidth: "100%",
+        paddingBlock: "16px",
+        paddingInline: "16px",
+        pointerEvents: "auto",
+      }}
+      {...props}
+    />
+  )
+}
 
 function ChartTooltipContent({
   active,
@@ -144,7 +169,7 @@ function ChartTooltipContent({
     >,
     "accessibilityLayer"
   >) {
-  const { config } = useChart()
+  const config = useOptionalChartConfig()
 
   const tooltipLabel = React.useMemo(() => {
     if (hideLabel || !payload?.length) {
@@ -191,7 +216,7 @@ function ChartTooltipContent({
   return (
     <div
       className={cn(
-        "grid min-w-[8rem] items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl",
+        "grid min-w-[8rem] items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-md",
         className
       )}
     >
@@ -242,18 +267,18 @@ function ChartTooltipContent({
                     )}
                     <div
                       className={cn(
-                        "flex flex-1 justify-between leading-none",
+                        "flex min-w-0 flex-1 justify-between gap-3 leading-none",
                         nestLabel ? "items-end" : "items-center"
                       )}
                     >
-                      <div className="grid gap-1.5">
+                      <div className="grid min-w-0 gap-1.5">
                         {nestLabel ? tooltipLabel : null}
-                        <span className="text-muted-foreground">
+                        <span className="min-w-0 break-words text-muted-foreground">
                           {itemConfig?.label ?? item.name}
                         </span>
                       </div>
                       {item.value != null && (
-                        <span className="font-mono font-medium text-foreground tabular-nums">
+                        <span className="shrink-0 text-right font-mono font-medium text-foreground tabular-nums">
                           {typeof item.value === "number"
                             ? item.value.toLocaleString()
                             : String(item.value)}

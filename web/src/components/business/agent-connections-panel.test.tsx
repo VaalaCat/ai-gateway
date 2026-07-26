@@ -1,10 +1,12 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTestQueryClient } from "@/test/render";
+import { agentQueryKeys } from "@/lib/api/agents";
 import type { ConnectionSnapshot, RouteTargetSnapshot, RouteTargetsPage } from "@/lib/types";
+import { AgentConnectionRail } from "./agent-connection-rail";
 import { AgentConnectionsPanel } from "./agent-connections-panel";
 
 const enqueueProbe = vi.fn().mockResolvedValue({});
@@ -31,9 +33,19 @@ vi.mock("next-intl", () => ({
     directCount: `Direct ${values?.reachable}/${values?.total}`,
     relayCount: `Relay ${values?.reachable}/${values?.total}`,
     probeTarget: `Check ${values?.target}`,
+    loadMore: "Load more",
     copyTargetDiagnostic: "Copy target diagnostics",
     probe: "Check all",
     moreRelayActions: "More Relay actions",
+    title: "Transport policy",
+    inbound: "Inbound",
+    outbound: "Outbound",
+    configured: "Configured",
+    effective: "Effective",
+    on: "On",
+    off: "Off",
+    refreshingDetail: "Refreshing connection details",
+    stale: "Stale",
   } as Record<string, string>)[key] ?? key,
 }));
 
@@ -91,6 +103,12 @@ function snapshot(): ConnectionSnapshot {
     observed_at: 100,
     agent_id: "agent-a",
     admin_status: 1,
+    transport_policy: {
+      direct_inbound: { configured: true, effective: true },
+      direct_outbound: { configured: true, effective: true },
+      relay_inbound: { configured: true, effective: true },
+      relay_outbound: { configured: false, effective: false },
+    },
     control: {
       state: "connected",
       health: "healthy",
@@ -125,12 +143,12 @@ function snapshot(): ConnectionSnapshot {
     },
     direct: {
       generation: 8,
-      summary: { state: "degraded", reachable: 0, degraded: 0, unreachable: 1, stale: 0, total: 1 },
+      summary: { state: "degraded", disabled: 0, reachable: 0, degraded: 0, unreachable: 1, stale: 0, total: 1 },
       targets: {},
     },
     target_summaries: {
-      direct: { state: "degraded", reachable: 0, degraded: 0, unreachable: 1, stale: 0, total: 1 },
-      relay: { state: "reachable", reachable: 1, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 1 },
+      direct: { state: "degraded", disabled: 0, reachable: 0, degraded: 0, unreachable: 1, stale: 0, total: 1 },
+      relay: { state: "reachable", disabled: 0, reachable: 1, unreachable: 0, unavailable: 0, unknown: 0, unsupported: 0, stale: 0, total: 1 },
     },
     allowed_operations: [{ operation: "probe", allowed: true }],
   };
@@ -173,8 +191,102 @@ describe("AgentConnectionsPanel", () => {
     const targets = screen.getByRole("heading", { name: "Route targets" }).closest("section");
     expect(control).toContainElement(relay);
     expect(relay).toContainElement(targets);
+    expect(relay).toHaveTextContent("Transport policy");
+    expect(screen.getByTestId("agent-transport-policy-status")).toHaveAttribute("data-compact", "false");
     expect(container.querySelector("[data-slot=card]")).not.toBeInTheDocument();
     expect(container.querySelectorAll("svg.size-4").length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps refresh feedback in the Control actions slot", () => {
+    const value = snapshot();
+    const queryClient = createTestQueryClient();
+    const view = (refreshing: boolean) => (
+      <QueryClientProvider client={queryClient}>
+        <AgentConnectionsPanel
+          agentId={7}
+          snapshot={value}
+          initialRouteTargetsPage={page()}
+          refreshing={refreshing}
+          routeTargetsCurrent
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(false));
+    const rail = screen.getByTestId("agent-connection-rail");
+    const control = screen.getByRole("heading", { name: "Control" }).closest("section")!;
+    const slot = screen.getByTestId("connection-refresh-status");
+    expect(control).toContainElement(slot);
+    expect(slot.querySelector("svg")).toHaveClass("invisible");
+
+    rerender(view(true));
+    expect(screen.getByTestId("connection-refresh-status")).toBe(slot);
+    expect(slot.querySelector("svg")).toHaveClass("animate-spin");
+    expect(rail.firstElementChild).toBe(control);
+    expect(screen.queryByText("Refreshing connection details")).not.toBeInTheDocument();
+
+    rerender(view(false));
+    expect(screen.getByTestId("connection-refresh-status")).toBe(slot);
+    expect(slot.querySelector("svg")).toHaveClass("invisible");
+  });
+
+  it("keeps the refresh slot in Control actions in compact mode", () => {
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentConnectionRail
+          agentId={7}
+          snapshot={snapshot()}
+          initialRouteTargetsPage={page()}
+          refreshing
+          compact
+        />
+      </QueryClientProvider>,
+    );
+
+    const control = screen.getByRole("heading", { name: "Control" }).closest("section")!;
+    expect(control).toContainElement(screen.getByTestId("connection-refresh-status"));
+    expect(screen.getByTestId("connection-refresh-status").querySelector("svg"))
+      .toHaveClass("animate-spin");
+  });
+
+  it("keeps stale feedback and hides the background spinner", () => {
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentConnectionsPanel
+          agentId={7}
+          snapshot={snapshot()}
+          initialRouteTargetsPage={page()}
+          stale
+          refreshing
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText("Stale")).toBeInTheDocument();
+    const slot = screen.getByTestId("connection-refresh-status");
+    expect(slot.querySelector("svg")).toHaveClass("invisible");
+    expect(slot).not.toHaveAttribute("role");
+  });
+
+  it("keeps one fixed slot while route targets catch up", () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise(() => undefined));
+    const queryClient = createTestQueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentConnectionsPanel
+          agentId={7}
+          snapshot={{ ...snapshot(), observed_at: 200 }}
+          initialRouteTargetsPage={page()}
+          refreshing
+          routeTargetsCurrent={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getAllByTestId("connection-refresh-status")).toHaveLength(1);
+    expect(screen.getByTestId("connection-refresh-status").querySelector("svg"))
+      .toHaveClass("animate-spin");
   });
 
   it("shows Direct and Relay outcomes for the same directed target", () => {
@@ -203,6 +315,64 @@ describe("AgentConnectionsPanel", () => {
 
     expect(screen.queryByText("No route targets")).not.toBeInTheDocument();
     expect(container.querySelectorAll("[data-slot=skeleton]")).toHaveLength(2);
+  });
+
+  it("retains the old page while a generic cached page mismatches, then atomically accepts a matching page", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise(() => undefined));
+    const current = { ...snapshot(), snapshot_seq: 9, observed_at: 200 };
+    const retainedPage = {
+      ...page(),
+      observed_at: 100,
+      data: [{ ...target(), target_agent_id: "old-target", target_name: "Old target" }],
+      next_cursor: "old-cursor",
+    };
+    const mismatchedPage = {
+      ...page(),
+      observed_at: 150,
+      data: [{ ...target(), target_agent_id: "wrong-target", target_name: "Wrong target" }],
+      next_cursor: "wrong-cursor",
+    };
+    const queryClient = createTestQueryClient();
+    queryClient.setQueryData(agentQueryKeys.targetsPage(7, 20), {
+      pages: [mismatchedPage],
+      pageParams: [""],
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentConnectionsPanel
+          agentId={7}
+          snapshot={current}
+          initialRouteTargetsPage={retainedPage}
+          refreshing
+          routeTargetsCurrent={false}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText("Old target")).toBeInTheDocument();
+    expect(screen.queryByText("Wrong target")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check Old target" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeDisabled();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const matchingPage = {
+      ...page(),
+      observed_at: current.observed_at,
+      data: [{ ...target(), target_agent_id: "new-target", target_name: "New target" }],
+      next_cursor: "new-cursor",
+    };
+    act(() => {
+      queryClient.setQueryData(agentQueryKeys.targetsPage(7, 20), {
+        pages: [matchingPage],
+        pageParams: [""],
+      });
+    });
+
+    expect(await screen.findByText("New target")).toBeInTheDocument();
+    expect(screen.queryByText("Old target")).not.toBeInTheDocument();
+    expect(screen.queryByText("Wrong target")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Check New target" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled();
   });
 
   it("runs a strict one-target probe and keeps mobile icon targets at 44px", async () => {

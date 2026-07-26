@@ -1,11 +1,15 @@
 package app
 
 import (
+	"sync/atomic"
+
 	"gorm.io/gorm"
 )
 
 type application struct {
-	db           *gorm.DB
+	coreDB       *gorm.DB
+	logDB        atomic.Pointer[gorm.DB]
+	layoutMode   atomic.Uint32
 	masterServer MasterServer
 	agentServer  AgentServer
 	hub          Hub
@@ -27,8 +31,19 @@ func NewApplication() Application {
 	return &application{}
 }
 
-func (a *application) GetDB() *gorm.DB                { return a.db }
-func (a *application) SetDB(db *gorm.DB)              { a.db = db }
+func (a *application) GetCoreDB() *gorm.DB   { return a.coreDB }
+func (a *application) SetCoreDB(db *gorm.DB) { a.coreDB = db }
+func (a *application) GetLogDB() *gorm.DB    { return a.logDB.Load() }
+func (a *application) SetLogDB(db *gorm.DB)  { a.logDB.Store(db) }
+func (a *application) GetDatabaseLayoutMode() DatabaseLayoutMode {
+	return DatabaseLayoutMode(a.layoutMode.Load())
+}
+func (a *application) SetDatabaseLayoutMode(mode DatabaseLayoutMode) {
+	if err := mode.Validate(); err != nil {
+		panic(err)
+	}
+	a.layoutMode.Store(uint32(mode))
+}
 func (a *application) GetMasterServer() MasterServer  { return a.masterServer }
 func (a *application) SetMasterServer(s MasterServer) { a.masterServer = s }
 func (a *application) GetHub() Hub                    { return a.hub }

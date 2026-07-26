@@ -8,7 +8,8 @@ export type SectionId =
   | "processing"
   | "connection"
   | "resilience"
-  | "response";
+  | "response"
+  | "usage";
 
 export const SECTION_FIELDS: Record<SectionId, ReadonlyArray<keyof ChannelForm>> = {
   meta: ["name", "key", "base_url", "tag", "remark", "use_legacy_adaptor"],
@@ -25,6 +26,7 @@ export const SECTION_FIELDS: Record<SectionId, ReadonlyArray<keyof ChannelForm>>
   connection: ["organization", "api_version", "proxy_url", "disable_keepalive", "other_settings"],
   resilience: ["resilience"],
   response: ["status_code_mapping", "free", "price_ratio"],
+  usage: [],
 };
 
 export function isSectionAllHidden(
@@ -32,5 +34,8 @@ export function isSectionAllHidden(
   hidden?: ReadonlySet<keyof ChannelForm>,
 ): boolean {
   if (!hidden || hidden.size === 0) return false;
+  // usage 是只读展示 stage,不绑定任何表单字段,空数组 .every() 恒真会被误判为
+  // "全部字段隐藏" 从而消失;显式排除。
+  if (SECTION_FIELDS[id].length === 0) return false;
   return SECTION_FIELDS[id].every((f) => hidden.has(f));
 }

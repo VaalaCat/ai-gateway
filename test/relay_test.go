@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
-	"github.com/VaalaCat/ai-gateway/internal/models"
 )
 
 func TestRelay_BasicChatCompletion(t *testing.T) {
@@ -48,7 +47,9 @@ func TestRelay_BasicChatCompletion(t *testing.T) {
 	// Verify usage log is written to master DB
 	env.WaitForLogs()
 	var logCount int64
-	env.Srv.DB.Model(&models.UsageLog{}).Count(&logCount)
+	if err := env.RequestLogDB(t).Count(&logCount).Error; err != nil {
+		t.Fatalf("count request logs: %v", err)
+	}
 	if logCount == 0 {
 		t.Error("no usage logs created on master")
 	}
@@ -475,7 +476,9 @@ func TestRelay_4xxForwarding(t *testing.T) {
 	// Verify error trace is recorded
 	env.WaitForLogs()
 	var traceCount int64
-	env.Srv.DB.Model(&models.UsageLogTrace{}).Where("request_id = ?", requestID).Count(&traceCount)
+	if err := env.RequestTraceDB(t).Where("request_id = ?", requestID).Count(&traceCount).Error; err != nil {
+		t.Fatalf("count request traces: %v", err)
+	}
 	if traceCount == 0 {
 		t.Error("no trace record created for the 429 request")
 	}

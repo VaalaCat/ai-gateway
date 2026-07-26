@@ -2,11 +2,14 @@ package billing
 
 import (
 	"errors"
+	"fmt"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -14,9 +17,35 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestInsightsUsesInjectedStatsCacheAndReturnsIsolatedResponses(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	h.Cache = dao.NewStatsCache()
+	start, end := insightsDayRange()
+	date := time.Unix(start, 0).UTC().Format("2006-01-02")
+	seedInsightsBucket(t, db, date, 10, "gpt-4o", 500, 100, 30, 200)
+	ctx := makeInsightsCtx(t, application, 1, true)
+	req := InsightsRequest{Start: start, End: end, Gran: "day", Stack: "model"}
+
+	first, err := h.Insights(ctx, req)
+	if err != nil {
+		t.Fatalf("first Insights: %v", err)
+	}
+	first.Trend[0].Requests = 999
+	seedInsightsBucket(t, db, date, 11, "claude-3", 300, 100, 10, 150)
+
+	second, err := h.Insights(ctx, req)
+	if err != nil {
+		t.Fatalf("cached Insights: %v", err)
+	}
+	if second.Trend[0].Requests != 1 {
+		t.Fatalf("cached insights was polluted: requests = %d, want 1", second.Trend[0].Requests)
+	}
+}
 
 // newInsightsTestCtx 构造 handler + DB + Application 三件套 (跟 dashboard_test 同形)。
 func newInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
@@ -28,6 +57,9 @@ func newInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
+	if err := db.AutoMigrate(&models.BillingHourlyBucket{}, &models.BillingLog{}); err != nil {
+		t.Fatalf("migrate billing hourly fixture: %v", err)
+	}
 	if err := models.SeedDefaultUserGroup(db); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
@@ -35,7 +67,7 @@ func newInsightsTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 		t.Fatalf("seed user: %v", err)
 	}
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	application.SetEventBus(eventbus.NewMemoryBus())
 	return &Handler{}, db, application
 }
@@ -72,6 +104,13 @@ func seedInsightsBucket(t *testing.T, db *gorm.DB, date string, hour int, model 
 		TotalCost:       cost,
 	}).Error; err != nil {
 		t.Fatalf("seed hourly bucket: %v", err)
+	}
+	if err := db.Create(&models.BillingHourlyBucket{
+		Date: date, Hour: hour, UserID: 1, TokenID: 1, ChannelID: 5,
+		ModelName: model, OwnerType: "admin", RequestCount: 1,
+		PromptTokens: prompt, CacheReadTokens: cacheRead, InputCost: inputCost, TotalCost: cost,
+	}).Error; err != nil {
+		t.Fatalf("seed billing hourly bucket: %v", err)
 	}
 }
 
@@ -123,29 +162,35 @@ func TestInsights_Admin_PopulatesStackAndSaving(t *testing.T) {
 	}
 }
 
-func TestInsights_User_ReadsUsageLogPath_NoBucketLeak(t *testing.T) {
+func TestInsights_User_ReadsOwnBillingHourlyWithoutCrossUserLeak(t *testing.T) {
 	h, db, application := newInsightsTestCtx(t)
 	start, end := insightsDayRange()
 	date := time.Unix(start, 0).UTC().Format("2006-01-02")
 	seedInsightsBucket(t, db, date, 10, "gpt-4o", 500, 100, 30, 200)
+	if err := db.Create(&models.BillingHourlyBucket{
+		Date: date, Hour: 10, UserID: 2, TokenID: 2, ChannelID: 5,
+		ModelName: "gpt-4o", OwnerType: "admin", RequestCount: 1, TotalCost: 900,
+	}).Error; err != nil {
+		t.Fatalf("seed other user billing hourly: %v", err)
+	}
 
 	ctx := makeInsightsCtx(t, application, 1, false)
 	resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day"})
 	if err != nil {
 		t.Fatalf("Insights user: %v", err)
 	}
-	// 非 admin 的 stacked/cache 走 usage_logs 路径(不是 usage_hourly_buckets)。
-	// 这里只 seed 了 uhb、没有该用户的 usage_logs 数据,故应为空 —— 验证 admin 的 uhb
-	// 数据不会泄漏进 per-user 路径。用户能看到自己 usage_logs 数据的正向行为,由
-	// dao 层 TestCostTrendStacked_AdminUserFilter_UsesUsageLog / _UserFilter_HourGran 覆盖。
-	if len(resp.CostTrendStacked.Buckets) != 0 {
-		t.Fatalf("user: CostTrendStacked.Buckets = %d, want 0", len(resp.CostTrendStacked.Buckets))
+	// cost stack 与 cache saving 都读 user_id=1 的 core billing facts。
+	if len(resp.CostTrendStacked.Buckets) != 1 {
+		t.Fatalf("user: CostTrendStacked.Buckets = %d, want 1", len(resp.CostTrendStacked.Buckets))
 	}
-	if len(resp.CostTrendStacked.SeriesOrder) != 0 {
-		t.Fatalf("user: SeriesOrder = %d, want 0", len(resp.CostTrendStacked.SeriesOrder))
+	if len(resp.CostTrendStacked.SeriesOrder) != 1 || resp.CostTrendStacked.SeriesOrder[0] != "gpt-4o" {
+		t.Fatalf("user: SeriesOrder = %v, want [gpt-4o]", resp.CostTrendStacked.SeriesOrder)
 	}
-	if resp.CacheSaving.SavedTokens != 0 {
-		t.Fatalf("user: SavedTokens = %d, want 0", resp.CacheSaving.SavedTokens)
+	if got := resp.CostTrendStacked.Buckets[0].Series["gpt-4o"]; got != 500 {
+		t.Fatalf("user: cost = %d, want own cost 500", got)
+	}
+	if resp.CacheSaving.SavedTokens != 30 {
+		t.Fatalf("user: SavedTokens = %d, want own billing fact 30", resp.CacheSaving.SavedTokens)
 	}
 	if resp.CacheSaving.VsLabel != "vs no-cache" {
 		t.Fatalf("user: VsLabel = %q, want 'vs no-cache'", resp.CacheSaving.VsLabel)
@@ -234,4 +279,140 @@ func TestInsights_Trend_IncludesCacheTokens(t *testing.T) {
 	if tokens != 370 {
 		t.Fatalf("trend tokens = %d, want 370 (含 cache)", tokens)
 	}
+}
+
+func TestBillingInsightsAcceptsTopNFiveTenTwenty(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	date := time.Unix(start, 0).UTC().Format("2006-01-02")
+	for i := 0; i < 7; i++ {
+		seedInsightsBucket(t, db, date, 10+i, fmt.Sprintf("model-%02d", i), int64(100-i), 1, 0, 1)
+	}
+	ctx := makeInsightsCtx(t, application, 1, true)
+	for _, tc := range []struct {
+		topN int
+		want int
+	}{{0, 6}, {5, 6}, {10, 7}, {20, 7}} {
+		resp, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "day", TopN: tc.topN})
+		if err != nil {
+			t.Fatalf("top_n=%d: %v", tc.topN, err)
+		}
+		if got := len(resp.CostTrendStacked.SeriesOrder); got != tc.want {
+			t.Fatalf("top_n=%d series = %d, want %d", tc.topN, got, tc.want)
+		}
+	}
+}
+
+func TestBillingInsightsRejectsInvalidTopN(t *testing.T) {
+	h, _, application := newInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	for _, topN := range []int{-1, 6} {
+		_, err := h.Insights(makeInsightsCtx(t, application, 1, true), InsightsRequest{Start: start, End: end, TopN: topN})
+		var apiErr *api.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "InvalidTopN" {
+			t.Fatalf("top_n=%d error = %v, want InvalidTopN", topN, err)
+		}
+	}
+}
+
+func TestBillingTokenFilterOnlyChangesTrendSeriesAndHidesForeignTokens(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	date := time.Unix(start, 0).UTC().Format("2006-01-02")
+	for _, token := range []models.Token{
+		{ID: 11, UserID: 1, Key: "sk-own-a", Name: "own-a"},
+		{ID: 12, UserID: 1, Key: "sk-own-b", Name: "own-b"},
+		{ID: 21, UserID: 2, Key: "sk-foreign", Name: "foreign"},
+	} {
+		if err := db.Create(&token).Error; err != nil {
+			t.Fatalf("seed token: %v", err)
+		}
+	}
+	for _, row := range []models.UsageLog{
+		{RequestID: "own-a", UserID: 1, TokenID: 11, ModelName: "model-a", CreatedAt: start + 10, PromptTokens: 10, CacheReadTokens: 2, TotalCost: 100},
+		{RequestID: "own-b", UserID: 1, TokenID: 12, ModelName: "model-b", CreatedAt: start + 20, PromptTokens: 20, CacheReadTokens: 3, TotalCost: 200},
+	} {
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatalf("seed usage log: %v", err)
+		}
+	}
+	for _, row := range []models.BillingHourlyBucket{
+		{Date: date, Hour: 0, UserID: 1, TokenID: 11, ModelName: "model-a", RequestCount: 1, PromptTokens: 10, CacheReadTokens: 2, TotalCost: 100},
+		{Date: date, Hour: 0, UserID: 1, TokenID: 12, ModelName: "model-b", RequestCount: 1, PromptTokens: 20, CacheReadTokens: 3, TotalCost: 200},
+	} {
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatalf("seed billing bucket: %v", err)
+		}
+	}
+
+	h.Cache = dao.NewStatsCache()
+	ctx := makeInsightsCtx(t, application, 1, false)
+	filtered, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "hour", TokenID: 11, TopN: 5})
+	if err != nil {
+		t.Fatalf("filtered insights: %v", err)
+	}
+	if got := filtered.Trend[0].Requests; got != 1 {
+		t.Fatalf("filtered trend requests = %d, want 1", got)
+	}
+	if got := filtered.CostTrendStacked.SeriesOrder; !reflect.DeepEqual(got, []string{"model-a"}) {
+		t.Fatalf("filtered cost series = %v", got)
+	}
+	if got := filtered.CacheSaving.SavedTokens; got != 5 {
+		t.Fatalf("cache saving = %d, want unfiltered 5", got)
+	}
+
+	other, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "hour", TokenID: 12, TopN: 10})
+	if err != nil {
+		t.Fatalf("second filtered insights: %v", err)
+	}
+	if got := other.CostTrendStacked.SeriesOrder; !reflect.DeepEqual(got, []string{"model-b"}) {
+		t.Fatalf("second cost series = %v; cache key omitted token_id/top_n", got)
+	}
+
+	for _, tokenID := range []uint{21, 999} {
+		_, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, TokenID: tokenID})
+		var apiErr *api.APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != 404 {
+			t.Fatalf("token_id=%d error = %v, want hidden 404", tokenID, err)
+		}
+	}
+}
+
+func TestBillingTokenFilterAllowsAdminTokenAccess(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	start, end := insightsDayRange()
+	if err := db.Create(&models.Token{ID: 21, UserID: 2, Key: "sk-admin-visible", Name: "admin-visible"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.UsageLog{RequestID: "admin-token", UserID: 2, TokenID: 21, ModelName: "foreign-model", CreatedAt: start + 10, TotalCost: 7}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.BillingHourlyBucket{Date: time.Unix(start, 0).UTC().Format("2006-01-02"), UserID: 2, TokenID: 21, ModelName: "foreign-model", RequestCount: 1, TotalCost: 7}).Error; err != nil {
+		t.Fatal(err)
+	}
+	resp, err := h.Insights(makeInsightsCtx(t, application, 1, true), InsightsRequest{Start: start, End: end, Gran: "hour", TokenID: 21})
+	if err != nil {
+		t.Fatalf("admin filter: %v", err)
+	}
+	if len(resp.Trend) != 1 || resp.Trend[0].Requests != 1 {
+		t.Fatalf("admin filtered trend = %+v", resp.Trend)
+	}
+}
+
+func TestBillingTokenFilterSplitLayoutNeedsOnlyCoreBillingFacts(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	start, _ := insightsDayRange()
+	require.NoError(t, db.Create(&models.Token{ID: 31, UserID: 3, Key: "split-core", Name: "split-core"}).Error)
+	require.NoError(t, db.Create(&models.BillingLog{
+		RequestID: "split-core-only", UserID: 3, TokenID: 31, ModelName: "core-model",
+		PromptTokens: 10, CompletionTokens: 20, CacheReadTokens: 5, CacheWriteTokens: 2,
+		InputCost: 4, TotalCost: 9, CreatedAt: start + 2,
+	}).Error)
+	resp, err := h.Insights(makeInsightsCtx(t, application, 1, true), InsightsRequest{Start: start + 1, End: start + 3, Gran: "hour", TokenID: 31})
+	require.NoError(t, err)
+	require.Equal(t, []string{"core-model"}, resp.CostTrendStacked.SeriesOrder)
+	require.Len(t, resp.Trend, 1)
+	require.Equal(t, int64(37), resp.Trend[0].Tokens)
+	require.Equal(t, int64(5), resp.CacheSaving.SavedTokens)
 }

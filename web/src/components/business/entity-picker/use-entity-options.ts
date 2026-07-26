@@ -6,13 +6,14 @@ import type { AdminScope, EntityAdapter } from "./types";
 /** 选择类组件(单选/多选)共用:列表 + 防抖搜索 + 取 value/label/renderItem。 */
 export function useEntityOptions(
   adapter: EntityAdapter<unknown>,
-  opts: { scope: AdminScope; pageSize: number },
+  opts: { scope: AdminScope; pageSize: number; ownerUserId?: number },
 ) {
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 300);
   const list = adapter.useList({
     search: debouncedSearch,
     scope: opts.scope,
+    ...(opts.ownerUserId !== undefined ? { ownerUserId: opts.ownerUserId } : {}),
     page_size: opts.pageSize,
   });
   const items = list.data?.data ?? [];

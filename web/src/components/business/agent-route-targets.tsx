@@ -10,6 +10,7 @@ import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empt
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { agentTransportPolicyReasonLabelKey } from "@/lib/agent-transport-policy";
 import { cn } from "@/lib/utils";
 import type {
   DirectPathState,
@@ -26,12 +27,18 @@ interface Props {
   hasNextPage?: boolean;
   probingTargetID?: string;
   compact?: boolean;
+  operationsDisabled?: boolean;
   onLoadMore?: () => void;
   onProbeTarget?: (targetAgentID: string) => void;
 }
 
 const MAX_RENDERED_TARGETS = 100;
-
+const reasonStates = new Set<DirectPathState | RelayPathState>([
+  "disabled",
+  "unreachable",
+  "unavailable",
+  "degraded",
+]);
 function statusVariant(value: DirectPathState | RelayPathState) {
   if (value === "reachable") return "default" as const;
   if (value === "unreachable" || value === "unavailable") return "destructive" as const;
@@ -55,7 +62,9 @@ function PathState({
   reasonCode?: string;
 }) {
   const t = useTranslations("agents.connection");
-  const showReasonCode = state === "unreachable" || state === "unavailable" || state === "degraded";
+  const showReasonCode = reasonStates.has(state);
+  const policyReasonLabelKey = agentTransportPolicyReasonLabelKey(reasonCode);
+  const reasonLabel = policyReasonLabelKey ? t(policyReasonLabelKey) : undefined;
   return (
     <div className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)_auto] items-center gap-2 py-1 sm:grid-cols-[auto_minmax(0,1fr)] sm:content-center sm:py-0">
       <span className="text-xs font-medium text-muted-foreground sm:hidden">{t(path)}</span>
@@ -66,9 +75,32 @@ function PathState({
         ) : null}
       </div>
       {showReasonCode && reasonCode ? (
-        <code className="col-span-2 col-start-2 truncate font-mono text-xs text-destructive sm:col-span-2 sm:col-start-1">
-          {reasonCode}
-        </code>
+        reasonLabel ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <code
+                tabIndex={0}
+                aria-label={`${reasonLabel} (${reasonCode})`}
+                className={cn(
+                  "col-span-2 col-start-2 truncate font-mono text-xs sm:col-span-2 sm:col-start-1",
+                  state === "disabled" ? "text-muted-foreground" : "text-destructive",
+                )}
+              >
+                {reasonCode}
+              </code>
+            </TooltipTrigger>
+            <TooltipContent>{reasonLabel}</TooltipContent>
+          </Tooltip>
+        ) : (
+          <code
+            className={cn(
+              "col-span-2 col-start-2 truncate font-mono text-xs sm:col-span-2 sm:col-start-1",
+              state === "disabled" ? "text-muted-foreground" : "text-destructive",
+            )}
+          >
+            {reasonCode}
+          </code>
+        )
       ) : null}
     </div>
   );
@@ -77,10 +109,12 @@ function PathState({
 function TargetActions({
   target,
   probing,
+  disabled,
   onProbe,
 }: {
   target: RouteTargetSnapshot;
   probing: boolean;
+  disabled: boolean;
   onProbe?: () => void;
 }) {
   const t = useTranslations("agents.connection");
@@ -102,7 +136,7 @@ function TargetActions({
             size="icon-sm"
             className="size-11 sm:size-8"
             aria-label={t("probeTarget", { target: target.target_name || target.target_agent_id })}
-            disabled={!onProbe || probing}
+            disabled={disabled || !onProbe || probing}
             onClick={onProbe}
           >
             {probing ? <LoaderCircle className="animate-spin" /> : <Radar />}
@@ -137,6 +171,7 @@ export function AgentRouteTargets({
   hasNextPage,
   probingTargetID,
   compact = false,
+  operationsDisabled = false,
   onLoadMore,
   onProbeTarget,
 }: Props) {
@@ -212,6 +247,7 @@ export function AgentRouteTargets({
                 <TargetActions
                   target={target}
                   probing={probingTargetID === target.target_agent_id}
+                  disabled={operationsDisabled}
                   onProbe={onProbeTarget ? () => onProbeTarget(target.target_agent_id) : undefined}
                 />
               </div>
@@ -220,7 +256,7 @@ export function AgentRouteTargets({
                   path="direct"
                   state={target.direct.state}
                   latency={target.direct.latency_ms}
-                  reasonCode={target.direct.last_error?.code}
+                  reasonCode={target.direct.policy_reason ?? target.direct.last_error?.code}
                 />
               </div>
               <div className="col-span-2 min-w-0 sm:col-span-1 sm:col-start-3 sm:row-start-1">
@@ -228,7 +264,7 @@ export function AgentRouteTargets({
                   path="relay"
                   state={target.relay.state}
                   latency={target.relay.latency_ms}
-                  reasonCode={target.relay.last_error?.code}
+                  reasonCode={target.relay.policy_reason ?? target.relay.last_error?.code}
                 />
               </div>
             </div>
@@ -241,7 +277,7 @@ export function AgentRouteTargets({
           variant="outline"
           size="sm"
           className="self-start"
-          disabled={isFetchingNextPage}
+          disabled={operationsDisabled || isFetchingNextPage}
           onClick={onLoadMore}
         >
           {isFetchingNextPage ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : null}

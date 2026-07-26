@@ -3,21 +3,18 @@ package agentproxy
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
@@ -30,37 +27,38 @@ var (
 	errDirectAttemptInvalid  = errors.New("direct forward: invalid attempt proxy request")
 )
 
-type DirectOutcome struct {
+type AttemptTransportOutcome struct {
 	ResponseStarted bool
 	Commit          tunnel.CommitState
 	Stage           string
 	Code            string
+	AttemptResult   *attemptwire.AttemptProxyResult
 	Err             error
+	circuitEffect   directCircuitEffect
 }
 
-// ReplayBody is the request-owned body contract consumed by DirectForwarder.
-type ReplayBody interface {
-	Size() int64
-	Open() (io.ReadCloser, error)
-	Bytes(limit int64) ([]byte, error)
-	Close() error
-}
+type directCircuitEffect uint8
+
+const (
+	directCircuitEffectCancelled directCircuitEffect = iota + 1
+	directCircuitEffectTransportFailed
+	directCircuitEffectHTTPResponded
+)
 
 type DirectRequestForwarder interface {
-	Forward(context.Context, DirectRequest, http.ResponseWriter) DirectOutcome
+	Forward(context.Context, DirectRequest, http.ResponseWriter) AttemptTransportOutcome
 }
 
+// DirectRequest carries only what the tunnel attempt stream needs. The frozen
+// target owns the address; credentials belong to the session pool.
 type DirectRequest struct {
-	TargetAgentID      string
-	RouteID            uint
-	Hop                uint8
-	AddressFingerprint string
-	TargetURL          *url.URL
-	ProxyURL           *url.URL
-	Request            *http.Request
-	Body               ReplayBody
-	ForwardTicket      agentauth.ForwardTicket
-	Attempt            *attemptwire.AttemptProxyMeta
+	Target    DirectSessionTarget
+	RouteID   uint
+	RequestID string
+	Hop       uint8
+	Request   *http.Request
+	Body      app.ReplayBody
+	Attempt   attemptwire.AttemptProxyMeta
 }
 
 type DirectTargetSnapshot struct {
@@ -72,21 +70,15 @@ type DirectTargetSnapshot struct {
 	PreferredTag   string
 }
 
-type PreparedDirectTarget struct {
-	AddressFingerprint string
-	TargetURL          *url.URL
-	ProxyURL           *url.URL
-}
-
 type DirectTransportRequest struct {
 	TargetAgentID  string
 	RouteID        uint
+	RequestID      string
 	Hop            uint8
-	PreparedTarget PreparedDirectTarget
+	PreparedTarget DirectSessionTarget
 	Request        *http.Request
-	Body           ReplayBody
-	ForwardTicket  agentauth.ForwardTicket
-	Attempt        *attemptwire.AttemptProxyMeta
+	Body           app.ReplayBody
+	Attempt        attemptwire.AttemptProxyMeta
 }
 
 func ExecuteDirectTransport(
@@ -94,29 +86,33 @@ func ExecuteDirectTransport(
 	direct DirectRequestForwarder,
 	req DirectTransportRequest,
 	dst http.ResponseWriter,
-) DirectOutcome {
+) AttemptTransportOutcome {
 	if direct == nil {
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeDirectDisabled, Err: errors.New(CodeDirectDisabled)}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeDirectDisabled, Err: errors.New(CodeDirectDisabled)}
 	}
 	return direct.Forward(ctx, DirectRequest{
-		TargetAgentID: req.TargetAgentID, RouteID: req.RouteID, Hop: req.Hop,
-		AddressFingerprint: req.PreparedTarget.AddressFingerprint,
-		TargetURL:          req.PreparedTarget.TargetURL, ProxyURL: req.PreparedTarget.ProxyURL,
-		Request: req.Request, Body: req.Body, ForwardTicket: req.ForwardTicket, Attempt: req.Attempt,
+		Target: req.PreparedTarget, RouteID: req.RouteID, RequestID: req.RequestID, Hop: req.Hop,
+		Request: req.Request, Body: req.Body, Attempt: req.Attempt,
 	}, dst)
 }
 
-func PrepareDirectTarget(snapshot DirectTargetSnapshot) (PreparedDirectTarget, error) {
+// PrepareDirectTarget resolves and freezes the direct peer address once. The
+// returned target holds the canonical http/https base URL; the session pool and
+// dialer adapt it to ws/wss at the dial boundary.
+func PrepareDirectTarget(snapshot DirectTargetSnapshot) (DirectSessionTarget, error) {
 	addresses := ParseAddresses(snapshot.HTTPAddresses)
-	prepared := PreparedDirectTarget{AddressFingerprint: CanonicalAddressFingerprint(addresses)}
+	fingerprint := CanonicalAddressFingerprint(addresses)
 	targetRaw, err := ResolveAddress(addresses, snapshot.AddressTag, snapshot.PreferredTag, snapshot.AgentID)
 	if err != nil {
-		return PreparedDirectTarget{}, err
+		return DirectSessionTarget{}, err
 	}
-	prepared.TargetURL, err = url.Parse(targetRaw)
-	if err != nil || prepared.TargetURL.Host == "" ||
-		(prepared.TargetURL.Scheme != "http" && prepared.TargetURL.Scheme != "https") {
-		return PreparedDirectTarget{}, errors.Join(errors.New(CodeDirectDisabled), err)
+	targetURL, err := url.Parse(targetRaw)
+	if err != nil || targetURL.Host == "" ||
+		(targetURL.Scheme != "http" && targetURL.Scheme != "https") {
+		return DirectSessionTarget{}, errors.Join(errors.New(CodeDirectDisabled), err)
+	}
+	prepared := DirectSessionTarget{
+		TargetAgentID: snapshot.AgentID, AddressFingerprint: fingerprint, WebSocketURL: targetURL,
 	}
 	proxyRaw := ResolveProxyURL(snapshot.AgentProxyURL, snapshot.GlobalProxyURL)
 	if proxyRaw == "" {
@@ -124,117 +120,121 @@ func PrepareDirectTarget(snapshot DirectTargetSnapshot) (PreparedDirectTarget, e
 	}
 	prepared.ProxyURL, err = url.Parse(proxyRaw)
 	if err != nil || prepared.ProxyURL.Host == "" {
-		return PreparedDirectTarget{}, errors.Join(errors.New(CodeDirectDisabled), err)
+		// behavior change: net/url errors contain the raw proxy URL, including secrets.
+		return DirectSessionTarget{}, errors.New(CodeDirectDisabled)
 	}
 	return prepared, nil
 }
 
 type RelayTransportRequest struct {
-	Purpose       tunnel.StreamPurpose
 	TargetAgentID string
 	RouteID       uint
 	RequestID     string
 	Request       *http.Request
-	Body          ReplayBody
+	Body          app.ReplayBody
 	Attempt       *attemptwire.AttemptProxyMeta
 }
 
 func ExecuteRelayTransport(
 	ctx context.Context,
-	link RelayLink,
+	link AttemptStreamOpener,
 	req RelayTransportRequest,
 	dst http.ResponseWriter,
-) DirectOutcome {
+) AttemptTransportOutcome {
 	if ctx == nil || link == nil || req.Request == nil || req.Request.URL == nil || req.Body == nil || dst == nil {
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeRelayNotReady, Err: errors.New("relay transport: required input is nil")}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeRelayNotReady, Err: errors.New("relay transport: required input is nil")}
 	}
 	if err := context.Cause(ctx); err != nil {
-		return canceledRelayOutcome(tunnel.PreCommit, err)
+		return canceledTransportOutcome(tunnel.PreCommit, err)
 	}
 	open, err := buildRelayOpenRequest(ctx, req)
 	if err != nil {
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeRelayNotReady, Err: err}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeRelayNotReady, Err: err}
 	}
-	stream, err := link.OpenStream(ctx, open)
+	stream, err := link.OpenAttemptStream(ctx, open)
 	if err != nil {
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "open", Code: relayFailureCode(ctx, err, CodeRelayNotReady), Err: err}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "open", Code: relayFailureCode(ctx, err, CodeRelayNotReady), Err: err}
 	}
 	if stream == nil {
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "open", Code: CodeRelayNotReady, Err: errors.New("relay transport returned a nil stream")}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "open", Code: CodeRelayNotReady, Err: errors.New("relay transport returned a nil stream")}
 	}
 	defer stream.Close()
-	return executeRelayStream(ctx, stream, req.Body, dst)
+	return executeAttemptStream(ctx, stream, req.Body, dst)
 }
 
-func executeRelayStream(ctx context.Context, stream RelayStream, replay ReplayBody, dst http.ResponseWriter) DirectOutcome {
-	if err := cancelRelayBetweenStages(ctx, stream); err != nil {
-		return canceledRelayOutcome(stream.CommitState(), err)
+// executeAttemptStream is the single execution path shared by Direct and Relay.
+// It opens the request body, commits the stream, uploads the body, and copies
+// the provider response, classifying failures into no-replay outcomes.
+func executeAttemptStream(
+	ctx context.Context,
+	stream app.AttemptStream,
+	body app.ReplayBody,
+	dst http.ResponseWriter,
+) AttemptTransportOutcome {
+	if err := cancelAttemptBetweenStages(ctx, stream); err != nil {
+		return canceledTransportOutcome(stream.CommitState(), err)
 	}
-	body, err := replay.Open()
-	if err != nil {
+	reader, err := body.Open()
+	if err != nil || reader == nil {
+		if err == nil {
+			err = errors.New("attempt transport body returned a nil reader")
+		}
 		stream.Cancel(err)
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "body", Code: CodeRelayNotReady, Err: err}
+		return preCommitBodyFailure(err)
 	}
-	if body == nil {
-		err = errors.New("relay transport body returned a nil reader")
-		stream.Cancel(err)
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "body", Code: CodeRelayNotReady, Err: err}
+	defer reader.Close()
+	if err := cancelAttemptBetweenStages(ctx, stream); err != nil {
+		return canceledTransportOutcome(stream.CommitState(), err)
 	}
-	defer body.Close()
-	if err := cancelRelayBetweenStages(ctx, stream); err != nil {
-		return canceledRelayOutcome(stream.CommitState(), err)
-	}
-	return commitAndUploadRelay(ctx, stream, body, dst)
-}
-
-func commitAndUploadRelay(ctx context.Context, stream RelayStream, body io.Reader, dst http.ResponseWriter) DirectOutcome {
 	if err := stream.Commit(ctx); err != nil {
-		return classifyRelayCommitFailure(ctx, stream, err)
+		return classifyCommitFailure(ctx, stream, err)
 	}
-	if err := cancelRelayBetweenStages(ctx, stream); err != nil {
-		return canceledRelayOutcome(stream.CommitState(), err)
+	if err := cancelAttemptBetweenStages(ctx, stream); err != nil {
+		return canceledTransportOutcome(stream.CommitState(), err)
 	}
-	if err := stream.Upload(ctx, body); err != nil {
-		return classifyRelayCommittedFailure(ctx, stream, "upload", CodeRelayCommitUncertain, false, err)
+	if err := stream.Upload(ctx, &localAttemptBodyReader{ReadCloser: reader}); err != nil {
+		return classifyCommittedFailure(ctx, stream, "upload", err)
 	}
-	if err := cancelRelayBetweenStages(ctx, stream); err != nil {
-		return canceledRelayOutcome(stream.CommitState(), err)
+	if err := cancelAttemptBetweenStages(ctx, stream); err != nil {
+		return canceledTransportOutcome(stream.CommitState(), err)
 	}
-	return copyRelayTransportResponse(ctx, stream, dst)
+	tracker, writer := responseStartWriterFor(dst)
+	result, err := stream.CopyAttemptResponse(ctx, writer)
+	resultValid := result.Validate() == nil
+	outcome := classifyAttemptResponse(ctx, stream, tracker.started, resultValid, err)
+	// behavior change: an absent or invalid remote result must remain nil.
+	if resultValid {
+		outcome.AttemptResult = &result
+	}
+	return outcome
 }
 
-func copyRelayTransportResponse(ctx context.Context, stream RelayStream, dst http.ResponseWriter) DirectOutcome {
-	responseWriter := &responseStartWriter{ResponseWriter: dst}
-	var copyWriter http.ResponseWriter = responseWriter
-	if flusher, ok := dst.(http.Flusher); ok {
-		copyWriter = &flushingResponseStartWriter{responseStartWriter: responseWriter, flusher: flusher}
-	}
-	if err := stream.CopyResponse(ctx, copyWriter); err != nil {
-		return classifyRelayCommittedFailure(ctx, stream, "response", CodeRelayResponseInterrupted, responseWriter.started, err)
-	}
-	if err := context.Cause(ctx); err != nil {
-		stream.Cancel(err)
-		outcome := canceledRelayOutcome(stream.CommitState(), err)
-		outcome.ResponseStarted = responseWriter.started
-		return outcome
-	}
-	return DirectOutcome{Commit: stream.CommitState(), Stage: "response", ResponseStarted: responseWriter.started}
-}
-
-func buildRelayOpenRequest(ctx context.Context, req RelayTransportRequest) (RelayRequest, error) {
+func buildRelayOpenRequest(ctx context.Context, req RelayTransportRequest) (AttemptStreamRequest, error) {
 	if req.Attempt == nil || req.Attempt.Validate() != nil ||
 		!attemptwire.ProviderPathAllowed(http.MethodPost, req.Attempt.RequestPath) {
-		return RelayRequest{}, errDirectAttemptInvalid
+		return AttemptStreamRequest{}, errDirectAttemptInvalid
 	}
 	attempt := *req.Attempt
-	return RelayRequest{
-		Purpose: req.Purpose, TargetAgentID: req.TargetAgentID, RouteID: req.RouteID, RequestID: req.RequestID,
+	return AttemptStreamRequest{
+		TargetAgentID: req.TargetAgentID, RouteID: req.RouteID, RequestID: req.RequestID,
 		Method: http.MethodPost, Path: attemptwire.EndpointPath, Header: cloneDirectRequestHeaders(req.Request.Header),
-		BodyLength: req.Body.Size(), Remaining: remainingDuration(ctx), Hop: 1, Attempt: &attempt,
+		BodyLength: req.Body.Size(), Remaining: remainingDuration(ctx), Hop: 1, Attempt: attempt,
 	}, nil
 }
 
-func cancelRelayBetweenStages(ctx context.Context, stream RelayStream) error {
+func buildDirectOpenRequest(ctx context.Context, req DirectRequest) (AttemptStreamRequest, error) {
+	if req.Request.Method != http.MethodPost || req.Attempt.Validate() != nil ||
+		!attemptwire.ProviderPathAllowed(http.MethodPost, req.Attempt.RequestPath) {
+		return AttemptStreamRequest{}, errDirectAttemptInvalid
+	}
+	return AttemptStreamRequest{
+		TargetAgentID: req.Target.TargetAgentID, RouteID: req.RouteID, RequestID: req.RequestID,
+		Method: http.MethodPost, Path: attemptwire.EndpointPath, Header: cloneDirectRequestHeaders(req.Request.Header),
+		BodyLength: req.Body.Size(), Remaining: remainingDuration(ctx), Hop: 1, Attempt: req.Attempt,
+	}, nil
+}
+
+func cancelAttemptBetweenStages(ctx context.Context, stream app.AttemptStream) error {
 	if err := context.Cause(ctx); err != nil {
 		stream.Cancel(err)
 		return err
@@ -242,50 +242,113 @@ func cancelRelayBetweenStages(ctx context.Context, stream RelayStream) error {
 	return nil
 }
 
-func classifyRelayCommitFailure(ctx context.Context, stream RelayStream, err error) DirectOutcome {
+func classifyCommitFailure(ctx context.Context, stream app.AttemptStream, err error) AttemptTransportOutcome {
 	commit := stream.CommitState()
 	if commit == tunnel.PreCommit {
-		return DirectOutcome{Commit: commit, Stage: "commit", Code: relayFailureCode(ctx, err, CodeRelayNotReady), Err: err}
+		code := relayFailureCode(ctx, err, CodeRelayNotReady)
+		return AttemptTransportOutcome{
+			Commit: commit, Stage: "commit", Code: code, Err: err,
+			circuitEffect: directFailureCircuitEffect(ctx, "commit", code, err),
+		}
 	}
-	return classifyRelayCommittedFailure(ctx, stream, "commit", CodeRelayCommitUncertain, false, err)
+	return classifyCommittedFailure(ctx, stream, "commit", err)
 }
 
-func classifyRelayCommittedFailure(
-	ctx context.Context,
-	stream RelayStream,
-	stage, fallback string,
-	started bool,
-	err error,
-) DirectOutcome {
-	return DirectOutcome{
-		ResponseStarted: started, Commit: stream.CommitState(), Stage: stage,
-		Code: relayFailureCode(ctx, err, fallback), Err: err,
+func classifyCommittedFailure(ctx context.Context, stream app.AttemptStream, stage string, err error) AttemptTransportOutcome {
+	code := relayFailureCode(ctx, err, CodeRelayCommitUncertain)
+	return AttemptTransportOutcome{
+		Commit: stream.CommitState(), Stage: stage,
+		Code: code, Err: err, circuitEffect: directFailureCircuitEffect(ctx, stage, code, err),
 	}
 }
 
-func canceledRelayOutcome(commit tunnel.CommitState, err error) DirectOutcome {
-	return DirectOutcome{Commit: commit, Stage: "cancel", Code: relayFailureCode(context.Background(), err, CodeRequestCancelled), Err: err}
+func classifyAttemptResponse(
+	ctx context.Context, stream app.AttemptStream, started, resultValid bool, err error,
+) AttemptTransportOutcome {
+	if err != nil {
+		code := relayFailureCode(ctx, err, CodeRelayResponseInterrupted)
+		return AttemptTransportOutcome{
+			ResponseStarted: started, Commit: stream.CommitState(), Stage: "response",
+			Code: code, Err: err, circuitEffect: directFailureCircuitEffect(ctx, "response", code, err),
+		}
+	}
+	if cause := context.Cause(ctx); cause != nil && !resultValid {
+		stream.Cancel(cause)
+		outcome := canceledTransportOutcome(stream.CommitState(), cause)
+		outcome.ResponseStarted = started
+		return outcome
+	}
+	return AttemptTransportOutcome{
+		Commit: stream.CommitState(), Stage: "response", ResponseStarted: started,
+		circuitEffect: directCircuitEffectHTTPResponded,
+	}
 }
 
-type preparedDirectAttempt struct {
-	encodedMeta string
+func preCommitBodyFailure(err error) AttemptTransportOutcome {
+	return AttemptTransportOutcome{
+		Commit: tunnel.PreCommit, Stage: "body", Code: CodeRelayNotReady, Err: err,
+		circuitEffect: directCircuitEffectCancelled,
+	}
+}
+
+func canceledTransportOutcome(commit tunnel.CommitState, err error) AttemptTransportOutcome {
+	return AttemptTransportOutcome{
+		Commit: commit, Stage: "cancel", Code: relayFailureCode(context.Background(), err, CodeRequestCancelled), Err: err,
+		circuitEffect: directCircuitEffectCancelled,
+	}
+}
+
+func directFailureCircuitEffect(ctx context.Context, stage, code string, err error) directCircuitEffect {
+	var localIO *localAttemptIOError
+	if stage == "body" || context.Cause(ctx) != nil || errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrNoProgress) || errors.As(err, &localIO) ||
+		code == CodeRequestCancelled || code == CodeRequestDeadline ||
+		consts.IsDirectedTransportPolicyErrorCode(code) {
+		return directCircuitEffectCancelled
+	}
+	return directCircuitEffectTransportFailed
+}
+
+// responseStartWriterFor returns a writer that tracks whether the provider
+// response has started, plus the tracker itself for classification.
+func responseStartWriterFor(dst http.ResponseWriter) (*responseStartWriter, http.ResponseWriter) {
+	tracker := &responseStartWriter{ResponseWriter: dst}
+	if flusher, ok := dst.(http.Flusher); ok {
+		return tracker, &flushingResponseStartWriter{responseStartWriter: tracker, flusher: flusher}
+	}
+	return tracker, tracker
+}
+
+type localAttemptIOError struct{ err error }
+
+func (e *localAttemptIOError) Error() string { return e.err.Error() }
+func (e *localAttemptIOError) Unwrap() error { return e.err }
+
+// behavior change: retain Close so stream cancellation can interrupt a blocked local body read.
+type localAttemptBodyReader struct{ io.ReadCloser }
+
+func (r *localAttemptBodyReader) Read(buffer []byte) (int, error) {
+	read, err := r.ReadCloser.Read(buffer)
+	if read < 0 || read > len(buffer) {
+		return 0, &localAttemptIOError{err: fmt.Errorf("invalid local request body read count: %d", read)}
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return read, &localAttemptIOError{err: err}
+	}
+	return read, err
 }
 
 type DirectForwarderOptions struct {
-	TransportLimit          int
+	Transports              DirectAttemptTransportBuilder
 	CircuitStateLimit       int
 	CircuitFailureThreshold int
 	CircuitOpenDuration     time.Duration
-	ResponseHeaderTimeout   time.Duration
-	TLSHandshakeTimeout     time.Duration
-	DialContext             func(context.Context, string, string) (net.Conn, error)
-	TLSClientConfig         *tls.Config
 	Now                     func() time.Time
 	OnCircuitTransition     func(DirectCircuitTransition)
 }
 
 type DirectForwarder struct {
-	transports *directTransportPool
+	transports DirectAttemptTransportBuilder
 	circuit    *directCircuit
 
 	lifecycleMu sync.Mutex
@@ -300,11 +363,7 @@ type DirectForwarder struct {
 func NewDirectForwarder(opts DirectForwarderOptions) *DirectForwarder {
 	rootCtx, rootCancel := context.WithCancelCause(context.Background())
 	return &DirectForwarder{
-		transports: newDirectTransportPool(directTransportPoolOptions{
-			Limit: opts.TransportLimit, DialContext: opts.DialContext,
-			TLSClientConfig: opts.TLSClientConfig, ResponseHeaderTimeout: opts.ResponseHeaderTimeout,
-			TLSHandshakeTimeout: opts.TLSHandshakeTimeout,
-		}),
+		transports: opts.Transports,
 		circuit: newDirectCircuit(directCircuitOptions{
 			FailureThreshold: opts.CircuitFailureThreshold, OpenFor: opts.CircuitOpenDuration,
 			Now: opts.Now, Limit: opts.CircuitStateLimit, OnTransition: opts.OnCircuitTransition,
@@ -313,106 +372,249 @@ func NewDirectForwarder(opts DirectForwarderOptions) *DirectForwarder {
 	}
 }
 
-func (f *DirectForwarder) Forward(ctx context.Context, req DirectRequest, dst http.ResponseWriter) DirectOutcome {
-	if ctx == nil || req.Request == nil || req.TargetURL == nil || req.Body == nil || dst == nil {
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeDirectInvalidInput, Err: errors.New("direct forward: required input is nil")}
+func (f *DirectForwarder) Forward(ctx context.Context, req DirectRequest, dst http.ResponseWriter) AttemptTransportOutcome {
+	if ctx == nil || req.Request == nil || req.Target.WebSocketURL == nil || req.Body == nil || dst == nil {
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeDirectInvalidInput, Err: errors.New("direct forward: required input is nil")}
 	}
-	preparedAttempt, err := prepareDirectAttempt(req)
+	open, err := buildDirectOpenRequest(ctx, req)
 	if err != nil {
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeDirectInvalidInput, Err: errDirectAttemptInvalid}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "validate", Code: CodeDirectInvalidInput, Err: errDirectAttemptInvalid}
+	}
+	if f.transports == nil {
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "lifecycle", Code: CodeDirectDisabled, Err: errDirectClosed}
 	}
 	callCtx, finish, ok := f.begin(ctx)
 	if !ok {
 		// behavior change: keep the lifecycle cause internal and expose the stable disabled code.
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "lifecycle", Code: CodeDirectDisabled, Err: errDirectClosed}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "lifecycle", Code: CodeDirectDisabled, Err: errDirectClosed}
 	}
 	defer finish()
 
-	key := directCircuitKey{TargetAgentID: req.TargetAgentID, AddressFingerprint: req.AddressFingerprint}
+	transport, err := f.transports.BuildDirectAttemptTransport(callCtx, req.Target)
+	if err != nil {
+		return classifyDirectTransportBuildFailure(callCtx, err)
+	}
+	if transport == nil {
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "open", Code: CodeDirectDisabled, Err: errors.New("direct forward: transport builder returned nil")}
+	}
+	key := directCircuitKey{
+		TargetAgentID: req.Target.TargetAgentID, AddressFingerprint: req.Target.AddressFingerprint,
+		TransportIdentity: transport.TransportIdentity(),
+	}
 	permit, denied := f.circuit.admit(key)
 	if denied != directCircuitAllowed {
 		return directCircuitDeniedOutcome(denied)
 	}
-
-	ownedReader, err := openOwnedReader(req.Body)
-	if err != nil {
-		f.circuit.cancelled(permit)
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "body", Code: CodeDirectBody, Err: err}
-	}
-	defer ownedReader.Close()
-
-	outbound := buildDirectRequest(callCtx, req, ownedReader, preparedAttempt)
-	transportKey := directTransportKey{
-		TargetAgentID: req.TargetAgentID, AddressFingerprint: req.AddressFingerprint,
-		Scheme: strings.ToLower(req.TargetURL.Scheme), Proxy: canonicalProxyURL(req.ProxyURL),
-	}
-	transport := f.transports.get(transportKey, req.ProxyURL)
-	if transport == nil {
-		f.circuit.cancelled(permit)
-		// behavior change: keep the lifecycle cause internal and expose the stable disabled code.
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "lifecycle", Code: CodeDirectDisabled, Err: errDirectClosed}
-	}
-
-	response, roundTripErr := transport.RoundTrip(outbound)
-	if response == nil {
-		outcome := classifyRoundTripFailure(roundTripErr)
-		if context.Cause(callCtx) != nil {
+	permitOwned := true
+	defer func() {
+		if permitOwned {
 			f.circuit.cancelled(permit)
-		} else {
-			f.circuit.transportFailed(permit)
 		}
+	}()
+
+	reservation, err := transport.AcquireAttemptStream(callCtx)
+	if err != nil {
+		if reservation != nil {
+			reservation.Release()
+		}
+		outcome := f.classifyDirectOpenFailure(callCtx, permit, err)
+		permitOwned = false
 		return outcome
 	}
-	f.circuit.httpResponded(permit)
-	outcome := classifyHTTPResponse(response.StatusCode)
-	copyErr := copyDirectResponse(dst, response, &outcome.ResponseStarted)
-	outcome.Err = errors.Join(roundTripErr, copyErr)
-	if copyErr != nil {
-		outcome.Stage = "response_body"
-		outcome.Code = CodeDirectResponseCopy
+	if reservation == nil {
+		return AttemptTransportOutcome{
+			Commit: tunnel.PreCommit, Stage: "open", Code: CodeDirectDisabled,
+			Err: errors.New("direct forward: transport returned nil stream reservation"),
+		}
 	}
+	defer reservation.Release()
+	if canceled := f.cancelDirectPermitIfContextDone(callCtx, permit); canceled != nil {
+		permitOwned = false
+		return *canceled
+	}
+	permit, rejected := f.bindDirectCircuitToReservedTransport(permit, key, reservation)
+	if rejected != nil {
+		permitOwned = false
+		return *rejected
+	}
+	if canceled := f.cancelDirectPermitIfContextDone(callCtx, permit); canceled != nil {
+		permitOwned = false
+		return *canceled
+	}
+	stream, err := reservation.OpenAttemptStream(callCtx, open)
+	if err != nil {
+		if stream != nil {
+			_ = stream.Close()
+		}
+		outcome := f.classifyDirectOpenFailure(callCtx, permit, err)
+		permitOwned = false
+		return outcome
+	}
+	if stream == nil {
+		f.circuit.cancelled(permit)
+		permitOwned = false
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "open", Code: CodeDirectDisabled, Err: errors.New("direct forward: opener returned a nil stream")}
+	}
+	defer stream.Close()
+	outcome := executeAttemptStream(callCtx, stream, req.Body, dst)
+	f.observeDirectOutcome(permit, outcome)
+	permitOwned = false
 	return outcome
 }
 
-func directCircuitDeniedOutcome(reason directCircuitDenyReason) DirectOutcome {
+func (f *DirectForwarder) bindDirectCircuitToReservedTransport(
+	plannedPermit directCircuitPermit,
+	plannedKey directCircuitKey,
+	reservation DirectAttemptStreamReservation,
+) (directCircuitPermit, *AttemptTransportOutcome) {
+	actualKey, resolved := directCircuitKeyForReservation(plannedKey.TargetAgentID, reservation)
+	if !resolved {
+		f.circuit.cancelled(plannedPermit)
+		outcome := AttemptTransportOutcome{
+			Commit: tunnel.PreCommit, Stage: "open", Code: CodeDirectDisabled,
+			Err: errors.New("direct forward: stream reservation has incomplete transport identity"),
+		}
+		return directCircuitPermit{}, &outcome
+	}
+	if actualKey == plannedKey {
+		return plannedPermit, nil
+	}
+	f.circuit.cancelled(plannedPermit)
+	actualPermit, denied := f.circuit.admit(actualKey)
+	if denied == directCircuitAllowed {
+		return actualPermit, nil
+	}
+	outcome := directCircuitDeniedOutcome(denied)
+	return directCircuitPermit{}, &outcome
+}
+
+func directCircuitKeyForReservation(
+	targetAgentID string, reservation DirectAttemptStreamReservation,
+) (directCircuitKey, bool) {
+	if reservation == nil {
+		return directCircuitKey{}, false
+	}
+	transportIdentity := reservation.TransportIdentity()
+	addressFingerprint := reservation.AddressFingerprint()
+	if transportIdentity == (DirectTransportIdentity{}) || addressFingerprint == "" {
+		return directCircuitKey{}, false
+	}
+	return directCircuitKey{
+		TargetAgentID: targetAgentID, AddressFingerprint: addressFingerprint,
+		TransportIdentity: transportIdentity,
+	}, true
+}
+
+func (f *DirectForwarder) cancelDirectPermitIfContextDone(
+	ctx context.Context, permit directCircuitPermit,
+) *AttemptTransportOutcome {
+	cause := context.Cause(ctx)
+	if cause == nil {
+		return nil
+	}
+	f.circuit.cancelled(permit)
+	outcome := canceledTransportOutcome(tunnel.PreCommit, cause)
+	return &outcome
+}
+
+func classifyDirectTransportBuildFailure(ctx context.Context, err error) AttemptTransportOutcome {
+	if cause := context.Cause(ctx); cause != nil {
+		return canceledTransportOutcome(tunnel.PreCommit, cause)
+	}
+	stage, code := "open", CodeDirectDisabled
+	var failure directOpenFailure
+	if errors.As(err, &failure) {
+		stage = failure.Stage()
+		code = directOpenPublicCode(failure, false)
+	}
+	return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: stage, Code: code, Err: err}
+}
+
+// observeDirectOutcome records connection health for the circuit. A target
+// policy RESET happens after OPEN but before admission, so it releases only the
+// permit and cannot recover existing transport failures.
+func (f *DirectForwarder) observeDirectOutcome(permit directCircuitPermit, outcome AttemptTransportOutcome) {
+	// behavior change: only peer/session transport failures affect Direct health;
+	// caller I/O and valid HTTP Results release or recover the circuit permit.
+	switch outcome.circuitEffect {
+	case directCircuitEffectTransportFailed:
+		f.circuit.transportFailed(permit)
+	case directCircuitEffectHTTPResponded:
+		f.circuit.httpResponded(permit)
+	default:
+		f.circuit.cancelled(permit)
+	}
+}
+
+// directOpenFailure is implemented by the session pool and dialer typed errors.
+// It exposes a stable stage/code plus whether the failure should count toward
+// the direct circuit breaker.
+type directOpenFailure interface {
+	Stage() string
+	ReasonCode() string
+	CountsForCircuit() bool
+}
+
+func (f *DirectForwarder) classifyDirectOpenFailure(ctx context.Context, permit directCircuitPermit, err error) AttemptTransportOutcome {
+	if cause := context.Cause(ctx); cause != nil {
+		f.circuit.cancelled(permit)
+		outcome := canceledTransportOutcome(tunnel.PreCommit, cause)
+		return outcome
+	}
+	stage, code, counts := "open", CodeDirectConnect, true
+	var failure directOpenFailure
+	if errors.As(err, &failure) {
+		stage, counts = failure.Stage(), failure.CountsForCircuit()
+		code = directOpenPublicCode(failure, counts)
+	}
+	if counts {
+		f.circuit.transportFailed(permit)
+	} else {
+		f.circuit.cancelled(permit)
+	}
+	return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: stage, Code: code, Err: err}
+}
+
+// directOpenPublicCode maps typed dial/pool reason codes to the stable public
+// codes the pipeline understands. Auth failures surface CodeDirectAuthUnavailable
+// so the stage classifier reports the authenticate stage; everything else maps
+// to a connect/disabled code without leaking internal reason strings.
+func directOpenPublicCode(failure directOpenFailure, counts bool) string {
+	if failure.Stage() == "policy" && consts.IsPublicRouteErrorCode(failure.ReasonCode()) {
+		return failure.ReasonCode()
+	}
+	switch failure.Stage() {
+	case "credentials":
+		return CodeDirectAuthUnavailable
+	case "target", "url":
+		return CodeDirectDisabled
+	case "pool":
+		return CodeDirectDisabled
+	default:
+		if counts {
+			return CodeDirectConnect
+		}
+		return CodeDirectDisabled
+	}
+}
+
+func directCircuitDeniedOutcome(reason directCircuitDenyReason) AttemptTransportOutcome {
 	switch reason {
 	case directCircuitDeniedOpen:
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: CodeDirectCircuitOpen, Err: errDirectCircuitOpen}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: CodeDirectCircuitOpen, Err: errDirectCircuitOpen}
 	case directCircuitDeniedHalfOpen:
 		// behavior change: expose the stable public circuit state while preserving the precise internal cause.
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: CodeDirectCircuitOpen, Err: errDirectCircuitHalfOpen}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: CodeDirectCircuitOpen, Err: errDirectCircuitHalfOpen}
 	case directCircuitDeniedCapacity:
 		// behavior change: capacity is an unavailable circuit, not a new public wire code.
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: CodeDirectCircuitOpen, Err: errDirectCircuitCapacity}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: CodeDirectCircuitOpen, Err: errDirectCircuitCapacity}
 	case directCircuitDeniedClosed:
 		// behavior change: a closed local forwarder is publicly equivalent to direct routing being disabled.
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "lifecycle", Code: CodeDirectDisabled, Err: errDirectClosed}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "lifecycle", Code: CodeDirectDisabled, Err: errDirectClosed}
 	default:
 		// behavior change: unknown internal states fail closed to the stable protocol error.
-		return DirectOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: consts.RouteErrorRelayProtocol, Err: errors.New("invalid direct circuit admission result")}
+		return AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: "circuit", Code: consts.RouteErrorRelayProtocol, Err: errors.New("invalid direct circuit admission result")}
 	}
-}
-
-type onceDirectReadCloser struct {
-	io.ReadCloser
-	once sync.Once
-	err  error
-}
-
-func (r *onceDirectReadCloser) Close() error {
-	r.once.Do(func() { r.err = r.ReadCloser.Close() })
-	return r.err
-}
-
-func openOwnedReader(body ReplayBody) (*onceDirectReadCloser, error) {
-	reader, err := body.Open()
-	if err != nil {
-		return nil, err
-	}
-	if reader == nil {
-		return nil, errors.New("direct forward: replay body returned a nil reader")
-	}
-	return &onceDirectReadCloser{ReadCloser: reader}, nil
 }
 
 func (f *DirectForwarder) begin(ctx context.Context) (context.Context, func(), bool) {
@@ -467,7 +669,6 @@ func (f *DirectForwarder) Close(ctx context.Context) error {
 		return errors.New("direct forwarder: nil close context")
 	}
 	f.Cancel()
-	f.transports.closeIdleConnections()
 	f.circuit.close()
 	select {
 	case <-f.done:
@@ -498,60 +699,13 @@ func (f *DirectForwarder) ResourceCount() int {
 	if f == nil {
 		return 0
 	}
-	return f.transports.resourceCount() + f.circuit.resourceCount()
+	return f.circuit.resourceCount()
 }
 
 func (f *DirectForwarder) ResetCircuit(targetAgentID, addressFingerprint string) {
 	if f != nil {
 		f.circuit.reset(targetAgentID, addressFingerprint)
 	}
-}
-
-func prepareDirectAttempt(req DirectRequest) (preparedDirectAttempt, error) {
-	if req.Attempt == nil {
-		return preparedDirectAttempt{}, errDirectAttemptInvalid
-	}
-	if req.ForwardTicket == "" || req.Request.Method != http.MethodPost || req.Attempt.Validate() != nil ||
-		!attemptwire.ProviderPathAllowed(http.MethodPost, req.Attempt.RequestPath) {
-		return preparedDirectAttempt{}, errDirectAttemptInvalid
-	}
-	encodedMeta, err := attemptwire.EncodeMeta(*req.Attempt)
-	if err != nil {
-		return preparedDirectAttempt{}, errDirectAttemptInvalid
-	}
-	return preparedDirectAttempt{encodedMeta: encodedMeta}, nil
-}
-
-func buildDirectRequest(ctx context.Context, req DirectRequest, body io.ReadCloser, prepared preparedDirectAttempt) *http.Request {
-	outbound := req.Request.Clone(ctx)
-	target := *req.TargetURL
-	target.Path = attemptwire.EndpointPath
-	target.RawPath = ""
-	if target.RawQuery == "" {
-		target.RawQuery = outbound.URL.RawQuery
-	} else if outbound.URL.RawQuery != "" {
-		target.RawQuery += "&" + outbound.URL.RawQuery
-	}
-	outbound.URL = &target
-	outbound.RequestURI = ""
-	outbound.Host = target.Host
-	outbound.Body = body
-	outbound.GetBody = func() (io.ReadCloser, error) { return openOwnedReader(req.Body) }
-	outbound.ContentLength = req.Body.Size()
-	if outbound.ContentLength == 0 {
-		outbound.Body = http.NoBody
-		outbound.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
-	}
-	outbound.TransferEncoding = nil
-	outbound.Trailer = nil
-	outbound.Header = cloneDirectRequestHeaders(req.Request.Header)
-	outbound.Header.Set(consts.HeaderXAgentHop, "1")
-	outbound.Header.Set(attemptwire.HeaderMeta, prepared.encodedMeta)
-	if req.ForwardTicket != "" {
-		outbound.Header.Set(consts.HeaderXAgentForwardTicket, string(req.ForwardTicket))
-		outbound.Header.Set(consts.HeaderXAgentRouteID, strconv.FormatUint(uint64(req.RouteID), 10))
-	}
-	return outbound
 }
 
 func cloneDirectRequestHeaders(source http.Header) http.Header {
@@ -563,86 +717,10 @@ func cloneDirectRequestHeaders(source http.Header) http.Header {
 		consts.HeaderXAgentID, consts.HeaderXAgentSecret, consts.HeaderXAgentTag,
 		consts.HeaderXAgentAddressTag, consts.HeaderXAgentHop,
 		consts.HeaderXAgentForwardTicket, consts.HeaderXAgentRouteID,
-		attemptwire.HeaderMeta,
 	} {
 		header.Del(name)
 	}
 	return header
-}
-
-func copyDirectResponse(dst http.ResponseWriter, response *http.Response, started *bool) error {
-	header := response.Header.Clone()
-	removeHopHeaders(header)
-	for _, name := range []string{
-		"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
-		"Te", "Trailer", "Transfer-Encoding", "Upgrade",
-	} {
-		header.Del(name)
-	}
-	removeReservedForwardHeaders(header)
-	copyHeader(dst.Header(), header)
-	removeReservedForwardHeaders(response.Trailer)
-	declaredTrailers := declareResponseTrailers(dst.Header(), response.Trailer)
-	*started = true
-	dst.WriteHeader(response.StatusCode)
-	writer := io.Writer(dst)
-	if flusher, ok := dst.(http.Flusher); ok {
-		writer = flushAfterWrite{Writer: dst, Flusher: flusher}
-	}
-	_, copyErr := io.Copy(writer, response.Body)
-	removeReservedForwardHeaders(response.Trailer)
-	copyResponseTrailers(dst.Header(), response.Trailer, declaredTrailers)
-	return errors.Join(copyErr, response.Body.Close())
-}
-
-func removeReservedForwardHeaders(header http.Header) {
-	header.Del(consts.HeaderXAgentForwardTicket)
-	header.Del(consts.HeaderXAgentRouteID)
-}
-
-type flushAfterWrite struct {
-	io.Writer
-	http.Flusher
-}
-
-func (w flushAfterWrite) Write(p []byte) (int, error) {
-	n, err := w.Writer.Write(p)
-	w.Flusher.Flush()
-	return n, err
-}
-
-func copyHeader(dst, source http.Header) {
-	for key, values := range source {
-		for _, value := range values {
-			dst.Add(key, value)
-		}
-	}
-}
-
-func declareResponseTrailers(header http.Header, trailers http.Header) map[string]struct{} {
-	keys := make([]string, 0, len(trailers))
-	declared := make(map[string]struct{}, len(trailers))
-	for key := range trailers {
-		canonical := http.CanonicalHeaderKey(key)
-		keys = append(keys, canonical)
-		declared[canonical] = struct{}{}
-	}
-	sort.Strings(keys)
-	if len(keys) > 0 {
-		header.Set("Trailer", strings.Join(keys, ", "))
-	}
-	return declared
-}
-
-func copyResponseTrailers(header http.Header, trailers http.Header, declared map[string]struct{}) {
-	for key, values := range trailers {
-		canonical := http.CanonicalHeaderKey(key)
-		if _, ok := declared[canonical]; ok {
-			header[canonical] = append([]string(nil), values...)
-			continue
-		}
-		header[http.TrailerPrefix+canonical] = append([]string(nil), values...)
-	}
 }
 
 func removeHopHeaders(header http.Header) {
@@ -665,7 +743,11 @@ func (w *responseStartWriter) WriteHeader(status int) {
 
 func (w *responseStartWriter) Write(p []byte) (int, error) {
 	w.started = true
-	return w.ResponseWriter.Write(p)
+	written, err := w.ResponseWriter.Write(p)
+	if err != nil {
+		return written, &localAttemptIOError{err: err}
+	}
+	return written, nil
 }
 
 type flushingResponseStartWriter struct {

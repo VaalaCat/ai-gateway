@@ -64,6 +64,7 @@ const token: Token = {
   expired_at: 0,
   models: "",
   trace_enabled: false,
+  trace_mode: "full",
   created_at: 1,
   updated_at: 1,
 };

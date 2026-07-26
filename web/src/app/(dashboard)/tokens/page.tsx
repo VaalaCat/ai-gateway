@@ -33,7 +33,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { TagInput } from "@/components/ui/tag-input";
 import { Switch } from "@/components/ui/switch";
-import { Badge } from "@/components/ui/badge";
 import { AgentRouteEditor } from "@/components/agent-route-editor";
 
 import { StatusBadge } from "@/components/business/status-badge";
@@ -45,6 +44,7 @@ import { EntityMultiPicker } from "@/components/business/entity-picker/entity-mu
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { EntityLabel } from "@/components/business/entity-label";
 import { TokenDetailPanel } from "@/components/business/token-detail-panel";
+import { TokenTraceBadge, TokenTraceFields } from "@/components/business/token-trace-fields";
 import {
   DateRangeInputs,
   isDateRangeValid,
@@ -63,7 +63,7 @@ import { parseModels, serializeModels } from "@/lib/parse-models";
 import { formatSuccessRate, formatMoneyCompact } from "@/lib/utils/format";
 import { MoneyCell } from "@/components/business/money-cell";
 import { buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
-import type { BillingTokenRow, Token } from "@/lib/types";
+import type { BillingTokenRow, Token, TokenTraceMode } from "@/lib/types";
 
 function isWeakToken(token: string): boolean {
   const value = token.trim();
@@ -206,8 +206,8 @@ function TokensPageContent() {
   const [editItem, setEditItem] = useState<Token | null>(null);
   const [deleteItem, setDeleteItem] = useState<Token | null>(null);
 
-  const [createForm, setCreateForm] = useState({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, byok_only: false, allowed_channel_ids: [] as number[] });
-  const [editForm, setEditForm] = useState({ user_id: "", name: "", status: "1", expired_at: "", models: "", trace_enabled: false, byok_only: false, allowed_channel_ids: [] as number[] });
+  const [createForm, setCreateForm] = useState({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, trace_mode: "full" as TokenTraceMode, byok_only: false, allowed_channel_ids: [] as number[] });
+  const [editForm, setEditForm] = useState({ user_id: "", name: "", status: "1", expired_at: "", models: "", trace_enabled: false, trace_mode: "full" as TokenTraceMode, byok_only: false, allowed_channel_ids: [] as number[] });
   const [weakKeyConfirmOpen, setWeakKeyConfirmOpen] = useState(false);
   const [pendingWeakKeyCreate, setPendingWeakKeyCreate] = useState<null | typeof createForm>(null);
 
@@ -221,6 +221,7 @@ function TokensPageContent() {
         ...(form.models ? { models: form.models } : {}),
         ...(form.template_id ? { template_id: form.template_id } : {}),
         trace_enabled: form.trace_enabled,
+        trace_mode: form.trace_mode,
         byok_only: form.byok_only,
         ...(form.allowed_channel_ids.length > 0 ? { allowed_channel_ids: form.allowed_channel_ids } : {}),
       });
@@ -229,12 +230,13 @@ function TokensPageContent() {
         name: form.name,
         template_id: form.template_id,
         trace_enabled: form.trace_enabled,
+        trace_mode: form.trace_mode,
         byok_only: form.byok_only,
       });
     }
     toast.success(tc("success"));
     setCreateOpen(false);
-    setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, byok_only: false, allowed_channel_ids: [] });
+    setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, trace_mode: "full", byok_only: false, allowed_channel_ids: [] });
     setPendingWeakKeyCreate(null);
   };
 
@@ -279,6 +281,7 @@ function TokensPageContent() {
           ...(editForm.expired_at ? { expired_at: Number(editForm.expired_at) } : {}),
           models: editForm.models,
           trace_enabled: editForm.trace_enabled,
+          trace_mode: editForm.trace_mode,
           byok_only: editForm.byok_only,
           allowed_channel_ids: editForm.allowed_channel_ids,
         });
@@ -288,6 +291,7 @@ function TokensPageContent() {
           name: editForm.name,
           status: Number(editForm.status),
           trace_enabled: editForm.trace_enabled,
+          trace_mode: editForm.trace_mode,
           byok_only: editForm.byok_only,
           ...(canEditModelWhitelist ? { models: editForm.models } : {}),
         });
@@ -318,6 +322,7 @@ function TokensPageContent() {
       expired_at: token.expired_at ? String(token.expired_at) : "",
       models: token.models ?? "",
       trace_enabled: token.trace_enabled,
+      trace_mode: token.trace_mode === "headers" ? "headers" : "full",
       byok_only: token.byok_only ?? false,
       allowed_channel_ids: token.allowed_channel_ids ?? [],
     });
@@ -383,9 +388,10 @@ function TokensPageContent() {
         id: "trace_enabled",
         header: t("traceEnabled"),
         cell: ({ row }) => (
-          row.original.trace_enabled ? (
-            <Badge variant="secondary">{tc("enabled")}</Badge>
-          ) : null
+          <TokenTraceBadge
+            enabled={row.original.trace_enabled}
+            mode={row.original.trace_mode}
+          />
         ),
       },
       {
@@ -495,7 +501,7 @@ function TokensPageContent() {
             value={filterValues}
             onChange={setFilterValues}
             primaryAction={
-              <Button size="sm" onClick={() => { setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, byok_only: false, allowed_channel_ids: [] }); setCreateOpen(true); }}>
+              <Button size="sm" onClick={() => { setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, trace_mode: "full", byok_only: false, allowed_channel_ids: [] }); setCreateOpen(true); }}>
                 <Plus className="mr-2 size-4" />
                 {t("createToken")}
               </Button>
@@ -668,15 +674,16 @@ function TokensPageContent() {
                     placeholder={t("selectTemplate")}
                   />
                 </div>
-                <div className="flex items-center justify-between">
-                  <Label>{t("traceEnabled")}</Label>
-                  <Switch
-                    checked={createForm.trace_enabled}
-                    onCheckedChange={(checked) =>
-                      setCreateForm({ ...createForm, trace_enabled: checked })
-                    }
-                  />
-                </div>
+                <TokenTraceFields
+                  enabled={createForm.trace_enabled}
+                  mode={createForm.trace_mode}
+                  onEnabledChange={(trace_enabled) =>
+                    setCreateForm((current) => ({ ...current, trace_enabled }))
+                  }
+                  onModeChange={(trace_mode) =>
+                    setCreateForm((current) => ({ ...current, trace_mode }))
+                  }
+                />
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
                     <Label>{t("byokOnly")}</Label>
@@ -711,15 +718,16 @@ function TokensPageContent() {
                     placeholder={t("selectTemplate")}
                   />
                 </div>
-                <div className="flex items-center justify-between">
-                  <Label>{t("traceEnabled")}</Label>
-                  <Switch
-                    checked={createForm.trace_enabled}
-                    onCheckedChange={(checked) =>
-                      setCreateForm({ ...createForm, trace_enabled: checked })
-                    }
-                  />
-                </div>
+                <TokenTraceFields
+                  enabled={createForm.trace_enabled}
+                  mode={createForm.trace_mode}
+                  onEnabledChange={(trace_enabled) =>
+                    setCreateForm((current) => ({ ...current, trace_enabled }))
+                  }
+                  onModeChange={(trace_mode) =>
+                    setCreateForm((current) => ({ ...current, trace_mode }))
+                  }
+                />
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
                     <Label>{t("byokOnly")}</Label>
@@ -802,15 +810,16 @@ function TokensPageContent() {
                 )}
               </>
             )}
-            <div className="flex items-center justify-between">
-              <Label>{t("traceEnabled")}</Label>
-              <Switch
-                checked={editForm.trace_enabled}
-                onCheckedChange={(checked) =>
-                  setEditForm({ ...editForm, trace_enabled: checked })
-                }
-              />
-            </div>
+            <TokenTraceFields
+              enabled={editForm.trace_enabled}
+              mode={editForm.trace_mode}
+              onEnabledChange={(trace_enabled) =>
+                setEditForm((current) => ({ ...current, trace_enabled }))
+              }
+              onModeChange={(trace_mode) =>
+                setEditForm((current) => ({ ...current, trace_mode }))
+              }
+            />
             <div className="space-y-1">
               <div className="flex items-center justify-between">
                 <Label>{t("byokOnly")}</Label>

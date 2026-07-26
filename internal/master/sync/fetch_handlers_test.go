@@ -9,6 +9,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -17,7 +18,9 @@ import (
 // dbApp 是测试专用的最小 AppProvider，满足 dao.AppProvider 接口。
 type dbApp struct{ db *gorm.DB }
 
-func (a *dbApp) GetDB() *gorm.DB { return a.db }
+func (a *dbApp) GetCoreDB() *gorm.DB                           { return a.db }
+func (a *dbApp) GetLogDB() *gorm.DB                            { return a.db }
+func (a *dbApp) GetDatabaseLayoutMode() app.DatabaseLayoutMode { return app.DatabaseLayoutLegacySingle }
 
 type fakeHandler struct {
 	called bool

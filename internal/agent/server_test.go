@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,9 +17,12 @@ import (
 	bodypkg "github.com/VaalaCat/ai-gateway/internal/agent/body"
 	agentcache "github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
+	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	pkgagentauth "github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	appkg "github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
@@ -31,6 +33,103 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+type staticForwardCredentialReader struct {
+	credential agentauthcache.ForwardCredential
+}
+
+func (r staticForwardCredentialReader) CachedForwardCredential() (agentauthcache.ForwardCredential, error) {
+	return r.credential, nil
+}
+
+func TestNewStandaloneOptionsWireProductionDirectDependencies(t *testing.T) {
+	cfg := &config.AgentRuntimeConfig{
+		Agent: config.AgentConfig{
+			Listen:          "127.0.0.1:0",
+			MasterURL:       "http://127.0.0.1:1",
+			CredentialsFile: filepath.Join(t.TempDir(), "standalone-options.json"),
+		},
+	}
+	require.NoError(t, os.WriteFile(
+		cfg.Agent.CredentialsFile,
+		[]byte(`{"agent_id":"standalone-options","secret":"secret"}`),
+		0o600,
+	))
+	dialer := agenttunnel.NewDirectDialer(agenttunnel.DirectDialerOptions{})
+	credentials := staticForwardCredentialReader{credential: agentauthcache.ForwardCredential{
+		Ticket: pkgagentauth.ForwardTicket("forward-ticket"), ExpiresAt: time.Now().Add(time.Hour),
+	}}
+	wantAuth := agentproxy.ForwardAuthSnapshot{
+		Capabilities: []string{protocol.AgentCapabilityForwardV1},
+		SigningKeys:  []pkgagentauth.PublicKey{{KeyID: "key-a", Algorithm: "EdDSA", Key: []byte("public-key")}},
+	}
+	loaderCalls := 0
+	manager := agenttunnel.NewManager(agenttunnel.ManagerOptions{})
+	managerBuilds := 0
+
+	server, err := New(cfg, zap.NewNop(), StandaloneOptions{
+		DirectSessionDialer:     dialer,
+		ForwardCredentialReader: credentials,
+		ForwardAuthSnapshotLoader: func() agentproxy.ForwardAuthSnapshot {
+			loaderCalls++
+			return wantAuth
+		},
+		TunnelManagerBuilder: func(*Server) *agenttunnel.Manager {
+			managerBuilds++
+			return manager
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, server.Shutdown(ctx))
+	})
+
+	require.Same(t, dialer, server.directSessionDialer)
+	require.Equal(t, credentials, server.forwardCredentialReader)
+	require.Equal(t, wantAuth, server.currentForwardAuthSnapshot())
+	require.Equal(t, 1, loaderCalls)
+	require.Same(t, manager, server.TunnelManager)
+	require.Equal(t, 1, managerBuilds)
+	require.NotNil(t, server.DirectSessionPool)
+	require.NotNil(t, server.DirectTunnelIngress)
+
+	ping := httptest.NewRecorder()
+	server.Router.ServeHTTP(ping, httptest.NewRequest(http.MethodGet, "/ping", nil))
+	require.Equal(t, http.StatusOK, ping.Code)
+	direct := httptest.NewRecorder()
+	server.Router.ServeHTTP(direct, httptest.NewRequest(http.MethodGet, agenttunnel.DirectTunnelPath, nil))
+	require.NotEqual(t, http.StatusNotFound, direct.Code)
+}
+
+func TestNormalizeTunnelManagerShutdownErrorOnlyIgnoresClosed(t *testing.T) {
+	manager := agenttunnel.NewManager(agenttunnel.ManagerOptions{})
+	require.NoError(t, manager.Close(t.Context()))
+	closedErr := manager.Drain(t.Context())
+	require.True(t, agenttunnel.IsManagerClosed(closedErr))
+	ordinaryErr := errors.New("relay drain failed")
+
+	for _, test := range []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{name: "nil"},
+		{name: "manager closed", err: closedErr},
+		{name: "deadline", err: context.DeadlineExceeded, wantErr: context.DeadlineExceeded},
+		{name: "ordinary", err: ordinaryErr, wantErr: ordinaryErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := normalizeTunnelManagerShutdownError(test.err)
+			if test.wantErr == nil {
+				require.NoError(t, got)
+				return
+			}
+			require.ErrorIs(t, got, test.wantErr)
+		})
+	}
+}
 
 func TestAgentMetricEndpointUsesInjectedRegistry(t *testing.T) {
 	registry := prometheus.NewRegistry()
@@ -96,101 +195,6 @@ type agentAuthControlFunc func(context.Context, string, any) (json.RawMessage, e
 
 func (f agentAuthControlFunc) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	return f(ctx, method, params)
-}
-
-func TestCachedForwardTicketServerAdapterIgnoresRequestContextAndNeverIssues(t *testing.T) {
-	initialNow := time.Unix(2_000_000_000, 0).UTC()
-	var clockMu sync.Mutex
-	now := initialNow
-	nowFunc := func() time.Time {
-		clockMu.Lock()
-		defer clockMu.Unlock()
-		return now
-	}
-	setNow := func(next time.Time) {
-		clockMu.Lock()
-		now = next
-		clockMu.Unlock()
-	}
-	refreshStarted := make(chan struct{})
-	releaseRefresh := make(chan struct{})
-	var releaseOnce sync.Once
-	var issues atomic.Int32
-	control := agentAuthControlFunc(func(ctx context.Context, method string, _ any) (json.RawMessage, error) {
-		switch method {
-		case consts.RPCAgentAuthBootstrap:
-			return marshalServerTest(protocol.AuthBootstrapResponse{
-				MasterInstanceID: "master-a",
-				Capabilities:     []string{protocol.AgentCapabilityForwardV1},
-				SigningKeys: []pkgagentauth.PublicKey{{
-					KeyID: "key-a", Algorithm: "EdDSA", Key: make([]byte, 32),
-				}},
-			})
-		case consts.RPCAgentIssueForwardTicket:
-			switch issues.Add(1) {
-			case 1:
-				return marshalServerTest(protocol.TicketResponse{
-					Token: "forward-1", ExpiresAt: initialNow.Add(7 * 24 * time.Hour).Unix(),
-				})
-			case 2:
-				close(refreshStarted)
-				select {
-				case <-releaseRefresh:
-					return marshalServerTest(protocol.TicketResponse{
-						Token: "forward-2", ExpiresAt: nowFunc().Add(7 * 24 * time.Hour).Unix(),
-					})
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
-			default:
-				return nil, errors.New("unexpected extra forward issue")
-			}
-		default:
-			return nil, errors.New("unexpected control method")
-		}
-	})
-	cache := agentauthcache.NewCache(control, agentauthcache.CacheOptions{Now: nowFunc})
-	require.NoError(t, cache.Run(context.Background()))
-	server := &Server{}
-	server.replaceAgentAuthCache(cache)
-	t.Cleanup(func() {
-		releaseOnce.Do(func() { close(releaseRefresh) })
-		server.clearAgentAuthCache(cache)
-		cache.Close()
-		<-cache.Done()
-	})
-	require.Eventually(t, func() bool {
-		ticket, err := cache.CachedForwardTicket()
-		return err == nil && ticket == pkgagentauth.ForwardTicket("forward-1")
-	}, time.Second, time.Millisecond)
-
-	setNow(initialNow.Add(25 * time.Hour))
-	select {
-	case <-refreshStarted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("background forward refresh did not start")
-	}
-	requestCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	result := make(chan struct {
-		ticket pkgagentauth.ForwardTicket
-		err    error
-	}, 1)
-	go func() {
-		ticket, err := server.cachedForwardTicket(requestCtx)
-		result <- struct {
-			ticket pkgagentauth.ForwardTicket
-			err    error
-		}{ticket: ticket, err: err}
-	}()
-	select {
-	case got := <-result:
-		require.NoError(t, got.err)
-		require.Equal(t, pkgagentauth.ForwardTicket("forward-1"), got.ticket)
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("server cached forward adapter blocked on control RPC")
-	}
-	require.Equal(t, int32(2), issues.Load())
 }
 
 func TestEndClientDoesNotClearReplacementControlSession(t *testing.T) {
@@ -395,9 +399,9 @@ func TestAgentAuthCacheSessionStartsBeforeCapabilitiesAndFullSync(t *testing.T) 
 	}
 	// behavior change: the authenticated runtime advertises relay, forward-auth, Direct ingress, Relay ping, and Token routing contracts.
 	if update.AgentID != "agent-a" || len(update.Capabilities) != 5 ||
-		update.Capabilities[0] != protocol.AgentCapabilityTunnelV1 ||
+		update.Capabilities[0] != protocol.AgentCapabilityTunnelV2 ||
 		update.Capabilities[1] != protocol.AgentCapabilityForwardV1 ||
-		update.Capabilities[2] != protocol.AgentCapabilityDirectIngressV1 ||
+		update.Capabilities[2] != protocol.AgentCapabilityDirectTunnelV1 ||
 		update.Capabilities[3] != protocol.AgentCapabilityRelayHTTPPingV1 ||
 		update.Capabilities[4] != protocol.AgentCapabilityTokenRoutingV1 {
 		t.Fatalf("runtime capability update = %#v, want authenticated ID and supported contracts", update)
@@ -685,6 +689,152 @@ func TestNewEmbeddedReusesOwnerMetricsInsteadOfCreatingUnservedRegistry(t *testi
 	require.Nil(t, unowned.RelayMetrics)
 }
 
+func TestNewEmbeddedUsesProvidedStoreBeforeDirectPoolConstruction(t *testing.T) {
+	cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+		MasterURL: "http://localhost:9999", CredentialsFile: filepath.Join(t.TempDir(), "credentials.json"),
+	}}
+	store := agentcache.NewStore(nil, cfg.Agent.Cache)
+
+	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "embedded", Secret: "secret"}, EmbeddedOptions{
+		Store: store,
+	})
+	require.NoError(t, err)
+	shutdown := false
+	t.Cleanup(func() {
+		if !shutdown {
+			require.NoError(t, server.Shutdown(context.Background()))
+		}
+	})
+
+	require.Same(t, store, server.Store)
+	require.NotNil(t, server.DirectSessionPool)
+	require.NoError(t, server.Shutdown(context.Background()))
+	shutdown = true
+	assertStoreDone(t, store)
+}
+
+func TestNewEmbeddedNilStoreCreatesOwnedStore(t *testing.T) {
+	cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+		MasterURL: "http://localhost:9999", CredentialsFile: filepath.Join(t.TempDir(), "credentials.json"),
+	}}
+
+	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "embedded", Secret: "secret"}, EmbeddedOptions{})
+	require.NoError(t, err)
+	shutdown := false
+	t.Cleanup(func() {
+		if !shutdown {
+			require.NoError(t, server.Shutdown(context.Background()))
+		}
+	})
+
+	require.NotNil(t, server.Store)
+	require.NotNil(t, server.DirectSessionPool)
+	store := server.Store
+	require.NoError(t, server.Shutdown(context.Background()))
+	shutdown = true
+	assertStoreDone(t, store)
+}
+
+func TestNewEmbeddedTypedNilConfigClosesProvidedStore(t *testing.T) {
+	var cfg *config.AgentRuntimeConfig
+	store := agentcache.NewStore(nil, config.AgentCacheConfig{})
+
+	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "embedded", Secret: "secret"}, EmbeddedOptions{
+		Store: store,
+	})
+	require.Nil(t, server)
+	require.ErrorContains(t, err, "agent runtime config is required")
+	assertStoreDone(t, store)
+}
+
+func TestNewEmbeddedBodyStoreFailureClosesProvidedStore(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "request-bodies"), []byte("block directory creation"), 0o600))
+	cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+		MasterURL: "http://localhost:9999", CredentialsFile: filepath.Join(dir, "credentials.json"),
+	}}
+	store := agentcache.NewStore(nil, cfg.Agent.Cache)
+
+	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "embedded", Secret: "secret"}, EmbeddedOptions{
+		Store: store,
+	})
+	require.Nil(t, server)
+	require.ErrorContains(t, err, "create request body store")
+
+	select {
+	case <-store.Done():
+	default:
+		t.Fatal("provided store remained open after NewEmbedded failed")
+	}
+}
+
+func TestNewEmbeddedDirectPoolCapturesProvidedStoreSettings(t *testing.T) {
+	cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+		MasterURL: "http://localhost:9999", CredentialsFile: filepath.Join(t.TempDir(), "credentials.json"),
+	}}
+	store := agentcache.NewStore(nil, cfg.Agent.Cache)
+
+	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "embedded", Secret: "secret"}, EmbeddedOptions{
+		Store: store,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Shutdown(context.Background())) })
+
+	replacement := agentcache.NewStore(nil, cfg.Agent.Cache)
+	t.Cleanup(replacement.Close)
+	server.Store = replacement
+	t.Cleanup(func() { server.Store = store })
+
+	store.LoadSettings([]models.Setting{
+		{Key: "agent.direct_max_sessions", Value: "17"},
+		{Key: "agent.direct_session_idle_timeout_seconds", Value: "71"},
+		{Key: "agent.tunnel_max_metadata_bytes", Value: "8192"},
+		{Key: "agent.tunnel_max_data_bytes", Value: "16384"},
+		{Key: "agent.tunnel_initial_window_bytes", Value: "262144"},
+		{Key: "agent.tunnel_max_session_queue_bytes", Value: "1048576"},
+		{Key: "agent.tunnel_max_streams", Value: "19"},
+		{Key: "agent.tunnel_drain_timeout_seconds", Value: "11"},
+	})
+
+	runtime := server.DirectSessionPool.RuntimeSettings()
+	require.Equal(t, int64(8192), runtime.Limits.MaxMetadataBytes)
+	require.Equal(t, int64(16384), runtime.Limits.MaxDataBytes)
+	require.Equal(t, int64(262144), runtime.Limits.InitialStreamWindow)
+	require.Equal(t, int64(1048576), runtime.Limits.MaxQueuedSessionBytes)
+	require.Equal(t, 19, runtime.Limits.MaxConcurrentStreams)
+	require.Equal(t, 17, runtime.MaxSessions)
+	require.Equal(t, 71*time.Second, runtime.IdleTimeout)
+	require.Equal(t, 11*time.Second, runtime.DrainTimeout)
+}
+
+func assertStoreDone(t *testing.T, store *agentcache.Store) {
+	t.Helper()
+	select {
+	case <-store.Done():
+	default:
+		t.Fatal("store Done channel remains open")
+	}
+}
+
+func TestNewEmbeddedStoreInjectionPreservesMetricsPairRequirement(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+		MasterURL: "http://localhost:9999", CredentialsFile: filepath.Join(t.TempDir(), "credentials.json"),
+	}}
+	store := agentcache.NewStore(nil, cfg.Agent.Cache)
+	t.Cleanup(store.Close)
+
+	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "embedded", Secret: "secret"}, EmbeddedOptions{
+		Store: store, MetricsRegistry: registry,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Shutdown(context.Background())) })
+
+	require.Same(t, store, server.Store)
+	require.Nil(t, server.MetricsRegistry)
+	require.Nil(t, server.RelayMetrics)
+}
+
 func TestMountRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger, _ := zap.NewDevelopment()
@@ -798,7 +948,9 @@ func TestStandaloneAndEmbeddedRegisterOnlyPostAttemptEndpoint(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, attemptwire.EndpointPath, nil)
 			request.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+"ordinary-client-token")
 			router.ServeHTTP(response, request)
-			require.Equal(t, http.StatusUnauthorized, response.Code)
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, attemptwire.ModeControl, response.Header().Get(attemptwire.HeaderMode))
+			require.Empty(t, response.Body.String())
 		})
 	}
 }

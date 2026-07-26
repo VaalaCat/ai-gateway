@@ -63,7 +63,7 @@ func newHandlerTestCtx(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	}
 
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	application.SetEventBus(eventbus.NewMemoryBus())
 
 	h := NewHandler(application, byokcrypto.NewStaticProvider(cipher))

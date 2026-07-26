@@ -29,19 +29,20 @@ type fairWriter struct {
 	write        func(wire.Frame) error
 	clock        sessionClock
 
-	mu          sync.Mutex
-	queues      map[wire.StreamID][]queuedFrame
-	active      []wire.StreamID
-	inFlight    map[wire.StreamID]bool
-	replacing   map[wire.StreamID]bool
-	terminal    map[wire.StreamID]bool
-	forgotten   map[wire.StreamID]bool
-	queuedBytes int64
-	closed      bool
-	wake        chan struct{}
-	space       chan struct{}
-	done        chan struct{}
-	err         chan error
+	mu                   sync.Mutex
+	queues               map[wire.StreamID][]queuedFrame
+	active               []wire.StreamID
+	inFlight             map[wire.StreamID]bool
+	replacing            map[wire.StreamID]bool
+	terminal             map[wire.StreamID]bool
+	forgotten            map[wire.StreamID]bool
+	queuedBytes          int64
+	closed               bool
+	wake                 chan struct{}
+	space                chan struct{}
+	done                 chan struct{}
+	err                  chan error
+	onQueuedBytesChanged func(int64)
 
 	pingInterval time.Duration
 	ping         func() error
@@ -178,6 +179,38 @@ func (w *fairWriter) Replace(ctx context.Context, frame wire.Frame, onAccept fun
 	}
 }
 
+func (w *fairWriter) WaitStreamFlushed(ctx context.Context, id wire.StreamID) error {
+	if isNilInterface(ctx) {
+		return errNilContext
+	}
+	for {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		if err := context.Cause(w.ctx); err != nil {
+			return err
+		}
+		w.mu.Lock()
+		if w.closed {
+			w.mu.Unlock()
+			return errWriterClosed
+		}
+		if len(w.queues[id]) == 0 && !w.inFlight[id] {
+			w.mu.Unlock()
+			return nil
+		}
+		space := w.space
+		w.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-w.ctx.Done():
+			return context.Cause(w.ctx)
+		case <-space:
+		}
+	}
+}
+
 func (w *fairWriter) acceptLocked(frame wire.Frame, cost int64, onAccept func()) {
 	id := frame.StreamID
 	if onAccept != nil {
@@ -187,7 +220,7 @@ func (w *fairWriter) acceptLocked(frame wire.Frame, cost int64, onAccept func())
 		w.active = append(w.active, id)
 	}
 	w.queues[id] = append(w.queues[id], queuedFrame{frame: frame, cost: cost})
-	w.queuedBytes += cost
+	w.changeQueuedBytesLocked(cost)
 }
 
 func (w *fairWriter) discard(id wire.StreamID) {
@@ -198,9 +231,11 @@ func (w *fairWriter) discard(id wire.StreamID) {
 
 func (w *fairWriter) discardLocked(id wire.StreamID) {
 	queue := w.queues[id]
+	var discardedBytes int64
 	for _, item := range queue {
-		w.queuedBytes -= item.cost
+		discardedBytes += item.cost
 	}
+	w.changeQueuedBytesLocked(-discardedBytes)
 	delete(w.queues, id)
 	w.removeActiveLocked(id)
 	w.notifySpaceLocked()
@@ -304,7 +339,7 @@ func (w *fairWriter) finish(item queuedFrame) {
 	w.mu.Lock()
 	id := item.frame.StreamID
 	w.inFlight[id] = false
-	w.queuedBytes -= item.cost
+	w.changeQueuedBytesLocked(-item.cost)
 	if len(w.queues[id]) > 0 {
 		w.active = append(w.active, id)
 	} else {
@@ -352,7 +387,7 @@ func (w *fairWriter) fail(err error) {
 		clear(w.terminal)
 		clear(w.forgotten)
 		w.active = nil
-		w.queuedBytes = 0
+		w.changeQueuedBytesLocked(-w.queuedBytes)
 		w.notifySpaceLocked()
 	}
 	w.mu.Unlock()
@@ -369,6 +404,16 @@ func (w *fairWriter) stats() (int64, int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.queuedBytes, len(w.queues)
+}
+
+func (w *fairWriter) changeQueuedBytesLocked(delta int64) {
+	if delta == 0 {
+		return
+	}
+	w.queuedBytes += delta
+	if w.onQueuedBytesChanged != nil {
+		w.onQueuedBytesChanged(delta)
+	}
 }
 
 func (w *fairWriter) removeActiveLocked(id wire.StreamID) {

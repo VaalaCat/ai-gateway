@@ -241,7 +241,7 @@ func TestControlSessionFactDelayedRemovalCallbackCannotForgetReplacementHealth(t
 	target := connectivity.ProbeTarget{AgentID: "target", Addresses: []protocol.Address{{URL: "http://target"}}}
 	svc.MarkDirectProbeChecking(agent.AgentID, replacement.generation, target, "gen2-fp", 1)
 	svc.ApplyDirectProbeResult(agent.AgentID, replacement.generation, target, protocol.DirectProbeResult{
-		TargetAgentID: target.AgentID, AddressFingerprint: "gen2-fp", Network: "reachable",
+		TargetAgentID: target.AgentID, AddressFingerprint: "gen2-fp", Policy: protocol.ProbeRespectBusinessPolicy, Network: "reachable",
 		Identity: "verified", Eligible: true, CheckedAt: 900,
 	}, 1)
 
@@ -323,7 +323,7 @@ func TestControlSessionFactAcceptedThenReplacedDoesNotUpdateLastSeenFallback(t *
 	require.NoError(t, db.AutoMigrate(&models.Agent{}))
 	require.NoError(t, db.Create(&models.Agent{AgentID: "agent-a", LastSeen: 900}).Error)
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 
 	h := newControlTestHub(100, 200, 300)
 	h.App = application
@@ -350,7 +350,7 @@ func TestControlSessionFactCurrentLastSeenFallbackDoesNotMoveBackward(t *testing
 	require.NoError(t, db.AutoMigrate(&models.Agent{}))
 	require.NoError(t, db.Create(&models.Agent{AgentID: "agent-a", LastSeen: 900}).Error)
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 
 	h := newControlTestHub(100)
 	h.App = application

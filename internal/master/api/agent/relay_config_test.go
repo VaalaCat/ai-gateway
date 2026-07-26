@@ -25,6 +25,182 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestBoolValueOrDefault(t *testing.T) {
+	t.Parallel()
+	require.True(t, boolValueOrDefault(nil, true))
+	require.False(t, boolValueOrDefault(nil, false))
+	require.True(t, boolValueOrDefault(agentPtr(true), false))
+	require.False(t, boolValueOrDefault(agentPtr(false), true))
+}
+
+func TestCreateTransportPolicyDefaultsAndPreservesExplicitValues(t *testing.T) {
+	tests := []struct {
+		name string
+		req  CreateRequest
+		want [4]bool
+	}{
+		{
+			name: "omitted defaults enabled",
+			req:  CreateRequest{AgentID: "policy-default", Secret: "secret", Name: "default"},
+			want: [4]bool{true, true, true, true},
+		},
+		{
+			name: "explicit false is preserved",
+			req: CreateRequest{
+				AgentID: "policy-disabled", Secret: "secret", Name: "disabled",
+				DirectInboundEnabled: agentPtr(false), DirectOutboundEnabled: agentPtr(false),
+				RelayInboundEnabled: agentPtr(false), RelayOutboundEnabled: agentPtr(false),
+			},
+			want: [4]bool{false, false, false, false},
+		},
+		{
+			name: "mixed directions are preserved",
+			req: CreateRequest{
+				AgentID: "policy-mixed", Secret: "secret", Name: "mixed",
+				DirectInboundEnabled: agentPtr(true), DirectOutboundEnabled: agentPtr(false),
+				RelayInboundEnabled: agentPtr(false), RelayOutboundEnabled: agentPtr(true),
+			},
+			want: [4]bool{true, false, false, true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, bus := newAgentMutationContext(t, http.MethodPost)
+			created, err := (&Handler{}).Create(c, tt.req)
+			require.NoError(t, err)
+
+			var stored models.Agent
+			require.NoError(t, c.App.GetCoreDB().First(&stored, created.Value.ID).Error)
+			assertAgentTransportPolicy(t, created.Value, tt.want)
+			assertAgentTransportPolicy(t, stored, tt.want)
+			require.Equal(t, stored, created.Value)
+
+			require.Len(t, bus.events, 1)
+			var published models.Agent
+			require.NoError(t, json.Unmarshal(bus.events[0].Payload, &published))
+			require.Equal(t, stored, published)
+		})
+	}
+}
+
+func TestMergeAgentPatchIncludesExplicitTransportPolicyValues(t *testing.T) {
+	t.Parallel()
+	current := models.Agent{
+		RelayMode:             "inherit",
+		DirectInboundEnabled:  true,
+		DirectOutboundEnabled: false,
+		RelayInboundEnabled:   true,
+		RelayOutboundEnabled:  false,
+	}
+
+	merged, updates, err := mergeAgentPatch(current, AgentPatch{
+		DirectInboundEnabled:  agentPtr(false),
+		DirectOutboundEnabled: agentPtr(true),
+		RelayInboundEnabled:   agentPtr(false),
+		RelayOutboundEnabled:  agentPtr(true),
+	})
+	require.NoError(t, err)
+	assertAgentTransportPolicy(t, merged, [4]bool{false, true, false, true})
+	require.Equal(t, map[string]any{
+		"direct_inbound_enabled":  false,
+		"direct_outbound_enabled": true,
+		"relay_inbound_enabled":   false,
+		"relay_outbound_enabled":  true,
+	}, updates)
+
+	merged, updates, err = mergeAgentPatch(current, AgentPatch{})
+	require.NoError(t, err)
+	require.Equal(t, current, merged)
+	require.Empty(t, updates)
+}
+
+func TestUpdateRelayCASPersistsTransportPolicyInSameMutation(t *testing.T) {
+	c, bus := newAgentMutationContext(t, http.MethodPut)
+	current := models.Agent{AgentID: "relay-policy-cas", Name: "before", RelayMode: "inherit"}
+	require.NoError(t, c.App.GetCoreDB().Create(&current).Error)
+
+	updated, err := (&Handler{}).Update(c, UpdateRequest{
+		ID: strconv.Itoa(int(current.ID)),
+		AgentPatch: AgentPatch{
+			RelayMode:             agentPtr("disabled"),
+			DirectInboundEnabled:  agentPtr(false),
+			RelayOutboundEnabled:  agentPtr(false),
+			DirectOutboundEnabled: agentPtr(true),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "disabled", updated.RelayMode)
+	assertAgentTransportPolicy(t, updated, [4]bool{false, true, true, false})
+
+	var stored models.Agent
+	require.NoError(t, c.App.GetCoreDB().First(&stored, current.ID).Error)
+	require.Equal(t, stored, updated)
+	require.Len(t, bus.events, 1)
+	var published models.Agent
+	require.NoError(t, json.Unmarshal(bus.events[0].Payload, &published))
+	require.Equal(t, stored, published)
+}
+
+func TestUpdateTransportPolicyPatchesOneDirectionFalseAndTrue(t *testing.T) {
+	c, bus := newAgentMutationContext(t, http.MethodPut)
+	current := models.Agent{AgentID: "single-policy-patch", Name: "before", RelayMode: "inherit"}
+	require.NoError(t, c.App.GetCoreDB().Create(&current).Error)
+
+	for _, want := range []bool{false, true} {
+		updated, err := (&Handler{}).Update(c, UpdateRequest{
+			ID: strconv.Itoa(int(current.ID)),
+			AgentPatch: AgentPatch{
+				DirectInboundEnabled: agentPtr(want),
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, want, updated.DirectInboundEnabled)
+		require.True(t, updated.DirectOutboundEnabled, "omitted direct outbound policy must be preserved")
+		require.True(t, updated.RelayInboundEnabled, "omitted relay inbound policy must be preserved")
+		require.True(t, updated.RelayOutboundEnabled, "omitted relay outbound policy must be preserved")
+	}
+
+	require.Len(t, bus.events, 2)
+	var published models.Agent
+	require.NoError(t, json.Unmarshal(bus.events[1].Payload, &published))
+	require.True(t, published.DirectInboundEnabled)
+}
+
+func TestAgentMutationAndListDTOsExposeTransportDirections(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(AgentResponse{
+		DirectInboundEnabled: true, DirectOutboundEnabled: false,
+		RelayInboundEnabled: false, RelayOutboundEnabled: true,
+	})
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"direct_inbound_enabled":true`)
+	require.Contains(t, string(encoded), `"direct_outbound_enabled":false`)
+	require.Contains(t, string(encoded), `"relay_inbound_enabled":false`)
+	require.Contains(t, string(encoded), `"relay_outbound_enabled":true`)
+
+	var create CreateRequest
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"direct_inbound_enabled": false,
+		"direct_outbound_enabled": true,
+		"relay_inbound_enabled": true,
+		"relay_outbound_enabled": false
+	}`), &create))
+	require.Equal(t, false, *create.DirectInboundEnabled)
+	require.Equal(t, true, *create.DirectOutboundEnabled)
+	require.Equal(t, true, *create.RelayInboundEnabled)
+	require.Equal(t, false, *create.RelayOutboundEnabled)
+}
+
+func assertAgentTransportPolicy(t *testing.T, agent models.Agent, want [4]bool) {
+	t.Helper()
+	require.Equal(t, want[0], agent.DirectInboundEnabled)
+	require.Equal(t, want[1], agent.DirectOutboundEnabled)
+	require.Equal(t, want[2], agent.RelayInboundEnabled)
+	require.Equal(t, want[3], agent.RelayOutboundEnabled)
+}
+
 func TestSetupTestDBClosesOwnedDatabaseAfterTestCleanup(t *testing.T) {
 	var ping func() error
 	t.Run("fixture", func(t *testing.T) {
@@ -114,7 +290,6 @@ func TestMergeAgentPatchBuildsOnlyExplicitUpdatesIncludingZeroAndEmpty(t *testin
 		ProxyURL:      "http://proxy.example",
 		RelayMode:     "custom",
 		RelayURI:      "wss://relay.example/original",
-		PeerRouteMode: "direct_first",
 	}
 
 	merged, updates, err := mergeAgentPatch(current, AgentPatch{
@@ -125,7 +300,6 @@ func TestMergeAgentPatchBuildsOnlyExplicitUpdatesIncludingZeroAndEmpty(t *testin
 		ProxyURL:      agentPtr(""),
 		RelayMode:     agentPtr("disabled"),
 		RelayURI:      agentPtr(""),
-		PeerRouteMode: agentPtr("relay_only"),
 	})
 	require.NoError(t, err)
 	require.Equal(t, "", merged.Name)
@@ -135,49 +309,17 @@ func TestMergeAgentPatchBuildsOnlyExplicitUpdatesIncludingZeroAndEmpty(t *testin
 	require.Equal(t, "", merged.ProxyURL)
 	require.Equal(t, "disabled", merged.RelayMode)
 	require.Equal(t, "", merged.RelayURI)
-	require.Equal(t, "relay_only", merged.PeerRouteMode)
 	require.Equal(t, "agent-7", merged.AgentID)
 	require.Equal(t, "secret-7", merged.Secret)
 	require.Equal(t, map[string]any{
-		"name":            "",
-		"status":          0,
-		"tags":            "",
-		"http_addresses":  "",
-		"proxy_url":       "",
-		"relay_mode":      "disabled",
-		"relay_uri":       "",
-		"peer_route_mode": "relay_only",
+		"name":           "",
+		"status":         0,
+		"tags":           "",
+		"http_addresses": "",
+		"proxy_url":      "",
+		"relay_mode":     "disabled",
+		"relay_uri":      "",
 	}, updates)
-}
-
-func TestNormalizePeerRouteModeDefaultsAndRejectsUnknown(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		mode         string
-		defaultEmpty bool
-		want         string
-		wantErr      string
-	}{
-		{name: "create defaults empty", defaultEmpty: true, want: "direct_first"},
-		{name: "direct first", mode: "direct_first", want: "direct_first"},
-		{name: "relay only", mode: "relay_only", want: "relay_only"},
-		{name: "patch rejects empty", wantErr: "invalid peer route mode"},
-		{name: "rejects unknown", mode: "automatic", defaultEmpty: true, wantErr: "invalid peer route mode"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := normalizePeerRouteMode(test.mode, test.defaultEmpty)
-			if test.wantErr != "" {
-				require.EqualError(t, err, test.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, test.want, got)
-		})
-	}
 }
 
 func TestMergeAgentPatchPreservesOmittedFieldsAndValidatesFinalRelayState(t *testing.T) {
@@ -223,7 +365,6 @@ func TestMergeAgentPatchRejectsInvalidStatusAndRelayFinalState(t *testing.T) {
 	tests := map[string]AgentPatch{
 		"invalid status":          {Status: agentPtr(2)},
 		"invalid mode":            {RelayMode: agentPtr("automatic")},
-		"invalid peer route mode": {PeerRouteMode: agentPtr("direct_only")},
 		"clear custom URI":        {RelayURI: agentPtr("")},
 		"invalid replacement URI": {RelayURI: agentPtr("http://relay.example/?token=secret")},
 	}
@@ -331,7 +472,7 @@ func TestCreateRelayConfigurationDefaultsAndValidatesBeforePersistence(t *testin
 				require.Equal(t, "invalid relay configuration", apiErr.Message)
 				require.NotContains(t, apiErr.Message, "secret")
 				var count int64
-				require.NoError(t, c.App.GetDB().Model(&models.Agent{}).Count(&count).Error)
+				require.NoError(t, c.App.GetCoreDB().Model(&models.Agent{}).Count(&count).Error)
 				require.Zero(t, count)
 				require.Empty(t, bus.events)
 				return
@@ -341,7 +482,7 @@ func TestCreateRelayConfigurationDefaultsAndValidatesBeforePersistence(t *testin
 			require.Equal(t, tt.wantMode, created.Value.RelayMode)
 			require.Equal(t, tt.wantURI, created.Value.RelayURI)
 			var stored models.Agent
-			require.NoError(t, c.App.GetDB().First(&stored, created.Value.ID).Error)
+			require.NoError(t, c.App.GetCoreDB().First(&stored, created.Value.ID).Error)
 			require.Equal(t, tt.wantMode, stored.RelayMode)
 			require.Equal(t, tt.wantURI, stored.RelayURI)
 			require.LessOrEqual(t, len(stored.RelayURI), 2048)
@@ -368,7 +509,7 @@ func TestCreatePublishesCompletePersistedAgentWithRequestContext(t *testing.T) {
 	})
 	require.NoError(t, err)
 	var stored models.Agent
-	require.NoError(t, c.App.GetDB().First(&stored, created.Value.ID).Error)
+	require.NoError(t, c.App.GetCoreDB().First(&stored, created.Value.ID).Error)
 	require.Equal(t, stored, created.Value)
 	require.Len(t, bus.events, 1)
 	require.Equal(t, events.AgentCreateTopic.Value(), bus.events[0].Topic)
@@ -408,9 +549,8 @@ func TestUpdatePersistsExplicitValuesPreservesOmissionsAndPublishesCompleteAgent
 		ProxyURL:      "http://proxy.example",
 		RelayMode:     "custom",
 		RelayURI:      "wss://relay.example/kept",
-		PeerRouteMode: "direct_first",
 	}
-	require.NoError(t, c.App.GetDB().Create(&current).Error)
+	require.NoError(t, c.App.GetCoreDB().Create(&current).Error)
 
 	updated, err := (&Handler{}).Update(c, UpdateRequest{
 		ID: strconv.Itoa(int(current.ID)),
@@ -420,7 +560,6 @@ func TestUpdatePersistsExplicitValuesPreservesOmissionsAndPublishesCompleteAgent
 			Tags:          agentPtr(""),
 			HTTPAddresses: agentPtr(""),
 			RelayMode:     agentPtr("disabled"),
-			PeerRouteMode: agentPtr("relay_only"),
 		},
 	})
 	require.NoError(t, err)
@@ -431,10 +570,9 @@ func TestUpdatePersistsExplicitValuesPreservesOmissionsAndPublishesCompleteAgent
 	require.Equal(t, "http://proxy.example", updated.ProxyURL, "omitted proxy_url must be preserved")
 	require.Equal(t, "disabled", updated.RelayMode)
 	require.Equal(t, "wss://relay.example/kept", updated.RelayURI)
-	require.Equal(t, "relay_only", updated.PeerRouteMode)
 
 	var stored models.Agent
-	require.NoError(t, c.App.GetDB().First(&stored, current.ID).Error)
+	require.NoError(t, c.App.GetCoreDB().First(&stored, current.ID).Error)
 	require.Equal(t, stored, updated)
 	require.Len(t, bus.events, 1)
 	require.Equal(t, events.AgentUpdateTopic.Value(), bus.events[0].Topic)
@@ -453,7 +591,7 @@ func TestUpdateExplicitEmptyProxyURLClearsPersistedValue(t *testing.T) {
 		ProxyURL:  "http://proxy.example",
 		RelayMode: "inherit",
 	}
-	require.NoError(t, c.App.GetDB().Create(&current).Error)
+	require.NoError(t, c.App.GetCoreDB().Create(&current).Error)
 
 	updated, err := (&Handler{}).Update(c, UpdateRequest{
 		ID:         strconv.Itoa(int(current.ID)),
@@ -462,7 +600,7 @@ func TestUpdateExplicitEmptyProxyURLClearsPersistedValue(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, updated.ProxyURL)
 	var stored models.Agent
-	require.NoError(t, c.App.GetDB().First(&stored, current.ID).Error)
+	require.NoError(t, c.App.GetCoreDB().First(&stored, current.ID).Error)
 	require.Empty(t, stored.ProxyURL)
 }
 
@@ -475,7 +613,7 @@ func TestUpdatePersistsCanonicalRelayURIAtStorageBoundary(t *testing.T) {
 		RelayMode: "custom",
 		RelayURI:  "wss://relay.example/original",
 	}
-	require.NoError(t, c.App.GetDB().Create(&current).Error)
+	require.NoError(t, c.App.GetCoreDB().Create(&current).Error)
 	raw, canonical := relayURIAtCanonicalStorageBoundary()
 
 	updated, err := (&Handler{}).Update(c, UpdateRequest{
@@ -486,7 +624,7 @@ func TestUpdatePersistsCanonicalRelayURIAtStorageBoundary(t *testing.T) {
 	require.Equal(t, canonical, updated.RelayURI)
 	require.Len(t, updated.RelayURI, 2048)
 	var stored models.Agent
-	require.NoError(t, c.App.GetDB().First(&stored, current.ID).Error)
+	require.NoError(t, c.App.GetCoreDB().First(&stored, current.ID).Error)
 	require.Equal(t, canonical, stored.RelayURI)
 	require.Len(t, bus.snapshotEvents(), 1)
 }
@@ -495,7 +633,6 @@ func TestUpdateRejectsInvalidFinalStateBeforePersistenceOrPublish(t *testing.T) 
 	tests := map[string]AgentPatch{
 		"invalid status":             {Status: agentPtr(2)},
 		"invalid mode":               {RelayMode: agentPtr("automatic")},
-		"invalid peer route mode":    {PeerRouteMode: agentPtr("direct_only")},
 		"clear custom URI":           {RelayURI: agentPtr("")},
 		"invalid replacement URI":    {RelayURI: agentPtr("http://relay.example/?token=secret")},
 		"empty fragment delimiter":   {RelayURI: agentPtr("wss://relay.example/tunnel#")},
@@ -513,7 +650,7 @@ func TestUpdateRejectsInvalidFinalStateBeforePersistenceOrPublish(t *testing.T) 
 				RelayMode: "custom",
 				RelayURI:  "wss://relay.example/kept",
 			}
-			require.NoError(t, c.App.GetDB().Create(&current).Error)
+			require.NoError(t, c.App.GetCoreDB().Create(&current).Error)
 
 			_, err := (&Handler{}).Update(c, UpdateRequest{
 				ID:         strconv.Itoa(int(current.ID)),
@@ -523,7 +660,7 @@ func TestUpdateRejectsInvalidFinalStateBeforePersistenceOrPublish(t *testing.T) 
 			require.Equal(t, http.StatusBadRequest, apiErr.Status)
 			require.NotContains(t, apiErr.Message, "secret")
 			var stored models.Agent
-			require.NoError(t, c.App.GetDB().First(&stored, current.ID).Error)
+			require.NoError(t, c.App.GetCoreDB().First(&stored, current.ID).Error)
 			require.Equal(t, current, stored)
 			require.Empty(t, bus.events)
 		})
@@ -758,11 +895,13 @@ func TestUpdateRequestBindURIAndJSONUsesFlatPointerPatch(t *testing.T) {
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Params = gin.Params{{Key: "id", Value: "42"}}
 	ginCtx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/agents/42", bytes.NewBufferString(`{
-		"status": 0,
-		"proxy_url": "",
-		"relay_mode": "custom",
-		"relay_uri": "wss://relay.example/tunnel"
-	}`))
+			"status": 0,
+			"proxy_url": "",
+			"relay_mode": "custom",
+			"relay_uri": "wss://relay.example/tunnel",
+			"direct_inbound_enabled": false,
+			"relay_outbound_enabled": true
+		}`))
 	ginCtx.Request.Header.Set("Content-Type", "application/json")
 
 	var req UpdateRequest
@@ -777,4 +916,10 @@ func TestUpdateRequestBindURIAndJSONUsesFlatPointerPatch(t *testing.T) {
 	require.Empty(t, *req.ProxyURL)
 	require.Equal(t, "custom", *req.RelayMode)
 	require.Equal(t, "wss://relay.example/tunnel", *req.RelayURI)
+	require.NotNil(t, req.DirectInboundEnabled)
+	require.False(t, *req.DirectInboundEnabled)
+	require.Nil(t, req.DirectOutboundEnabled)
+	require.Nil(t, req.RelayInboundEnabled)
+	require.NotNil(t, req.RelayOutboundEnabled)
+	require.True(t, *req.RelayOutboundEnabled)
 }

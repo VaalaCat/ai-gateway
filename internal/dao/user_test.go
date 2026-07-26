@@ -237,7 +237,7 @@ func TestUserDAO_UserScoped(t *testing.T) {
 
 	uctx, _ := setupUserContext(t, u.ID)
 	// The user context has its own DB, so seed the user in that DB too
-	uctx.(*userContextImpl).GetDB().Create(&models.User{Username: "testuser", Password: "oldhash"})
+	uctx.(*userContextImpl).GetCoreDB().Create(&models.User{Username: "testuser", Password: "oldhash"})
 
 	uq := NewQuery(uctx).User()
 	um := NewMutation(uctx).User()

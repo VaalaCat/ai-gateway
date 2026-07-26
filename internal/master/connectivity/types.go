@@ -1,10 +1,12 @@
 package connectivity
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 )
@@ -97,6 +99,7 @@ type RelaySummary struct {
 
 type DirectSummary struct {
 	State       string `json:"state"`
+	Disabled    int    `json:"disabled"`
 	Reachable   int    `json:"reachable"`
 	Degraded    int    `json:"degraded"`
 	Unreachable int    `json:"unreachable"`
@@ -133,6 +136,7 @@ type DirectSnapshot struct {
 
 type RelayPathSummary struct {
 	State       string `json:"state"`
+	Disabled    int    `json:"disabled"`
 	Reachable   int    `json:"reachable"`
 	Unreachable int    `json:"unreachable"`
 	Unavailable int    `json:"unavailable"`
@@ -155,6 +159,7 @@ type RelayTargetSnapshot struct {
 	CheckedAt             int64                    `json:"checked_at"`
 	LatencyMS             int64                    `json:"latency_ms"`
 	LastError             *RecentError             `json:"last_error,omitempty"`
+	PolicyReason          string                   `json:"policy_reason,omitempty"`
 }
 
 type RelayPathSnapshot struct {
@@ -165,6 +170,7 @@ type RelayPathSnapshot struct {
 
 type RouteDirectTargetSnapshot struct {
 	State              string                  `json:"state"`
+	PolicyReason       string                  `json:"policy_reason,omitempty"`
 	Addresses          []DirectAddressSnapshot `json:"addresses"`
 	Network            string                  `json:"network"`
 	Identity           string                  `json:"identity"`
@@ -211,31 +217,46 @@ type OperationStatus struct {
 	DenialCode string    `json:"denial_code,omitempty"`
 }
 
+type TransportDirectionSnapshot struct {
+	Configured bool   `json:"configured"`
+	Effective  bool   `json:"effective"`
+	ReasonCode string `json:"reason_code,omitempty"`
+}
+
+type AgentTransportPolicySnapshot struct {
+	DirectInbound  TransportDirectionSnapshot `json:"direct_inbound"`
+	DirectOutbound TransportDirectionSnapshot `json:"direct_outbound"`
+	RelayInbound   TransportDirectionSnapshot `json:"relay_inbound"`
+	RelayOutbound  TransportDirectionSnapshot `json:"relay_outbound"`
+}
+
 type ConnectionSnapshot struct {
-	Version           string               `json:"version"`
-	SnapshotEpoch     string               `json:"snapshot_epoch"`
-	SnapshotSeq       uint64               `json:"snapshot_seq"`
-	ObservedAt        int64                `json:"observed_at"`
-	AgentID           string               `json:"agent_id"`
-	AdminStatus       int                  `json:"admin_status"`
-	Control           ControlSnapshot      `json:"control"`
-	Relay             RelaySnapshot        `json:"relay"`
-	Direct            DirectSnapshot       `json:"direct"`
-	RelayPaths        RelayPathSnapshot    `json:"-"`
-	TargetSummaries   RouteTargetSummaries `json:"target_summaries"`
-	RouteTargets      RouteTargetsSnapshot `json:"-"`
-	AllowedOperations []OperationStatus    `json:"allowed_operations"`
+	Version           string                       `json:"version"`
+	SnapshotEpoch     string                       `json:"snapshot_epoch"`
+	SnapshotSeq       uint64                       `json:"snapshot_seq"`
+	ObservedAt        int64                        `json:"observed_at"`
+	AgentID           string                       `json:"agent_id"`
+	AdminStatus       int                          `json:"admin_status"`
+	TransportPolicy   AgentTransportPolicySnapshot `json:"transport_policy"`
+	Control           ControlSnapshot              `json:"control"`
+	Relay             RelaySnapshot                `json:"relay"`
+	Direct            DirectSnapshot               `json:"direct"`
+	RelayPaths        RelayPathSnapshot            `json:"-"`
+	TargetSummaries   RouteTargetSummaries         `json:"target_summaries"`
+	RouteTargets      RouteTargetsSnapshot         `json:"-"`
+	AllowedOperations []OperationStatus            `json:"allowed_operations"`
 }
 
 type ConnectionSummary struct {
-	Version       string               `json:"version"`
-	SnapshotEpoch string               `json:"snapshot_epoch"`
-	SnapshotSeq   uint64               `json:"snapshot_seq"`
-	ObservedAt    int64                `json:"observed_at"`
-	Control       ControlSnapshot      `json:"control"`
-	Relay         RelaySummary         `json:"relay"`
-	Direct        DirectSummary        `json:"direct"`
-	Targets       RouteTargetSummaries `json:"targets"`
+	Version         string                       `json:"version"`
+	SnapshotEpoch   string                       `json:"snapshot_epoch"`
+	SnapshotSeq     uint64                       `json:"snapshot_seq"`
+	ObservedAt      int64                        `json:"observed_at"`
+	TransportPolicy AgentTransportPolicySnapshot `json:"transport_policy"`
+	Control         ControlSnapshot              `json:"control"`
+	Relay           RelaySummary                 `json:"relay"`
+	Direct          DirectSummary                `json:"direct"`
+	Targets         RouteTargetSummaries         `json:"targets"`
 }
 
 type SnapshotBatch struct {
@@ -317,10 +338,15 @@ type Sources struct {
 }
 
 type Options struct {
-	HeartbeatDegradedAfter time.Duration
-	RecoverySamples        int
-	Now                    func() time.Time
-	Logger                 *zap.Logger
+	HeartbeatDegradedAfter     time.Duration
+	RecoverySamples            int
+	AgentTransportPolicyFinder AgentTransportPolicyFinder
+	Now                        func() time.Time
+	Logger                     *zap.Logger
+}
+
+type AgentTransportPolicyFinder interface {
+	FindAgentTransportPolicies(context.Context, []string) (map[string]models.Agent, error)
 }
 
 type OperationDeniedError struct {

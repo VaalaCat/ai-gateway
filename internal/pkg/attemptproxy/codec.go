@@ -1,49 +1,43 @@
 package attemptproxy
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 )
 
 var ErrResultTooLarge = errors.New("attempt proxy result too large")
 
-const maxResultJSONBytes = MaxResultWireBytes * 3 / 4
-
-func EncodeMeta(meta AttemptProxyMeta) (string, error) {
-	if meta.Validate() != nil {
-		return "", ErrInvalidContract
-	}
-	raw, err := json.Marshal(meta)
-	if err != nil {
-		return "", ErrInvalidContract
-	}
-	return string(raw), nil
-}
-
-func DecodeMeta(raw string) (AttemptProxyMeta, error) {
-	var meta AttemptProxyMeta
-	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
-		return AttemptProxyMeta{}, ErrInvalidContract
-	}
-	if meta.Validate() != nil {
-		return AttemptProxyMeta{}, ErrInvalidContract
-	}
-	return meta, nil
-}
-
-func EncodeResult(result AttemptProxyResult) (string, error) {
-	raw, err := marshalResultJSON(result, maxResultJSONBytes)
-	if err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
-}
-
-// EncodeResultJSON encodes a control response as bounded raw JSON. It uses the
-// same trace trimming order as the base64 trailer encoder.
+// EncodeResultJSON encodes a bounded result payload for the explicit Result
+// frame carried by the tunnel stream.
 func EncodeResultJSON(result AttemptProxyResult) ([]byte, error) {
-	return marshalResultJSON(result, MaxResultWireBytes)
+	return EncodeResultJSONWithin(result, MaxResultWireBytes)
+}
+
+func DecodeResultJSON(payload []byte) (AttemptProxyResult, error) {
+	return DecodeResultJSONWithin(payload, MaxResultWireBytes)
+}
+
+// EncodeResultJSONWithin applies the negotiated tunnel Result payload limit.
+func EncodeResultJSONWithin(result AttemptProxyResult, maxBytes int) ([]byte, error) {
+	if maxBytes <= 0 || maxBytes > MaxResultWireBytes {
+		return nil, ErrResultTooLarge
+	}
+	return marshalResultJSON(result, maxBytes)
+}
+
+// DecodeResultJSONWithin applies the same negotiated limit as frame decoding.
+func DecodeResultJSONWithin(payload []byte, maxBytes int) (AttemptProxyResult, error) {
+	if maxBytes <= 0 || maxBytes > MaxResultWireBytes || len(payload) > maxBytes {
+		return AttemptProxyResult{}, ErrResultTooLarge
+	}
+	var result AttemptProxyResult
+	if err := json.Unmarshal(payload, &result); err != nil {
+		return AttemptProxyResult{}, ErrInvalidContract
+	}
+	if result.Validate() != nil {
+		return AttemptProxyResult{}, ErrInvalidContract
+	}
+	return result, nil
 }
 
 func marshalResultJSON(result AttemptProxyResult, maxBytes int) ([]byte, error) {
@@ -56,6 +50,21 @@ func marshalResultJSON(result AttemptProxyResult, maxBytes int) ([]byte, error) 
 	}
 	if candidate.Trace == nil {
 		return nil, ErrResultTooLarge
+	}
+
+	if candidate.Trace.FailureFallback != nil {
+		clearFallbackBodies := []func(*AttemptTraceBodyWire){
+			func(fallback *AttemptTraceBodyWire) { fallback.InboundBody = "" },
+			func(fallback *AttemptTraceBodyWire) { fallback.OutboundBody = "" },
+			func(fallback *AttemptTraceBodyWire) { fallback.ClientResponseBody = "" },
+			func(fallback *AttemptTraceBodyWire) { fallback.ResponseBody = "" },
+		}
+		for _, clearBody := range clearFallbackBodies {
+			clearBody(candidate.Trace.FailureFallback)
+			if raw, ok := marshalResultWithinLimit(candidate, maxBytes); ok {
+				return raw, nil
+			}
+		}
 	}
 
 	clearBodies := []func(*AttemptTraceWire){
@@ -82,36 +91,15 @@ func marshalResultJSON(result AttemptProxyResult, maxBytes int) ([]byte, error) 
 	return nil, ErrResultTooLarge
 }
 
-func DecodeResult(raw string) (AttemptProxyResult, error) {
-	if len(raw) > MaxResultWireBytes {
-		return AttemptProxyResult{}, ErrResultTooLarge
-	}
-	decoded, err := base64.RawURLEncoding.DecodeString(raw)
-	if err != nil {
-		return AttemptProxyResult{}, ErrInvalidContract
-	}
-	return decodeResultJSON(decoded)
-}
-
-func decodeResultJSON(raw []byte) (AttemptProxyResult, error) {
-	if len(raw) > maxResultJSONBytes {
-		return AttemptProxyResult{}, ErrResultTooLarge
-	}
-	var result AttemptProxyResult
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return AttemptProxyResult{}, ErrInvalidContract
-	}
-	if result.Validate() != nil {
-		return AttemptProxyResult{}, ErrInvalidContract
-	}
-	return result, nil
-}
-
 func cloneResultTrace(result AttemptProxyResult) AttemptProxyResult {
 	if result.Trace == nil {
 		return result
 	}
 	trace := *result.Trace
+	if trace.FailureFallback != nil {
+		fallback := *trace.FailureFallback
+		trace.FailureFallback = &fallback
+	}
 	result.Trace = &trace
 	return result
 }

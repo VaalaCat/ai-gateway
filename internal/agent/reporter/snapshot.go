@@ -2,14 +2,12 @@
 package reporter
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 )
@@ -88,63 +86,27 @@ func (s *Snapshotter) WriteNow() error {
 		snap.Retry = append(snap.Retry, retrySnapshotItem{Entry: it.entry, Attempts: it.attempts, Degrade: it.degrade})
 	}
 	if len(snap.Store) == 0 && len(snap.Retry) == 0 && len(snap.Inflight) == 0 {
-		if err := os.Remove(s.Path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
+		return deliveryqueue.RemoveSnapshot(s.Path)
 	}
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	if err := json.NewEncoder(zw).Encode(snap); err != nil {
-		return err
-	}
-	if err := zw.Close(); err != nil {
-		return err
-	}
-	tmp := s.Path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(buf.Bytes()); err != nil {
-		f.Close()
-		return err
-	}
-	// fsync 后再 rename:防主机断电时新文件内容未落盘而旧文件已被顶掉(spec §6)
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.Path)
+	return deliveryqueue.WriteGzipJSON(s.Path, snap)
 }
 
 // Restore:恢复后**不删**快照文件——"恢复成功但立刻崩"的窗口里数据还在盘上,
 // 下一个 60s 周期自然覆盖;期间与崩溃间隙的重复上传由 master request_id 去重吸收。
 func (s *Snapshotter) Restore() (int, error) {
-	raw, err := os.ReadFile(s.Path)
+	var snap backlogSnapshot
+	err := deliveryqueue.ReadGzipJSON(s.Path, &snap)
 	if os.IsNotExist(err) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
-	quarantine := func(stage string, cause error) {
-		s.Logger.Error("backlog snapshot corrupt, quarantined",
-			zap.String("stage", stage), zap.Error(cause))
-		os.Rename(s.Path, s.Path+".corrupt")
-	}
-	zr, err := gzip.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		quarantine("gzip", err)
-		return 0, nil
-	}
-	var snap backlogSnapshot
-	if err := json.NewDecoder(zr).Decode(&snap); err != nil || snap.Version != 1 {
-		quarantine("decode", err)
-		return 0, nil
+	if snap.Version != 1 {
+		if renameErr := deliveryqueue.QuarantineSnapshot(s.Path); renameErr != nil {
+			return 0, fmt.Errorf("unsupported backlog snapshot version %d; quarantine: %w", snap.Version, renameErr)
+		}
+		return 0, fmt.Errorf("unsupported backlog snapshot version %d, quarantined", snap.Version)
 	}
 	s.Store.Append(snap.Store)
 	s.Store.Append(snap.Inflight) // 在飞状态未知,按未投递处理;重复由 master 去重吸收

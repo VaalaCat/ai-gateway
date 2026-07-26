@@ -20,25 +20,25 @@ type adminOAuthProviderMutation struct{ ctx *baseContext }
 
 func (q *adminOAuthProviderQuery) GetByID(id uint) (*models.OAuthProvider, error) {
 	var p models.OAuthProvider
-	err := q.ctx.GetDB().First(&p, id).Error
+	err := q.ctx.GetCoreDB().First(&p, id).Error
 	return &p, err
 }
 
 func (q *adminOAuthProviderQuery) GetByName(name string) (*models.OAuthProvider, error) {
 	var p models.OAuthProvider
-	err := q.ctx.GetDB().Where("name = ?", name).First(&p).Error
+	err := q.ctx.GetCoreDB().Where("name = ?", name).First(&p).Error
 	return &p, err
 }
 
 func (q *adminOAuthProviderQuery) List() ([]models.OAuthProvider, error) {
 	var list []models.OAuthProvider
-	err := q.ctx.GetDB().Order("id ASC").Find(&list).Error
+	err := q.ctx.GetCoreDB().Order("id ASC").Find(&list).Error
 	return list, err
 }
 
 func (q *adminOAuthProviderQuery) ListEnabled() ([]models.OAuthProvider, error) {
 	var list []models.OAuthProvider
-	err := q.ctx.GetDB().Where("enabled = ?", true).Order("id ASC").Find(&list).Error
+	err := q.ctx.GetCoreDB().Where("enabled = ?", true).Order("id ASC").Find(&list).Error
 	return list, err
 }
 
@@ -50,11 +50,11 @@ func (m *adminOAuthProviderMutation) Create(p *models.OAuthProvider) error {
 	// commit ada013a) but SQLite still applied the column DEFAULT.
 	intendedEnabled := p.Enabled
 	return RunInTx[Context](m.ctx, func(txCtx Context) error {
-		if err := txCtx.GetDB().Create(p).Error; err != nil {
+		if err := txCtx.GetCoreDB().Create(p).Error; err != nil {
 			return err
 		}
 		if !intendedEnabled {
-			if err := txCtx.GetDB().Model(p).UpdateColumn("enabled", false).Error; err != nil {
+			if err := txCtx.GetCoreDB().Model(p).UpdateColumn("enabled", false).Error; err != nil {
 				return err
 			}
 			p.Enabled = false
@@ -64,9 +64,9 @@ func (m *adminOAuthProviderMutation) Create(p *models.OAuthProvider) error {
 }
 
 func (m *adminOAuthProviderMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetDB().Model(&models.OAuthProvider{}).Where("id = ?", id).Updates(updates).Error
+	return m.ctx.GetCoreDB().Model(&models.OAuthProvider{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (m *adminOAuthProviderMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.OAuthProvider{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.OAuthProvider{}, id).Error
 }

@@ -478,6 +478,75 @@ func TestConnectionSnapshotDefaultsAreCompleteAndCopyIsolated(t *testing.T) {
 	require.Equal(t, "dial_failed", again.Relay.RecentErrors[0].Code)
 }
 
+func TestConnectionSnapshotTransportPolicyConfiguredAndEffectiveDirections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		agent models.Agent
+		want  AgentTransportPolicySnapshot
+	}{
+		{
+			name: "all configured and physically available",
+			agent: models.Agent{
+				AgentID: "all-enabled", RelayMode: consts.RelayModeInherit,
+				DirectInboundEnabled: true, DirectOutboundEnabled: true,
+				RelayInboundEnabled: true, RelayOutboundEnabled: true,
+			},
+			want: AgentTransportPolicySnapshot{
+				DirectInbound:  TransportDirectionSnapshot{Configured: true, Effective: true},
+				DirectOutbound: TransportDirectionSnapshot{Configured: true, Effective: true},
+				RelayInbound:   TransportDirectionSnapshot{Configured: true, Effective: true},
+				RelayOutbound:  TransportDirectionSnapshot{Configured: true, Effective: true},
+			},
+		},
+		{
+			name: "configured false is effective false without a physical reason",
+			agent: models.Agent{
+				AgentID: "mixed", RelayMode: consts.RelayModeInherit,
+				DirectInboundEnabled: true, DirectOutboundEnabled: false,
+				RelayInboundEnabled: false, RelayOutboundEnabled: true,
+			},
+			want: AgentTransportPolicySnapshot{
+				DirectInbound:  TransportDirectionSnapshot{Configured: true, Effective: true},
+				DirectOutbound: TransportDirectionSnapshot{Configured: false, Effective: false},
+				RelayInbound:   TransportDirectionSnapshot{Configured: false, Effective: false},
+				RelayOutbound:  TransportDirectionSnapshot{Configured: true, Effective: true},
+			},
+		},
+		{
+			name: "relay disabled makes configured relay directions ineffective",
+			agent: models.Agent{
+				AgentID: "relay-disabled", RelayMode: consts.RelayModeDisabled,
+				DirectInboundEnabled: true, DirectOutboundEnabled: true,
+				RelayInboundEnabled: true, RelayOutboundEnabled: true,
+			},
+			want: AgentTransportPolicySnapshot{
+				DirectInbound:  TransportDirectionSnapshot{Configured: true, Effective: true},
+				DirectOutbound: TransportDirectionSnapshot{Configured: true, Effective: true},
+				RelayInbound: TransportDirectionSnapshot{
+					Configured: true, Effective: false, ReasonCode: consts.RouteErrorRelayConnectionDisabled,
+				},
+				RelayOutbound: TransportDirectionSnapshot{
+					Configured: true, Effective: false, ReasonCode: consts.RouteErrorRelayConnectionDisabled,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			svc := NewService("policy-epoch", Sources{}, Options{})
+			snapshot := svc.Build(tt.agent)
+			require.Equal(t, tt.want, snapshot.TransportPolicy)
+
+			encoded, err := json.Marshal(snapshot)
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), `"transport_policy":`)
+		})
+	}
+}
+
 func TestConnectionSnapshotNormalizesRelayWireStates(t *testing.T) {
 	tests := []struct {
 		name          string

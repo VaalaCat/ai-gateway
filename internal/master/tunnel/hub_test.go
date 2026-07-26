@@ -268,7 +268,7 @@ func TestRelaySnapshotSourceProjectsDesiredConfigurationWithoutSession(t *testin
 			"disabled": {AgentID: "disabled", Status: consts.StatusEnabled, RelayMode: consts.RelayModeDisabled},
 		},
 		caps: map[string][]string{
-			"inherit": {protocol.AgentCapabilityTunnelV1}, "custom": {protocol.AgentCapabilityTunnelV1}, "disabled": {protocol.AgentCapabilityTunnelV1},
+			"inherit": {protocol.AgentCapabilityTunnelV2}, "custom": {protocol.AgentCapabilityTunnelV2}, "disabled": {protocol.AgentCapabilityTunnelV2},
 		},
 		relay: map[string]connectivity.RelayRuntimeFact{
 			"inherit":  {Support: "supported", Config: "configured", Availability: "unavailable", Convergence: "converging", Desired: connectivity.RelayDesiredSnapshot{Mode: consts.RelayModeInherit, EffectiveURI: "wss://reported.example/ws?token=REDACTED"}},
@@ -308,7 +308,7 @@ func TestRelaySnapshotSourceProjectsDesiredConfigurationWithoutSession(t *testin
 func TestRelaySnapshotSourceDoesNotMixMismatchedHeartbeatAndHubGenerations(t *testing.T) {
 	agents := fakeAgents{
 		agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"source": {protocol.AgentCapabilityTunnelV1}},
+		caps:   map[string][]string{"source": {protocol.AgentCapabilityTunnelV2}},
 		relay: map[string]connectivity.RelayRuntimeFact{"source": {
 			Support: "supported", Config: "configured", Availability: "available", AcceptingNewStreams: true,
 			Convergence: "converged",
@@ -495,17 +495,202 @@ func (f fakeAgents) GetRelayRuntime(id string) (connectivity.RelayRuntimeFact, b
 	return fact, ok
 }
 
+type mutableRelayAgentLookup struct {
+	mu     sync.RWMutex
+	agents map[string]models.Agent
+	caps   map[string][]string
+	calls  map[string]int
+}
+
+func newMutableRelayAgentLookup(agentIDs ...string) *mutableRelayAgentLookup {
+	lookup := &mutableRelayAgentLookup{
+		agents: make(map[string]models.Agent, len(agentIDs)),
+		caps:   make(map[string][]string, len(agentIDs)),
+		calls:  make(map[string]int, len(agentIDs)),
+	}
+	for _, agentID := range agentIDs {
+		lookup.agents[agentID] = *enabledRelayPolicyAgent(agentID)
+		lookup.caps[agentID] = []string{protocol.AgentCapabilityTunnelV2}
+	}
+	return lookup
+}
+
+func (l *mutableRelayAgentLookup) GetByAgentID(_ context.Context, id string) (*models.Agent, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls[id]++
+	agent, ok := l.agents[id]
+	if !ok {
+		return nil, nil
+	}
+	return &agent, nil
+}
+
+func (l *mutableRelayAgentLookup) Capabilities(id string) []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return append([]string(nil), l.caps[id]...)
+}
+
+func (l *mutableRelayAgentLookup) SetRelayDirections(id string, inbound, outbound bool) {
+	l.mu.Lock()
+	agent := l.agents[id]
+	agent.RelayInboundEnabled = inbound
+	agent.RelayOutboundEnabled = outbound
+	l.agents[id] = agent
+	l.mu.Unlock()
+}
+
+func (l *mutableRelayAgentLookup) CallCount(id string) int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.calls[id]
+}
+
+type relayAuthorizeAgentLookup struct {
+	agents map[string]*models.Agent
+	errs   map[string]error
+	caps   map[string][]string
+	calls  []string
+}
+
+func (l *relayAuthorizeAgentLookup) GetByAgentID(_ context.Context, id string) (*models.Agent, error) {
+	l.calls = append(l.calls, id)
+	if err := l.errs[id]; err != nil {
+		return nil, err
+	}
+	if l.agents[id] == nil {
+		return nil, nil
+	}
+	copy := *l.agents[id]
+	return &copy, nil
+}
+
+func (l *relayAuthorizeAgentLookup) Capabilities(id string) []string {
+	return append([]string(nil), l.caps[id]...)
+}
+
+func TestHubAuthorizeRelayOpenClassifiesFailuresAndReturnsActiveTarget(t *testing.T) {
+	sourceDAOErr := errors.New("source database unavailable")
+	targetDAOErr := errors.New("target database unavailable")
+	tests := []struct {
+		name      string
+		source    *models.Agent
+		target    *models.Agent
+		errs      map[string]error
+		caps      []string
+		wantErr   error
+		wantCode  string
+		wantCalls []string
+	}{
+		{
+			name: "all enabled returns active target", source: enabledRelayPolicyAgent("source"), target: enabledRelayPolicyAgent("target"),
+			caps: []string{protocol.AgentCapabilityTunnelV2}, wantCalls: []string{"source", "target"},
+		},
+		{
+			name: "source DAO error", errs: map[string]error{"source": sourceDAOErr},
+			wantErr: sourceDAOErr, wantCode: consts.RouteErrorRelayProtocol, wantCalls: []string{"source"},
+		},
+		{
+			name: "source missing", target: enabledRelayPolicyAgent("target"),
+			wantErr: errSessionNotFound, wantCode: consts.RouteErrorRelayProtocol, wantCalls: []string{"source"},
+		},
+		{
+			name: "source admin disabled", source: &models.Agent{AgentID: "source", Status: consts.StatusDisabled, RelayOutboundEnabled: true},
+			target: enabledRelayPolicyAgent("target"), wantErr: errSessionNotFound,
+			wantCode: consts.RouteErrorRelayProtocol, wantCalls: []string{"source"},
+		},
+		{
+			name: "source outbound disabled", source: &models.Agent{AgentID: "source", Status: consts.StatusEnabled},
+			target: enabledRelayPolicyAgent("target"), wantCode: consts.RouteErrorSourceRelayOutboundDisabled,
+			wantCalls: []string{"source"},
+		},
+		{
+			name: "target DAO error", source: enabledRelayPolicyAgent("source"),
+			errs: map[string]error{"target": targetDAOErr}, wantErr: targetDAOErr,
+			wantCode: consts.RouteErrorRelayProtocol, wantCalls: []string{"source", "target"},
+		},
+		{
+			name: "target missing", source: enabledRelayPolicyAgent("source"),
+			wantErr: errTargetNotFound, wantCode: consts.RouteErrorTargetNotFound, wantCalls: []string{"source", "target"},
+		},
+		{
+			name: "target admin disabled", source: enabledRelayPolicyAgent("source"),
+			target:  &models.Agent{AgentID: "target", Status: consts.StatusDisabled, RelayInboundEnabled: true},
+			wantErr: errTargetDisabled, wantCode: consts.RouteErrorTargetDisabled, wantCalls: []string{"source", "target"},
+		},
+		{
+			name: "target inbound disabled", source: enabledRelayPolicyAgent("source"),
+			target:   &models.Agent{AgentID: "target", Status: consts.StatusEnabled},
+			wantCode: consts.RouteErrorTargetRelayInboundDisabled, wantCalls: []string{"source", "target"},
+		},
+		{
+			name: "target relay connection disabled", source: enabledRelayPolicyAgent("source"),
+			target:  &models.Agent{AgentID: "target", Status: consts.StatusEnabled, RelayInboundEnabled: true, RelayMode: consts.RelayModeDisabled},
+			wantErr: errRelayConnectionDisabled, wantCode: consts.RouteErrorRelayConnectionDisabled, wantCalls: []string{"source", "target"},
+		},
+		{
+			name: "target capability missing", source: enabledRelayPolicyAgent("source"),
+			target: enabledRelayPolicyAgent("target"), wantErr: errTargetCapability,
+			wantCode: consts.RouteErrorRelayUnsupported, wantCalls: []string{"source", "target"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agents := &relayAuthorizeAgentLookup{
+				agents: map[string]*models.Agent{}, errs: test.errs,
+				caps: map[string][]string{"target": test.caps},
+			}
+			if test.source != nil {
+				agents.agents["source"] = test.source
+			}
+			if test.target != nil {
+				agents.agents["target"] = test.target
+			}
+			hub := NewHub(HubOptions{InstanceID: "master-a", Agents: agents, Limits: testLimits()})
+			targetSession, _ := liveTestSession(hub, "target", 1)
+			hub.sessions["target"] = &AgentSessions{Active: targetSession, Draining: make(map[uint64]*Session)}
+			t.Cleanup(func() {
+				targetSession.Cancel(errors.New("cleanup"))
+				require.NoError(t, hub.Close(context.Background()))
+			})
+
+			got, err := hub.authorizeRelayOpen(t.Context(), "source", "target")
+			require.Equal(t, test.wantCalls, agents.calls)
+			if test.wantCode == "" && test.wantErr == nil {
+				require.NoError(t, err)
+				require.Same(t, targetSession, got)
+				return
+			}
+			require.Nil(t, got)
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+			}
+			require.Equal(t, test.wantCode, masterResetCode(err))
+		})
+	}
+}
+
+func enabledRelayPolicyAgent(agentID string) *models.Agent {
+	return &models.Agent{
+		AgentID: agentID, Status: consts.StatusEnabled,
+		DirectInboundEnabled: true, DirectOutboundEnabled: true,
+		RelayInboundEnabled: true, RelayOutboundEnabled: true,
+	}
+}
+
 func testLimits() wire.Limits {
 	return wire.Limits{MaxMetadataBytes: 64 << 10, MaxDataBytes: 64 << 10, InitialStreamWindow: 1 << 20, MaxQueuedSessionBytes: 1 << 20, MaxConcurrentStreams: 32}
 }
 
-func TestAdmissionGateDefaultsClosedAndCanBeEnabled(t *testing.T) {
-	var gate AdmissionGate
-	require.False(t, gate.AllowNew())
-	gate.Set(true)
-	require.True(t, gate.AllowNew())
-	gate.Set(false)
-	require.False(t, gate.AllowNew())
+func TestV2RelayReadLimitAllowsAttemptResult(t *testing.T) {
+	limits := testLimits()
+	limits.MaxMetadataBytes = 128
+	limits.MaxDataBytes = 256
+	require.Equal(t, int64(wire.HeaderSize)+limits.MaxDataBytes, relayMessageReadLimit(limits))
+
+	limits.MaxDataBytes = 64
+	require.Equal(t, int64(wire.HeaderSize)+limits.MaxMetadataBytes, relayMessageReadLimit(limits))
 }
 
 func TestHubRuntimeSettingsAreReadDynamically(t *testing.T) {
@@ -548,7 +733,10 @@ func TestHubValidatesRelayBearerTicketAndRejectsWrongMaster(t *testing.T) {
 func TestWelcomeBindsHelloNonceAndGeneration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	signer := testSigner(t, "master-a")
-	agents := fakeAgents{agents: map[string]*models.Agent{"agent-a": {AgentID: "agent-a", Status: consts.StatusEnabled}}}
+	agents := fakeAgents{
+		agents: map[string]*models.Agent{"agent-a": {AgentID: "agent-a", Status: consts.StatusEnabled}},
+		caps:   map[string][]string{"agent-a": {protocol.AgentCapabilityTunnelV2}},
+	}
 	h := NewHub(HubOptions{InstanceID: "master-a", Signer: signer, Agents: agents, Limits: testLimits()})
 	router := gin.New()
 	router.GET("/ws/agent-relay", h.HandleWS)
@@ -582,7 +770,10 @@ func TestWelcomeBindsHelloNonceAndGeneration(t *testing.T) {
 func TestHubShutdownClosesPendingHandshakeAndRejectsNewUpgrade(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	signer := testSigner(t, "master-a")
-	agents := fakeAgents{agents: map[string]*models.Agent{"agent-a": {AgentID: "agent-a", Status: consts.StatusEnabled}}}
+	agents := fakeAgents{
+		agents: map[string]*models.Agent{"agent-a": {AgentID: "agent-a", Status: consts.StatusEnabled}},
+		caps:   map[string][]string{"agent-a": {protocol.AgentCapabilityTunnelV2}},
+	}
 	h := NewHub(HubOptions{InstanceID: "master-a", Signer: signer, Agents: agents, Limits: testLimits()})
 	router := gin.New()
 	router.GET("/ws/agent-relay", h.HandleWS)
@@ -729,9 +920,33 @@ func newRelayE2EFixtureWithLimits(t *testing.T, agents fakeAgents, limits wire.L
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	signer := testSigner(t, "master-a")
-	gate := &AdmissionGate{}
-	gate.Set(true)
-	h := NewHub(HubOptions{InstanceID: "master-a", Signer: signer, Agents: agents, Admission: gate, Limits: limits})
+	for _, agent := range agents.agents {
+		agent.RelayInboundEnabled = true
+		agent.RelayOutboundEnabled = true
+	}
+	if agents.caps == nil {
+		agents.caps = make(map[string][]string)
+	}
+	for agentID := range agents.agents {
+		if _, ok := agents.caps[agentID]; !ok {
+			agents.caps[agentID] = []string{protocol.AgentCapabilityTunnelV2}
+		}
+	}
+	return newRelayE2EFixtureWithLookup(t, agents, limits, signer)
+}
+
+func newRelayE2EFixtureWithLookup(
+	t *testing.T,
+	agents AgentLookup,
+	limits wire.Limits,
+	signer *masteragentauth.Signer,
+) *relayE2EFixture {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	if signer == nil {
+		signer = testSigner(t, "master-a")
+	}
+	h := NewHub(HubOptions{InstanceID: "master-a", Signer: signer, Agents: agents, Limits: limits})
 	router := gin.New()
 	router.GET("/ws/agent-relay", h.HandleWS)
 	server := httptest.NewServer(router)
@@ -784,7 +999,7 @@ func (f *relayE2EFixture) connectDesired(agentID string, desiredGeneration uint6
 func TestHubDoesNotPromoteCandidateBeforeAuthenticatedACK(t *testing.T) {
 	agents := fakeAgents{
 		agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"source": {protocol.AgentCapabilityTunnelV1}},
+		caps:   map[string][]string{"source": {protocol.AgentCapabilityTunnelV2}},
 	}
 	f := newRelayE2EFixture(t, agents)
 	oldConn, oldWelcome := f.connectDesired("source", 1)
@@ -818,7 +1033,7 @@ func TestHubDoesNotPromoteCandidateBeforeAuthenticatedACK(t *testing.T) {
 func TestHubConfirmedWriteFailureRollsBackToOldActive(t *testing.T) {
 	agents := fakeAgents{
 		agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"source": {protocol.AgentCapabilityTunnelV1}},
+		caps:   map[string][]string{"source": {protocol.AgentCapabilityTunnelV2}},
 	}
 	f := newRelayE2EFixture(t, agents)
 	oldConn, oldWelcome := f.connectDesired("source", 1)
@@ -1236,11 +1451,11 @@ func TestHubWebSocketReadLimitBoundsBinaryMessages(t *testing.T) {
 			t.Cleanup(func() { _ = conn.Close() })
 			raw, err := wire.Encode(wire.Frame{
 				Version: wire.ProtocolVersion, Type: wire.FrameRequestData, StreamID: wire.StreamID{1}, Sequence: 1,
-				Payload: bytes.Repeat([]byte{'d'}, int(limits.MaxDataBytes)),
+				Payload: bytes.Repeat([]byte{'r'}, int(limits.MaxDataBytes)),
 			}, limits)
 			require.NoError(t, err)
 			if overLimit {
-				raw = append(raw, 'd')
+				raw = append(raw, 'r')
 				binary.BigEndian.PutUint32(raw[24:28], uint32(limits.MaxDataBytes+1))
 			}
 			require.NoError(t, conn.WriteMessage(websocket.BinaryMessage, raw))
@@ -1360,9 +1575,22 @@ func openRelaySwitch(t *testing.T, f *relayE2EFixture, source, target *websocket
 	return openRelaySwitchWithRemaining(t, f, source, target, id, time.Second)
 }
 
+func validHubAttemptMeta() attemptwire.AttemptProxyMeta {
+	return attemptwire.AttemptProxyMeta{
+		Attempt: attemptwire.BoundAttempt{
+			Channel: attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 1}, RealModel: "model", Mode: attemptwire.ModeNative,
+		},
+		RequestPath: "/v1/responses",
+	}
+}
+
 func openRelaySwitchWithRemaining(t *testing.T, f *relayE2EFixture, source, target *websocket.Conn, id wire.StreamID, remaining time.Duration) *Switch {
 	t.Helper()
-	payload, err := wire.EncodeMetadata(wire.Open{Method: http.MethodPost, Path: "/v1/responses", SourceAgentID: "forged", TargetAgentID: "target", RemainingNanos: int64(remaining)}, f.limits.MaxMetadataBytes)
+	meta := validHubAttemptMeta()
+	payload, err := wire.EncodeMetadata(wire.Open{
+		Method: http.MethodPost, Path: attemptwire.EndpointPath, SourceAgentID: "forged", TargetAgentID: "target",
+		RemainingNanos: int64(remaining), Hop: 1, Attempt: &meta,
+	}, f.limits.MaxMetadataBytes)
 	require.NoError(t, err)
 	writeRelayFrame(t, source, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: id, Sequence: 1, Payload: payload})
 	forwarded := readRelayFrame(t, target, f.limits)
@@ -1386,6 +1614,31 @@ func openRelaySwitchWithRemaining(t *testing.T, f *relayE2EFixture, source, targ
 	return nil
 }
 
+func writeRelayBusinessOpen(t *testing.T, f *relayE2EFixture, source *websocket.Conn, id wire.StreamID, targetAgentID string) {
+	t.Helper()
+	meta := validHubAttemptMeta()
+	payload, err := wire.EncodeMetadata(wire.Open{
+		Method: http.MethodPost, Path: attemptwire.EndpointPath, TargetAgentID: targetAgentID,
+		RemainingNanos: int64(time.Second), Hop: 1, Attempt: &meta,
+	}, f.limits.MaxMetadataBytes)
+	require.NoError(t, err)
+	writeRelayFrame(t, source, f.limits, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: id, Sequence: 1, Payload: payload,
+	})
+}
+
+func resetForwardedRelayOpen(t *testing.T, f *relayE2EFixture, target, source *websocket.Conn, id wire.StreamID) {
+	t.Helper()
+	payload, err := wire.EncodeMetadata(wire.Reset{Code: wire.ErrorCodeRequestCancelled, Stage: "test"}, f.limits.MaxMetadataBytes)
+	require.NoError(t, err)
+	writeRelayFrame(t, target, f.limits, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameReset, StreamID: id, Sequence: 1, Payload: payload,
+	})
+	frame, reset := readRelayReset(t, source, f.limits)
+	require.Equal(t, id, frame.StreamID)
+	require.Equal(t, wire.ErrorCodeRequestCancelled, reset.Code)
+}
+
 func readRelayReset(t *testing.T, conn *websocket.Conn, limits wire.Limits) (wire.Frame, wire.Reset) {
 	t.Helper()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
@@ -1403,7 +1656,7 @@ func TestHubRelayE2EForwardsOpenReadyDataFlowControlAndTerminal(t *testing.T) {
 			"source": {AgentID: "source", Status: consts.StatusEnabled},
 			"target": {AgentID: "target", Status: consts.StatusEnabled},
 		},
-		caps: map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+		caps: map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 	}
 	f := newRelayE2EFixture(t, agents)
 	target, _ := f.connect("target")
@@ -1424,9 +1677,17 @@ func TestHubRelayE2EForwardsOpenReadyDataFlowControlAndTerminal(t *testing.T) {
 	require.Equal(t, wire.FrameWindowUpdate, readRelayFrame(t, target, f.limits).Type)
 	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameWindowUpdate, StreamID: id, Sequence: 2, Payload: windowPayload})
 	require.Equal(t, wire.FrameWindowUpdate, readRelayFrame(t, source, f.limits).Type)
-	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameResponseData, StreamID: id, Sequence: 3, Payload: []byte("response")})
+	headersPayload, err := wire.EncodeMetadata(wire.Headers{StatusCode: http.StatusOK}, f.limits.MaxMetadataBytes)
+	require.NoError(t, err)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameHeaders, StreamID: id, Sequence: 3, Payload: headersPayload})
+	require.Equal(t, wire.FrameHeaders, readRelayFrame(t, source, f.limits).Type)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameResponseData, StreamID: id, Sequence: 4, Payload: []byte("response")})
 	require.Equal(t, []byte("response"), readRelayFrame(t, source, f.limits).Payload)
-	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, StreamID: id, Sequence: 4})
+	resultPayload, err := attemptwire.EncodeResultJSON(attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded})
+	require.NoError(t, err)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameAttemptResult, StreamID: id, Sequence: 5, Payload: resultPayload})
+	require.Equal(t, wire.FrameAttemptResult, readRelayFrame(t, source, f.limits).Type)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, StreamID: id, Sequence: 6})
 	require.Equal(t, wire.FrameEnd, readRelayFrame(t, source, f.limits).Type)
 	requireClosed(t, sw.Done(), "Switch.Done after END")
 	require.NoError(t, source.SetReadDeadline(time.Now().Add(50*time.Millisecond)))
@@ -1434,12 +1695,98 @@ func TestHubRelayE2EForwardsOpenReadyDataFlowControlAndTerminal(t *testing.T) {
 	require.ErrorContains(t, err, "i/o timeout", "normal END must not synthesize a second terminal")
 }
 
+func TestHubRelayConnectionDirectionsRemainIndependentOnOneWebSocket(t *testing.T) {
+	agents := newMutableRelayAgentLookup("source", "target")
+	f := newRelayE2EFixtureWithLookup(t, agents, testLimits(), nil)
+	target, _ := f.connect("target")
+	source, _ := f.connect("source")
+	t.Cleanup(func() { _ = source.Close(); _ = target.Close() })
+	agents.SetRelayDirections("source", false, true)
+	agents.SetRelayDirections("target", true, false)
+
+	sourceCalls, targetCalls := agents.CallCount("source"), agents.CallCount("target")
+	forwardID := wire.StreamID{81, 1}
+	writeRelayBusinessOpen(t, f, source, forwardID, "target")
+	require.Equal(t, wire.FrameOpen, readRelayFrame(t, target, f.limits).Type)
+	require.Equal(t, sourceCalls+1, agents.CallCount("source"))
+	require.Equal(t, targetCalls+1, agents.CallCount("target"), "one OPEN must query the target exactly once")
+	resetForwardedRelayOpen(t, f, target, source, forwardID)
+
+	blockedOutboundID := wire.StreamID{81, 2}
+	writeRelayBusinessOpen(t, f, target, blockedOutboundID, "source")
+	_, outboundReset := readRelayReset(t, target, f.limits)
+	require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, outboundReset.Code)
+
+	agents.SetRelayDirections("target", true, true)
+	blockedInboundID := wire.StreamID{81, 3}
+	writeRelayBusinessOpen(t, f, target, blockedInboundID, "source")
+	_, inboundReset := readRelayReset(t, target, f.limits)
+	require.Equal(t, consts.RouteErrorTargetRelayInboundDisabled, inboundReset.Code)
+
+	agents.SetRelayDirections("source", true, false)
+	reverseID := wire.StreamID{81, 4}
+	writeRelayBusinessOpen(t, f, target, reverseID, "source")
+	require.Equal(t, wire.FrameOpen, readRelayFrame(t, source, f.limits).Type)
+	resetForwardedRelayOpen(t, f, source, target, reverseID)
+}
+
+func TestHubRelayPolicyHotUpdateLetsCommittedSSEFinishAndRejectsNewStreams(t *testing.T) {
+	agents := newMutableRelayAgentLookup("source", "target")
+	f := newRelayE2EFixtureWithLookup(t, agents, testLimits(), nil)
+	target, _ := f.connect("target")
+	source, _ := f.connect("source")
+	t.Cleanup(func() { _ = source.Close(); _ = target.Close() })
+
+	oldID := wire.StreamID{82, 1}
+	writeRelayBusinessOpen(t, f, source, oldID, "target")
+	require.Equal(t, wire.FrameOpen, readRelayFrame(t, target, f.limits).Type)
+	ready, err := wire.EncodeMetadata(wire.Ready{RequestWindow: 1024}, f.limits.MaxMetadataBytes)
+	require.NoError(t, err)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameReady, StreamID: oldID, Sequence: 1, Payload: ready})
+	require.Equal(t, wire.FrameReady, readRelayFrame(t, source, f.limits).Type)
+	writeRelayFrame(t, source, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameCommit, StreamID: oldID, Sequence: 2})
+	require.Equal(t, wire.FrameCommit, readRelayFrame(t, target, f.limits).Type)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameCommitted, StreamID: oldID, Sequence: 2})
+	require.Equal(t, wire.FrameCommitted, readRelayFrame(t, source, f.limits).Type)
+
+	agents.SetRelayDirections("source", true, false)
+	agents.SetRelayDirections("target", false, true)
+	writeRelayFrame(t, source, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameRequestData, StreamID: oldID, Sequence: 3, Payload: []byte("request")})
+	require.Equal(t, []byte("request"), readRelayFrame(t, target, f.limits).Payload)
+	writeRelayFrame(t, source, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameRequestEnd, StreamID: oldID, Sequence: 4})
+	require.Equal(t, wire.FrameRequestEnd, readRelayFrame(t, target, f.limits).Type)
+	headers, err := wire.EncodeMetadata(wire.Headers{
+		StatusCode: http.StatusOK, Header: map[string][]string{"Content-Type": {"text/event-stream"}},
+	}, f.limits.MaxMetadataBytes)
+	require.NoError(t, err)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameHeaders, StreamID: oldID, Sequence: 3, Payload: headers})
+	require.Equal(t, wire.FrameHeaders, readRelayFrame(t, source, f.limits).Type)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameResponseData, StreamID: oldID, Sequence: 4, Payload: []byte("data: ok\n\n")})
+	require.Equal(t, []byte("data: ok\n\n"), readRelayFrame(t, source, f.limits).Payload)
+	result, err := attemptwire.EncodeResultJSON(attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded, ResponseStarted: true})
+	require.NoError(t, err)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameAttemptResult, StreamID: oldID, Sequence: 5, Payload: result})
+	require.Equal(t, wire.FrameAttemptResult, readRelayFrame(t, source, f.limits).Type)
+	writeRelayFrame(t, target, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameEnd, StreamID: oldID, Sequence: 6})
+	require.Equal(t, wire.FrameEnd, readRelayFrame(t, source, f.limits).Type)
+
+	sourceDisabledID := wire.StreamID{82, 2}
+	writeRelayBusinessOpen(t, f, source, sourceDisabledID, "target")
+	_, sourceReset := readRelayReset(t, source, f.limits)
+	require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, sourceReset.Code)
+	agents.SetRelayDirections("source", true, true)
+	targetDisabledID := wire.StreamID{82, 3}
+	writeRelayBusinessOpen(t, f, source, targetDisabledID, "target")
+	_, targetReset := readRelayReset(t, source, f.limits)
+	require.Equal(t, consts.RouteErrorTargetRelayInboundDisabled, targetReset.Code)
+}
+
 func TestHubRelayE2ENormalTerminalsDoNotSynthesizeReset(t *testing.T) {
 	for _, terminalType := range []wire.Type{wire.FrameEnd, wire.FrameCancel, wire.FrameReset} {
 		t.Run(fmt.Sprintf("type-%d", terminalType), func(t *testing.T) {
 			agents := fakeAgents{
 				agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}, "target": {AgentID: "target", Status: consts.StatusEnabled}},
-				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 			}
 			f := newRelayE2EFixture(t, agents)
 			target, _ := f.connect("target")
@@ -1453,8 +1800,25 @@ func TestHubRelayE2ENormalTerminalsDoNotSynthesizeReset(t *testing.T) {
 				payload, err = wire.EncodeMetadata(wire.Reset{Code: wire.ErrorCodeRequestCancelled, Stage: "target"}, f.limits.MaxMetadataBytes)
 				require.NoError(t, err)
 			}
+			sequence := uint32(1)
+			if terminalType == wire.FrameEnd {
+				headersPayload, err := wire.EncodeMetadata(wire.Headers{StatusCode: http.StatusOK}, f.limits.MaxMetadataBytes)
+				require.NoError(t, err)
+				writeRelayFrame(t, target, f.limits, wire.Frame{
+					Version: wire.ProtocolVersion, Type: wire.FrameHeaders, StreamID: id, Sequence: sequence, Payload: headersPayload,
+				})
+				require.Equal(t, wire.FrameHeaders, readRelayFrame(t, source, f.limits).Type)
+				resultPayload, err := attemptwire.EncodeResultJSON(attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded})
+				require.NoError(t, err)
+				sequence++
+				writeRelayFrame(t, target, f.limits, wire.Frame{
+					Version: wire.ProtocolVersion, Type: wire.FrameAttemptResult, StreamID: id, Sequence: sequence, Payload: resultPayload,
+				})
+				require.Equal(t, wire.FrameAttemptResult, readRelayFrame(t, source, f.limits).Type)
+				sequence++
+			}
 			writeRelayFrame(t, target, f.limits, wire.Frame{
-				Version: wire.ProtocolVersion, Type: terminalType, StreamID: id, Sequence: 1, Payload: payload,
+				Version: wire.ProtocolVersion, Type: terminalType, StreamID: id, Sequence: sequence, Payload: payload,
 			})
 			require.Equal(t, terminalType, readRelayFrame(t, source, f.limits).Type)
 			requireClosed(t, sw.Done(), "Switch.Done after normal terminal")
@@ -1468,13 +1832,13 @@ func TestHubRelayE2ENormalTerminalsDoNotSynthesizeReset(t *testing.T) {
 func TestHubSyntheticResetTerminatesRealAgentStream(t *testing.T) {
 	agents := fakeAgents{
 		agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}, "target": {AgentID: "target", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 	}
 	f := newRelayE2EFixture(t, agents)
 	target, _ := f.connect("target")
 	sourceConn, welcome := f.connect("source")
 	agentSession := agenttunnel.NewSession(sourceConn, welcome.SessionGeneration, welcome.Limits, agenttunnel.SessionOptions{
-		PingInterval: time.Hour, PongTimeout: time.Hour,
+		Direction: agenttunnel.SessionDirectionRelay, PingInterval: time.Hour, PongTimeout: time.Hour,
 	})
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
@@ -1489,9 +1853,9 @@ func TestHubSyntheticResetTerminatesRealAgentStream(t *testing.T) {
 		}
 		_ = target.Close()
 	})
-	stream, err := agentSession.OpenStream(t.Context(), agentproxy.RelayRequest{
-		Purpose: wire.StreamPurposeConnectivityProbe, TargetAgentID: "target",
-		Method: http.MethodGet, Path: "/ping", Header: make(http.Header), Remaining: time.Second,
+	stream, err := agentSession.OpenProbeStream(t.Context(), agentproxy.ProbeStreamRequest{
+		TargetAgentID: "target", RequestID: "probe", Remaining: time.Second,
+		Policy: agentproxy.ProbeBypassBusinessPolicy,
 	})
 	require.NoError(t, err)
 	open := readRelayFrame(t, target, f.limits)
@@ -1508,21 +1872,153 @@ func TestHubSyntheticResetTerminatesRealAgentStream(t *testing.T) {
 	}
 }
 
-func TestRouteFallbackDisabledResetReachesSourceCommitWithTypedCode(t *testing.T) {
-	agents := fakeAgents{
-		agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"source": {protocol.AgentCapabilityTunnelV1}},
+func TestRelayDirectedPolicyResetReachesSourceCommitWithTypedCode(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		disable  func(*models.Agent, *models.Agent)
+		wantCode string
+	}{
+		{
+			name: "source outbound disabled", wantCode: consts.RouteErrorSourceRelayOutboundDisabled,
+			disable: func(source, _ *models.Agent) { source.RelayOutboundEnabled = false },
+		},
+		{
+			name: "target inbound disabled", wantCode: consts.RouteErrorTargetRelayInboundDisabled,
+			disable: func(_, target *models.Agent) { target.RelayInboundEnabled = false },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sourceAgent := enabledRelayPolicyAgent("source")
+			targetAgent := enabledRelayPolicyAgent("target")
+			agents := fakeAgents{
+				agents: map[string]*models.Agent{"source": sourceAgent, "target": targetAgent},
+				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
+			}
+			f := newRelayE2EFixture(t, agents)
+			target, _ := f.connect("target")
+			t.Cleanup(func() { _ = target.Close() })
+			sourceConn, welcome := f.connect("source")
+			agentSession := agenttunnel.NewSession(sourceConn, welcome.SessionGeneration, welcome.Limits, agenttunnel.SessionOptions{
+				Direction: agenttunnel.SessionDirectionRelay, PingInterval: time.Hour, PongTimeout: time.Hour,
+			})
+			runCtx, cancelRun := context.WithCancel(context.Background())
+			runDone := make(chan error, 1)
+			go func() { runDone <- agentSession.Run(runCtx) }()
+			t.Cleanup(func() {
+				agentSession.Cancel(context.Canceled)
+				cancelRun()
+				select {
+				case <-runDone:
+				case <-time.After(time.Second):
+					t.Error("Agent Session.Run did not exit")
+				}
+			})
+
+			test.disable(sourceAgent, targetAgent)
+			meta := attemptwire.AttemptProxyMeta{
+				Attempt: attemptwire.BoundAttempt{
+					Channel:   attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7},
+					RealModel: "gpt-4o", Mode: attemptwire.ModeNative,
+				},
+				RequestPath: "/v1/responses",
+			}
+			stream, err := agentSession.OpenAttemptStream(t.Context(), agentproxy.AttemptStreamRequest{
+				TargetAgentID: "target", Method: http.MethodPost, Path: attemptwire.EndpointPath,
+				Remaining: time.Second, Hop: 1, Attempt: meta,
+			})
+			require.NoError(t, err)
+			commitCtx, cancelCommit := context.WithTimeout(t.Context(), time.Second)
+			defer cancelCommit()
+			err = stream.Commit(commitCtx)
+			require.Error(t, err)
+			require.Equal(t, wire.PreCommit, stream.CommitState())
+			var coded interface{ ResetCode() string }
+			require.ErrorAs(t, err, &coded)
+			require.Equal(t, test.wantCode, coded.ResetCode())
+		})
 	}
-	f := newRelayE2EFixture(t, agents)
-	sourceConn, welcome := f.connect("source")
-	agentSession := agenttunnel.NewSession(sourceConn, welcome.SessionGeneration, welcome.Limits, agenttunnel.SessionOptions{
-		PingInterval: time.Hour, PongTimeout: time.Hour,
+}
+
+func TestRelayProbeMasterPolicyGateAndBypass(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		disable  func(*models.Agent, *models.Agent)
+		wantCode string
+	}{
+		{
+			name: "respect rejects source outbound disabled", wantCode: consts.RouteErrorSourceRelayOutboundDisabled,
+			disable: func(source, _ *models.Agent) { source.RelayOutboundEnabled = false },
+		},
+		{
+			name: "respect rejects target inbound disabled", wantCode: consts.RouteErrorTargetRelayInboundDisabled,
+			disable: func(_, target *models.Agent) { target.RelayInboundEnabled = false },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sourceAgent := enabledRelayPolicyAgent("source")
+			targetAgent := enabledRelayPolicyAgent("target")
+			agents := fakeAgents{agents: map[string]*models.Agent{"source": sourceAgent, "target": targetAgent}}
+			fixture := newRelayE2EFixture(t, agents)
+			target, _ := fixture.connect("target")
+			t.Cleanup(func() { _ = target.Close() })
+			source := newRunningRelayProbeSourceSession(t, fixture)
+			test.disable(sourceAgent, targetAgent)
+
+			stream, err := source.OpenProbeStream(t.Context(), agentproxy.ProbeStreamRequest{
+				TargetAgentID: "target", RequestID: "respect-probe", Remaining: time.Second,
+				Policy: agentproxy.ProbeRespectBusinessPolicy,
+			})
+			require.NoError(t, err)
+			commitCtx, cancelCommit := context.WithTimeout(t.Context(), time.Second)
+			defer cancelCommit()
+			err = stream.Commit(commitCtx)
+			require.Error(t, err)
+			var coded interface{ ResetCode() string }
+			require.ErrorAs(t, err, &coded)
+			require.Equal(t, test.wantCode, coded.ResetCode())
+		})
+	}
+
+	t.Run("bypass reaches target with fixed ping despite both directions disabled", func(t *testing.T) {
+		sourceAgent := enabledRelayPolicyAgent("source")
+		targetAgent := enabledRelayPolicyAgent("target")
+		agents := fakeAgents{agents: map[string]*models.Agent{"source": sourceAgent, "target": targetAgent}}
+		fixture := newRelayE2EFixture(t, agents)
+		target, _ := fixture.connect("target")
+		t.Cleanup(func() { _ = target.Close() })
+		source := newRunningRelayProbeSourceSession(t, fixture)
+		sourceAgent.RelayOutboundEnabled = false
+		targetAgent.RelayInboundEnabled = false
+
+		stream, err := source.OpenProbeStream(t.Context(), agentproxy.ProbeStreamRequest{
+			TargetAgentID: "target", RequestID: "bypass-probe", Remaining: time.Second,
+			Policy: agentproxy.ProbeBypassBusinessPolicy,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { stream.Cancel(context.Canceled) })
+		frame := readRelayFrame(t, target, fixture.limits)
+		require.Equal(t, wire.FrameOpen, frame.Type)
+		var open wire.Open
+		require.NoError(t, wire.DecodeMetadata(frame.Payload, &open, fixture.limits.MaxMetadataBytes))
+		require.True(t, open.IsConnectivityProbe())
+		require.Equal(t, wire.ProbeBypassBusinessPolicy, open.ProbePolicy)
+		require.Equal(t, http.MethodGet, open.Method)
+		require.Equal(t, "/ping", open.Path)
+		require.Nil(t, open.Attempt)
+	})
+}
+
+func newRunningRelayProbeSourceSession(t *testing.T, fixture *relayE2EFixture) *agenttunnel.Session {
+	t.Helper()
+	conn, welcome := fixture.connect("source")
+	session := agenttunnel.NewSession(conn, welcome.SessionGeneration, welcome.Limits, agenttunnel.SessionOptions{
+		Direction: agenttunnel.SessionDirectionRelay, PingInterval: time.Hour, PongTimeout: time.Hour,
 	})
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
-	go func() { runDone <- agentSession.Run(runCtx) }()
+	go func() { runDone <- session.Run(runCtx) }()
 	t.Cleanup(func() {
-		agentSession.Cancel(context.Canceled)
+		session.Cancel(context.Canceled)
 		cancelRun()
 		select {
 		case <-runDone:
@@ -1530,84 +2026,19 @@ func TestRouteFallbackDisabledResetReachesSourceCommitWithTypedCode(t *testing.T
 			t.Error("Agent Session.Run did not exit")
 		}
 	})
-
-	f.hub.opts.Admission.Set(false)
-	meta := attemptwire.AttemptProxyMeta{
-		Attempt: attemptwire.BoundAttempt{
-			Channel:   attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7},
-			RealModel: "gpt-4o", Mode: attemptwire.ModeNative,
-		},
-		RequestPath: "/v1/responses",
-	}
-	stream, err := agentSession.OpenStream(t.Context(), agentproxy.RelayRequest{
-		TargetAgentID: "target", Method: http.MethodPost, Path: attemptwire.EndpointPath,
-		Remaining: time.Second, Hop: 1, Attempt: &meta,
-	})
-	require.NoError(t, err)
-	commitCtx, cancelCommit := context.WithTimeout(t.Context(), time.Second)
-	defer cancelCommit()
-	err = stream.Commit(commitCtx)
-	require.Error(t, err)
-	require.Equal(t, wire.PreCommit, stream.CommitState())
-	var coded interface{ ResetCode() string }
-	require.ErrorAs(t, err, &coded)
-	require.Equal(t, "relay_fallback_disabled", coded.ResetCode())
+	return session
 }
 
-func TestRouteFallbackDisabledAdmissionAllowsOnlyBoundedConnectivityProbe(t *testing.T) {
-	tests := []struct {
-		name    string
-		purpose wire.StreamPurpose
-		method  string
-		path    string
-		allowed bool
-	}{
-		{name: "connectivity probe", purpose: wire.StreamPurposeConnectivityProbe, method: http.MethodGet, path: "/ping", allowed: true},
-		{name: "probe purpose on another path", purpose: wire.StreamPurposeConnectivityProbe, method: http.MethodGet, path: "/v1/models"},
-		{name: "unmarked ping", method: http.MethodGet, path: "/ping"},
+func TestRelayHubRejectsLegacyTunnelCapability(t *testing.T) {
+	legacyCapability := strings.Join([]string{"agent", "tunnel", "v1"}, "_")
+	agent := enabledRelayPolicyAgent("source")
+	agents := fakeAgents{
+		agents: map[string]*models.Agent{"source": agent},
+		caps:   map[string][]string{"source": {legacyCapability}},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			agents := fakeAgents{
-				agents: map[string]*models.Agent{
-					"source": {AgentID: "source", Status: consts.StatusEnabled},
-					"target": {AgentID: "target", Status: consts.StatusEnabled},
-				},
-				caps: map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
-			}
-			f := newRelayE2EFixture(t, agents)
-			target, _ := f.connect("target")
-			source, _ := f.connect("source")
-			t.Cleanup(func() { _ = source.Close(); _ = target.Close() })
-			f.hub.opts.Admission.Set(false)
-
-			payload, err := wire.EncodeMetadata(wire.Open{
-				Purpose: test.purpose, Method: test.method, Path: test.path, Header: map[string][]string{},
-				TargetAgentID: "target", RequestID: "relay-connectivity-probe",
-				RemainingNanos: int64(time.Second), ResponseWindow: f.limits.InitialStreamWindow,
-			}, f.limits.MaxMetadataBytes)
-			require.NoError(t, err)
-			id := wire.StreamID{91, byte(len(test.name))}
-			writeRelayFrame(t, source, f.limits, wire.Frame{
-				Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: id, Sequence: 1, Payload: payload,
-			})
-
-			if test.allowed {
-				require.NoError(t, target.SetReadDeadline(time.Now().Add(time.Second)))
-				forwarded := readRelayFrame(t, target, f.limits)
-				require.Equal(t, wire.FrameOpen, forwarded.Type)
-				var open wire.Open
-				require.NoError(t, wire.DecodeMetadata(forwarded.Payload, &open, f.limits.MaxMetadataBytes))
-				require.Equal(t, wire.StreamPurposeConnectivityProbe, open.Purpose)
-				require.Equal(t, "source", open.SourceAgentID)
-				return
-			}
-
-			_, reset := readRelayReset(t, source, f.limits)
-			require.Equal(t, wire.ErrorCodeRelayFallbackDisabled, reset.Code)
-			require.Equal(t, "admission", reset.Stage)
-		})
-	}
+	hub := NewHub(HubOptions{InstanceID: "master-a", Agents: agents, Limits: testLimits()})
+	t.Cleanup(func() { require.NoError(t, hub.Close(context.Background())) })
+	require.False(t, hub.relayConnectionAllowed(agent))
 }
 
 func TestSwitchDoesNotResetRealTargetAgentBeforeOpenDelivery(t *testing.T) {
@@ -1634,8 +2065,10 @@ func TestSwitchDoesNotResetRealTargetAgentBeforeOpenDelivery(t *testing.T) {
 				sw := newSwitch(f.hub, source, target, id, time.Now(), f.limits)
 				require.NoError(t, f.hub.attachSwitch(sw))
 				sw.started.Store(true)
+				meta := validHubAttemptMeta()
 				payload, err := wire.EncodeMetadata(wire.Open{
-					Method: http.MethodPost, Path: "/v1/responses", TargetAgentID: "target", RemainingNanos: int64(time.Second),
+					Method: http.MethodPost, Path: attemptwire.EndpointPath, TargetAgentID: "target", RemainingNanos: int64(time.Second),
+					Hop: 1, Attempt: &meta,
 				}, f.limits.MaxMetadataBytes)
 				require.NoError(t, err)
 				require.NoError(t, sw.accept(source, source.generation, wire.Frame{
@@ -1649,12 +2082,12 @@ func TestSwitchDoesNotResetRealTargetAgentBeforeOpenDelivery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			agents := fakeAgents{
 				agents: map[string]*models.Agent{"target": {AgentID: "target", Status: consts.StatusEnabled}},
-				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 			}
 			f := newRelayE2EFixture(t, agents)
 			targetConn, welcome := f.connect("target")
 			targetAgent := agenttunnel.NewSession(targetConn, welcome.SessionGeneration, welcome.Limits, agenttunnel.SessionOptions{
-				PingInterval: time.Hour, PongTimeout: time.Hour,
+				Direction: agenttunnel.SessionDirectionRelay, PingInterval: time.Hour, PongTimeout: time.Hour,
 			})
 			runCtx, cancelRun := context.WithCancel(context.Background())
 			runDone := make(chan error, 1)
@@ -1703,10 +2136,10 @@ func TestHubRelayE2ETargetEligibilityFailuresResetSource(t *testing.T) {
 		caps   []string
 		code   string
 	}{
-		{name: "disabled", target: &models.Agent{AgentID: "target", Status: consts.StatusDisabled}, caps: []string{protocol.AgentCapabilityTunnelV1}, code: consts.RouteErrorTargetDisabled},
+		{name: "disabled", target: &models.Agent{AgentID: "target", Status: consts.StatusDisabled}, caps: []string{protocol.AgentCapabilityTunnelV2}, code: consts.RouteErrorTargetDisabled},
 		{name: "missing capability", target: &models.Agent{AgentID: "target", Status: consts.StatusEnabled}, code: consts.RouteErrorRelayUnsupported},
-		{name: "unknown", target: nil, caps: []string{protocol.AgentCapabilityTunnelV1}, code: consts.RouteErrorTargetNotFound},
-		{name: "not ready", target: &models.Agent{AgentID: "target", Status: consts.StatusEnabled}, caps: []string{protocol.AgentCapabilityTunnelV1}, code: consts.RouteErrorRelayNotReady},
+		{name: "unknown", target: nil, caps: []string{protocol.AgentCapabilityTunnelV2}, code: consts.RouteErrorTargetNotFound},
+		{name: "not ready", target: &models.Agent{AgentID: "target", Status: consts.StatusEnabled}, caps: []string{protocol.AgentCapabilityTunnelV2}, code: consts.RouteErrorRelayNotReady},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1732,7 +2165,7 @@ func TestHubRelayE2ESocketDisconnectsConvergeSwitch(t *testing.T) {
 		t.Run(disconnect, func(t *testing.T) {
 			agents := fakeAgents{
 				agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}, "target": {AgentID: "target", Status: consts.StatusEnabled}},
-				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 			}
 			f := newRelayE2EFixture(t, agents)
 			target, _ := f.connect("target")
@@ -1766,7 +2199,7 @@ func TestHubRelayE2EPeerDisconnectSendsSingleReset(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			agents := fakeAgents{
 				agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}, "target": {AgentID: "target", Status: consts.StatusEnabled}},
-				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+				caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 			}
 			f := newRelayE2EFixture(t, agents)
 			target, _ := f.connect("target")
@@ -1794,7 +2227,7 @@ func TestHubRelayE2EPeerDisconnectSendsSingleReset(t *testing.T) {
 func TestHubRelayE2EBoundProtocolErrorTerminatesOffenderAndPeer(t *testing.T) {
 	agents := fakeAgents{
 		agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}, "target": {AgentID: "target", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 	}
 	f := newRelayE2EFixture(t, agents)
 	target, _ := f.connect("target")
@@ -1824,7 +2257,7 @@ func TestHubRelayE2EBoundProtocolErrorTerminatesOffenderAndPeer(t *testing.T) {
 func TestHubRelayE2EPeerResetCarriesCommittedStateAndSequence(t *testing.T) {
 	agents := fakeAgents{
 		agents: map[string]*models.Agent{"source": {AgentID: "source", Status: consts.StatusEnabled}, "target": {AgentID: "target", Status: consts.StatusEnabled}},
-		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}},
+		caps:   map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}},
 	}
 	f := newRelayE2EFixture(t, agents)
 	target, _ := f.connect("target")
@@ -1855,7 +2288,7 @@ func TestHubRejectsDisabledAndUnsupportedTarget(t *testing.T) {
 		},
 		caps: map[string][]string{"legacy": {"other"}},
 	}
-	h := NewHub(HubOptions{InstanceID: "master-a", Agents: agents, Admission: &AdmissionGate{}, Limits: testLimits(), Logger: zap.NewNop()})
+	h := NewHub(HubOptions{InstanceID: "master-a", Agents: agents, Limits: testLimits(), Logger: zap.NewNop()})
 	require.ErrorIs(t, h.validateTarget(context.Background(), "disabled"), errTargetDisabled)
 	require.ErrorIs(t, h.validateTarget(context.Background(), "legacy"), errTargetCapability)
 	require.Error(t, h.validateTarget(context.Background(), ""))
@@ -1907,7 +2340,7 @@ func TestHubSnapshotDrainDisconnectAndShutdownAreIdempotent(t *testing.T) {
 }
 
 func TestCancelImmediatelyRemovesSessionFromActiveTargetAdmission(t *testing.T) {
-	agents := fakeAgents{agents: map[string]*models.Agent{"target": {AgentID: "target", Status: consts.StatusEnabled}}, caps: map[string][]string{"target": {protocol.AgentCapabilityTunnelV1}}}
+	agents := fakeAgents{agents: map[string]*models.Agent{"target": {AgentID: "target", Status: consts.StatusEnabled}}, caps: map[string][]string{"target": {protocol.AgentCapabilityTunnelV2}}}
 	h := NewHub(HubOptions{InstanceID: "master-a", Agents: agents, Limits: testLimits()})
 	target := newTestSession(h, "target", 1)
 	require.NoError(t, h.register(target))
@@ -1980,8 +2413,8 @@ func TestHubLifecycleDrainsRealActiveCommittedAndDrainingSessions(t *testing.T) 
 			"target": {AgentID: "target", Status: consts.StatusEnabled},
 		},
 		caps: map[string][]string{
-			"source": {protocol.AgentCapabilityTunnelV1},
-			"target": {protocol.AgentCapabilityTunnelV1},
+			"source": {protocol.AgentCapabilityTunnelV2},
+			"target": {protocol.AgentCapabilityTunnelV2},
 		},
 	}
 	f := newRelayE2EFixture(t, agents)

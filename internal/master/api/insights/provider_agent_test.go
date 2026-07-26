@@ -8,6 +8,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"gorm.io/gorm"
@@ -55,12 +56,8 @@ func seedAgentStreamLog(t *testing.T, db *gorm.DB, agentID string, ts int64, ttf
 // agentProviderCtx 构造一个 providerCtx 给 provider unit 测试直接用,
 // 不走 handler;允许验证 provider 单独的契约。
 func agentProviderCtx(application app.Application, isAdmin bool, uid uint) *providerCtx {
-	q := dao.NewAdminQuery(dao.NewContext(application))
-	return &providerCtx{
-		q:  q,
-		s:  dao.Scope{IsAdmin: isAdmin, UserID: uid},
-		db: application.GetDB(),
-	}
+	ctx := newProviderCtx(context.Background(), application, &middleware.RequestScope{IsAdmin: isAdmin, UserID: uid})
+	return ctx.(*providerCtx)
 }
 
 func TestNewProviderCtxBindsRequestContextToRawDB(t *testing.T) {

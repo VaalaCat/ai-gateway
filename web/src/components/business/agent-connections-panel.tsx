@@ -9,6 +9,8 @@ interface AgentConnectionsPanelProps {
   initialRouteTargetsPage?: RouteTargetsPage;
   stale?: boolean;
   loading?: boolean;
+  refreshing?: boolean;
+  routeTargetsCurrent?: boolean;
 }
 
 export function AgentConnectionsPanel({
@@ -17,6 +19,8 @@ export function AgentConnectionsPanel({
   initialRouteTargetsPage,
   stale = false,
   loading = false,
+  refreshing = false,
+  routeTargetsCurrent = true,
 }: AgentConnectionsPanelProps) {
   return (
     <AgentConnectionRail
@@ -25,6 +29,8 @@ export function AgentConnectionsPanel({
       initialRouteTargetsPage={initialRouteTargetsPage}
       stale={stale}
       loading={loading}
+      refreshing={refreshing}
+      routeTargetsCurrent={routeTargetsCurrent}
     />
   );
 }

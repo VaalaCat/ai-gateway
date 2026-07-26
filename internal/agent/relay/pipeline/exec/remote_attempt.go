@@ -9,7 +9,6 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -17,12 +16,14 @@ import (
 )
 
 type RemoteTargetSnapshot struct {
-	Enabled        bool
-	HTTPAddresses  string
-	ProxyURL       string
-	GlobalProxyURL string
-	AddressTag     string
-	PreferredTag   string
+	Enabled              bool
+	DirectInboundEnabled bool
+	RelayInboundEnabled  bool
+	HTTPAddresses        string
+	ProxyURL             string
+	GlobalProxyURL       string
+	AddressTag           string
+	PreferredTag         string
 }
 
 type RemoteTargetRuntime interface {
@@ -34,32 +35,60 @@ type RemoteAttemptExecutor interface {
 }
 
 type RemoteAttemptExecutorOptions struct {
-	SourceAgentID       string
-	Direct              agentproxy.DirectRequestForwarder
-	Relay               app.RelayLink
-	Targets             RemoteTargetRuntime
-	CachedForwardTicket func() (agentauth.ForwardTicket, error)
-	RelayEnabled        func() bool
-	PeerRouteMode       func() string
-	Observer            func(models.AgentPathRecord)
+	SourceAgentID         string
+	Direct                agentproxy.DirectRequestForwarder
+	Relay                 app.AttemptStreamOpener
+	Targets               RemoteTargetRuntime
+	DirectOutboundEnabled func() bool
+	RelayOutboundEnabled  func() bool
+	Observer              func(models.AgentPathRecord)
+	DirectPathDisabled    agentproxy.DirectPathDisabledRecorder
 }
 
 type remoteExecutor struct {
-	SourceAgentID       string
-	Direct              agentproxy.DirectRequestForwarder
-	Relay               app.RelayLink
-	Targets             RemoteTargetRuntime
-	CachedForwardTicket func() (agentauth.ForwardTicket, error)
-	RelayEnabled        func() bool
-	PeerRouteMode       func() string
-	Observer            func(models.AgentPathRecord)
+	SourceAgentID         string
+	Direct                agentproxy.DirectRequestForwarder
+	Relay                 app.AttemptStreamOpener
+	Targets               RemoteTargetRuntime
+	DirectOutboundEnabled func() bool
+	RelayOutboundEnabled  func() bool
+	Observer              func(models.AgentPathRecord)
+	DirectPathDisabled    agentproxy.DirectPathDisabledRecorder
+}
+
+type remoteTransportAttempt struct {
+	ctx           context.Context
+	request       *http.Request
+	writer        http.ResponseWriter
+	body          app.ReplayBody
+	targetAgentID string
+	routeID       uint
+	requestID     string
+	snapshot      RemoteTargetSnapshot
+	meta          *attemptwire.AttemptProxyMeta
+}
+
+type transportPathDecision struct {
+	path                 app.RoutePath
+	sourceEnabled        func() bool
+	targetEnabled        bool
+	sourceDisabledReason string
+	targetDisabledReason string
+	execute              func([]models.AgentPathRecord) AttemptOutcome
 }
 
 func NewRemoteAttemptExecutor(options RemoteAttemptExecutorOptions) RemoteAttemptExecutor {
+	if options.DirectOutboundEnabled == nil {
+		options.DirectOutboundEnabled = func() bool { return true }
+	}
+	if options.RelayOutboundEnabled == nil {
+		options.RelayOutboundEnabled = func() bool { return true }
+	}
 	return &remoteExecutor{
 		SourceAgentID: options.SourceAgentID, Direct: options.Direct, Relay: options.Relay,
-		Targets: options.Targets, CachedForwardTicket: options.CachedForwardTicket,
-		RelayEnabled: options.RelayEnabled, PeerRouteMode: options.PeerRouteMode, Observer: options.Observer,
+		Targets: options.Targets, DirectOutboundEnabled: options.DirectOutboundEnabled,
+		RelayOutboundEnabled: options.RelayOutboundEnabled, Observer: options.Observer,
+		DirectPathDisabled: options.DirectPathDisabled,
 	}
 }
 
@@ -89,15 +118,88 @@ func (e *remoteExecutor) Execute(
 			target.AgentID, app.RoutePathRelay, agentproxy.CodeTargetDisabled, errors.New(agentproxy.CodeTargetDisabled),
 		), time.Now())
 	}
-	if e.peerRouteMode() == consts.PeerRouteModeRelayOnly {
-		return e.executeRelay(ctx, request, writer, body, target.AgentID, routeID, remoteRequestID(rctx), &meta, nil)
+	traceWriter := newRemoteTraceResponseWriter(writer)
+	if traceWriter != nil {
+		writer = traceWriter
 	}
+	outcome := e.executeTransportPaths(remoteTransportAttempt{
+		ctx: ctx, request: request, writer: writer, body: body, targetAgentID: target.AgentID,
+		routeID: routeID, requestID: remoteRequestID(rctx), snapshot: snapshot, meta: &meta,
+	})
+	if outcome.remoteFailureFallback && traceWriter != nil {
+		traceWriter.CorrectClientResponseBody(outcome.Trace)
+	}
+	return outcome
+}
 
-	direct := e.executeDirect(ctx, request, writer, body, target.AgentID, routeID, snapshot, &meta)
-	if nextAttemptAction(AttemptDecisionInput{CurrentPath: app.RoutePathDirect, Outcome: direct}) != ActionTryRelay {
-		return direct
+func (e *remoteExecutor) executeTransportPaths(attempt remoteTransportAttempt) AttemptOutcome {
+	var outcome AttemptOutcome
+	decisions := e.transportPathDecisions(attempt)
+	for index, decision := range decisions {
+		previous := outcome.AgentPaths
+		switch {
+		case decision.sourceEnabled == nil || !decision.sourceEnabled():
+			outcome = e.finishPolicyPath(attempt.targetAgentID, decision.path, decision.sourceDisabledReason, previous)
+		case !decision.targetEnabled:
+			outcome = e.finishPolicyPath(attempt.targetAgentID, decision.path, decision.targetDisabledReason, previous)
+		default:
+			outcome = decision.execute(previous)
+		}
+		if index == len(decisions)-1 || nextAttemptAction(AttemptDecisionInput{CurrentPath: decision.path, Outcome: outcome}) != ActionTryRelay {
+			return outcome
+		}
 	}
-	return e.executeRelay(ctx, request, writer, body, target.AgentID, routeID, remoteRequestID(rctx), &meta, direct.AgentPaths)
+	return outcome
+}
+
+func (e *remoteExecutor) transportPathDecisions(attempt remoteTransportAttempt) []transportPathDecision {
+	return []transportPathDecision{
+		{
+			path: app.RoutePathDirect,
+			sourceEnabled: func() bool {
+				return e != nil && e.DirectOutboundEnabled != nil && e.DirectOutboundEnabled()
+			},
+			targetEnabled:        attempt.snapshot.DirectInboundEnabled,
+			sourceDisabledReason: consts.RouteErrorSourceDirectOutboundDisabled,
+			targetDisabledReason: consts.RouteErrorTargetDirectInboundDisabled,
+			execute: func(_ []models.AgentPathRecord) AttemptOutcome {
+				return e.executeDirect(
+					attempt.ctx, attempt.request, attempt.writer, attempt.body, attempt.targetAgentID,
+					attempt.routeID, attempt.requestID, attempt.snapshot, attempt.meta,
+				)
+			},
+		},
+		{
+			path: app.RoutePathRelay,
+			sourceEnabled: func() bool {
+				return e != nil && e.RelayOutboundEnabled != nil && e.RelayOutboundEnabled()
+			},
+			targetEnabled:        attempt.snapshot.RelayInboundEnabled,
+			sourceDisabledReason: consts.RouteErrorSourceRelayOutboundDisabled,
+			targetDisabledReason: consts.RouteErrorTargetRelayInboundDisabled,
+			execute: func(previous []models.AgentPathRecord) AttemptOutcome {
+				return e.executeRelay(
+					attempt.ctx, attempt.request, attempt.writer, attempt.body, attempt.targetAgentID,
+					attempt.routeID, attempt.requestID, attempt.meta, previous,
+				)
+			},
+		},
+	}
+}
+
+func (e *remoteExecutor) finishPolicyPath(
+	targetAgentID string, path app.RoutePath, code string, previous []models.AgentPathRecord,
+) AttemptOutcome {
+	if path == app.RoutePathDirect && e != nil && e.DirectPathDisabled != nil {
+		reason := agentproxy.DirectPathDisabledReason(code)
+		if reason == agentproxy.DirectPathDisabledSourceOutbound || reason == agentproxy.DirectPathDisabledTargetInbound {
+			e.DirectPathDisabled.RecordDirectPathDisabled(agentproxy.DirectPathDisabledEvent{
+				SourceAgentID: e.SourceAgentID, TargetAgentID: targetAgentID, Reason: reason,
+			})
+		}
+	}
+	outcome := transportUnavailableOutcome(targetAgentID, path, code, errors.New(code))
+	return e.finishPathAfter(previous, targetAgentID, path, outcome, time.Now())
 }
 
 func (e *remoteExecutor) executeDirect(
@@ -107,6 +209,7 @@ func (e *remoteExecutor) executeDirect(
 	body app.ReplayBody,
 	targetAgentID string,
 	routeID uint,
+	requestID string,
 	snapshot RemoteTargetSnapshot,
 	meta *attemptwire.AttemptProxyMeta,
 ) AttemptOutcome {
@@ -123,12 +226,6 @@ func (e *remoteExecutor) executeDirect(
 			targetAgentID, app.RoutePathDirect, agentproxy.CodeDirectDisabled, err,
 		), startedAt)
 	}
-	ticket, err := e.cachedForwardTicket()
-	if err != nil {
-		return e.finishPath(targetAgentID, app.RoutePathDirect, transportUnavailableOutcome(
-			targetAgentID, app.RoutePathDirect, agentproxy.CodeDirectAuthUnavailable, err,
-		), startedAt)
-	}
 	if err := context.Cause(ctx); err != nil {
 		return e.finishPath(targetAgentID, app.RoutePathDirect, canceledAttemptOutcome(targetAgentID, app.RoutePathDirect, tunnel.PreCommit, false, err), startedAt)
 	}
@@ -139,8 +236,8 @@ func (e *remoteExecutor) executeDirect(
 	}
 	receiver := newAttemptResponseReceiver(writer)
 	transport := agentproxy.ExecuteDirectTransport(ctx, e.Direct, agentproxy.DirectTransportRequest{
-		TargetAgentID: targetAgentID, RouteID: routeID, PreparedTarget: prepared,
-		Request: request, Body: body, ForwardTicket: ticket, Attempt: meta,
+		TargetAgentID: targetAgentID, RouteID: routeID, RequestID: requestID, PreparedTarget: prepared,
+		Request: request, Body: body, Attempt: *meta,
 	}, receiver)
 	outcome := finishRemoteTransport(receiver, targetAgentID, app.RoutePathDirect, transport)
 	return e.finishPath(targetAgentID, app.RoutePathDirect, outcome, startedAt)
@@ -158,10 +255,6 @@ func (e *remoteExecutor) executeRelay(
 	previous []models.AgentPathRecord,
 ) AttemptOutcome {
 	startedAt := time.Now()
-	if e == nil || e.RelayEnabled == nil || !e.RelayEnabled() {
-		outcome := transportUnavailableOutcome(targetAgentID, app.RoutePathRelay, agentproxy.CodeRelayFallbackDisabled, errors.New(agentproxy.CodeRelayFallbackDisabled))
-		return e.finishPathAfter(previous, targetAgentID, app.RoutePathRelay, outcome, startedAt)
-	}
 	if e.Relay == nil {
 		outcome := transportUnavailableOutcome(targetAgentID, app.RoutePathRelay, agentproxy.CodeRelayNotReady, errors.New(agentproxy.CodeRelayNotReady))
 		return e.finishPathAfter(previous, targetAgentID, app.RoutePathRelay, outcome, startedAt)
@@ -179,15 +272,22 @@ func finishRemoteTransport(
 	receiver *attemptResponseReceiver,
 	targetAgentID string,
 	path app.RoutePath,
-	transport agentproxy.DirectOutcome,
+	transport agentproxy.AttemptTransportOutcome,
 ) AttemptOutcome {
+	if transport.AttemptResult != nil {
+		return receiver.FinishWithResult(
+			targetAgentID, path, transport.Commit, *transport.AttemptResult, transport.Code, transport.Err,
+		)
+	}
 	if errors.Is(transport.Err, context.Canceled) || errors.Is(transport.Err, context.DeadlineExceeded) {
 		return canceledAttemptOutcome(targetAgentID, path, transport.Commit, receiver.ResponseStarted(), transport.Err)
 	}
 	if transport.Commit == tunnel.PreCommit && !transport.ResponseStarted {
 		return transportUnavailableOutcome(targetAgentID, path, transport.Code, transport.Err)
 	}
-	return receiver.Finish(targetAgentID, path, transport.Commit, transport.Err)
+	return interruptedRemoteTransportOutcome(
+		targetAgentID, path, transport.Commit, receiver.ResponseStarted(), transport.Code, transport.Err,
+	)
 }
 
 func transportUnavailableOutcome(executionAgentID string, path app.RoutePath, code string, err error) AttemptOutcome {
@@ -240,7 +340,11 @@ func remotePathRecord(agentID string, path app.RoutePath, outcome AttemptOutcome
 	}
 	switch outcome.Kind {
 	case AttemptTransportUnavailable:
-		record.Result = models.AgentPathUnavailable
+		if isTransportPolicyCode(outcome.ReasonCode) {
+			record.Result = models.AgentPathDisabled
+		} else {
+			record.Result = models.AgentPathUnavailable
+		}
 	case AttemptProxyRejected, AttemptExecutionRejected, AttemptCanceled:
 		record.Result = models.AgentPathRejected
 	case AttemptCommitUncertain:
@@ -257,6 +361,9 @@ func modelAgentPath(path app.RoutePath) models.AgentPathKind {
 }
 
 func remotePathStage(outcome AttemptOutcome) models.AgentPathStage {
+	if isTransportPolicyCode(outcome.ReasonCode) {
+		return models.AgentPathPolicy
+	}
 	if outcome.Kind == AttemptTransportUnavailable {
 		if outcome.ReasonCode == agentproxy.CodeDirectAuthUnavailable {
 			return models.AgentPathAuthenticate
@@ -267,6 +374,10 @@ func remotePathStage(outcome AttemptOutcome) models.AgentPathStage {
 		return models.AgentPathDispatch
 	}
 	return models.AgentPathResponse
+}
+
+func isTransportPolicyCode(code string) bool {
+	return consts.IsDirectedTransportPolicyErrorCode(code)
 }
 
 func modelCommitState(commit tunnel.CommitState) models.AgentPathCommitState {
@@ -296,24 +407,6 @@ func (e *remoteExecutor) remoteTarget(agentID string) (RemoteTargetSnapshot, boo
 		return RemoteTargetSnapshot{}, false
 	}
 	return e.Targets.SnapshotRemoteTarget(agentID)
-}
-
-func (e *remoteExecutor) cachedForwardTicket() (agentauth.ForwardTicket, error) {
-	if e == nil || e.CachedForwardTicket == nil {
-		return "", errors.New(agentproxy.CodeDirectAuthUnavailable)
-	}
-	ticket, err := e.CachedForwardTicket()
-	if err != nil || ticket == "" {
-		return "", errors.Join(errors.New(agentproxy.CodeDirectAuthUnavailable), err)
-	}
-	return ticket, nil
-}
-
-func (e *remoteExecutor) peerRouteMode() string {
-	if e != nil && e.PeerRouteMode != nil && e.PeerRouteMode() == consts.PeerRouteModeRelayOnly {
-		return consts.PeerRouteModeRelayOnly
-	}
-	return consts.PeerRouteModeDirectFirst
 }
 
 func remoteRequestID(rctx *state.RelayContext) string {

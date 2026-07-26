@@ -4,15 +4,24 @@ import Link from "next/link";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
-import { ColumnDef } from "@tanstack/react-table";
+import { ColumnDef, Row } from "@tanstack/react-table";
 import { toast } from "sonner";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DateCell } from "@/components/business/date-cell";
+import { DebouncedSearchInput } from "@/components/business/debounced-search-input";
+import { FilterBar, FilterField } from "@/components/business/filter-bar";
 import { ObservabilityHeader } from "@/components/business/observability-header";
 import { RebuildButton } from "@/components/business/rebuild-button";
 import { RebuildDialog } from "@/components/business/rebuild-dialog";
@@ -26,10 +35,12 @@ import {
   useTokenBilling,
 } from "@/lib/api/billing";
 import { useBillingInsights } from "@/lib/api/billing-insights";
+import type { ChartTopN } from "@/lib/api/dashboard";
 import { useChannelTypes } from "@/lib/api/channels";
 import { buildQuery } from "@/lib/api/client";
 import { useAuth } from "@/lib/auth";
 import { useObsRange } from "@/lib/hooks/use-obs-range";
+import { useChartTopN } from "@/lib/hooks/use-chart-top-n";
 import { tsToDateStr } from "@/lib/utils/date-range";
 import { PAGE_SIZES } from "@/lib/constants";
 import { formatMoneyCompact, formatSuccessRate, formatTokensCompact } from "@/lib/utils/format";
@@ -37,6 +48,8 @@ import { MoneyCell } from "@/components/business/money-cell";
 import { EntityLabel } from "@/components/business/entity-label";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
+import { ChannelModelBreakdown } from "@/components/business/channel-model-breakdown";
+import { ChartOptionSelect } from "@/components/business/chart-option-select";
 import type {
   BillingChannelRow,
   BillingOverviewResponse,
@@ -65,11 +78,9 @@ function BillingPageContent() {
   const t = useTranslations("billing");
   const tc = useTranslations("common");
   const tcf = useTranslations("charts");
-  const { isAdmin, loading } = useAuth();
+  const { user, isAdmin, loading } = useAuth();
 
   const [tab, setTab] = useState("token");
-  // channelId 仅作用于「按渠道」表(channel tab),不进 URL、不参与页级 user/model 筛选。
-  const [channelId, setChannelId] = useState("");
   const [rebuildOpen, setRebuildOpen] = useState(false);
 
   const [tokenPage, setTokenPage] = useState(1);
@@ -84,14 +95,34 @@ function BillingPageContent() {
   const pathname = usePathname();
   const userId = searchParams.get("user_id") ?? "";
   const model = searchParams.get("model") ?? "";
-  const setParam = (key: string, value: string) => {
+  const channelId = searchParams.get("channel_id") ?? "";
+  const channelType = searchParams.get("channel_type") ?? "";
+  const search = searchParams.get("q") ?? "";
+  const minTokens = searchParams.get("min_tokens") ?? "";
+  const tokenId = searchParams.get("token_id") ?? "";
+  const trendTokenId = searchParams.get("trend_token_id") ?? "";
+  const selectedUserId = isAdmin && userId ? Number(userId) : undefined;
+  const [topN, setTopN] = useChartTopN(user?.user_id ?? 0, pathname);
+  const setParams = (updates: Record<string, string>) => {
     const sp = new URLSearchParams(searchParams.toString());
-    if (value) sp.set(key, value);
-    else sp.delete(key);
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) sp.set(key, value);
+      else sp.delete(key);
+    }
     router.replace(`${pathname}?${sp.toString()}`, { scroll: false });
   };
-  const setUserFilter = (v: string) => { setParam("user_id", v); setTokenPage(1); };
+  const setParam = (key: string, value: string) => setParams({ [key]: value });
+  const setUserFilter = (v: string) => {
+    setParams({ user_id: v, trend_token_id: "" });
+    setTokenPage(1);
+  };
   const setModel = (v: string) => setParam("model", v);
+  const setChannelIdFilter = (v: string) => { setParam("channel_id", v); setChannelPage(1); };
+  const setChannelType = (v: string) => { setParam("channel_type", v); setChannelPage(1); };
+  const setSearch = (v: string) => { setParam("q", v); setTokenPage(1); setChannelPage(1); };
+  const setMinTokens = (v: string) => { setParam("min_tokens", v); setTokenPage(1); setChannelPage(1); };
+  const setTokenIdFilter = (v: string) => { setParam("token_id", v); setTokenPage(1); };
+  const setTrendTokenId = (v: string) => setParam("trend_token_id", v);
 
   // 统一时间窗 + gran (day/hour) 控制所有数据源 (KPI / trend / token-list / channel-list).
   // useObsRange 默认 24h, 24h 配 gran=day 会出"1 个点", 这里仅在 URL 没显式 start 时
@@ -112,14 +143,18 @@ function BillingPageContent() {
 
   const insights = useBillingInsights(
     {
-      ...range,
+      from: range.start,
+      to: range.end,
+      gran: range.gran,
       ...(model ? { model } : {}),
-      ...(userId ? { user_id: Number(userId) } : {}),
+      ...(selectedUserId ? { user_id: selectedUserId } : {}),
+      ...(trendTokenId ? { token_id: Number(trendTokenId) } : {}),
+      top_n: topN,
     },
     { enabled: !loading, refetchKey: refreshKey },
   );
 
-  const tokenUserId = userId ? Number(userId) : undefined;
+  const tokenUserId = selectedUserId;
   const channelFilterId = channelId ? Number(channelId) : undefined;
 
   // 注意:model 筛选「只作用于趋势图」(useBillingInsights)。
@@ -140,6 +175,9 @@ function BillingPageContent() {
       start_date: startDateStr,
       end_date: endDateStr,
       ...(tokenUserId ? { user_id: tokenUserId } : {}),
+      ...(tokenId ? { token_id: Number(tokenId) } : {}),
+      ...(search ? { search } : {}),
+      ...(minTokens ? { min_tokens: Number(minTokens) } : {}),
     },
     { enabled: !loading }
   );
@@ -150,6 +188,9 @@ function BillingPageContent() {
       start_date: startDateStr,
       end_date: endDateStr,
       ...(channelFilterId ? { channel_id: channelFilterId } : {}),
+      ...(search ? { search } : {}),
+      ...(channelType ? { channel_type: Number(channelType) } : {}),
+      ...(minTokens ? { min_tokens: Number(minTokens) } : {}),
     },
     { enabled: !loading && isAdmin && tab === "channel" }
   );
@@ -337,12 +378,104 @@ function BillingPageContent() {
     [channelTypeMap, t]
   );
 
+  const renderChannelExpandedRow = (row: Row<BillingChannelRow>) => (
+    <ChannelModelBreakdown
+      channelId={row.original.channel_id}
+      start={range.start}
+      end={range.end}
+    />
+  );
+
   const tokenTotal = tokenBilling.data?.total ?? 0;
   const tokenPageCount = Math.ceil(tokenTotal / tokenPageSize) || 1;
   const channelTotal = channelBilling.data?.total ?? 0;
   const channelPageCount = Math.ceil(channelTotal / channelPageSize) || 1;
 
   const overviewValue: BillingOverviewResponse | undefined = overview.data;
+
+  const tokenFilters = (
+    <FilterBar>
+      <FilterField label={t("filterLabelToken")}>
+        <EntityPicker
+          entity="token"
+          size="sm"
+          value={tokenId}
+          onChange={setTokenIdFilter}
+          placeholder={t("filterTokenPick")}
+          className="w-40"
+        />
+      </FilterField>
+      <FilterField label={t("filterLabelSearch")}>
+        <DebouncedSearchInput
+          value={search}
+          onCommit={setSearch}
+          placeholder={t("filterSearchToken")}
+          className="h-8 w-56"
+        />
+      </FilterField>
+      <FilterField label={t("filterMinTokens")}>
+        <Input
+          type="number"
+          min={0}
+          value={minTokens}
+          onChange={(e) => setMinTokens(e.target.value)}
+          placeholder={t("filterMinTokens")}
+          className="h-8 w-36"
+        />
+      </FilterField>
+    </FilterBar>
+  );
+
+  const channelFilters = (
+    <FilterBar>
+      <FilterField label={t("filterLabelChannel")}>
+        <EntityPicker
+          entity="channel"
+          size="sm"
+          value={channelId}
+          onChange={setChannelIdFilter}
+          placeholder={t("channelId")}
+          className="w-40"
+        />
+      </FilterField>
+      <FilterField label={t("filterChannelType")}>
+        <Select
+          value={channelType || "all"}
+          onValueChange={(v) => setChannelType(v === "all" ? "" : v)}
+        >
+          <SelectTrigger size="sm" className="w-40">
+            <SelectValue placeholder={t("filterAllTypes")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t("filterAllTypes")}</SelectItem>
+            {(channelTypes.data ?? []).map((ct) => (
+              <SelectItem key={ct.id} value={String(ct.id)}>
+                {ct.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </FilterField>
+      <FilterField label={t("filterLabelSearch")}>
+        <DebouncedSearchInput
+          value={search}
+          onCommit={setSearch}
+          placeholder={t("filterSearchChannel")}
+          className="h-8 w-56"
+        />
+      </FilterField>
+      <FilterField label={t("filterMinTokens")}>
+        <Input
+          type="number"
+          min={0}
+          value={minTokens}
+          onChange={(e) => setMinTokens(e.target.value)}
+          placeholder={t("filterMinTokens")}
+          className="h-8 w-36"
+        />
+      </FilterField>
+    </FilterBar>
+  );
 
   if (loading) {
     return (
@@ -363,15 +496,27 @@ function BillingPageContent() {
         refreshing={insights.isFetching || overview.isFetching}
         showGranularity
         extraFilters={
-          isAdmin ? (
-            <EntityPicker
-              entity="user"
-              value={userId}
-              onChange={setUserFilter}
-              placeholder={tcf("filter.user")}
-              className="w-44"
+          <>
+            <ChartOptionSelect
+              value={String(topN) as "5" | "10" | "20"}
+              onValueChange={(value) => setTopN(Number(value) as ChartTopN)}
+              label={tcf("prefix.topN")}
+              options={[
+                { value: "5", label: "5" },
+                { value: "10", label: "10" },
+                { value: "20", label: "20" },
+              ]}
             />
-          ) : undefined
+            {isAdmin && (
+              <EntityPicker
+                entity="user"
+                value={userId}
+                onChange={setUserFilter}
+                placeholder={tcf("filter.user")}
+                className="w-44"
+              />
+            )}
+          </>
         }
       />
       {isAdmin && (
@@ -436,29 +581,27 @@ function BillingPageContent() {
         title={t("usageTrend")}
         loading={insights.isLoading}
         headerExtra={
-          <EntityPicker
-            entity="model"
-            value={model}
-            onChange={setModel}
-            placeholder={tcf("filter.model")}
-            className="w-40"
-          />
+          <>
+            <EntityPicker
+              entity="model"
+              size="sm"
+              value={model}
+              onChange={setModel}
+              placeholder={tcf("filter.model")}
+              className="w-40"
+            />
+            <EntityPicker
+              entity="token"
+              size="sm"
+              value={trendTokenId}
+              onChange={setTrendTokenId}
+              {...(selectedUserId ? { ownerUserId: selectedUserId } : {})}
+              placeholder={t("filterTokenPick")}
+              className="w-40"
+            />
+          </>
         }
       />
-
-      {isAdmin && tab === "channel" && (
-        <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
-          <div className="space-y-1">
-            <Label>{t("channelId")}</Label>
-            <EntityPicker
-              entity="channel"
-              value={channelId}
-              onChange={(v) => { setChannelId(v); setChannelPage(1); }}
-              placeholder={t("channelId")}
-            />
-          </div>
-        </div>
-      )}
 
       {isAdmin ? (
         <Tabs value={tab} onValueChange={setTab}>
@@ -467,6 +610,7 @@ function BillingPageContent() {
             <TabsTrigger value="channel">{t("byChannel")}</TabsTrigger>
           </TabsList>
           <TabsContent value="token" className="space-y-4">
+            {tokenFilters}
             <DataTable
               columns={tokenColumns}
               data={tokenBilling.data?.data ?? []}
@@ -486,6 +630,7 @@ function BillingPageContent() {
             />
           </TabsContent>
           <TabsContent value="channel" className="space-y-4">
+            {channelFilters}
             <DataTable
               columns={channelColumns}
               data={channelBilling.data?.data ?? []}
@@ -502,27 +647,32 @@ function BillingPageContent() {
                 }
                 setChannelPage(nextPage);
               }}
+              getRowId={(r) => String(r.channel_id)}
+              renderExpandedRow={renderChannelExpandedRow}
             />
           </TabsContent>
         </Tabs>
       ) : (
-        <DataTable
-          columns={tokenColumns}
-          data={tokenBilling.data?.data ?? []}
-          loading={tokenBilling.isLoading}
-          total={tokenTotal}
-          page={tokenPage}
-          pageSize={tokenPageSize}
-          pageCount={tokenPageCount}
-          onPaginationChange={(nextPage, nextPageSize) => {
-            if (nextPageSize !== tokenPageSize) {
-              setTokenPage(1);
-              setTokenPageSize(nextPageSize);
-              return;
-            }
-            setTokenPage(nextPage);
-          }}
-        />
+        <div className="space-y-4">
+          {tokenFilters}
+          <DataTable
+            columns={tokenColumns}
+            data={tokenBilling.data?.data ?? []}
+            loading={tokenBilling.isLoading}
+            total={tokenTotal}
+            page={tokenPage}
+            pageSize={tokenPageSize}
+            pageCount={tokenPageCount}
+            onPaginationChange={(nextPage, nextPageSize) => {
+              if (nextPageSize !== tokenPageSize) {
+                setTokenPage(1);
+                setTokenPageSize(nextPageSize);
+                return;
+              }
+              setTokenPage(nextPage);
+            }}
+          />
+        </div>
       )}
 
       {isAdmin && (

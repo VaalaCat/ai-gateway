@@ -8,9 +8,7 @@ import (
 
 const (
 	EndpointPath       = "/internal/agent/attempt"
-	HeaderMeta         = "X-Vaala-Bound-Attempt"
 	HeaderMode         = "X-Vaala-Attempt-Mode"
-	TrailerResult      = "X-Vaala-Attempt-Result"
 	ModeControl        = "control"
 	ModeResponse       = "response"
 	MaxResultWireBytes = 48 * 1024
@@ -54,17 +52,25 @@ type AttemptProxyMeta struct {
 }
 
 type AttemptTraceWire struct {
-	InboundPath        string `json:"inbound_path,omitempty"`
-	OutboundPath       string `json:"outbound_path,omitempty"`
-	InboundHeaders     string `json:"inbound_headers,omitempty"`
-	OutboundHeaders    string `json:"outbound_headers,omitempty"`
+	InboundPath        string                `json:"inbound_path,omitempty"`
+	OutboundPath       string                `json:"outbound_path,omitempty"`
+	InboundHeaders     string                `json:"inbound_headers,omitempty"`
+	OutboundHeaders    string                `json:"outbound_headers,omitempty"`
+	InboundBody        string                `json:"inbound_body,omitempty"`
+	OutboundBody       string                `json:"outbound_body,omitempty"`
+	ResponseHeaders    string                `json:"response_headers,omitempty"`
+	ResponseBody       string                `json:"response_body,omitempty"`
+	ClientResponseBody string                `json:"client_response_body,omitempty"`
+	UpstreamStatus     int                   `json:"upstream_status,omitempty"`
+	ErrorStage         string                `json:"error_stage,omitempty"`
+	FailureFallback    *AttemptTraceBodyWire `json:"failure_fallback,omitempty"`
+}
+
+type AttemptTraceBodyWire struct {
 	InboundBody        string `json:"inbound_body,omitempty"`
 	OutboundBody       string `json:"outbound_body,omitempty"`
-	ResponseHeaders    string `json:"response_headers,omitempty"`
 	ResponseBody       string `json:"response_body,omitempty"`
 	ClientResponseBody string `json:"client_response_body,omitempty"`
-	UpstreamStatus     int    `json:"upstream_status,omitempty"`
-	ErrorStage         string `json:"error_stage,omitempty"`
 }
 
 type AttemptProxyResult struct {

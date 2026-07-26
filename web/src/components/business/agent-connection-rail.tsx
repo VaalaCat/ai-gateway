@@ -5,9 +5,11 @@ import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
 import { AgentConnectionStatus } from "@/components/business/agent-connection-status";
+import { BackgroundRefreshStatus } from "@/components/business/background-refresh-status";
 import { AgentDiagnosticsButton } from "@/components/business/agent-diagnostics-button";
 import { AgentOperationButtons } from "@/components/business/agent-operation-buttons";
 import { AgentRouteTargets } from "@/components/business/agent-route-targets";
+import { AgentTransportPolicyStatus } from "@/components/business/agent-transport-policy-status";
 import { AgentURI } from "@/components/business/agent-uri";
 import { Badge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -157,6 +159,8 @@ export function AgentConnectionRail({
   initialRouteTargetsPage,
   stale = false,
   loading = false,
+  refreshing = false,
+  routeTargetsCurrent = true,
   compact = false,
 }: {
   agentId: number;
@@ -164,20 +168,50 @@ export function AgentConnectionRail({
   initialRouteTargetsPage?: RouteTargetsPage;
   stale?: boolean;
   loading?: boolean;
+  refreshing?: boolean;
+  routeTargetsCurrent?: boolean;
   compact?: boolean;
 }) {
   const t = useTranslations("agents.connection");
   const targetProbe = useEnqueueConnectivityProbe();
   const initialPageMatchesSnapshot = !!initialRouteTargetsPage &&
     routeTargetsPageMatchesSnapshot(initialRouteTargetsPage, snapshot);
-  const waitingForRouteTargetsPage = !initialPageMatchesSnapshot && (
+  const hasRouteTargets = (
     snapshot.target_summaries.direct.total > 0 || snapshot.target_summaries.relay.total > 0
   );
+  const refreshRouteTargets = !routeTargetsCurrent && (
+    !!initialRouteTargetsPage || hasRouteTargets
+  );
   const routeTargets = useAgentRouteTargets(agentId, initialRouteTargetsPage?.limit || 20, {
-    enabled: initialPageMatchesSnapshot,
+    enabled: initialPageMatchesSnapshot || refreshRouteTargets,
     initialPage: initialPageMatchesSnapshot ? initialRouteTargetsPage : undefined,
     snapshot: initialPageMatchesSnapshot ? routeTargetsIdentity(initialRouteTargetsPage) : undefined,
   });
+  const fetchedPage = routeTargets.data?.pages[0];
+  const fetchedPageMatchesSnapshot = !!fetchedPage &&
+    routeTargetsPageMatchesSnapshot(fetchedPage, snapshot);
+  const displayInitialPage = initialPageMatchesSnapshot || !routeTargetsCurrent
+    ? initialRouteTargetsPage
+    : undefined;
+  const displayPage = fetchedPageMatchesSnapshot ? fetchedPage : displayInitialPage;
+  const displayPages = fetchedPageMatchesSnapshot
+    ? routeTargets.data?.pages
+    : displayPage ? [displayPage] : undefined;
+  const waitingForRouteTargetsPage = !displayPage && !initialPageMatchesSnapshot && hasRouteTargets;
+  const displayIdentity = displayPage
+    ? routeTargetsIdentity(displayPage)
+    : { snapshot_epoch: snapshot.snapshot_epoch, snapshot_seq: 0 };
+  const effectiveRouteTargetsCurrent = fetchedPageMatchesSnapshot || (
+    routeTargetsCurrent && !!displayPage && routeTargetsPageMatchesSnapshot(displayPage, snapshot)
+  );
+  const routeTargetsStale = stale || routeTargets.snapshotConflict;
+  const operationsDisabled = routeTargetsStale || !effectiveRouteTargetsCurrent;
+  const hasNextRouteTargetsPage = fetchedPageMatchesSnapshot
+    ? routeTargets.hasNextPage
+    : !!displayPage?.next_cursor;
+  const showRefreshing = refreshing && (
+    routeTargetsCurrent || !effectiveRouteTargetsCurrent
+  );
 
   const probeTarget = async (targetAgentID: string) => {
     try {
@@ -195,19 +229,23 @@ export function AgentConnectionRail({
     }
   };
 
-  const pageIdentity = initialRouteTargetsPage
-    ? routeTargetsIdentity(initialRouteTargetsPage)
-    : { snapshot_epoch: snapshot.snapshot_epoch, snapshot_seq: 0 };
   return (
     <TooltipProvider delayDuration={200}>
       <div data-testid="agent-connection-rail" className="min-w-0">
-        {stale || routeTargets.snapshotConflict ? (
+        {routeTargetsStale ? (
           <Badge variant="outline" className="mb-2">{t("stale")}</Badge>
         ) : null}
         <RailNode
           icon={Cable}
           title={t("control")}
           status={<AgentConnectionStatus kind="control" value={snapshot.control} />}
+          actions={(
+            <BackgroundRefreshStatus
+              refreshing={!routeTargetsStale && showRefreshing}
+              label={t("refreshingDetail")}
+              testId="connection-refresh-status"
+            />
+          )}
         >
           <RailNode
             icon={RadioTower}
@@ -218,7 +256,7 @@ export function AgentConnectionRail({
                 <AgentOperationButtons
                   agentId={agentId}
                   snapshot={snapshot}
-                  stale={stale}
+                  stale={operationsDisabled}
                   loading={loading}
                 />
                 {!compact ? <AgentDiagnosticsButton agentId={agentId} /> : null}
@@ -226,6 +264,10 @@ export function AgentConnectionRail({
             )}
           >
             <div className="flex min-w-0 flex-col gap-3">
+              <AgentTransportPolicyStatus
+                value={snapshot.transport_policy}
+                compact={compact}
+              />
               <RelayDetails snapshot={snapshot} compact={compact} />
               <RailNode
                 icon={Network}
@@ -233,19 +275,22 @@ export function AgentConnectionRail({
                 status={<TargetSummaries snapshot={snapshot} />}
               >
                 <AgentRouteTargets
-                  pages={routeTargets.data?.pages}
+                  pages={displayPages}
                   currentSnapshot={{
-                    ...pageIdentity,
-                    observed_at: initialRouteTargetsPage?.observed_at ?? snapshot.observed_at,
+                    ...displayIdentity,
+                    observed_at: displayPage?.observed_at ?? snapshot.observed_at,
                   }}
                   compact={compact}
-                  isLoading={routeTargets.isLoading || waitingForRouteTargetsPage}
-                  isFetchingNextPage={routeTargets.isFetchingNextPage}
-                  hasNextPage={routeTargets.hasNextPage}
+                  isLoading={(routeTargets.isLoading && !displayPage) || waitingForRouteTargetsPage}
+                  isFetchingNextPage={fetchedPageMatchesSnapshot && routeTargets.isFetchingNextPage}
+                  hasNextPage={hasNextRouteTargetsPage}
+                  operationsDisabled={operationsDisabled}
                   probingTargetID={targetProbe.isPending
                     ? targetProbe.variables?.request.scope?.target_agent_ids?.[0]
                     : undefined}
-                  onProbeTarget={(targetAgentID) => void probeTarget(targetAgentID)}
+                  onProbeTarget={operationsDisabled
+                    ? undefined
+                    : (targetAgentID) => void probeTarget(targetAgentID)}
                   onLoadMore={() => void routeTargets.fetchNextPage()}
                 />
               </RailNode>

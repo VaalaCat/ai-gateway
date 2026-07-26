@@ -37,20 +37,20 @@ type adminModelRoutingQuery struct{ ctx *baseContext }
 
 func (q *adminModelRoutingQuery) GetByID(id uint) (*models.ModelRouting, error) {
 	var r models.ModelRouting
-	err := q.ctx.GetDB().First(&r, id).Error
+	err := q.ctx.GetCoreDB().First(&r, id).Error
 	return &r, err
 }
 
 func (q *adminModelRoutingQuery) GetByName(scope string, userID, tokenID uint, name string) (*models.ModelRouting, error) {
 	var r models.ModelRouting
-	err := q.ctx.GetDB().
+	err := q.ctx.GetCoreDB().
 		Where("scope = ? AND user_id = ? AND token_id = ? AND name = ?", scope, userID, tokenID, name).
 		First(&r).Error
 	return &r, err
 }
 
 func (q *adminModelRoutingQuery) List(opts ListOptions, filter ModelRoutingListFilter) ([]models.ModelRouting, int64, error) {
-	db := q.ctx.GetDB().Model(&models.ModelRouting{})
+	db := q.ctx.GetCoreDB().Model(&models.ModelRouting{})
 
 	if filter.Scope != "" {
 		db = db.Where("scope = ?", filter.Scope)
@@ -79,7 +79,7 @@ func (q *adminModelRoutingQuery) List(opts ListOptions, filter ModelRoutingListF
 
 func (q *adminModelRoutingQuery) ListAllGlobal() ([]models.ModelRouting, error) {
 	var rows []models.ModelRouting
-	err := q.ctx.GetDB().
+	err := q.ctx.GetCoreDB().
 		Where("scope = ?", models.RoutingScopeGlobal).
 		Order("id DESC").
 		Find(&rows).Error
@@ -88,7 +88,7 @@ func (q *adminModelRoutingQuery) ListAllGlobal() ([]models.ModelRouting, error) 
 
 func (q *adminModelRoutingQuery) ListByUser(userID uint) ([]models.ModelRouting, error) {
 	var rows []models.ModelRouting
-	err := q.ctx.GetDB().
+	err := q.ctx.GetCoreDB().
 		Where("scope = ? AND user_id = ?", models.RoutingScopeUser, userID).
 		Order("id DESC").
 		Find(&rows).Error
@@ -97,7 +97,7 @@ func (q *adminModelRoutingQuery) ListByUser(userID uint) ([]models.ModelRouting,
 
 func (q *adminModelRoutingQuery) ListByToken(tokenID uint) ([]models.ModelRouting, error) {
 	var rows []models.ModelRouting
-	err := q.ctx.GetDB().
+	err := q.ctx.GetCoreDB().
 		Where("scope = ? AND token_id = ?", models.RoutingScopeToken, tokenID).
 		Order("id DESC").
 		Find(&rows).Error
@@ -113,12 +113,12 @@ func (m *adminModelRoutingMutation) Create(r *models.ModelRouting) *ValidateErro
 	// 在 Create 前记录期望的 enabled 值：gorm:"default:true" 会使 GORM 在 Create 后
 	// 将 struct 字段回填为 DB default=true，导致后续 if !r.Enabled 失效。
 	wantEnabled := r.Enabled
-	if err := m.ctx.GetDB().Create(r).Error; err != nil {
+	if err := m.ctx.GetCoreDB().Create(r).Error; err != nil {
 		return newErr(ErrCodeDBError, err.Error(), nil)
 	}
 	// 如果期望 disabled，需显式 Update（GORM 零值 false 被 default:true 覆盖）。
 	if !wantEnabled {
-		if err := m.ctx.GetDB().Model(r).Update("enabled", false).Error; err != nil {
+		if err := m.ctx.GetCoreDB().Model(r).Update("enabled", false).Error; err != nil {
 			return newErr(ErrCodeDBError, err.Error(), nil)
 		}
 		r.Enabled = false
@@ -128,7 +128,7 @@ func (m *adminModelRoutingMutation) Create(r *models.ModelRouting) *ValidateErro
 
 func (m *adminModelRoutingMutation) Update(id uint, updates map[string]any) *ValidateError {
 	var existing models.ModelRouting
-	if err := m.ctx.GetDB().First(&existing, id).Error; err != nil {
+	if err := m.ctx.GetCoreDB().First(&existing, id).Error; err != nil {
 		return newErr(ErrCodeNotFound, "routing not found", nil)
 	}
 	next := existing
@@ -164,7 +164,7 @@ func (m *adminModelRoutingMutation) Update(id uint, updates map[string]any) *Val
 	if len(allowed) == 0 {
 		return nil
 	}
-	if err := m.ctx.GetDB().Model(&existing).Updates(allowed).Error; err != nil {
+	if err := m.ctx.GetCoreDB().Model(&existing).Updates(allowed).Error; err != nil {
 		return newErr(ErrCodeDBError, err.Error(), nil)
 	}
 	return nil
@@ -172,20 +172,20 @@ func (m *adminModelRoutingMutation) Update(id uint, updates map[string]any) *Val
 
 func (m *adminModelRoutingMutation) Delete(id uint) *ValidateError {
 	var r models.ModelRouting
-	if err := m.ctx.GetDB().First(&r, id).Error; err != nil {
+	if err := m.ctx.GetCoreDB().First(&r, id).Error; err != nil {
 		return newErr(ErrCodeNotFound, "routing not found", nil)
 	}
 	if e := ValidateDelete(&r, &daoNameProvider{ctx: m.ctx}); e != nil {
 		return e
 	}
-	if err := m.ctx.GetDB().Delete(&r).Error; err != nil {
+	if err := m.ctx.GetCoreDB().Delete(&r).Error; err != nil {
 		return newErr(ErrCodeDBError, err.Error(), nil)
 	}
 	return nil
 }
 
 func (m *adminModelRoutingMutation) DeleteByToken(tokenID uint) error {
-	return m.ctx.GetDB().
+	return m.ctx.GetCoreDB().
 		Where("scope = ? AND token_id = ?", models.RoutingScopeToken, tokenID).
 		Delete(&models.ModelRouting{}).Error
 }
@@ -203,7 +203,7 @@ func (p *daoNameProvider) HasModel(name string) bool {
 	// 转义 LIKE 元字符，避免 name 含 %/_ 导致误匹配。
 	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(name)
 	var count int64
-	p.ctx.GetDB().Model(&models.Channel{}).
+	p.ctx.GetCoreDB().Model(&models.Channel{}).
 		Where("status = ? AND ',' || models || ',' LIKE ? ESCAPE '\\'",
 			consts.StatusEnabled, "%,"+escaped+",%").
 		Limit(1).Count(&count)
@@ -212,7 +212,7 @@ func (p *daoNameProvider) HasModel(name string) bool {
 
 func (p *daoNameProvider) HasToken(tokenID uint) bool {
 	var count int64
-	p.ctx.GetDB().Model(&models.Token{}).Where("id = ?", tokenID).Limit(1).Count(&count)
+	p.ctx.GetCoreDB().Model(&models.Token{}).Where("id = ?", tokenID).Limit(1).Count(&count)
 	return count > 0
 }
 
@@ -224,7 +224,7 @@ func (p *daoNameProvider) GetGlobalRouting(name string) *models.ModelRouting {
 		return r
 	}
 	var r models.ModelRouting
-	if err := p.ctx.GetDB().Where("scope=? AND name=?",
+	if err := p.ctx.GetCoreDB().Where("scope=? AND name=?",
 		models.RoutingScopeGlobal, name).
 		First(&r).Error; err != nil {
 		p.routingCache[name] = nil
@@ -239,7 +239,7 @@ func (p *daoNameProvider) AllGlobalRoutings() []*models.ModelRouting {
 		return p.allCache
 	}
 	var rs []*models.ModelRouting
-	p.ctx.GetDB().Where("scope=?", models.RoutingScopeGlobal).Find(&rs)
+	p.ctx.GetCoreDB().Where("scope=?", models.RoutingScopeGlobal).Find(&rs)
 	p.allCache = rs
 	p.allCacheLoaded = true
 	return rs

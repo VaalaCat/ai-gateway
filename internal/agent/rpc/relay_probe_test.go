@@ -22,12 +22,12 @@ import (
 
 type relayProbeLinkStub struct {
 	mu       sync.Mutex
-	requests []app.RelayRequest
-	stream   *relayProbeStreamStub
+	requests []app.ProbeStreamRequest
+	stream   app.ProbeStream
 	err      error
 }
 
-func (l *relayProbeLinkStub) OpenStream(_ context.Context, request app.RelayRequest) (app.RelayStream, error) {
+func (l *relayProbeLinkStub) OpenProbeStream(_ context.Context, request app.ProbeStreamRequest) (app.ProbeStream, error) {
 	l.mu.Lock()
 	l.requests = append(l.requests, request)
 	l.mu.Unlock()
@@ -37,10 +37,10 @@ func (l *relayProbeLinkStub) OpenStream(_ context.Context, request app.RelayRequ
 	return l.stream, nil
 }
 
-func (l *relayProbeLinkStub) requestSnapshot() []app.RelayRequest {
+func (l *relayProbeLinkStub) requestSnapshot() []app.ProbeStreamRequest {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return append([]app.RelayRequest(nil), l.requests...)
+	return append([]app.ProbeStreamRequest(nil), l.requests...)
 }
 
 type relayProbeStreamStub struct {
@@ -180,17 +180,90 @@ func TestRelayProbeUsesEndToEndPingAndAcceptsMasterRole(t *testing.T) {
 	requests := link.requestSnapshot()
 	require.Len(t, requests, 1)
 	require.Equal(t, "agent-b", requests[0].TargetAgentID)
-	require.Equal(t, http.MethodGet, requests[0].Method)
-	require.Equal(t, "/ping", requests[0].Path)
-	require.Equal(t, wire.StreamPurposeConnectivityProbe, requests[0].Purpose)
-	require.Empty(t, requests[0].Header)
-	require.Zero(t, requests[0].BodyLength)
+	require.Equal(t, app.ProbeRespectBusinessPolicy, requests[0].Policy)
+	require.Equal(t, "relay-connectivity-probe", requests[0].RequestID)
 	require.Positive(t, requests[0].Remaining)
 	require.LessOrEqual(t, requests[0].Remaining, defaultRelayProbeTimeout)
 	operations, cancelCause, closeCalls := stream.snapshot()
 	require.Equal(t, []string{"commit", "upload", "response", "close"}, operations)
 	require.NoError(t, cancelCause)
 	require.Equal(t, 1, closeCalls)
+}
+
+func TestRelayProbeFailsClosedWhenLinkReturnsNilStream(t *testing.T) {
+	var result protocol.RelayProbeResult
+	require.NotPanics(t, func() {
+		result = NewRelayProber(RelayProberOptions{
+			Link: &relayProbeLinkStub{}, RelayGeneration: func() uint64 { return 11 },
+		}).Probe(t.Context(), relayProbeTargetForTest(11, 22))
+	})
+	require.Equal(t, protocol.RelayProbeUnavailable, result.State)
+	require.Equal(t, protocol.RelayProbeStageOpen, result.Stage)
+	require.Equal(t, consts.RouteErrorRelayNotReady, result.ReasonCode)
+}
+
+func TestRelayProbeProjectsRespectTargetPolicyReset(t *testing.T) {
+	tests := []struct {
+		name         string
+		policy       protocol.ProbePolicy
+		link         *relayProbeLinkStub
+		wantDisabled bool
+		wantState    protocol.RelayProbeState
+		wantReason   string
+	}{
+		{
+			name: "open reset", policy: protocol.ProbeRespectBusinessPolicy,
+			link:         &relayProbeLinkStub{err: relayProbeResetError{code: consts.RouteErrorTargetRelayInboundDisabled}},
+			wantDisabled: true, wantState: protocol.RelayProbeReachable,
+		},
+		{
+			name: "commit reset", policy: protocol.ProbeRespectBusinessPolicy,
+			link: &relayProbeLinkStub{stream: &relayProbeStreamStub{
+				commitState: wire.PreCommit, commitErr: relayProbeResetError{code: consts.RouteErrorTargetRelayInboundDisabled},
+			}},
+			wantDisabled: true, wantState: protocol.RelayProbeReachable,
+		},
+		{
+			name: "bypass does not project policy", policy: protocol.ProbeBypassBusinessPolicy,
+			link: &relayProbeLinkStub{stream: &relayProbeStreamStub{
+				commitState: wire.PreCommit, commitErr: relayProbeResetError{code: consts.RouteErrorTargetRelayInboundDisabled},
+			}},
+			wantState: protocol.RelayProbeUnavailable, wantReason: consts.RouteErrorTargetRelayInboundDisabled,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := relayProbeTargetForTest(11, 22)
+			target.Policy = test.policy
+			result := NewRelayProber(RelayProberOptions{
+				Link: test.link, RelayGeneration: func() uint64 { return 11 },
+			}).Probe(t.Context(), target)
+			require.Equal(t, test.wantState, result.State)
+			require.Equal(t, test.wantDisabled, result.PolicyDisabled)
+			if test.wantDisabled {
+				require.Equal(t, consts.RouteErrorTargetRelayInboundDisabled, result.PolicyReasonCode)
+				require.Empty(t, result.ReasonCode)
+			} else {
+				require.Empty(t, result.PolicyReasonCode)
+				require.Equal(t, test.wantReason, result.ReasonCode)
+			}
+		})
+	}
+}
+
+func TestRelayProbePassesManualBypassPolicy(t *testing.T) {
+	stream := &relayProbeStreamStub{commitState: wire.Committed, body: `{"status":"ok"}`}
+	link := &relayProbeLinkStub{stream: stream}
+	target := relayProbeTargetForTest(11, 22)
+	target.Policy = protocol.ProbeBypassBusinessPolicy
+
+	result := NewRelayProber(RelayProberOptions{
+		Link: link, RelayGeneration: func() uint64 { return 11 },
+	}).Probe(t.Context(), target)
+
+	require.Equal(t, protocol.RelayProbeReachable, result.State)
+	require.Equal(t, protocol.ProbeBypassBusinessPolicy, result.Policy)
+	require.Equal(t, app.ProbeBypassBusinessPolicy, link.requestSnapshot()[0].Policy)
 }
 
 func TestRelayProbeRejectsHTTPAndInvalidBodies(t *testing.T) {
@@ -393,5 +466,6 @@ func relayProbeTargetForTest(sourceGeneration, targetGeneration uint64) protocol
 		TargetAgentID:         "agent-b",
 		SourceRelayGeneration: sourceGeneration,
 		TargetRelayGeneration: targetGeneration,
+		Policy:                protocol.ProbeRespectBusinessPolicy,
 	}
 }

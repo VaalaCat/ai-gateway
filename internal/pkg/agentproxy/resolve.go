@@ -30,8 +30,9 @@ var (
 )
 
 type addrCacheEntry struct {
-	url       string
-	expiresAt time.Time
+	url                string
+	addressFingerprint string
+	expiresAt          time.Time
 }
 
 // ResolveAddress selects the best address for the target agent.
@@ -60,11 +61,15 @@ func ResolveAddress(addresses []Address, addressTag, preferredTag, cacheKey stri
 	}
 
 	// 3. Check cache
+	addressFingerprint := ""
 	if cacheKey != "" {
+		addressFingerprint = CanonicalAddressFingerprint(addresses)
 		addrCacheMu.RLock()
 		entry, ok := addrCache[cacheKey]
 		addrCacheMu.RUnlock()
-		if ok && time.Now().Before(entry.expiresAt) {
+		// behavior change: a hot address update cannot reuse a URL from the old set.
+		if ok && entry.addressFingerprint == addressFingerprint && time.Now().Before(entry.expiresAt) &&
+			addressSetContainsURL(addresses, entry.url) {
 			return entry.url, nil
 		}
 	}
@@ -74,7 +79,9 @@ func ResolveAddress(addresses []Address, addressTag, preferredTag, cacheKey stri
 		if probeURL(a.URL) {
 			if cacheKey != "" {
 				addrCacheMu.Lock()
-				addrCache[cacheKey] = addrCacheEntry{url: a.URL, expiresAt: time.Now().Add(60 * time.Second)}
+				addrCache[cacheKey] = addrCacheEntry{
+					url: a.URL, addressFingerprint: addressFingerprint, expiresAt: time.Now().Add(60 * time.Second),
+				}
 				addrCacheMu.Unlock()
 			}
 			return a.URL, nil
@@ -82,6 +89,14 @@ func ResolveAddress(addresses []Address, addressTag, preferredTag, cacheKey stri
 	}
 
 	return "", fmt.Errorf("all %d addresses unreachable", len(addresses))
+}
+func addressSetContainsURL(addresses []Address, cachedURL string) bool {
+	for _, address := range addresses {
+		if address.URL == cachedURL {
+			return true
+		}
+	}
+	return false
 }
 
 func probeURL(urlStr string) bool {

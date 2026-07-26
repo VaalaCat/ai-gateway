@@ -11,47 +11,40 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
-	"github.com/VaalaCat/ai-gateway/internal/agent/route"
+	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
-func TestAgentServerRegistersDirectProbeAndProjectsResultIntoGate(t *testing.T) {
+func TestAgentServerRegistersDirectProbeWithSessionPool(t *testing.T) {
 	cfg := directProbeAgentConfig()
 	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "agent-a", Secret: "secret"})
 	require.NoError(t, err)
+	require.NotNil(t, server.DirectSessionPool)
 	require.NotNil(t, server.directGate)
 	require.NotNil(t, server.directProber)
 	t.Cleanup(func() { shutdownDirectProbeServer(t, server) })
 
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(protocol.DirectIngressIdentity{
-			Contract: protocol.DirectIngressContractV1, Role: "agent", AgentID: "wrong-agent",
-		})
-	}))
-	t.Cleanup(target.Close)
 	client := newOrderedAgentControlClient()
 	server.registerControlHandlers(client)
 	handler := client.handlers[consts.RPCAgentDirectProbe]
 	require.NotNil(t, handler)
 	raw, err := json.Marshal(protocol.DirectProbeTarget{
 		TargetAgentID: "agent-b", AddressFingerprint: "fp-b",
-		Addresses: []protocol.Address{{URL: target.URL}},
+		Addresses: []protocol.Address{{URL: "https://agent-b.example"}},
+		Policy:    protocol.ProbeRespectBusinessPolicy,
 	})
 	require.NoError(t, err)
 	value, err := handler(t.Context(), raw)
 	require.NoError(t, err)
 	result, ok := value.(protocol.DirectProbeResult)
 	require.True(t, ok)
-	require.Equal(t, "mismatch", result.Identity)
-	require.Equal(t, route.DirectGateIdentity, server.directGate.Decision("agent-b", "fp-b"))
-	routeFingerprint := agentproxy.CanonicalAddressFingerprint([]agentproxy.Address{{URL: target.URL}})
-	require.Equal(t, route.DirectGateIdentity, server.directGate.Decision("agent-b", routeFingerprint))
+	require.Equal(t, "credentials", result.Stage)
+	require.Equal(t, consts.RouteErrorDirectAuthUnavailable, result.ReasonCode)
 }
 
 func TestAgentServerBuildsRelayProberAfterTunnelManagerAndRegistersControlHandler(t *testing.T) {
@@ -111,7 +104,7 @@ func TestEmbeddedAgentDoesNotReplaceMasterPing(t *testing.T) {
 	require.Nil(t, server.Router)
 }
 
-func TestStandaloneAndEmbeddedAgentsExposeTargetedDirectIngressIdentity(t *testing.T) {
+func TestStandaloneAndEmbeddedAgentsCreateDirectSessionPoolAndTunnelIngress(t *testing.T) {
 	tests := []struct {
 		name      string
 		newRouter func(*testing.T) (*Server, http.Handler)
@@ -150,30 +143,44 @@ func TestStandaloneAndEmbeddedAgentsExposeTargetedDirectIngressIdentity(t *testi
 		t.Run(test.name, func(t *testing.T) {
 			server, router := test.newRouter(t)
 			t.Cleanup(func() { shutdownDirectProbeServer(t, server) })
+			require.NotNil(t, server.DirectSessionPool)
+			require.NotNil(t, server.directProber)
+			require.NotNil(t, server.DirectTunnelIngress)
 
-			response := httptest.NewRecorder()
-			router.ServeHTTP(response, httptest.NewRequest(
-				http.MethodGet,
-				protocol.DirectIngressIdentityPath+"?target_agent_id=agent-a",
-				nil,
-			))
-			require.Equal(t, http.StatusOK, response.Code)
-			var identity protocol.DirectIngressIdentity
-			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &identity))
-			require.Equal(t, protocol.DirectIngressIdentity{
-				Contract: protocol.DirectIngressContractV1, Role: "agent", AgentID: "agent-a",
-			}, identity)
-
-			for _, target := range []string{"", "wrong-agent"} {
+			for _, tunnelTest := range []struct {
+				target string
+				status int
+			}{
+				{target: "agent-a", status: http.StatusUnauthorized},
+				{target: "wrong-agent", status: http.StatusForbidden},
+			} {
 				response := httptest.NewRecorder()
 				router.ServeHTTP(response, httptest.NewRequest(
 					http.MethodGet,
-					protocol.DirectIngressIdentityPath+"?target_agent_id="+target,
+					agenttunnel.DirectTunnelPath+"?target_agent_id="+tunnelTest.target,
 					nil,
 				))
-				require.Equal(t, http.StatusNotFound, response.Code, target)
+				require.Equal(t, tunnelTest.status, response.Code, tunnelTest.target)
 			}
 		})
+	}
+}
+
+func TestDirectIngressShutdownClosesSharedServerIngress(t *testing.T) {
+	server, err := NewEmbedded(
+		directProbeAgentConfig(), zap.NewNop(),
+		&enrollment.Credentials{AgentID: "embedded-a", Secret: "secret"},
+	)
+	require.NoError(t, err)
+	server.MountRoutes(gin.New())
+	ingress := server.DirectTunnelIngress
+	require.NotNil(t, ingress)
+
+	shutdownDirectProbeServer(t, server)
+	select {
+	case <-ingress.Done():
+	case <-time.After(time.Second):
+		t.Fatal("direct tunnel ingress did not finish with server shutdown")
 	}
 }
 

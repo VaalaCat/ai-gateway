@@ -82,7 +82,9 @@ func (p *Publisher) recordAffinity(rctx *state.RelayContext, e *protocol.UsageLo
 		e.AffinityStatus = affinity.StatusNone
 	}
 	if success && dec.Record && (e.CacheReadTokens > 0 || e.CacheWriteTokens > 0) {
-		p.affinity.Remember(affinity.Key{UserID: uid, RealModel: u.RealModel}, u.Source, u.SourceID, ovr.TTLSec)
+		p.affinity.Remember(affinity.Key{
+			UserID: uid, TokenID: rctx.Input.UserInfo.TokenID, RealModel: u.RealModel,
+		}, u.Source, u.SourceID, ovr.TTLSec)
 		e.AffinityRecorded = true
 	}
 }

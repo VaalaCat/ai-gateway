@@ -2,20 +2,22 @@ package exec
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
-	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -27,6 +29,62 @@ type remoteTargetsStub struct {
 	calls     []string
 }
 
+type recordingDirectPathDisabled struct {
+	events []agentproxy.DirectPathDisabledEvent
+}
+
+func TestTraceRecordFromWirePreservesHeaderOnlyVerboseSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wire     *attemptwire.AttemptTraceWire
+		wantBody bool
+	}{
+		{name: "nil trace"},
+		{
+			name: "headers only",
+			wire: &attemptwire.AttemptTraceWire{
+				InboundPath: "/v1/chat/completions", InboundHeaders: `{"X-Inbound":["kept"]}`,
+				OutboundPath: "/v1/chat/completions", OutboundHeaders: `{"X-Outbound":["kept"]}`,
+				ResponseHeaders: `{"X-Upstream":["kept"]}`, UpstreamStatus: http.StatusOK,
+				ErrorStage:  string(trace.StageNone),
+				InboundBody: "must-strip-main", OutboundBody: "must-strip-main",
+				ResponseBody: "must-strip-main", ClientResponseBody: "must-strip-main",
+				FailureFallback: &attemptwire.AttemptTraceBodyWire{
+					InboundBody: "must-not-persist", OutboundBody: "must-not-persist",
+					ResponseBody: "must-not-persist", ClientResponseBody: "must-not-persist",
+				},
+			},
+		},
+		{
+			name: "failed full",
+			wire: &attemptwire.AttemptTraceWire{
+				InboundPath: "/v1/chat/completions", InboundHeaders: `{"X-Inbound":["kept"]}`,
+				InboundBody: `{"model":"public"}`, OutboundBody: `{"model":"upstream"}`,
+				ResponseBody: `{"error":"failed"}`, ClientResponseBody: `{"error":"client"}`,
+				ErrorStage: string(trace.StageUpstreamStatus),
+			},
+			wantBody: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := traceRecordFromWire(tc.wire)
+			if tc.wire == nil {
+				require.Nil(t, record)
+				return
+			}
+			require.True(t, record.Verbose, "every non-nil wire trace is persistable")
+			require.Equal(t, tc.wire.InboundPath, record.InboundPath)
+			require.Equal(t, "kept", record.InboundHeaders.Get("X-Inbound"))
+			gotBody := record.InboundBody != "" || record.OutboundBody != "" || record.UpstreamBody != "" || record.ClientResponseBody != ""
+			require.Equal(t, tc.wantBody, gotBody)
+		})
+	}
+}
+
+func (r *recordingDirectPathDisabled) RecordDirectPathDisabled(event agentproxy.DirectPathDisabledEvent) {
+	r.events = append(r.events, event)
+}
+
 func (s *remoteTargetsStub) SnapshotRemoteTarget(agentID string) (RemoteTargetSnapshot, bool) {
 	s.calls = append(s.calls, agentID)
 	snapshot, ok := s.snapshots[agentID]
@@ -36,23 +94,28 @@ func (s *remoteTargetsStub) SnapshotRemoteTarget(agentID string) (RemoteTargetSn
 type remoteDirectStub struct {
 	calls   int
 	request agentproxy.DirectRequest
-	forward func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome
+	forward func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome
 }
 
-func (s *remoteDirectStub) Forward(ctx context.Context, request agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
+func (s *remoteDirectStub) Forward(ctx context.Context, request agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 	s.calls++
 	s.request = request
-	return s.forward(ctx, request, dst)
+	capture := &remoteResponseCapture{ResponseWriter: dst}
+	outcome := s.forward(ctx, request, capture)
+	if outcome.AttemptResult == nil {
+		outcome.AttemptResult = capture.result()
+	}
+	return outcome
 }
 
 type remoteRelayLinkStub struct {
 	calls   int
-	request app.RelayRequest
+	request app.AttemptStreamRequest
 	stream  *remoteRelayStreamStub
 	err     error
 }
 
-func (s *remoteRelayLinkStub) OpenStream(_ context.Context, request app.RelayRequest) (app.RelayStream, error) {
+func (s *remoteRelayLinkStub) OpenAttemptStream(_ context.Context, request app.AttemptStreamRequest) (app.AttemptStream, error) {
 	s.calls++
 	s.request = request
 	if s.err != nil {
@@ -66,12 +129,44 @@ type remoteRelayStreamStub struct {
 	commitErr          error
 	uploadErr          error
 	copyErr            error
+	copyResult         *attemptwire.AttemptProxyResult
 	respond            func(http.ResponseWriter)
 	dispatchProvider   bool
 	providerDispatches int
 	order              []string
 	uploaded           string
 	canceled           error
+}
+
+type remoteResponseCapture struct {
+	http.ResponseWriter
+	attemptResult *attemptwire.AttemptProxyResult
+}
+
+func (w *remoteResponseCapture) WriteHeader(status int) {
+	if strings.TrimSpace(w.Header().Get(attemptwire.HeaderMode)) == "" && status >= http.StatusBadRequest {
+		w.Header().Set(attemptwire.HeaderMode, attemptwire.ModeControl)
+		w.ResponseWriter.WriteHeader(http.StatusOK)
+		return
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *remoteResponseCapture) Write(body []byte) (int, error) {
+	if strings.TrimSpace(w.Header().Get(attemptwire.HeaderMode)) != attemptwire.ModeResponse {
+		return len(body), nil
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *remoteResponseCapture) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *remoteResponseCapture) result() *attemptwire.AttemptProxyResult {
+	return w.attemptResult
 }
 
 func (s *remoteRelayStreamStub) Commit(context.Context) error {
@@ -86,15 +181,274 @@ func (s *remoteRelayStreamStub) Upload(_ context.Context, source io.Reader) erro
 	return s.uploadErr
 }
 
-func (s *remoteRelayStreamStub) CopyResponse(_ context.Context, dst http.ResponseWriter) error {
+func (s *remoteRelayStreamStub) CopyAttemptResponse(_ context.Context, dst http.ResponseWriter) (attemptwire.AttemptProxyResult, error) {
 	s.order = append(s.order, "copy")
 	if s.dispatchProvider {
 		s.providerDispatches++
 	}
 	if s.respond != nil {
-		s.respond(dst)
+		capture := &remoteResponseCapture{ResponseWriter: dst}
+		s.respond(capture)
+		if s.copyResult == nil {
+			s.copyResult = capture.result()
+		}
 	}
-	return s.copyErr
+	if s.copyErr != nil {
+		if s.copyResult != nil {
+			return *s.copyResult, s.copyErr
+		}
+		return attemptwire.AttemptProxyResult{}, s.copyErr
+	}
+	if s.copyResult != nil {
+		return *s.copyResult, nil
+	}
+	return attemptwire.AttemptProxyResult{}, attemptwire.ErrInvalidContract
+}
+
+func TestRemoteAttemptResultFollowedByMissingEndIsUncertainAndPreservesDiagnostics(t *testing.T) {
+	interrupted := errors.New("result received but End was lost")
+	wireResult := attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultSucceeded, ProviderResultKnown: true, ProviderDispatched: true,
+		Dispatches: 2, PromptTokens: 17, CompletionTokens: 3, CacheReadTokens: 5,
+		ResponseStarted: true, PlanAdvanceAllowed: true,
+		Trace: &attemptwire.AttemptTraceWire{
+			InboundPath: "/target/inbound", InboundHeaders: `{"X-Target-In":["kept"]}`,
+			OutboundPath: "/target/outbound", OutboundHeaders: `{"X-Target-Out":["kept"]}`,
+			ResponseHeaders: `{"X-Target-Response":["kept"]}`, UpstreamStatus: http.StatusOK,
+			ErrorStage: string(trace.StageNone),
+			FailureFallback: &attemptwire.AttemptTraceBodyWire{
+				InboundBody: "target-inbound", OutboundBody: "target-outbound-transformed",
+				ResponseBody: "target-provider-raw", ClientResponseBody: "target-client-encoded",
+			},
+		},
+	}
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 38)
+	rctx.State.Recorder = trace.NewRecorder(trace.CaptureHeaders, 1024)
+	inbound := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rctx.State.Recorder.WithInbound(inbound, []byte("source-inbound-body"))
+	stream := &remoteRelayStreamStub{
+		commit: tunnel.Committed, copyErr: interrupted, copyResult: &wireResult, dispatchProvider: true,
+		respond: func(dst http.ResponseWriter) {
+			dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
+			dst.WriteHeader(http.StatusOK)
+			_, err := dst.Write([]byte("target-client-encoded"))
+			require.NoError(t, err)
+		},
+	}
+	relay := &remoteRelayLinkStub{stream: stream}
+	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+		SourceAgentID: "source-a", Relay: relay, Targets: enabledRemoteTargets("target-a"),
+		DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: func() bool { return true },
+	})
+
+	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 38, validRemoteBoundAttempt())
+
+	require.Equal(t, AttemptCommitUncertain, outcome.Kind)
+	require.Equal(t, tunnel.CommitUncertain, outcome.Commit)
+	require.Equal(t, ActionStop, nextAttemptAction(AttemptDecisionInput{
+		CurrentPath: app.RoutePathRelay, HasNextTarget: true, HasLocalTarget: true, HasNextAttempt: true, Outcome: outcome,
+	}))
+	require.True(t, outcome.ResponseStarted)
+	require.True(t, outcome.ProviderResultKnown)
+	require.True(t, outcome.ProviderDispatched)
+	require.False(t, outcome.PlanAdvanceAllowed)
+	require.Equal(t, 2, outcome.Dispatches)
+	require.Equal(t, 17, outcome.Result.PromptTokens)
+	require.Equal(t, 3, outcome.Result.CompletionTokens)
+	require.Equal(t, 5, outcome.Result.CacheReadTokens)
+	require.ErrorIs(t, outcome.Result.Err, interrupted)
+	require.Equal(t, agentproxy.CodeRelayResponseInterrupted, outcome.ReasonCode)
+	require.NotNil(t, outcome.Trace)
+	require.Equal(t, "/target/inbound", outcome.Trace.InboundPath)
+	require.Equal(t, "target-inbound", outcome.Trace.InboundBody)
+
+	recordAttemptTrace(rctx.State.Recorder, outcome)
+	attempts := rctx.State.Recorder.Attempts()
+	require.Len(t, attempts, 1)
+	upgraded := attempts[0]
+	require.Equal(t, trace.StageInternal, upgraded.FailStage)
+	require.Equal(t, "kept", upgraded.InboundHeaders.Get("X-Target-In"))
+	require.Equal(t, "kept", upgraded.OutboundHeaders.Get("X-Target-Out"))
+	require.Equal(t, "kept", upgraded.ResponseHeaders.Get("X-Target-Response"))
+	require.Equal(t, "target-inbound", upgraded.InboundBody)
+	require.Equal(t, "target-outbound-transformed", upgraded.OutboundBody)
+	require.Equal(t, "target-provider-raw", upgraded.UpstreamBody)
+	require.Equal(t, "target-client-encoded", upgraded.ClientResponseBody)
+}
+
+func TestDirectRemoteAttemptLateInterruptionUsesTargetFailureFallback(t *testing.T) {
+	interrupted := errors.New("direct result received but End was lost")
+	result := attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultSucceeded, ProviderResultKnown: true, ProviderDispatched: true,
+		Dispatches: 1, ResponseStarted: true, Written: true,
+		Trace: &attemptwire.AttemptTraceWire{
+			InboundPath: "/target/inbound", InboundHeaders: `{"X-Target-In":["kept"]}`,
+			OutboundPath: "/target/outbound", OutboundHeaders: `{"X-Target-Out":["kept"]}`,
+			ResponseHeaders: `{"X-Target-Response":["kept"]}`, UpstreamStatus: http.StatusOK,
+			ErrorStage: string(trace.StageNone),
+			FailureFallback: &attemptwire.AttemptTraceBodyWire{
+				InboundBody: "target-inbound", OutboundBody: "target-outbound-transformed",
+				ResponseBody: "target-provider-raw", ClientResponseBody: "target-client-encoded",
+			},
+		},
+	}
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 382)
+	rctx.State.Recorder = trace.NewRecorder(trace.CaptureHeaders, 1024)
+	direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
+		dst.WriteHeader(http.StatusOK)
+		_, err := dst.Write([]byte("target-client-encoded"))
+		require.NoError(t, err)
+		return agentproxy.AttemptTransportOutcome{
+			Commit: tunnel.Committed, ResponseStarted: true, Code: agentproxy.CodeDirectResponseInterrupted,
+			AttemptResult: &result, Err: interrupted,
+		}
+	}}
+	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+		SourceAgentID: "source-a", Direct: direct, Targets: enabledRemoteTargets("target-a"),
+		DirectOutboundEnabled: func() bool { return true }, RelayOutboundEnabled: func() bool { return false },
+	})
+
+	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 382, validRemoteBoundAttempt())
+	recordAttemptTrace(rctx.State.Recorder, outcome)
+
+	require.Equal(t, app.RoutePathDirect, outcome.Path)
+	require.ErrorIs(t, outcome.Result.Err, interrupted)
+	require.Len(t, rctx.State.Recorder.Attempts(), 1)
+	got := rctx.State.Recorder.Attempts()[0]
+	require.Equal(t, trace.StageInternal, got.FailStage)
+	require.Equal(t, "target-inbound", got.InboundBody)
+	require.Equal(t, "target-outbound-transformed", got.OutboundBody)
+	require.Equal(t, "target-provider-raw", got.UpstreamBody)
+	require.Equal(t, "target-client-encoded", got.ClientResponseBody)
+}
+
+func TestRemoteAttemptInterruptedProviderFailureKeepsTargetClientBody(t *testing.T) {
+	interrupted := errors.New("provider result received but response ended early")
+	result := attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true, ProviderDispatched: true,
+		Dispatches: 1, ResponseStarted: true, ErrorMessage: "provider failed",
+		Trace: &attemptwire.AttemptTraceWire{
+			InboundPath: "/target/inbound", ClientResponseBody: "target-provider-error",
+			ErrorStage: string(trace.StageUpstreamStatus),
+		},
+	}
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 381)
+	stream := &remoteRelayStreamStub{
+		commit: tunnel.Committed, copyErr: interrupted, copyResult: &result, dispatchProvider: true,
+		respond: func(dst http.ResponseWriter) {
+			dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
+			dst.WriteHeader(http.StatusBadGateway)
+			_, err := dst.Write([]byte("x"))
+			require.NoError(t, err)
+		},
+	}
+	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+		SourceAgentID: "source-a", Relay: &remoteRelayLinkStub{stream: stream}, Targets: enabledRemoteTargets("target-a"),
+		DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: func() bool { return true },
+	})
+
+	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 381, validRemoteBoundAttempt())
+
+	require.ErrorIs(t, outcome.Result.Err, interrupted)
+	require.NotNil(t, outcome.Trace)
+	require.Equal(t, "target-provider-error", outcome.Trace.ClientResponseBody)
+}
+
+func TestRemoteAttemptHeadersSuccessDoesNotPersistRetainedBodies(t *testing.T) {
+	result := attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultSucceeded, ProviderResultKnown: true, ProviderDispatched: true,
+		Dispatches: 1, ResponseStarted: true, Written: true,
+		Trace: &attemptwire.AttemptTraceWire{
+			InboundPath: "/target/inbound", InboundHeaders: `{"X-Target-In":["kept"]}`,
+			OutboundPath: "/target/outbound", OutboundHeaders: `{"X-Target-Out":["kept"]}`,
+			ResponseHeaders: `{"X-Target-Response":["kept"]}`, UpstreamStatus: http.StatusOK,
+			ErrorStage: string(trace.StageNone),
+			FailureFallback: &attemptwire.AttemptTraceBodyWire{
+				InboundBody: "target-inbound", OutboundBody: "target-outbound",
+				ResponseBody: "target-upstream", ClientResponseBody: "target-client",
+			},
+		},
+	}
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 39)
+	rctx.State.Recorder = trace.NewRecorder(trace.CaptureHeaders, 1024)
+	rctx.State.Recorder.WithInbound(httptest.NewRequest(http.MethodPost, "/v1/responses", nil), []byte("source-inbound-body"))
+	stream := &remoteRelayStreamStub{
+		commit: tunnel.Committed, copyResult: &result, dispatchProvider: true,
+		respond: func(dst http.ResponseWriter) {
+			dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
+			dst.WriteHeader(http.StatusOK)
+			_, err := dst.Write([]byte("remote-response-body"))
+			require.NoError(t, err)
+		},
+	}
+	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+		SourceAgentID: "source-a", Relay: &remoteRelayLinkStub{stream: stream}, Targets: enabledRemoteTargets("target-a"),
+		DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: func() bool { return true },
+	})
+
+	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 39, validRemoteBoundAttempt())
+	recordAttemptTrace(rctx.State.Recorder, outcome)
+
+	require.NoError(t, outcome.Result.Err)
+	attempts := rctx.State.Recorder.Attempts()
+	require.Len(t, attempts, 1)
+	require.True(t, attempts[0].Verbose)
+	require.Empty(t, attempts[0].InboundBody)
+	require.Empty(t, attempts[0].OutboundBody)
+	require.Empty(t, attempts[0].UpstreamBody)
+	require.Empty(t, attempts[0].ClientResponseBody)
+}
+
+func TestRemoteAttemptResultFollowedByCancellationIsUncertainAndPreservesDiagnostics(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		cause      error
+		wantReason string
+	}{
+		{name: "canceled", cause: context.Canceled, wantReason: agentproxy.CodeRequestCancelled},
+		{name: "deadline", cause: context.DeadlineExceeded, wantReason: agentproxy.CodeRequestDeadline},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wireResult := attemptwire.AttemptProxyResult{
+				Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true, ProviderDispatched: true,
+				Dispatches: 2, PromptTokens: 23, CompletionTokens: 5, ResponseStarted: true,
+				ErrorMessage: "provider failed before transport ended",
+				Trace:        &attemptwire.AttemptTraceWire{InboundPath: "/v1/responses"},
+			}
+			rctx, _ := newRemoteAttemptContext(t, context.Background(), 40)
+			stream := &remoteRelayStreamStub{
+				commit: tunnel.Committed, copyErr: test.cause, copyResult: &wireResult, dispatchProvider: true,
+				respond: func(dst http.ResponseWriter) {
+					dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
+					dst.WriteHeader(http.StatusOK)
+					_, err := dst.Write([]byte("partial"))
+					require.NoError(t, err)
+				},
+			}
+			executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+				SourceAgentID: "source-a", Relay: &remoteRelayLinkStub{stream: stream}, Targets: enabledRemoteTargets("target-a"),
+				DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: func() bool { return true },
+			})
+
+			outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 40, validRemoteBoundAttempt())
+
+			require.Equal(t, AttemptCommitUncertain, outcome.Kind)
+			require.Equal(t, tunnel.CommitUncertain, outcome.Commit)
+			require.Equal(t, ActionStop, nextAttemptAction(AttemptDecisionInput{
+				CurrentPath: app.RoutePathRelay, HasNextTarget: true, HasLocalTarget: true, HasNextAttempt: true, Outcome: outcome,
+			}))
+			require.True(t, outcome.ProviderResultKnown)
+			require.True(t, outcome.ProviderDispatched)
+			require.Equal(t, 2, outcome.Dispatches)
+			require.Equal(t, 23, outcome.Result.PromptTokens)
+			require.Equal(t, 5, outcome.Result.CompletionTokens)
+			require.ErrorIs(t, outcome.Result.Err, test.cause)
+			require.Equal(t, test.wantReason, outcome.ReasonCode)
+			require.NotNil(t, outcome.Trace)
+			require.Equal(t, "/v1/responses", outcome.Trace.InboundPath)
+		})
+	}
 }
 
 func (s *remoteRelayStreamStub) CommitState() tunnel.CommitState { return s.commit }
@@ -109,12 +463,12 @@ func TestRemoteAttemptDirectSuccess(t *testing.T) {
 	rctx, client := newRemoteAttemptContext(t, context.Background(), 0)
 	targets := enabledRemoteTargets("target-a")
 	providerDispatches := 0
-	direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
+	direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 		providerDispatches++
 		writeRemoteResponse(t, dst, http.StatusCreated, []byte("direct-response"), attemptwire.AttemptProxyResult{
 			Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true, ResponseStarted: true,
 		})
-		return agentproxy.DirectOutcome{Commit: tunnel.Committed, ResponseStarted: true}
+		return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true}
 	}}
 	relay := &remoteRelayLinkStub{}
 	executor := newRemoteExecutorForTest(targets, direct, relay)
@@ -130,18 +484,182 @@ func TestRemoteAttemptDirectSuccess(t *testing.T) {
 	require.Zero(t, relay.calls)
 	require.Equal(t, 1, providerDispatches)
 	require.Equal(t, currentRouteID, direct.request.RouteID)
-	require.Equal(t, attemptwire.AttemptProxyMeta{Attempt: validRemoteBoundAttempt(), RequestPath: "/v1/responses"}, *direct.request.Attempt)
+	require.Equal(t, attemptwire.AttemptProxyMeta{Attempt: validRemoteBoundAttempt(), RequestPath: "/v1/responses"}, direct.request.Attempt)
 	require.Equal(t, []string{"target-a"}, targets.calls)
 	require.Equal(t, []models.AgentPathKind{models.AgentPathDirect}, agentPathKinds(outcome.AgentPaths))
 }
 
+func TestRemoteAttemptDirectedTransportPolicyMatrix(t *testing.T) {
+	tests := []struct {
+		name                            string
+		sourceDirect, sourceRelay       bool
+		targetDirect, targetRelay       bool
+		wantPath                        app.RoutePath
+		wantDirectCalls, wantRelayCalls int
+		wantDisabledReasons             []string
+		wantDirectDisabled              []agentproxy.DirectPathDisabledReason
+	}{
+		{name: "all enabled uses direct only", sourceDirect: true, sourceRelay: true, targetDirect: true, targetRelay: true, wantPath: app.RoutePathDirect, wantDirectCalls: 1},
+		{name: "source direct disabled falls back to relay", sourceRelay: true, targetDirect: true, targetRelay: true, wantPath: app.RoutePathRelay, wantRelayCalls: 1, wantDisabledReasons: []string{consts.RouteErrorSourceDirectOutboundDisabled}, wantDirectDisabled: []agentproxy.DirectPathDisabledReason{agentproxy.DirectPathDisabledSourceOutbound}},
+		{name: "target direct disabled falls back to relay", sourceDirect: true, sourceRelay: true, targetRelay: true, wantPath: app.RoutePathRelay, wantRelayCalls: 1, wantDisabledReasons: []string{consts.RouteErrorTargetDirectInboundDisabled}, wantDirectDisabled: []agentproxy.DirectPathDisabledReason{agentproxy.DirectPathDisabledTargetInbound}},
+		{name: "source relay disabled does not block direct success", sourceDirect: true, targetDirect: true, targetRelay: true, wantPath: app.RoutePathDirect, wantDirectCalls: 1},
+		{name: "source direct and target relay disabled perform no transport", sourceRelay: true, targetDirect: true, wantPath: app.RoutePathRelay, wantDisabledReasons: []string{consts.RouteErrorSourceDirectOutboundDisabled, consts.RouteErrorTargetRelayInboundDisabled}, wantDirectDisabled: []agentproxy.DirectPathDisabledReason{agentproxy.DirectPathDisabledSourceOutbound}},
+		{name: "all directions disabled prefer source reasons and perform no transport", wantPath: app.RoutePathRelay, wantDisabledReasons: []string{consts.RouteErrorSourceDirectOutboundDisabled, consts.RouteErrorSourceRelayOutboundDisabled}, wantDirectDisabled: []agentproxy.DirectPathDisabledReason{agentproxy.DirectPathDisabledSourceOutbound}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rctx, _ := newRemoteAttemptContext(t, context.Background(), 42)
+			direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+				writeRemoteResponse(t, dst, http.StatusOK, nil, attemptwire.AttemptProxyResult{
+					Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true, ResponseStarted: true,
+				})
+				return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true}
+			}}
+			relay := &remoteRelayLinkStub{stream: &remoteRelayStreamStub{
+				commit: tunnel.Committed,
+				respond: func(dst http.ResponseWriter) {
+					writeRemoteResponse(t, dst, http.StatusOK, nil, attemptwire.AttemptProxyResult{
+						Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true, ResponseStarted: true,
+					})
+				},
+			}}
+			targets := &remoteTargetsStub{snapshots: map[string]RemoteTargetSnapshot{
+				"target-a": {
+					Enabled: true, DirectInboundEnabled: test.targetDirect, RelayInboundEnabled: test.targetRelay,
+					HTTPAddresses: `[{"url":"http://target.invalid:8139","tag":"direct"}]`, AddressTag: "direct",
+				},
+			}}
+			disabledRecorder := &recordingDirectPathDisabled{}
+			executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+				SourceAgentID: "source-a", Direct: direct, Relay: relay, Targets: targets,
+				DirectOutboundEnabled: func() bool { return test.sourceDirect },
+				RelayOutboundEnabled:  func() bool { return test.sourceRelay },
+				DirectPathDisabled:    disabledRecorder,
+			})
+
+			outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 42, validRemoteBoundAttempt())
+
+			require.Equal(t, test.wantPath, outcome.Path)
+			require.Equal(t, test.wantDirectCalls, direct.calls)
+			require.Equal(t, test.wantRelayCalls, relay.calls)
+			disabled := make([]models.AgentPathRecord, 0, len(outcome.AgentPaths))
+			for _, record := range outcome.AgentPaths {
+				if record.Result == models.AgentPathResult("disabled") {
+					disabled = append(disabled, record)
+				}
+			}
+			var reasons []string
+			for _, record := range disabled {
+				reasons = append(reasons, record.ReasonCode)
+				require.Equal(t, models.AgentPathStage("policy"), record.Stage)
+				require.Equal(t, models.AgentPathNotCommitted, record.CommitState)
+			}
+			require.Equal(t, test.wantDisabledReasons, reasons)
+			var gotDisabled []agentproxy.DirectPathDisabledReason
+			for _, event := range disabledRecorder.events {
+				require.Equal(t, "source-a", event.SourceAgentID)
+				require.Equal(t, "target-a", event.TargetAgentID)
+				gotDisabled = append(gotDisabled, event.Reason)
+			}
+			require.Equal(t, test.wantDirectDisabled, gotDisabled)
+		})
+	}
+}
+
+func TestRemoteAttemptTransportPathDecisionTableIsOrderedAndDefersSourceReaders(t *testing.T) {
+	var reads []app.RoutePath
+	executor := &remoteExecutor{
+		DirectOutboundEnabled: func() bool {
+			reads = append(reads, app.RoutePathDirect)
+			return true
+		},
+		RelayOutboundEnabled: func() bool {
+			reads = append(reads, app.RoutePathRelay)
+			return true
+		},
+	}
+
+	decisions := executor.transportPathDecisions(remoteTransportAttempt{})
+
+	require.Empty(t, reads, "constructing the decision table must not freeze source policy")
+	require.Len(t, decisions, 2)
+	require.Equal(t, app.RoutePathDirect, decisions[0].path)
+	require.Equal(t, app.RoutePathRelay, decisions[1].path)
+	require.True(t, decisions[0].sourceEnabled())
+	require.Equal(t, []app.RoutePath{app.RoutePathDirect}, reads)
+	require.True(t, decisions[1].sourceEnabled())
+	require.Equal(t, []app.RoutePath{app.RoutePathDirect, app.RoutePathRelay}, reads)
+}
+
+func TestRemoteAttemptReReadsRelayPolicyAfterDirectPreCommitFailure(t *testing.T) {
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 42)
+	var relayEnabled atomic.Bool
+	relayEnabled.Store(true)
+	var relayPolicyReads atomic.Int32
+	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		relayEnabled.Store(false)
+		return agentproxy.AttemptTransportOutcome{
+			Commit: tunnel.PreCommit, Stage: "connect", Code: agentproxy.CodeDirectConnect,
+			Err: errors.New(agentproxy.CodeDirectConnect),
+		}
+	}}
+	relay := &remoteRelayLinkStub{}
+	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+		SourceAgentID: "source-a", Direct: direct, Relay: relay, Targets: enabledRemoteTargets("target-a"),
+		DirectOutboundEnabled: func() bool { return true },
+		RelayOutboundEnabled: func() bool {
+			relayPolicyReads.Add(1)
+			return relayEnabled.Load()
+		},
+	})
+
+	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 42, validRemoteBoundAttempt())
+
+	require.Equal(t, AttemptTransportUnavailable, outcome.Kind)
+	require.Equal(t, app.RoutePathRelay, outcome.Path)
+	require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, outcome.ReasonCode)
+	require.Equal(t, int32(1), relayPolicyReads.Load(), "Relay policy must be read only when Relay is reached")
+	require.Equal(t, 1, direct.calls)
+	require.Zero(t, relay.calls)
+	require.Len(t, outcome.AgentPaths, 2)
+	require.Equal(t, models.AgentPathUnavailable, outcome.AgentPaths[0].Result)
+	require.Equal(t, models.AgentPathDisabled, outcome.AgentPaths[1].Result)
+	require.Equal(t, models.AgentPathPolicy, outcome.AgentPaths[1].Stage)
+}
+
+func TestRemoteAttemptManagerSecondRelayGatePreservesPolicyRecord(t *testing.T) {
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 42)
+	var relayPolicyReads atomic.Int32
+	relayEnabled := func() bool { return relayPolicyReads.Add(1) == 1 }
+	manager := agenttunnel.NewManager(agenttunnel.ManagerOptions{RelayOutboundEnabled: relayEnabled})
+	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+		SourceAgentID: "source-a", Relay: manager, Targets: enabledRemoteTargets("target-a"),
+		DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: relayEnabled,
+	})
+
+	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 42, validRemoteBoundAttempt())
+
+	require.Equal(t, AttemptTransportUnavailable, outcome.Kind)
+	require.Equal(t, app.RoutePathRelay, outcome.Path)
+	require.Equal(t, tunnel.PreCommit, outcome.Commit)
+	require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, outcome.ReasonCode)
+	require.Equal(t, int32(2), relayPolicyReads.Load())
+	require.Len(t, outcome.AgentPaths, 2)
+	relayRecord := outcome.AgentPaths[1]
+	require.Equal(t, models.AgentPathDisabled, relayRecord.Result)
+	require.Equal(t, models.AgentPathPolicy, relayRecord.Stage)
+	require.Equal(t, models.AgentPathNotCommitted, relayRecord.CommitState)
+	require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, relayRecord.ReasonCode)
+	require.Empty(t, manager.Snapshot().RecentErrors, "policy rejection must not affect Relay health")
+}
+
 func TestRemoteAttemptHardRouteIDZeroDoesNotReusePreviousRoute(t *testing.T) {
 	rctx, _ := newRemoteAttemptContext(t, context.Background(), 99)
-	direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
+	direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 		writeRemoteResponse(t, dst, http.StatusOK, []byte("ok"), attemptwire.AttemptProxyResult{
 			Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true, ResponseStarted: true,
 		})
-		return agentproxy.DirectOutcome{Commit: tunnel.Committed, ResponseStarted: true}
+		return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true}
 	}}
 	executor := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, &remoteRelayLinkStub{})
 
@@ -166,8 +684,8 @@ func TestRemoteAttemptNoReplayDirectPreCommitFallsBackToRelay(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rctx, client := newRemoteAttemptContext(t, context.Background(), 41)
 			targets := enabledRemoteTargets("target-a")
-			direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-				return agentproxy.DirectOutcome{Commit: tunnel.PreCommit, Stage: tt.stage, Code: tt.code, Err: errors.New(tt.code)}
+			direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+				return agentproxy.AttemptTransportOutcome{Commit: tunnel.PreCommit, Stage: tt.stage, Code: tt.code, Err: errors.New(tt.code)}
 			}}
 			stream := &remoteRelayStreamStub{commit: tunnel.Committed, dispatchProvider: true, respond: func(dst http.ResponseWriter) {
 				writeRemoteResponse(t, dst, http.StatusOK, []byte("relay-response"), attemptwire.AttemptProxyResult{
@@ -192,15 +710,14 @@ func TestRemoteAttemptNoReplayDirectPreCommitFallsBackToRelay(t *testing.T) {
 			require.Equal(t, uint8(1), relay.request.Hop)
 			require.Equal(t, uint(41), relay.request.RouteID)
 			require.Equal(t, "Bearer original", relay.request.Header.Get("Authorization"))
-			require.Empty(t, relay.request.Header.Get(attemptwire.HeaderMeta))
 		})
 	}
 }
 
 func TestRemoteAttemptBothTransportsPreCommitUnavailable(t *testing.T) {
 	rctx, _ := newRemoteAttemptContext(t, context.Background(), 7)
-	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-		return agentproxy.DirectOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeDirectConnect, Err: errors.New("direct unavailable")}
+	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		return agentproxy.AttemptTransportOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeDirectConnect, Err: errors.New("direct unavailable")}
 	}}
 	relay := &remoteRelayLinkStub{err: errors.New("relay unavailable")}
 	executor := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, relay)
@@ -219,9 +736,9 @@ func TestRemoteAttemptEndpointRejectionNeverFallsBack(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusNotFound} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			rctx, client := newRemoteAttemptContext(t, context.Background(), 11)
-			direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
+			direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 				writeRemoteProxyRejection(t, dst, status)
-				return agentproxy.DirectOutcome{Commit: tunnel.Committed, ResponseStarted: true}
+				return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true}
 			}}
 			relay := &remoteRelayLinkStub{}
 			executor := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, relay)
@@ -240,13 +757,13 @@ func TestRemoteAttemptProviderControlFailureNeverChangesTransport(t *testing.T) 
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			rctx, _ := newRemoteAttemptContext(t, context.Background(), 13)
 			providerDispatches := 0
-			direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
+			direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 				providerDispatches++
 				writeRemoteControl(t, dst, attemptwire.AttemptProxyResult{
 					Kind: attemptwire.ResultProviderFailed, HTTPStatus: status, ProviderDispatched: true,
 					ProviderResultKnown: true, PlanAdvanceAllowed: true, ReasonCode: "provider_http_error",
 				})
-				return agentproxy.DirectOutcome{Commit: tunnel.Committed}
+				return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed}
 			}}
 			relay := &remoteRelayLinkStub{}
 			executor := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, relay)
@@ -265,23 +782,22 @@ func TestRemoteAttemptUncertainInterruptedAndCanceledNeverReplay(t *testing.T) {
 	tests := []struct {
 		name        string
 		ctx         func() (context.Context, context.CancelFunc)
-		forward     func(*testing.T, context.Context, http.ResponseWriter) agentproxy.DirectOutcome
+		forward     func(*testing.T, context.Context, http.ResponseWriter) agentproxy.AttemptTransportOutcome
 		wantKind    AttemptOutcomeKind
 		wantStarted bool
 	}{
-		{name: "direct commit uncertain", ctx: liveRemoteContext, wantKind: AttemptCommitUncertain, forward: func(_ *testing.T, _ context.Context, _ http.ResponseWriter) agentproxy.DirectOutcome {
-			return agentproxy.DirectOutcome{Commit: tunnel.CommitUncertain, Code: agentproxy.CodeDirectRoundTrip, Err: errors.New("unknown write")}
+		{name: "direct commit uncertain", ctx: liveRemoteContext, wantKind: AttemptCommitUncertain, forward: func(_ *testing.T, _ context.Context, _ http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+			return agentproxy.AttemptTransportOutcome{Commit: tunnel.CommitUncertain, Code: agentproxy.CodeDirectRoundTrip, Err: errors.New("unknown write")}
 		}},
-		{name: "response interrupted", ctx: liveRemoteContext, wantKind: AttemptCommitUncertain, wantStarted: true, forward: func(t *testing.T, _ context.Context, dst http.ResponseWriter) agentproxy.DirectOutcome {
+		{name: "response interrupted", ctx: liveRemoteContext, wantKind: AttemptCommitUncertain, wantStarted: true, forward: func(t *testing.T, _ context.Context, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 			dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
-			dst.Header().Add("Trailer", attemptwire.TrailerResult)
 			dst.WriteHeader(http.StatusOK)
 			_, err := dst.Write([]byte("partial"))
 			require.NoError(t, err)
-			return agentproxy.DirectOutcome{Commit: tunnel.Committed, ResponseStarted: true, Code: agentproxy.CodeDirectResponseInterrupted, Err: errors.New("body interrupted")}
+			return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true, Code: agentproxy.CodeDirectResponseInterrupted, Err: errors.New("body interrupted")}
 		}},
-		{name: "request canceled", ctx: canceledRemoteContext, wantKind: AttemptCanceled, forward: func(_ *testing.T, ctx context.Context, _ http.ResponseWriter) agentproxy.DirectOutcome {
-			return agentproxy.DirectOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeRequestCancelled, Err: context.Cause(ctx)}
+		{name: "request canceled", ctx: canceledRemoteContext, wantKind: AttemptCanceled, forward: func(_ *testing.T, ctx context.Context, _ http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+			return agentproxy.AttemptTransportOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeRequestCancelled, Err: context.Cause(ctx)}
 		}},
 	}
 	for _, tt := range tests {
@@ -289,7 +805,7 @@ func TestRemoteAttemptUncertainInterruptedAndCanceledNeverReplay(t *testing.T) {
 			ctx, cancel := tt.ctx()
 			defer cancel()
 			rctx, _ := newRemoteAttemptContext(t, ctx, 17)
-			direct := &remoteDirectStub{forward: func(ctx context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.DirectOutcome {
+			direct := &remoteDirectStub{forward: func(ctx context.Context, _ agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 				return tt.forward(t, ctx, dst)
 			}}
 			relay := &remoteRelayLinkStub{}
@@ -308,35 +824,11 @@ func TestRemoteAttemptUncertainInterruptedAndCanceledNeverReplay(t *testing.T) {
 	}
 }
 
-func TestRemoteAttemptForwardTicketCacheMissAllowsRelay(t *testing.T) {
-	rctx, _ := newRemoteAttemptContext(t, context.Background(), 19)
-	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-		return agentproxy.DirectOutcome{}
-	}}
-	stream := &remoteRelayStreamStub{commit: tunnel.Committed, respond: func(dst http.ResponseWriter) {
-		writeRemoteControl(t, dst, attemptwire.AttemptProxyResult{Kind: attemptwire.ResultExecutionRejected, ProviderResultKnown: true, PlanAdvanceAllowed: true})
-	}}
-	relay := &remoteRelayLinkStub{stream: stream}
-	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
-		SourceAgentID: "source-a", Direct: direct, Relay: relay, Targets: enabledRemoteTargets("target-a"),
-		CachedForwardTicket: func() (agentauth.ForwardTicket, error) { return "", errors.New("cache miss") },
-		RelayEnabled:        func() bool { return true },
-	})
-
-	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 19, validRemoteBoundAttempt())
-
-	require.Equal(t, AttemptExecutionRejected, outcome.Kind)
-	require.Equal(t, app.RoutePathRelay, outcome.Path)
-	require.Zero(t, direct.calls)
-	require.Equal(t, 1, relay.calls)
-	require.Zero(t, stream.providerDispatches)
-}
-
 func TestRemoteAttemptRelayOnlyAndDisabledTargetBoundaries(t *testing.T) {
-	t.Run("relay only skips direct", func(t *testing.T) {
+	t.Run("direct policy disabled skips direct", func(t *testing.T) {
 		rctx, _ := newRemoteAttemptContext(t, context.Background(), 23)
-		direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-			return agentproxy.DirectOutcome{}
+		direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+			return agentproxy.AttemptTransportOutcome{}
 		}}
 		stream := &remoteRelayStreamStub{commit: tunnel.Committed, dispatchProvider: true, respond: func(dst http.ResponseWriter) {
 			writeRemoteResponse(t, dst, http.StatusOK, nil, attemptwire.AttemptProxyResult{
@@ -346,8 +838,7 @@ func TestRemoteAttemptRelayOnlyAndDisabledTargetBoundaries(t *testing.T) {
 		relay := &remoteRelayLinkStub{stream: stream}
 		executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
 			SourceAgentID: "source-a", Direct: direct, Relay: relay, Targets: enabledRemoteTargets("target-a"),
-			CachedForwardTicket: func() (agentauth.ForwardTicket, error) { return "ticket", nil },
-			RelayEnabled:        func() bool { return true }, PeerRouteMode: func() string { return consts.PeerRouteModeRelayOnly },
+			DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: func() bool { return true },
 		})
 		outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 23, validRemoteBoundAttempt())
 		require.Equal(t, AttemptSucceeded, outcome.Kind)
@@ -358,8 +849,8 @@ func TestRemoteAttemptRelayOnlyAndDisabledTargetBoundaries(t *testing.T) {
 	t.Run("disabled target performs no IO", func(t *testing.T) {
 		rctx, _ := newRemoteAttemptContext(t, context.Background(), 29)
 		targets := &remoteTargetsStub{snapshots: map[string]RemoteTargetSnapshot{"target-a": {Enabled: false}}}
-		direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-			return agentproxy.DirectOutcome{}
+		direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+			return agentproxy.AttemptTransportOutcome{}
 		}}
 		relay := &remoteRelayLinkStub{}
 		executor := newRemoteExecutorForTest(targets, direct, relay)
@@ -373,8 +864,8 @@ func TestRemoteAttemptRelayOnlyAndDisabledTargetBoundaries(t *testing.T) {
 	t.Run("missing target is distinct from disabled", func(t *testing.T) {
 		rctx, _ := newRemoteAttemptContext(t, context.Background(), 31)
 		targets := &remoteTargetsStub{snapshots: map[string]RemoteTargetSnapshot{}}
-		executor := newRemoteExecutorForTest(targets, &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-			return agentproxy.DirectOutcome{}
+		executor := newRemoteExecutorForTest(targets, &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+			return agentproxy.AttemptTransportOutcome{}
 		}}, &remoteRelayLinkStub{})
 		outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 31, validRemoteBoundAttempt())
 		require.Equal(t, agentproxy.CodeTargetNotFound, outcome.ReasonCode)
@@ -401,7 +892,6 @@ func TestRemoteAttemptRelayUncertainInterruptedCanceledAndRejectedNeverReplay(t 
 				commit: tunnel.Committed, copyErr: errors.New("response interrupted"), dispatchProvider: true,
 				respond: func(dst http.ResponseWriter) {
 					dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
-					dst.Header().Add("Trailer", attemptwire.TrailerResult)
 					dst.WriteHeader(http.StatusOK)
 					_, _ = dst.Write([]byte("partial"))
 				},
@@ -423,14 +913,13 @@ func TestRemoteAttemptRelayUncertainInterruptedCanceledAndRejectedNeverReplay(t 
 			ctx, cancel := tt.ctx()
 			defer cancel()
 			rctx, _ := newRemoteAttemptContext(t, ctx, 37)
-			direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-				return agentproxy.DirectOutcome{}
+			direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+				return agentproxy.AttemptTransportOutcome{}
 			}}
 			relay := &remoteRelayLinkStub{stream: tt.stream}
 			executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
 				SourceAgentID: "source-a", Direct: direct, Relay: relay, Targets: enabledRemoteTargets("target-a"),
-				CachedForwardTicket: func() (agentauth.ForwardTicket, error) { return "ticket", nil },
-				RelayEnabled:        func() bool { return true }, PeerRouteMode: func() string { return consts.PeerRouteModeRelayOnly },
+				DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: func() bool { return true },
 			})
 
 			outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 37, validRemoteBoundAttempt())
@@ -455,14 +944,13 @@ func TestRemoteAttemptRelayFlushOnlyInterruptedWithNonFlusherNeverReplays(t *tes
 	_, clientHasFlusher := any(client).(http.Flusher)
 	require.False(t, clientHasFlusher)
 	rctx := newRemoteAttemptContextWithWriter(t, context.Background(), 39, client)
-	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-		return agentproxy.DirectOutcome{}
+	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		return agentproxy.AttemptTransportOutcome{}
 	}}
 	stream := &remoteRelayStreamStub{
 		commit: tunnel.Committed, copyErr: errors.New("flush-only response interrupted"), dispatchProvider: true,
 		respond: func(dst http.ResponseWriter) {
 			dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
-			dst.Header().Add("Trailer", attemptwire.TrailerResult)
 			flusher, ok := dst.(http.Flusher)
 			require.True(t, ok, "attempt receiver must expose flush without requiring the source writer to do so")
 			flusher.Flush()
@@ -471,8 +959,7 @@ func TestRemoteAttemptRelayFlushOnlyInterruptedWithNonFlusherNeverReplays(t *tes
 	relay := &remoteRelayLinkStub{stream: stream}
 	executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
 		SourceAgentID: "source-a", Direct: direct, Relay: relay, Targets: enabledRemoteTargets("target-a"),
-		CachedForwardTicket: func() (agentauth.ForwardTicket, error) { return "ticket", nil },
-		RelayEnabled:        func() bool { return true }, PeerRouteMode: func() string { return consts.PeerRouteModeRelayOnly },
+		DirectOutboundEnabled: func() bool { return false }, RelayOutboundEnabled: func() bool { return true },
 	})
 
 	outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 39, validRemoteBoundAttempt())
@@ -497,7 +984,7 @@ type remoteCancellationRelayLink struct {
 	calls  int
 }
 
-func (l *remoteCancellationRelayLink) OpenStream(ctx context.Context, _ app.RelayRequest) (app.RelayStream, error) {
+func (l *remoteCancellationRelayLink) OpenAttemptStream(ctx context.Context, _ app.AttemptStreamRequest) (app.AttemptStream, error) {
 	l.calls++
 	if l.stage == "open" {
 		l.cancel(l.cause)
@@ -531,13 +1018,13 @@ func (s *remoteCancellationRelayStream) Upload(ctx context.Context, _ io.Reader)
 	return nil
 }
 
-func (s *remoteCancellationRelayStream) CopyResponse(ctx context.Context, _ http.ResponseWriter) error {
+func (s *remoteCancellationRelayStream) CopyAttemptResponse(ctx context.Context, _ http.ResponseWriter) (attemptwire.AttemptProxyResult, error) {
 	if s.stage == "copy" {
 		s.providerDispatches++
 		s.cancel(s.cause)
-		return context.Cause(ctx)
+		return attemptwire.AttemptProxyResult{}, context.Cause(ctx)
 	}
-	return nil
+	return attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded}, nil
 }
 
 func (s *remoteCancellationRelayStream) CommitState() tunnel.CommitState { return s.commit }
@@ -553,6 +1040,7 @@ func TestRemoteAttemptCancellationAtEveryWaitNeverReplays(t *testing.T) {
 		wantRelay              int
 		wantProviderDispatches int
 		wantCode               string
+		wantKind               AttemptOutcomeKind
 	}{
 		{stage: "direct", cause: context.Canceled, wantCode: "request_canceled"},
 		{stage: "open", cause: context.DeadlineExceeded, wantRelay: 1, wantCode: "request_deadline"},
@@ -565,12 +1053,12 @@ func TestRemoteAttemptCancellationAtEveryWaitNeverReplays(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(context.Canceled)
 			rctx, _ := newRemoteAttemptContext(t, ctx, 43)
-			direct := &remoteDirectStub{forward: func(ctx context.Context, _ agentproxy.DirectRequest, _ http.ResponseWriter) agentproxy.DirectOutcome {
+			direct := &remoteDirectStub{forward: func(ctx context.Context, _ agentproxy.DirectRequest, _ http.ResponseWriter) agentproxy.AttemptTransportOutcome {
 				if tt.stage == "direct" {
 					cancel(tt.cause)
-					return agentproxy.DirectOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeRequestCancelled, Err: context.Cause(ctx)}
+					return agentproxy.AttemptTransportOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeRequestCancelled, Err: context.Cause(ctx)}
 				}
-				return agentproxy.DirectOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeDirectConnect, Err: errors.New("direct unavailable")}
+				return agentproxy.AttemptTransportOutcome{Commit: tunnel.PreCommit, Code: agentproxy.CodeDirectConnect, Err: errors.New("direct unavailable")}
 			}}
 			stream := &remoteCancellationRelayStream{stage: tt.stage, cancel: cancel, cause: tt.cause}
 			relay := &remoteCancellationRelayLink{stage: tt.stage, cancel: cancel, cause: tt.cause, stream: stream}
@@ -578,7 +1066,11 @@ func TestRemoteAttemptCancellationAtEveryWaitNeverReplays(t *testing.T) {
 
 			outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 43, validRemoteBoundAttempt())
 
-			require.Equal(t, AttemptCanceled, outcome.Kind)
+			wantKind := tt.wantKind
+			if wantKind == "" {
+				wantKind = AttemptCanceled
+			}
+			require.Equal(t, wantKind, outcome.Kind)
 			require.Equal(t, tt.wantCode, outcome.ReasonCode)
 			require.Equal(t, 1, direct.calls)
 			require.Equal(t, tt.wantRelay, relay.calls)
@@ -591,8 +1083,8 @@ func TestRemoteAttemptCancellationAtEveryWaitNeverReplays(t *testing.T) {
 }
 
 func TestRemoteAttemptInvalidInputsPerformNoTransportIO(t *testing.T) {
-	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.DirectOutcome {
-		return agentproxy.DirectOutcome{}
+	direct := &remoteDirectStub{forward: func(context.Context, agentproxy.DirectRequest, http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		return agentproxy.AttemptTransportOutcome{}
 	}}
 	relay := &remoteRelayLinkStub{}
 	executor := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, relay)
@@ -609,19 +1101,19 @@ func TestRemoteAttemptInvalidInputsPerformNoTransportIO(t *testing.T) {
 	require.Zero(t, relay.calls)
 }
 
-func newRemoteExecutorForTest(targets RemoteTargetRuntime, direct agentproxy.DirectRequestForwarder, relay app.RelayLink) RemoteAttemptExecutor {
+func newRemoteExecutorForTest(targets RemoteTargetRuntime, direct agentproxy.DirectRequestForwarder, relay app.AttemptStreamOpener) RemoteAttemptExecutor {
 	return NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
 		SourceAgentID: "source-a", Direct: direct, Relay: relay, Targets: targets,
-		CachedForwardTicket: func() (agentauth.ForwardTicket, error) { return "forward-ticket", nil },
-		RelayEnabled:        func() bool { return true },
+		DirectOutboundEnabled: func() bool { return true }, RelayOutboundEnabled: func() bool { return true },
 	})
 }
 
 func enabledRemoteTargets(agentID string) *remoteTargetsStub {
 	return &remoteTargetsStub{snapshots: map[string]RemoteTargetSnapshot{
 		agentID: {
-			Enabled: true, HTTPAddresses: `[{"url":"http://target.invalid:8139","tag":"direct"}]`,
-			AddressTag: "direct",
+			Enabled: true, DirectInboundEnabled: true, RelayInboundEnabled: true,
+			HTTPAddresses: `[{"url":"http://target.invalid:8139","tag":"direct"}]`,
+			AddressTag:    "direct",
 		},
 	}}
 }
@@ -641,7 +1133,6 @@ func newRemoteAttemptContextWithWriter(t *testing.T, ctx context.Context, _ uint
 	ginContext, _ := gin.CreateTestContext(client)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses?stream=true", nil).WithContext(ctx)
 	request.Header.Set("Authorization", "Bearer original")
-	request.Header.Set(attemptwire.HeaderMeta, "forged")
 	ginContext.Request = request
 	return &state.RelayContext{
 		Context:   ginContext,
@@ -680,28 +1171,34 @@ func writeRemoteControl(t *testing.T, dst http.ResponseWriter, result attemptwir
 	t.Helper()
 	dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeControl)
 	dst.WriteHeader(http.StatusOK)
-	require.NoError(t, json.NewEncoder(dst).Encode(result))
+	setRemoteResult(t, dst, result)
 }
 
 func writeRemoteResponse(t *testing.T, dst http.ResponseWriter, status int, body []byte, result attemptwire.AttemptProxyResult) {
 	t.Helper()
-	encoded, err := attemptwire.EncodeResult(result)
-	require.NoError(t, err)
 	dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
-	dst.Header().Add("Trailer", attemptwire.TrailerResult)
 	dst.WriteHeader(status)
-	_, err = dst.Write(body)
+	_, err := dst.Write(body)
 	require.NoError(t, err)
-	dst.Header().Set(attemptwire.TrailerResult, encoded)
+	setRemoteResult(t, dst, result)
 }
 
 func writeRemoteProxyRejection(t *testing.T, dst http.ResponseWriter, status int) {
 	t.Helper()
-	dst.WriteHeader(status)
-	require.NoError(t, json.NewEncoder(dst).Encode(attemptwire.AttemptProxyResult{
+	dst.Header().Set(attemptwire.HeaderMode, attemptwire.ModeControl)
+	dst.WriteHeader(http.StatusOK)
+	setRemoteResult(t, dst, attemptwire.AttemptProxyResult{
 		Kind: attemptwire.ResultProxyRejected, HTTPStatus: status,
-		ReasonCode: "attempt_ingress_rejected", ErrorMessage: "attempt proxy ingress rejected",
-	}))
+		ProviderResultKnown: true, ReasonCode: "attempt_ingress_rejected", ErrorMessage: "attempt proxy ingress rejected",
+	})
+}
+
+func setRemoteResult(t *testing.T, dst http.ResponseWriter, result attemptwire.AttemptProxyResult) {
+	t.Helper()
+	capture, ok := dst.(*remoteResponseCapture)
+	require.True(t, ok)
+	copy := result
+	capture.attemptResult = &copy
 }
 
 func agentPathKinds(records []models.AgentPathRecord) []models.AgentPathKind {

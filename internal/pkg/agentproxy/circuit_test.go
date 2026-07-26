@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sourcegraph/conc"
 	"github.com/stretchr/testify/require"
 )
 
@@ -268,4 +269,53 @@ func TestDirectCircuitIgnoresCompletionFromEvictedGeneration(t *testing.T) {
 	require.True(t, ok, "completion from an evicted generation must not mutate the replacement state")
 	c.cancelled(probe)
 	c.cancelled(currentA)
+}
+
+func TestDirectCircuitOldTransportIdentityCompletionDoesNotMutateNewIdentity(t *testing.T) {
+	c := newDirectCircuit(directCircuitOptions{FailureThreshold: 1, OpenFor: time.Minute, Limit: 4})
+	oldKey := directCircuitKey{
+		TargetAgentID: "a", AddressFingerprint: "fp", TransportIdentity: DirectTransportIdentity{1},
+	}
+	newKey := directCircuitKey{
+		TargetAgentID: "a", AddressFingerprint: "fp", TransportIdentity: DirectTransportIdentity{2},
+	}
+	oldPermit, ok := c.allow(oldKey)
+	require.True(t, ok)
+	newPermit, ok := c.allow(newKey)
+	require.True(t, ok)
+
+	c.transportFailed(oldPermit)
+	newProbe, ok := c.allow(newKey)
+	require.True(t, ok, "an old identity completion must not open the new identity")
+	c.cancelled(newProbe)
+	c.transportFailed(newPermit)
+	_, ok = c.allow(newKey)
+	require.False(t, ok, "the new identity must still track its own failure")
+	_, ok = c.allow(oldKey)
+	require.False(t, ok, "the old identity must remain independently open")
+}
+
+func TestDirectCircuitConcurrentOldTransportCompletionDoesNotOpenNewIdentity(t *testing.T) {
+	for range 100 {
+		c := newDirectCircuit(directCircuitOptions{FailureThreshold: 1, OpenFor: time.Minute, Limit: 4})
+		oldKey := directCircuitKey{
+			TargetAgentID: "a", AddressFingerprint: "fp", TransportIdentity: DirectTransportIdentity{1},
+		}
+		newKey := directCircuitKey{
+			TargetAgentID: "a", AddressFingerprint: "fp", TransportIdentity: DirectTransportIdentity{2},
+		}
+		oldPermit, ok := c.allow(oldKey)
+		require.True(t, ok)
+		newPermit, ok := c.allow(newKey)
+		require.True(t, ok)
+
+		var completions conc.WaitGroup
+		completions.Go(func() { c.transportFailed(oldPermit) })
+		completions.Go(func() { c.cancelled(newPermit) })
+		completions.Wait()
+
+		probe, ok := c.allow(newKey)
+		require.True(t, ok)
+		c.cancelled(probe)
+	}
 }

@@ -26,7 +26,7 @@ func setupBYOKTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	}
 
 	application := app.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	application.SetEventBus(eventbus.NewMemoryBus())
 
 	w := httptest.NewRecorder()

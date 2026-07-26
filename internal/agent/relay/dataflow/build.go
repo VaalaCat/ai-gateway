@@ -125,7 +125,7 @@ var stepFactories = map[string]stepFactory{
 		return &StepHeaderOverride{headers: bc.cfg.HeaderOverride}
 	},
 	"upstream_script": func(bc *buildContext) Step {
-		return &StepUpstreamScript{agent: bc.deps.Agent, c: bc.deps.GinCtx, rctx: bc.deps.RCtx, ch: bc.ch, proto: bc.proto}
+		return &StepUpstreamScript{agent: bc.deps.Agent, c: bc.deps.GinCtx, rctx: bc.deps.RCtx, attempt: bc.deps.Attempt, proto: bc.proto}
 	},
 }
 

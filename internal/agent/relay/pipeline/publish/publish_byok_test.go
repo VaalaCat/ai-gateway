@@ -12,7 +12,7 @@ import (
 // newByokRctx 构造一个 projectExecution 测试用的最小 RelayContext。
 func newByokRctx(attempt state.Attempt) *state.RelayContext {
 	rctx := newPublishTestRctx()
-	rctx.State.Recorder = trace.NewRecorder(false, 0)
+	rctx.State.Recorder = trace.NewRecorder(trace.CaptureOff, 0)
 	rctx.State.Execution = state.ExecutionResult{
 		Used:    attempt,
 		Outcome: state.AttemptResult{},

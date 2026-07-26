@@ -51,6 +51,15 @@ type BootstrapSnapshot struct {
 	SigningKeys      []pkgagentauth.PublicKey
 }
 
+type ForwardCredential struct {
+	Ticket    pkgagentauth.ForwardTicket
+	ExpiresAt time.Time
+}
+
+type ForwardCredentialReader interface {
+	CachedForwardCredential() (ForwardCredential, error)
+}
+
 type ticketEntry struct {
 	token      string
 	issuedAt   time.Time
@@ -178,20 +187,22 @@ func (c *Cache) RelayTicket(ctx context.Context, desiredGeneration uint64) (pkga
 	return "", errTicketRefresh
 }
 
-func (c *Cache) CachedForwardTicket() (pkgagentauth.ForwardTicket, error) {
+func (c *Cache) CachedForwardCredential() (ForwardCredential, error) {
 	now := c.opts.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.availableLocked(protocol.AgentCapabilityForwardV1); err != nil {
-		return "", err
+		return ForwardCredential{}, err
 	}
 	if !c.hasForward || !c.forward.validAt(now) {
 		c.forward.token = ""
 		c.forward = ticketEntry{}
 		c.hasForward = false
-		return "", errTicketRefresh
+		return ForwardCredential{}, errTicketRefresh
 	}
-	return pkgagentauth.ForwardTicket(c.forward.token), nil
+	return ForwardCredential{
+		Ticket: pkgagentauth.ForwardTicket(c.forward.token), ExpiresAt: c.forward.expiresAt,
+	}, nil
 }
 
 func (c *Cache) Bootstrap() BootstrapSnapshot {
@@ -304,7 +315,7 @@ func (c *Cache) relayEntry(generation uint64, now time.Time) (ticketEntry, bool,
 }
 
 func (c *Cache) relayEntryLocked(generation uint64, now time.Time) (ticketEntry, bool, error) {
-	if err := c.availableLocked(protocol.AgentCapabilityTunnelV1); err != nil {
+	if err := c.availableLocked(protocol.AgentCapabilityTunnelV2); err != nil {
 		return ticketEntry{}, false, err
 	}
 	c.pruneExpiredRelayLocked(now)
@@ -480,7 +491,7 @@ func (c *Cache) issueRelayTicket(ctx context.Context, generation uint64) (entry 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.availableLocked(protocol.AgentCapabilityTunnelV1); err != nil {
+	if err := c.availableLocked(protocol.AgentCapabilityTunnelV2); err != nil {
 		return ticketEntry{}, err
 	}
 	c.pruneExpiredRelayLocked(entry.issuedAt)

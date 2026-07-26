@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"gorm.io/gorm"
 )
 
@@ -64,20 +65,28 @@ func applyUsageLogFilter(db *gorm.DB, filter UsageLogListFilter) *gorm.DB {
 // --- user-scoped ---
 
 func (q *usageLogQuery) List(opts ListOptions, filter UsageLogListFilter) ([]models.UsageLog, int64, error) {
-	db := applyUsageLogFilter(q.ctx.UserDB().Model(&models.UsageLog{}), filter)
-	var total int64
-	if err := db.Count(&total).Error; err != nil {
+	db, err := requestLogDB(&q.ctx.baseContext)
+	if err != nil {
 		return nil, 0, err
 	}
+	db = applyUsageLogFilter(db.Where("user_id = ?", q.ctx.userInfo.UserID), filter)
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, WrapLogDatabaseError(err)
+	}
 	var logs []models.UsageLog
-	err := db.Order("created_at DESC, id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
-	return logs, total, err
+	err = db.Order("created_at DESC, id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
+	return logs, total, WrapLogDatabaseError(err)
 }
 
 func (q *usageLogQuery) GetByRequestID(requestID string) (*models.UsageLog, error) {
+	db, err := requestLogDB(&q.ctx.baseContext)
+	if err != nil {
+		return nil, err
+	}
 	var log models.UsageLog
-	err := q.ctx.UserDB().Where("request_id = ?", requestID).First(&log).Error
-	return &log, err
+	err = db.Where("user_id = ? AND request_id = ?", q.ctx.userInfo.UserID, requestID).First(&log).Error
+	return &log, WrapLogDatabaseError(err)
 }
 
 // PercentileTTFT 计算 first_response_ms 的 p 分位数 (p ∈ [0,1]),
@@ -86,7 +95,12 @@ func (q *usageLogQuery) GetByRequestID(requestID string) (*models.UsageLog, erro
 // SQLite 友好的近似实现: ORDER BY first_response_ms ASC LIMIT 1 OFFSET floor(cnt * p)。
 // cnt=0 时直接返回 0。
 func (q *usageLogQuery) PercentileTTFT(filter UsageLogListFilter, p float64) (int64, error) {
-	return percentileTTFT(q.ctx.UserDB().Model(&models.UsageLog{}), filter, p)
+	db, err := requestLogDB(&q.ctx.baseContext)
+	if err != nil {
+		return 0, err
+	}
+	value, err := percentileTTFT(db.Where("user_id = ?", q.ctx.userInfo.UserID), filter, p)
+	return value, WrapLogDatabaseError(err)
 }
 
 // percentileTTFT 是 PercentileTTFT 的核心实现 (传入 base db 已带 scope 过滤)。
@@ -121,56 +135,122 @@ func percentileTTFT(base *gorm.DB, filter UsageLogListFilter, p float64) (int64,
 // --- admin-scoped ---
 
 func (q *adminUsageLogQuery) List(opts ListOptions, filter UsageLogListFilter) ([]models.UsageLog, int64, error) {
-	db := applyUsageLogFilter(q.ctx.GetDB().Model(&models.UsageLog{}), filter)
-	var total int64
-	if err := db.Count(&total).Error; err != nil {
+	db, err := requestLogDB(q.ctx)
+	if err != nil {
 		return nil, 0, err
 	}
+	db = applyUsageLogFilter(db, filter)
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, WrapLogDatabaseError(err)
+	}
 	var logs []models.UsageLog
-	err := db.Order("created_at DESC, id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
-	return logs, total, err
+	err = db.Order("created_at DESC, id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&logs).Error
+	return logs, total, WrapLogDatabaseError(err)
 }
 
 func (q *adminUsageLogQuery) GetByRequestID(requestID string) (*models.UsageLog, error) {
+	db, err := requestLogDB(q.ctx)
+	if err != nil {
+		return nil, err
+	}
 	var log models.UsageLog
-	err := q.ctx.GetDB().Where("request_id = ?", requestID).First(&log).Error
-	return &log, err
+	err = db.Where("request_id = ?", requestID).First(&log).Error
+	return &log, WrapLogDatabaseError(err)
 }
 
 func (q *adminUsageLogQuery) ExistsByRequestID(requestID string) (bool, error) {
+	db, err := requestLogDB(q.ctx)
+	if err != nil {
+		return false, err
+	}
 	var count int64
-	err := q.ctx.GetDB().Model(&models.UsageLog{}).Where("request_id = ?", requestID).Count(&count).Error
-	return count > 0, err
+	err = db.Where("request_id = ?", requestID).Count(&count).Error
+	return count > 0, WrapLogDatabaseError(err)
 }
 
 func (q *adminUsageLogQuery) GetTraceByRequestID(requestID string) (*models.UsageLogTrace, error) {
+	db, err := requestTraceDB(q.ctx)
+	if err != nil {
+		return nil, err
+	}
 	var trace models.UsageLogTrace
-	err := q.ctx.GetDB().Where("request_id = ?", requestID).First(&trace).Error
-	return &trace, err
+	err = db.Where("request_id = ?", requestID).First(&trace).Error
+	return &trace, WrapLogDatabaseError(err)
 }
 
 func (q *adminUsageLogQuery) GetTracesByRequestID(requestID string) ([]*models.UsageLogTrace, error) {
+	db, err := requestTraceDB(q.ctx)
+	if err != nil {
+		return nil, WrapLogDatabaseError(err)
+	}
 	var traces []*models.UsageLogTrace
-	if err := q.ctx.GetDB().Where("request_id = ?", requestID).Order("attempt_index asc").Find(&traces).Error; err != nil {
+	if err := db.Where("request_id = ?", requestID).Order("attempt_index asc").Find(&traces).Error; err != nil {
 		return nil, err
 	}
 	return traces, nil
 }
 
 func (m *adminUsageLogMutation) Create(log *models.UsageLog) error {
-	return m.ctx.GetDB().Select("*").Create(log).Error
+	db, err := requestLogDB(m.ctx)
+	if err != nil {
+		return err
+	}
+	return WrapLogDatabaseError(db.Select("*").Create(log).Error)
 }
 
 func (m *adminUsageLogMutation) CreateTrace(trace *models.UsageLogTrace) error {
-	return m.ctx.GetDB().Create(trace).Error
+	db, err := requestTraceDB(m.ctx)
+	if err != nil {
+		return err
+	}
+	return WrapLogDatabaseError(db.Create(trace).Error)
 }
 
 func (m *adminUsageLogMutation) DeleteLogsBefore(cutoff time.Time) (int64, error) {
-	result := m.ctx.GetDB().Where("created_at < ?", cutoff.Unix()).Delete(&models.UsageLog{})
-	return result.RowsAffected, result.Error
+	db, err := requestLogDB(m.ctx)
+	if err != nil {
+		return 0, err
+	}
+	result := db.Where("created_at < ?", cutoff.Unix()).Delete(nil)
+	return result.RowsAffected, WrapLogDatabaseError(result.Error)
 }
 
 func (m *adminUsageLogMutation) DeleteTracesBefore(cutoff time.Time) (int64, error) {
-	result := m.ctx.GetDB().Where("created_at < ?", cutoff.Unix()).Delete(&models.UsageLogTrace{})
-	return result.RowsAffected, result.Error
+	db, err := requestTraceDB(m.ctx)
+	if err != nil {
+		return 0, err
+	}
+	result := db.Where("created_at < ?", cutoff.Unix()).Delete(nil)
+	return result.RowsAffected, WrapLogDatabaseError(result.Error)
+}
+
+func requestLogDB(ctx *baseContext) (*gorm.DB, error) {
+	db, err := ctx.LogDB()
+	if err != nil {
+		return nil, err
+	}
+	mode, err := ctx.DatabaseLayoutMode()
+	if err != nil {
+		return nil, err
+	}
+	if mode == app.DatabaseLayoutSplit {
+		return db.Table(models.RequestLog{}.TableName()), nil
+	}
+	return db.Table("usage_logs"), nil
+}
+
+func requestTraceDB(ctx *baseContext) (*gorm.DB, error) {
+	db, err := ctx.LogDB()
+	if err != nil {
+		return nil, err
+	}
+	mode, err := ctx.DatabaseLayoutMode()
+	if err != nil {
+		return nil, err
+	}
+	if mode == app.DatabaseLayoutSplit {
+		return db.Table(models.RequestTrace{}.TableName()), nil
+	}
+	return db.Table("usage_log_traces"), nil
 }

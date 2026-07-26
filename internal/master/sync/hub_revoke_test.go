@@ -36,7 +36,7 @@ func TestRevokeControlSessionRemovesRuntimeStateAndNotifiesReadyPeers(t *testing
 	targetConn := &ws.Conn{}
 	targetGeneration, _, _ := h.installControlSession("target", targetConn, "203.0.113.9:2000")
 	require.True(t, h.publishCurrentCapabilities(
-		"target", targetConn, targetGeneration, []string{"agent_direct_ingress_v1"},
+		"target", targetConn, targetGeneration, []string{"agent_direct_tunnel_v1"},
 	))
 	h.updateAutoDetectedAddress("target", targetConn, targetGeneration, 8140)
 
@@ -242,7 +242,7 @@ func newPendingControlInstallFixture(t *testing.T) (
 	}).Error)
 
 	application := appcontainer.NewApplication()
-	application.SetDB(db)
+	application.SetCoreDB(db)
 	hub := NewHub(application, zap.NewNop(), nil, func() int64 { return 0 }, nil, HubOptions{})
 	pendingTracked := make(chan struct{})
 	releaseInstall := make(chan struct{})

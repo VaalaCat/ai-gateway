@@ -76,6 +76,26 @@ func TestFillExecution_AffinityNone(t *testing.T) {
 	}
 }
 
+func TestFillExecution_AffinityRecordIsolatedByTokenID(t *testing.T) {
+	eng := affinity.New(affStubCfg{on: 1})
+	p := NewPublisher(nil, nil, eng)
+	used := state.Attempt{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5}
+	rctx := affRctx(used, state.AttemptResult{CacheWriteTokens: 100}, false)
+	rctx.Input.UserInfo.TokenID = 11
+	var entry protocol.UsageLogEntry
+	projectExecution(&entry, rctx)
+	p.recordAffinity(rctx, &entry)
+
+	if _, ok := eng.Lookup(affinity.Key{UserID: 1, TokenID: 11, RealModel: "m"}); !ok {
+		t.Fatal("current token should own the recorded affinity entry")
+	}
+	for _, tokenID := range []uint{0, 22} {
+		if _, ok := eng.Lookup(affinity.Key{UserID: 1, TokenID: tokenID, RealModel: "m"}); ok {
+			t.Fatalf("token %d must not share the current token affinity entry", tokenID)
+		}
+	}
+}
+
 func TestFillExecution_AffinityDisabledEmpty(t *testing.T) {
 	eng := affinity.New(affStubCfg{on: 0})
 	p := NewPublisher(nil, nil, eng)

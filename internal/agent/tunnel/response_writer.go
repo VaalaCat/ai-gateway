@@ -28,6 +28,25 @@ type TunnelResponseWriter struct {
 	err         error
 }
 
+type attemptResultState struct {
+	required bool
+	written  bool
+	err      error
+}
+
+func (s attemptResultState) validate() error {
+	if !s.required {
+		return nil
+	}
+	if s.err != nil {
+		return s.err
+	}
+	if !s.written {
+		return errAttemptResultMissing
+	}
+	return nil
+}
+
 var _ http.ResponseWriter = (*TunnelResponseWriter)(nil)
 var _ http.Flusher = (*TunnelResponseWriter)(nil)
 
@@ -76,7 +95,10 @@ func (w *TunnelResponseWriter) Flush() {
 	}
 }
 
-func (w *TunnelResponseWriter) finish() error {
+func (w *TunnelResponseWriter) finish(result attemptResultState) error {
+	if err := result.validate(); err != nil {
+		return err
+	}
 	if !w.wroteHeader {
 		w.writeHeader(http.StatusOK)
 	}

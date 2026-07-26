@@ -22,12 +22,12 @@ type adminChannelMutation struct{ ctx *baseContext }
 
 func (q *adminChannelQuery) GetByID(id uint) (*models.Channel, error) {
 	var channel models.Channel
-	err := q.ctx.GetDB().First(&channel, id).Error
+	err := q.ctx.GetCoreDB().First(&channel, id).Error
 	return &channel, err
 }
 
 func (q *adminChannelQuery) List(opts ListOptions, filter ChannelListFilter) ([]models.Channel, int64, error) {
-	db := q.ctx.GetDB().Model(&models.Channel{})
+	db := q.ctx.GetCoreDB().Model(&models.Channel{})
 	if filter.Search != "" {
 		like := "%" + filter.Search + "%"
 		db = db.Where("name LIKE ? OR models LIKE ?", like, like)
@@ -49,32 +49,32 @@ func (q *adminChannelQuery) List(opts ListOptions, filter ChannelListFilter) ([]
 
 func (q *adminChannelQuery) ListAll() ([]models.Channel, error) {
 	var channels []models.Channel
-	err := q.ctx.GetDB().Find(&channels).Error
+	err := q.ctx.GetCoreDB().Find(&channels).Error
 	return channels, err
 }
 
 func (q *adminChannelQuery) ListByTag(tag string) ([]models.Channel, error) {
 	var channels []models.Channel
-	err := q.ctx.GetDB().Where("tag = ?", tag).Find(&channels).Error
+	err := q.ctx.GetCoreDB().Where("tag = ?", tag).Find(&channels).Error
 	return channels, err
 }
 
 func (q *adminChannelQuery) ListEnabled() ([]models.Channel, error) {
 	var channels []models.Channel
-	err := q.ctx.GetDB().Where("status = 1").Find(&channels).Error
+	err := q.ctx.GetCoreDB().Where("status = 1").Find(&channels).Error
 	return channels, err
 }
 
 func (m *adminChannelMutation) Create(channel *models.Channel) error {
-	return m.ctx.GetDB().Create(channel).Error
+	return m.ctx.GetCoreDB().Create(channel).Error
 }
 
 func (m *adminChannelMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetDB().Model(&models.Channel{}).Where("id = ?", id).Updates(updates).Error
+	return m.ctx.GetCoreDB().Model(&models.Channel{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (m *adminChannelMutation) Delete(id uint) error {
-	return m.ctx.GetDB().Delete(&models.Channel{}, id).Error
+	return m.ctx.GetCoreDB().Delete(&models.Channel{}, id).Error
 }
 
 // ChannelUsage 是某渠道某窗口的用量汇总。BilledCost=对用户结算后(SUM total_cost),
@@ -86,7 +86,7 @@ type ChannelUsage struct {
 }
 
 func (q *adminChannelQuery) ChannelWindowUsage(channelID uint, wf WindowFilter) (ChannelUsage, error) {
-	db := q.ctx.GetDB().Model(&models.ChannelDailyBilling{}).
+	db := q.ctx.GetCoreDB().Model(&models.ChannelDailyBilling{}).
 		Where("channel_id = ? AND private_channel_id = 0", channelID)
 	switch wf.Kind {
 	case "since":

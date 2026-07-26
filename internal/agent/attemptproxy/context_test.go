@@ -17,6 +17,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 )
@@ -151,6 +152,11 @@ func newAttemptTestContext(method, target string, body []byte) (*gin.Context, *h
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(method, target, bytes.NewReader(body))
+	ctx := attemptwire.WithAttemptResultWriter(c.Request.Context(), &capturingAttemptResultWriter{})
+	ctx = agentproxy.WithIngressMeta(ctx, agentproxy.IngressMeta{
+		Kind: agentproxy.IngressKindDirectTunnel,
+	})
+	c.Request = c.Request.WithContext(ctx)
 	return c, recorder
 }
 
