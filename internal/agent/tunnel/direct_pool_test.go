@@ -538,6 +538,9 @@ func TestDirectAttemptStreamReservationConcurrentOpenAndRelease(t *testing.T) {
 			if result.err == nil {
 				opened = true
 				require.NotNil(t, result.stream)
+				require.Eventually(t, func() bool {
+					return dialer.openCount() == before+1
+				}, time.Second, time.Millisecond, "successful OPEN was not written before stream close")
 				require.NoError(t, result.stream.Close())
 			} else {
 				require.Nil(t, result.stream)
