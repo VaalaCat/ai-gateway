@@ -167,8 +167,8 @@ See [`docs/k8s-deployment.md`](docs/k8s-deployment.md) for Kubernetes deployment
 # Build (frontend + backend)
 CGO_ENABLED=0 bash ./build.sh
 
-# Run tests
-CGO_ENABLED=0 go test ./... -count=1 -timeout=120s
+# Run the same checks and resource limits as GitHub CI
+./scripts/ci.sh
 
 # Frontend dev server (port 8141, proxies to :8140)
 cd web && pnpm install && pnpm dev

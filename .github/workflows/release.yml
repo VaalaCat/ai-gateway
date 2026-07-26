@@ -27,9 +27,7 @@ jobs:
           node-version: '20'
 
       - name: Run Go tests
-        run: go test ./... -count=1 -timeout=120s
-        env:
-          CGO_ENABLED: '0'
+        run: ./scripts/ci.sh go-tests
 
       - name: Build frontend
         working-directory: web

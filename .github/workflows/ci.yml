@@ -25,43 +25,22 @@ jobs:
           node-version: '20'
 
       - name: Install frontend dependencies
-        run: pnpm install
-        working-directory: web
+        run: ./scripts/ci.sh frontend-install
 
       - name: Lint frontend
-        run: pnpm lint
-        working-directory: web
+        run: ./scripts/ci.sh frontend-lint
 
       - name: Run frontend unit tests
-        run: pnpm test:unit
-        working-directory: web
+        run: ./scripts/ci.sh frontend-unit-tests
 
       - name: Build frontend
-        run: pnpm build
-        working-directory: web
+        run: ./scripts/ci.sh frontend-build
 
       - name: Run tests
-        run: go test ./... -count=1 -timeout=120s
-        env:
-          CGO_ENABLED: '0'
+        run: ./scripts/ci.sh go-tests
 
       - name: Run agent tunnel race tests
-        run: >-
-          go test -race
-          ./internal/pkg/tunnel/...
-          ./internal/pkg/attemptproxy/...
-          ./internal/pkg/agentproxy/...
-          ./internal/agent/tunnel/...
-          ./internal/agent/attemptproxy/...
-          ./internal/agent/relay/pipeline/exec/...
-          ./internal/master/tunnel/...
-          ./internal/master/connectivity/...
-          ./internal/agent/body/...
-          -count=1 -timeout=300s
-        env:
-          CGO_ENABLED: '1'
+        run: ./scripts/ci.sh agent-tunnel-race-tests
 
       - name: Run agent relay rollout race tests
-        run: go test -race ./internal/master -run 'AgentRelayRollout|DirectTunnel|TransportPolicy' -count=1 -timeout=300s
-        env:
-          CGO_ENABLED: '1'
+        run: ./scripts/ci.sh agent-relay-race-tests

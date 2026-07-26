@@ -1525,9 +1525,10 @@ func TestLifecycleShutdownDeadlineCancelsHTTPAPIDAOBeforeClosingDB(t *testing.T)
 	queryEntered := make(chan struct{}, 1)
 	queryCanceled := make(chan error, 1)
 	releaseQuery := make(chan struct{})
+	httpQueryMarker := &struct{}{}
 	defer close(releaseQuery)
 	if err := srv.DB.Callback().Query().Before("gorm:query").Register("test:block_http_api_query", func(tx *gorm.DB) {
-		if tx.Statement.Table != "settings" {
+		if tx.Statement.Table != "settings" || tx.Statement.Context.Value(httpQueryMarker) != true {
 			return
 		}
 		select {
@@ -1553,7 +1554,10 @@ func TestLifecycleShutdownDeadlineCancelsHTTPAPIDAOBeforeClosingDB(t *testing.T)
 		t.Fatal(err)
 	}
 	httpSrv := &http.Server{
-		Handler:     srv.countHTTPHandlers(srv.Router),
+		Handler: srv.countHTTPHandlers(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			ctx := context.WithValue(request.Context(), httpQueryMarker, true)
+			srv.Router.ServeHTTP(w, request.WithContext(ctx))
+		})),
 		BaseContext: func(net.Listener) context.Context { return root },
 		ConnState:   srv.countAcceptedSockets,
 	}

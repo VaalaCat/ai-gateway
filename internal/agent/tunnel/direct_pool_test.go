@@ -426,10 +426,13 @@ func TestDirectSessionPoolForwarderOpenCircuitRejectsFallbackBeforeFrameOpen(t *
 	require.NoError(t, err)
 	dialer.releaseHealthySession()
 	_, firstStream := acquireAndOpenDirectAttemptStream(t, firstTransport)
+	require.Eventually(t, func() bool {
+		return dialer.openCount() == 1
+	}, time.Second, time.Millisecond, "successful OPEN was not written before stream close")
 	require.NoError(t, firstStream.Close())
 	require.Eventually(t, func() bool {
-		return dialer.openCount() == 1 && pool.Snapshot().Streams == 0
-	}, time.Second, time.Millisecond)
+		return pool.Snapshot().Streams == 0
+	}, time.Second, time.Millisecond, "closed stream was not released")
 
 	secondTarget := directTargetWithURL("agent-b", "https://second.example:9443")
 	secondTarget.AddressFingerprint = "fp-second"
