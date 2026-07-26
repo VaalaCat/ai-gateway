@@ -1425,8 +1425,21 @@ func (s *Server) Run() error {
 	readyLn := newReadyListener(ln)
 	var serveErr error
 	var serveGroup conc.WaitGroup
-	serveGroup.Go(func() { serveErr = httpSrv.Serve(readyLn) })
-	<-readyLn.ready
+	serveDone := make(chan struct{})
+	serveGroup.Go(func() {
+		defer close(serveDone)
+		serveErr = httpSrv.Serve(readyLn)
+	})
+	// behavior change: Shutdown may stop http.Server after startup commit but
+	// before Serve reaches its first Accept; in that case ready never closes.
+	select {
+	case <-readyLn.ready:
+	case <-serveDone:
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		return serveErr
+	}
 	if s.afterHTTPServeStarted != nil {
 		s.afterHTTPServeStarted()
 	}

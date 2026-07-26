@@ -3,7 +3,6 @@
 set -euo pipefail
 
 readonly go_package_parallelism=2
-readonly go_max_procs=2
 readonly go_test_timeout=300s
 
 run_frontend_install() {
@@ -23,12 +22,12 @@ run_frontend_build() {
 }
 
 run_go_tests() {
-	CGO_ENABLED=0 GOMAXPROCS="${go_max_procs}" go test ./... \
+	CGO_ENABLED=0 go test ./... \
 		-p "${go_package_parallelism}" -count=1 -timeout="${go_test_timeout}"
 }
 
 run_agent_tunnel_race_tests() {
-	CGO_ENABLED=1 GOMAXPROCS="${go_max_procs}" go test -race \
+	CGO_ENABLED=1 go test -race \
 		./internal/pkg/tunnel/... \
 		./internal/pkg/attemptproxy/... \
 		./internal/pkg/agentproxy/... \
@@ -42,7 +41,7 @@ run_agent_tunnel_race_tests() {
 }
 
 run_agent_relay_race_tests() {
-	CGO_ENABLED=1 GOMAXPROCS="${go_max_procs}" go test -race ./internal/master \
+	CGO_ENABLED=1 go test -race ./internal/master \
 		-run 'AgentRelayRollout|DirectTunnel|TransportPolicy' \
 		-p "${go_package_parallelism}" -count=1 -timeout="${go_test_timeout}"
 }

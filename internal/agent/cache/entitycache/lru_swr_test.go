@@ -36,24 +36,36 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
 
 func TestLRUServeStaleAndRefresh(t *testing.T) {
 	var calls atomic.Int64
+	var now atomic.Int64
+	refreshLoaded := make(chan struct{})
 	loader := LoaderFunc[string, string](func(_ context.Context, _ string) (string, error) {
-		return fmt.Sprintf("v%d", calls.Add(1)), nil
+		call := calls.Add(1)
+		if call == 2 {
+			close(refreshLoaded)
+		}
+		return fmt.Sprintf("v%d", call), nil
 	})
 	c, _ := NewLRUCache[string, string](Config[string, string]{
 		Capacity: 4, Loader: loader, Refresh: swrCfg(),
+		Now: func() time.Time { return time.Unix(0, now.Load()) },
 	})
 
 	v, _, _ := c.Get(context.Background(), "k") // 冷 miss → v1
 	if v != "v1" {
 		t.Fatalf("cold load got %q, want v1", v)
 	}
-	time.Sleep(20 * time.Millisecond) // 超过 RefreshAfter
+	now.Store(int64(20 * time.Millisecond)) // 超过 RefreshAfter
 
 	v, _, _ = c.Get(context.Background(), "k") // 立即返回旧值并触发后台刷新
 	if v != "v1" {
 		t.Fatalf("stale get got %q, want immediate v1", v)
 	}
-	waitUntil(t, time.Second, func() bool {
+	select {
+	case <-refreshLoaded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background refresh did not call loader")
+	}
+	waitUntil(t, 5*time.Second, func() bool {
 		got, _ := c.Peek("k")
 		return got == "v2" // 后台刷新写回
 	})
