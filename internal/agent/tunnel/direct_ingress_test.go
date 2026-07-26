@@ -1090,6 +1090,9 @@ func TestDirectIngressLogsHandshakeRejectReplacementDrainAndClose(t *testing.T) 
 	require.NoError(t, err)
 	second, err := NewDirectDialer(DirectDialerOptions{HandshakeTimeout: time.Second}).DialDirectSession(t.Context(), fixture.dialRequest(server.URL, testLimits(2)))
 	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return observed.FilterMessage("direct ingress accepted").Len() == 2
+	}, 2*time.Second, time.Millisecond, "second ingress was not installed before connection close")
 	require.Eventually(t, func() bool { return ingress.Snapshot().Active == 1 && ingress.Snapshot().Draining == 0 }, 2*time.Second, time.Millisecond)
 	require.NoError(t, second.Close(t.Context()))
 	_ = first.Close(t.Context())

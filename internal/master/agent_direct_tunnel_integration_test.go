@@ -597,7 +597,7 @@ func TestDirectTunnelLargeStreamingResponseIsBounded(t *testing.T) {
 	})
 	f := newDirectTunnelIntegrationFixture(t, directTunnelFixtureOptions{provider: provider, relayTimeout: 10})
 	requestID := "req-direct-large-stream"
-	req, err := f.newRequest(t.Context(), false, "", requestID)
+	req, err := f.newRequest(t.Context(), true, "", requestID)
 	require.NoError(t, err)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
