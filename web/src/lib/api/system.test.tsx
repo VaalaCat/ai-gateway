@@ -1,26 +1,32 @@
 import type { ReactNode } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestQueryClient } from "@/test/render";
 import {
+  deleteCleanupTableBatch,
+  previewCleanupTable,
   useCompleteHistoryBackfill,
   useDeleteLegacyArtifact,
   useDeleteLegacySource,
+  useSettings,
+  useUpdateSettings,
 } from "./system";
 
-const { apiDelete, apiPost } = vi.hoisted(() => ({
+const { apiDelete, apiGet, apiPost, apiPut } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
+  apiGet: vi.fn(),
   apiPost: vi.fn(),
+  apiPut: vi.fn(),
 }));
 
 vi.mock("./client", () => ({
   api: {
     delete: apiDelete,
-    get: vi.fn(),
+    get: apiGet,
     post: apiPost,
-    put: vi.fn(),
+    put: apiPut,
   },
 }));
 
@@ -75,5 +81,70 @@ describe("history backfill admin API hooks", () => {
     );
     await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["system-stats"] }));
     invalidate.mockRestore();
+  });
+});
+
+describe("data cleanup API", () => {
+  it("sends the exact table preview query", async () => {
+    const apiGet = vi.mocked((await import("./client")).api.get);
+    apiGet.mockResolvedValueOnce({});
+
+    await previewCleanupTable({ database: "log", table: "request_logs", cutoff_date: "2026-07-21" });
+
+    expect(apiGet).toHaveBeenCalledWith(
+      "/admin/system/cleanup/preview?database=log&table=request_logs&cutoff_date=2026-07-21",
+    );
+  });
+
+  it("posts the exact batch body including the snapshot watermark", async () => {
+    const body = {
+      database: "core",
+      table: "billing_logs",
+      cutoff_date: "2026-07-21",
+      snapshot_max_key: "42",
+    } as const;
+    apiPost.mockResolvedValueOnce({ deleted: 1, has_more: false });
+
+    await deleteCleanupTableBatch(body);
+
+    expect(apiPost).toHaveBeenCalledWith("/admin/system/cleanup/batch", body);
+  });
+});
+
+describe("settings API hooks", () => {
+  beforeEach(() => {
+    apiGet.mockReset();
+    apiPut.mockReset();
+  });
+
+  it("keeps the confirmed settings response cached when invalidation refetch fails", async () => {
+    const settingsClient = createTestQueryClient();
+    const key = ["system-settings"] as const;
+    const oldSettings = { settings: { "billing.log_retention_days": "45" } };
+    const confirmedSettings = { settings: { "billing.log_retention_days": "90" } };
+    settingsClient.setQueryDefaults(key, { staleTime: Infinity });
+    settingsClient.setQueryData(key, oldSettings);
+    apiPut.mockResolvedValueOnce(confirmedSettings);
+    apiGet.mockRejectedValueOnce(new Error("settings refetch failed"));
+    const settingsWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={settingsClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(
+      () => ({ settings: useSettings(), update: useUpdateSettings() }),
+      { wrapper: settingsWrapper },
+    );
+
+    await act(async () => {
+      await result.current.update.mutateAsync({
+        settings: { "billing.log_retention_days": "90" },
+      });
+    });
+    await waitFor(() => expect(result.current.settings.isError).toBe(true));
+
+    expect(apiPut).toHaveBeenCalledWith("/admin/system/settings", {
+      settings: { "billing.log_retention_days": "90" },
+    });
+    expect(result.current.settings.data).toEqual(confirmedSettings);
+    expect(settingsClient.getQueryData(key)).toEqual(confirmedSettings);
   });
 });

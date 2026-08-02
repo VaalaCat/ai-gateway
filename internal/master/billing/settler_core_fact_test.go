@@ -14,16 +14,6 @@ import (
 	"gorm.io/gorm"
 )
 
-type recordingCoreAggregator struct {
-	facts []models.BillingLog
-}
-
-func (a *recordingCoreAggregator) SubmitBilling(fact *models.BillingLog) {
-	if fact != nil {
-		a.facts = append(a.facts, *fact)
-	}
-}
-
 type recordingLogQueue struct {
 	result  deliveryqueue.EnqueueResult
 	batches []logqueue.LogBatch
@@ -39,9 +29,12 @@ func TestSettlerCommitsBillingLogAndQuotaInOneCoreTransaction(t *testing.T) {
 		db, appProv := setupTestDB(t)
 		require.NoError(t, db.Create(&models.User{ID: 1, Username: "atomic", Password: "x", Quota: 1000}).Error)
 		require.NoError(t, db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 1, Status: 1}).Error)
-		agg := &recordingCoreAggregator{}
 		queue := &recordingLogQueue{result: deliveryqueue.EnqueueResult{Accepted: true}}
-		settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), agg, queue)
+		require.NoError(t, db.Migrator().DropTable(
+			&models.BillingHourlyBucket{}, &models.TokenDailyBilling{}, &models.ChannelDailyBilling{},
+			&models.BillingProjectionReceipt{}, &models.BillingProjectionBaseline{},
+		))
+		settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), queue)
 
 		err := settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{{
 			RequestID: "atomic-ok", UserID: 1, ModelName: "m", PromptTokens: 1_000,
@@ -51,34 +44,11 @@ func TestSettlerCommitsBillingLogAndQuotaInOneCoreTransaction(t *testing.T) {
 
 		var fact models.BillingLog
 		require.NoError(t, db.Where("request_id = ?", "atomic-ok").First(&fact).Error)
-		var receipt models.BillingProjectionReceipt
-		require.NoError(t, db.Where("request_id = ?", "atomic-ok").First(&receipt).Error)
-		require.Equal(t, fact.ID, receipt.BillingLogID)
-		require.Equal(t, models.BillingProjectionPending, receipt.State)
 		var user models.User
 		require.NoError(t, db.First(&user, 1).Error)
 		require.Equal(t, int64(900), user.Quota)
-		require.Len(t, agg.facts, 1)
 		require.Len(t, queue.batches, 1)
 		require.Equal(t, "atomic-ok", queue.batches[0].Request.RequestID)
-	})
-
-	t.Run("receipt failure rolls back fact and quota", func(t *testing.T) {
-		db, appProv := setupTestDB(t)
-		require.NoError(t, db.Create(&models.User{ID: 1, Username: "receipt-rollback", Password: "x", Quota: 1000}).Error)
-		require.NoError(t, db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 1, Status: 1}).Error)
-		require.NoError(t, db.Exec(`CREATE TRIGGER fail_pending_receipt BEFORE INSERT ON billing_projection_receipts BEGIN SELECT RAISE(ABORT, 'forced receipt failure'); END`).Error)
-		settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), &recordingCoreAggregator{}, &recordingLogQueue{})
-
-		err := settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{{
-			RequestID: "receipt-fail", UserID: 1, ModelName: "m", PromptTokens: 1_000, Status: 1,
-		}})
-		require.ErrorContains(t, err, "forced receipt failure")
-		require.Equal(t, int64(0), countRows(t, db, &models.BillingLog{}))
-		require.Equal(t, int64(0), countRows(t, db, &models.BillingProjectionReceipt{}))
-		var user models.User
-		require.NoError(t, db.First(&user, 1).Error)
-		require.Equal(t, int64(1000), user.Quota)
 	})
 
 	t.Run("rolls back both", func(t *testing.T) {
@@ -86,9 +56,8 @@ func TestSettlerCommitsBillingLogAndQuotaInOneCoreTransaction(t *testing.T) {
 		require.NoError(t, db.Create(&models.User{ID: 1, Username: "rollback", Password: "x", Quota: 1000}).Error)
 		require.NoError(t, db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 1, Status: 1}).Error)
 		require.NoError(t, db.Exec(`CREATE TRIGGER fail_billing_insert BEFORE INSERT ON billing_logs BEGIN SELECT RAISE(ABORT, 'forced billing failure'); END`).Error)
-		agg := &recordingCoreAggregator{}
 		queue := &recordingLogQueue{}
-		settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), agg, queue)
+		settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), queue)
 
 		err := settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{{
 			RequestID: "atomic-fail", UserID: 1, ModelName: "m", PromptTokens: 1_000,
@@ -99,23 +68,20 @@ func TestSettlerCommitsBillingLogAndQuotaInOneCoreTransaction(t *testing.T) {
 		var user models.User
 		require.NoError(t, db.First(&user, 1).Error)
 		require.Equal(t, int64(1000), user.Quota)
-		require.Empty(t, agg.facts)
 		require.Empty(t, queue.batches)
 	})
 
 	t.Run("quota failure rolls back inserted fact", func(t *testing.T) {
 		db, appProv := setupTestDB(t)
 		require.NoError(t, db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 1, Status: 1}).Error)
-		agg := &recordingCoreAggregator{}
 		queue := &recordingLogQueue{}
-		settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), agg, queue)
+		settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), queue)
 
 		err := settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{{
 			RequestID: "quota-fail", UserID: 99, ModelName: "m", PromptTokens: 1_000, Status: 1,
 		}})
 		require.Error(t, err)
 		require.Equal(t, int64(0), countRows(t, db, &models.BillingLog{}))
-		require.Empty(t, agg.facts)
 		require.Empty(t, queue.batches)
 	})
 }
@@ -123,21 +89,19 @@ func TestSettlerCommitsBillingLogAndQuotaInOneCoreTransaction(t *testing.T) {
 func TestSettlerReturnsSuccessWhenLogQueueDropsAfterCommit(t *testing.T) {
 	db, appProv := setupTestDB(t)
 	require.NoError(t, db.Create(&models.User{ID: 1, Username: "drop", Password: "x", Quota: 1000}).Error)
-	agg := &recordingCoreAggregator{}
 	queue := &recordingLogQueue{result: deliveryqueue.EnqueueResult{Dropped: true, Error: "full"}}
-	settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), agg, queue)
+	settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), queue)
 
 	err := settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{{RequestID: "drop-after-commit", UserID: 1, Status: 0}})
 	require.NoError(t, err)
 	require.Equal(t, int64(1), countRows(t, db, &models.BillingLog{}))
-	require.Len(t, agg.facts, 1)
 	require.Len(t, queue.batches, 1)
 }
 
 func TestSettlerUsesCommittedBillingTimestampForLogBatch(t *testing.T) {
 	_, appProv := setupTestDB(t)
 	queue := &recordingLogQueue{result: deliveryqueue.EnqueueResult{Accepted: true}}
-	settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), &recordingCoreAggregator{}, queue)
+	settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), queue)
 
 	require.NoError(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{{RequestID: "zero-time", Status: 1}}))
 	require.Len(t, queue.batches, 1)
@@ -149,9 +113,8 @@ func TestSettlerDuplicateRequestDoesNotDeductOrDeliverTwice(t *testing.T) {
 	db, appProv := setupTestDB(t)
 	require.NoError(t, db.Create(&models.User{ID: 1, Username: "duplicate", Password: "x", Quota: 1000}).Error)
 	require.NoError(t, db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 1, Status: 1}).Error)
-	agg := &recordingCoreAggregator{}
 	queue := &recordingLogQueue{result: deliveryqueue.EnqueueResult{Accepted: true}}
-	settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), agg, queue)
+	settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), queue)
 	entry := protocol.UsageLogEntry{RequestID: "same", UserID: 1, ModelName: "m", PromptTokens: 1_000, Status: 1}
 
 	require.NoError(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{entry}))
@@ -161,7 +124,6 @@ func TestSettlerDuplicateRequestDoesNotDeductOrDeliverTwice(t *testing.T) {
 	require.NoError(t, db.First(&user, 1).Error)
 	require.Equal(t, int64(900), user.Quota)
 	require.Equal(t, int64(1), countRows(t, db, &models.BillingLog{}))
-	require.Len(t, agg.facts, 1)
 	require.Len(t, queue.batches, 1)
 }
 
@@ -177,7 +139,7 @@ func TestSettlerPreservesRawCostForFreeAndBYOKBillingFacts(t *testing.T) {
 			db, appProv := setupTestDB(t)
 			require.NoError(t, db.Create(&models.User{ID: 1, Username: test.name, Password: "x", Quota: 1000}).Error)
 			require.NoError(t, db.Create(&models.ModelConfig{ModelName: "m", InputPrice: 1, Status: 1}).Error)
-			settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), &recordingCoreAggregator{}, &recordingLogQueue{result: deliveryqueue.EnqueueResult{Accepted: true}})
+			settler := NewCoreFactSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop(), &recordingLogQueue{result: deliveryqueue.EnqueueResult{Accepted: true}})
 
 			require.NoError(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{test.entry}))
 			var fact models.BillingLog

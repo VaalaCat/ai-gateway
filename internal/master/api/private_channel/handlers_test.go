@@ -2,6 +2,7 @@ package private_channel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,7 +17,10 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -133,6 +137,24 @@ func TestCreate_ValidatorRejects(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsNonBinaryAutoBanWithoutWriteOrPublish(t *testing.T) {
+	for _, value := range []int{-1, 2} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			h, ctx, db := newHandlerTestCtx(t)
+			invalidations := recordPrivateChannelInvalidations(t, ctx)
+			_, err := h.Create(ctx, CreateRequest{
+				Name: "invalid-auto-ban", Type: 1, Key: "sk-test",
+				BaseURL: "https://api.openai.com", Models: []string{"gpt-4o"}, AutoBan: value,
+			})
+			assertAPIStatus(t, err, http.StatusBadRequest)
+			var count int64
+			require.NoError(t, db.Model(&models.PrivateChannel{}).Count(&count).Error)
+			require.Zero(t, count)
+			require.Empty(t, *invalidations)
+		})
+	}
+}
+
 func TestPortalList_OnlyShowsOwnChannels(t *testing.T) {
 	h, ctx, db := newHandlerTestCtx(t)
 	db.Create(&models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "mine", Status: 1})
@@ -195,6 +217,47 @@ func TestPortalUpdate_OwnerCheck(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("cross-owner update should 404")
+	}
+}
+
+func TestPortalUpdateStatusValidation(t *testing.T) {
+	t.Run("typed and JSON zero one are accepted", func(t *testing.T) {
+		for _, status := range []any{0, 1, float64(0), float64(1)} {
+			h, ctx, db := newHandlerTestCtx(t)
+			pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "status-valid", Status: 1}
+			require.NoError(t, db.Create(pc).Error)
+
+			_, err := h.PortalUpdate(ctx, UpdateRequest{ID: strconv.FormatUint(uint64(pc.ID), 10), Fields: map[string]any{"status": status}})
+			require.NoError(t, err)
+			var got models.PrivateChannel
+			require.NoError(t, db.First(&got, pc.ID).Error)
+			if status == 0 || status == float64(0) {
+				require.Equal(t, 0, got.Status)
+			} else {
+				require.Equal(t, 1, got.Status)
+			}
+		}
+	})
+
+	for name, status := range map[string]any{
+		"out of range": 2,
+		"fractional":   float64(0.5),
+		"string":       "1",
+		"nil":          nil,
+	} {
+		t.Run("invalid "+name+" returns bad request without mutation", func(t *testing.T) {
+			h, ctx, db := newHandlerTestCtx(t)
+			pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1}, OwnerID: 1, Name: "status-invalid-" + name, Status: 1}
+			require.NoError(t, db.Create(pc).Error)
+			invalidations := recordPrivateChannelInvalidations(t, ctx)
+
+			_, err := h.PortalUpdate(ctx, UpdateRequest{ID: strconv.FormatUint(uint64(pc.ID), 10), Fields: map[string]any{"status": status}})
+			assertAPIStatus(t, err, http.StatusBadRequest)
+			var got models.PrivateChannel
+			require.NoError(t, db.First(&got, pc.ID).Error)
+			require.Equal(t, 1, got.Status)
+			require.Empty(t, *invalidations)
+		})
 	}
 }
 
@@ -433,6 +496,137 @@ func TestAdminDisable_StatusFlipsAndPublishes(t *testing.T) {
 	if got.Status != 0 {
 		t.Fatalf("status should be 0 after disable: %d", got.Status)
 	}
+}
+
+func TestPortalUpdateStatusClearsAutoBanStateAndBumpsRevision(t *testing.T) {
+	h, ctx, db := newHandlerTestCtx(t)
+	pc := &models.PrivateChannel{
+		ChannelCore: models.ChannelCore{
+			Type: 1, AutoBanState: datatypes.NewJSONType(models.ChannelDisableState{Tripped: true, Reason: "consecutive_errors"}), AutoBanRevision: 7,
+		},
+		OwnerID: 1, Name: "status-lifecycle", Status: 1,
+	}
+	require.NoError(t, db.Create(pc).Error)
+	invalidations := recordPrivateChannelInvalidations(t, ctx)
+
+	_, err := h.PortalUpdate(ctx, UpdateRequest{
+		ID: strconv.FormatUint(uint64(pc.ID), 10), Fields: map[string]any{"status": 0},
+	})
+	require.NoError(t, err)
+
+	var got models.PrivateChannel
+	require.NoError(t, db.First(&got, pc.ID).Error)
+	require.Equal(t, 0, got.Status)
+	require.Equal(t, models.ChannelDisableState{}, got.AutoBanState.Data())
+	require.Equal(t, uint64(8), got.AutoBanRevision)
+	require.Equal(t, []uint{1}, *invalidations)
+}
+
+func TestPortalUpdateAutoBanClearsStateWithoutEnabling(t *testing.T) {
+	h, ctx, db := newHandlerTestCtx(t)
+	pc := &models.PrivateChannel{
+		ChannelCore: models.ChannelCore{
+			Type: 1, AutoBanState: datatypes.NewJSONType(models.ChannelDisableState{Tripped: true, Reason: "consecutive_errors"}), AutoBanRevision: 2,
+		},
+		OwnerID: 1, Name: "auto-ban-lifecycle", Status: 1,
+	}
+	require.NoError(t, db.Create(pc).Error)
+	require.NoError(t, db.Model(&models.PrivateChannel{}).Where("id = ?", pc.ID).Update("status", 0).Error)
+	invalidations := recordPrivateChannelInvalidations(t, ctx)
+
+	_, err := h.PortalUpdate(ctx, UpdateRequest{
+		ID: strconv.FormatUint(uint64(pc.ID), 10), Fields: map[string]any{"auto_ban": 1},
+	})
+	require.NoError(t, err)
+
+	var got models.PrivateChannel
+	require.NoError(t, db.First(&got, pc.ID).Error)
+	require.Equal(t, 0, got.Status)
+	require.Equal(t, 1, got.AutoBan)
+	require.Equal(t, models.ChannelDisableState{}, got.AutoBanState.Data())
+	require.Equal(t, uint64(3), got.AutoBanRevision)
+	require.Equal(t, []uint{1}, *invalidations)
+}
+
+func TestPortalUpdateRejectsNonBinaryAutoBanWithoutWriteOrPublish(t *testing.T) {
+	values := map[string]any{
+		"positive": 2, "negative": -1, "fractional": 0.5, "string": "1", "nil": nil,
+	}
+	for name, value := range values {
+		t.Run(name, func(t *testing.T) {
+			h, ctx, db := newHandlerTestCtx(t)
+			pc := &models.PrivateChannel{
+				ChannelCore: models.ChannelCore{Type: 1, AutoBan: 0, AutoBanRevision: 3},
+				OwnerID:     1, Name: "invalid-auto-ban", Status: 1,
+			}
+			require.NoError(t, db.Create(pc).Error)
+			invalidations := recordPrivateChannelInvalidations(t, ctx)
+
+			_, err := h.PortalUpdate(ctx, UpdateRequest{
+				ID: strconv.FormatUint(uint64(pc.ID), 10), Fields: map[string]any{"auto_ban": value},
+			})
+			assertAPIStatus(t, err, http.StatusBadRequest)
+			var got models.PrivateChannel
+			require.NoError(t, db.First(&got, pc.ID).Error)
+			require.Zero(t, got.AutoBan)
+			require.Equal(t, uint64(3), got.AutoBanRevision)
+			require.Empty(t, *invalidations)
+		})
+	}
+}
+
+func TestPortalUpdateRejectsAutoBanRuntimeFields(t *testing.T) {
+	h, ctx, db := newHandlerTestCtx(t)
+	pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Type: 1, AutoBanRevision: 4}, OwnerID: 1, Name: "runtime-read-only", Status: 1}
+	require.NoError(t, db.Create(pc).Error)
+
+	for field, value := range map[string]any{
+		"auto_ban_state":    map[string]any{"tripped": true},
+		"auto_ban_revision": 99,
+	} {
+		_, err := h.PortalUpdate(ctx, UpdateRequest{
+			ID: strconv.FormatUint(uint64(pc.ID), 10), Fields: map[string]any{field: value},
+		})
+		assertAPIStatus(t, err, http.StatusBadRequest)
+	}
+
+	var got models.PrivateChannel
+	require.NoError(t, db.First(&got, pc.ID).Error)
+	require.Equal(t, uint64(4), got.AutoBanRevision)
+	require.Equal(t, models.ChannelDisableState{}, got.AutoBanState.Data())
+}
+
+func TestAdminDisableClearsRuntimeStateAndBumpsRevision(t *testing.T) {
+	h, ctx, db := newHandlerTestCtx(t)
+	pc := &models.PrivateChannel{
+		ChannelCore: models.ChannelCore{
+			Type: 1, AutoBanState: datatypes.NewJSONType(models.ChannelDisableState{Tripped: true, Reason: "consecutive_errors"}), AutoBanRevision: 6,
+		},
+		OwnerID: 1, Name: "admin-disable-lifecycle", Status: 1,
+	}
+	require.NoError(t, db.Create(pc).Error)
+	invalidations := recordPrivateChannelInvalidations(t, ctx)
+
+	_, err := h.AdminDisable(ctx, api.IDPathRequest{ID: strconv.FormatUint(uint64(pc.ID), 10)})
+	require.NoError(t, err)
+
+	var got models.PrivateChannel
+	require.NoError(t, db.First(&got, pc.ID).Error)
+	require.Equal(t, 0, got.Status)
+	require.Equal(t, models.ChannelDisableState{}, got.AutoBanState.Data())
+	require.Equal(t, uint64(7), got.AutoBanRevision)
+	require.Equal(t, []uint{1}, *invalidations)
+}
+
+func recordPrivateChannelInvalidations(t *testing.T, ctx *app.Context) *[]uint {
+	t.Helper()
+	invalidations := make([]uint, 0, 1)
+	_, err := events.Subscribe(ctx.GetBus(), events.PrivateChannelInvalidateTopic, func(_ context.Context, payload protocol.PrivateChannelInvalidatePayload) error {
+		invalidations = append(invalidations, payload.AffectedUserIDs...)
+		return nil
+	})
+	require.NoError(t, err)
+	return &invalidations
 }
 
 func TestAdminDisable_NotFound(t *testing.T) {

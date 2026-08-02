@@ -105,19 +105,20 @@ func (d *recordingDispatcher) Dispatch(_ *state.RelayContext, a state.Attempt) s
 
 type retryOnceRunner struct{}
 
-func (retryOnceRunner) Run(_ *state.RelayContext, _ state.Attempt, dispatch func() state.AttemptResult) state.AttemptResult {
-	result := dispatch()
+func (retryOnceRunner) Run(_ *state.RelayContext, _ state.Attempt, dispatch func() DispatchResult) state.AttemptResult {
+	result := dispatch().Outcome
 	if result.Err != nil && !result.Written {
-		return dispatch()
+		return dispatch().Outcome
 	}
 	return result
 }
 
-type greedyRetryRunner struct{}
+type greedyRetryRunner struct{ results []DispatchResult }
 
-func (greedyRetryRunner) Run(_ *state.RelayContext, _ state.Attempt, dispatch func() state.AttemptResult) state.AttemptResult {
-	_ = dispatch()
-	return dispatch()
+func (r *greedyRetryRunner) Run(_ *state.RelayContext, _ state.Attempt, dispatch func() DispatchResult) state.AttemptResult {
+	r.results = append(r.results, dispatch())
+	r.results = append(r.results, dispatch())
+	return r.results[1].Outcome
 }
 
 type trackingGate struct {
@@ -260,7 +261,8 @@ func TestProviderExecutorCanceledRequestSkipsDispatch(t *testing.T) {
 func TestProviderExecutorWrittenResultPreventsAnotherDispatch(t *testing.T) {
 	wantErr := errors.New("stream interrupted")
 	dispatcher := &recordingDispatcher{result: state.AttemptResult{Written: true, Err: wantErr}}
-	executor := NewProviderExecutor(dispatcher, greedyRetryRunner{}, nil)
+	runner := &greedyRetryRunner{}
+	executor := NewProviderExecutor(dispatcher, runner, nil)
 
 	result := executor.Execute(providerTestContext(t, nil), providerTestAttempt(attemptproxy.ModeNative))
 
@@ -269,6 +271,11 @@ func TestProviderExecutorWrittenResultPreventsAnotherDispatch(t *testing.T) {
 	require.Equal(t, 1, result.Dispatches)
 	require.True(t, result.ProviderDispatched)
 	require.Len(t, dispatcher.attempts, 1)
+	require.Len(t, runner.results, 2)
+	require.Equal(t, []bool{true, false}, []bool{
+		runner.results[0].ProviderDispatched,
+		runner.results[1].ProviderDispatched,
+	})
 }
 
 func TestProviderExecutorPassesExecutionModeToDispatcher(t *testing.T) {

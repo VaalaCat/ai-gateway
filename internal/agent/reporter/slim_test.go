@@ -8,9 +8,39 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+func TestSlimAndDegradePreserveAutoDisableTrigger(t *testing.T) {
+	trigger := autoDisableTrigger()
+	base := protocol.UsageLogEntry{
+		RequestID: "triggered", TraceData: `{"inbound_body":"large"}`,
+		AttemptTraces:       []models.UsageLogTrace{{InboundBody: "large"}},
+		FallbackChain:       []models.AttemptRecord{{Seq: 1}},
+		AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
+	}
+	tests := []struct {
+		name  string
+		apply func(*protocol.UsageLogEntry)
+	}{
+		{name: "slim", apply: slimEntry},
+		{name: "strip trace", apply: func(entry *protocol.UsageLogEntry) { applyDegrade(entry, DegradeStripTrace) }},
+		{name: "billing only", apply: func(entry *protocol.UsageLogEntry) { applyDegrade(entry, DegradeBillingOnly) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := base
+			test.apply(&got)
+			require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{trigger}, got.AutoDisableTriggers)
+			if test.name == "billing only" {
+				require.Nil(t, got.FallbackChain, "L3 strips only the fallback chain after L2 trace removal")
+			}
+		})
+	}
+}
 
 func TestSlimEntry_BlanksBodyFieldsKeepsRest(t *testing.T) {
 	e := protocol.UsageLogEntry{

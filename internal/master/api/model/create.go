@@ -11,6 +11,10 @@ import (
 )
 
 func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.ModelConfig], error) {
+	prices := PricingValues{InputPrice: req.InputPrice, OutputPrice: req.OutputPrice}
+	if err := validateModelPriceBuckets(prices); err != nil {
+		return api.Created[models.ModelConfig]{}, api.BadRequestError(err.Error(), err)
+	}
 	mc := models.ModelConfig{
 		ModelName:   req.ModelName,
 		InputPrice:  req.InputPrice,

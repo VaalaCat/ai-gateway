@@ -2,7 +2,7 @@ package billing
 
 import (
 	"context"
-	"sync"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +11,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
@@ -21,6 +22,114 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 	"gorm.io/gorm"
 )
+
+type recordingAutoDisabler struct {
+	calls [][]attemptproxy.ChannelAutoDisableTrigger
+	errs  []error
+}
+
+func (d *recordingAutoDisabler) DisableFromTriggers(_ context.Context, triggers []attemptproxy.ChannelAutoDisableTrigger) error {
+	d.calls = append(d.calls, append([]attemptproxy.ChannelAutoDisableTrigger(nil), triggers...))
+	if len(d.errs) == 0 {
+		return nil
+	}
+	err := d.errs[0]
+	d.errs = d.errs[1:]
+	return err
+}
+
+func autoDisableUsageEntry(requestID string, channelID uint) protocol.UsageLogEntry {
+	return protocol.UsageLogEntry{
+		RequestID: requestID,
+		Status:    1,
+		Timestamp: time.Now().Unix(),
+		AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{{
+			Source: attemptproxy.SourceAdmin, ChannelID: channelID, Revision: 2,
+			Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+		}},
+	}
+}
+
+func TestSettlerProcessesAutoDisableTriggersAfterBillingCommit(t *testing.T) {
+	t.Run("billing and trigger both succeed", func(t *testing.T) {
+		db, appProv := setupTestDB(t)
+		disabler := &recordingAutoDisabler{}
+		settler := newTestSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+		settler.AutoDisabler = disabler
+
+		require.NoError(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{autoDisableUsageEntry("trigger-ok", 3)}))
+		require.Len(t, disabler.calls, 1)
+		require.Equal(t, uint(3), disabler.calls[0][0].ChannelID)
+		var count int64
+		require.NoError(t, db.Model(&models.BillingLog{}).Where("request_id = ?", "trigger-ok").Count(&count).Error)
+		require.Equal(t, int64(1), count)
+	})
+
+	t.Run("no triggers skips disabler", func(t *testing.T) {
+		_, appProv := setupTestDB(t)
+		disabler := &recordingAutoDisabler{}
+		settler := newTestSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+		settler.AutoDisabler = disabler
+
+		require.NoError(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{{RequestID: "no-trigger", Status: 1}}))
+		require.Empty(t, disabler.calls)
+	})
+}
+
+func TestSettlerRetriesAutoDisableAfterBillingDedup(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	disabler := &recordingAutoDisabler{errs: []error{errors.New("database unavailable"), nil}}
+	settler := newTestSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+	settler.AutoDisabler = disabler
+	entry := autoDisableUsageEntry("trigger-retry", 4)
+
+	require.Error(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{entry}))
+	require.NoError(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{entry}))
+	require.Len(t, disabler.calls, 2)
+	var count int64
+	require.NoError(t, db.Model(&models.BillingLog{}).Where("request_id = ?", entry.RequestID).Count(&count).Error)
+	require.Equal(t, int64(1), count)
+}
+
+func TestSettlerAutoDisableFailureDoesNotSuppressCommittedQuotaEvent(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	require.NoError(t, db.Create(&models.User{ID: 1, Username: "depleted-trigger", Password: "x", Status: 1, Quota: 1}).Error)
+	require.NoError(t, db.Create(&models.ModelConfig{ModelName: "priced", InputPrice: 1, Status: 1}).Error)
+	bus := eventbus.NewMemoryBus()
+	depletedEvents := 0
+	_, err := events.SubscribeUserQuotaDepleted(bus, func(context.Context, models.User) error {
+		depletedEvents++
+		return nil
+	})
+	require.NoError(t, err)
+	disabler := &recordingAutoDisabler{errs: []error{errors.New("database unavailable")}}
+	settler := newTestSettler(appProv, bus, zap.NewNop())
+	settler.AutoDisabler = disabler
+	entry := autoDisableUsageEntry("trigger-depleted", 4)
+	entry.UserID = 1
+	entry.ModelName = "priced"
+	entry.PromptTokens = 1_000_000
+
+	require.Error(t, settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{entry}))
+	require.Equal(t, 1, depletedEvents)
+}
+
+func TestSettlerAggregatesAutoDisableErrorsAndSettlesOtherEntries(t *testing.T) {
+	db, appProv := setupTestDB(t)
+	disabler := &recordingAutoDisabler{errs: []error{errors.New("first failed"), nil}}
+	settler := newTestSettler(appProv, eventbus.NewMemoryBus(), zap.NewNop())
+	settler.AutoDisabler = disabler
+
+	err := settler.SettleBatch(t.Context(), "agent", []protocol.UsageLogEntry{
+		autoDisableUsageEntry("trigger-first", 5),
+		autoDisableUsageEntry("trigger-second", 6),
+	})
+	require.Error(t, err)
+	require.Len(t, disabler.calls, 2)
+	var count int64
+	require.NoError(t, db.Model(&models.BillingLog{}).Where("request_id IN ?", []string{"trigger-first", "trigger-second"}).Count(&count).Error)
+	require.Equal(t, int64(2), count)
+}
 
 // testAppProvider wraps *gorm.DB to satisfy dao.AppProvider.
 type testAppProvider struct{ db *gorm.DB }
@@ -56,11 +165,7 @@ func (q legacyTestLogQueue) Enqueue(batch logqueue.LogBatch) deliveryqueue.Enque
 }
 
 func newTestSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger) *Settler {
-	return NewCoreFactSettler(application, bus, logger, noopCoreAggregator{}, legacyTestLogQueue{db: application.GetCoreDB()})
-}
-
-func newTestSettlerWithAggregator(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg CoreAggregator) *Settler {
-	return NewCoreFactSettler(application, bus, logger, agg, legacyTestLogQueue{db: application.GetCoreDB()})
+	return NewCoreFactSettler(application, bus, logger, legacyTestLogQueue{db: application.GetCoreDB()})
 }
 
 func setupTestDB(t *testing.T) (*gorm.DB, *testAppProvider) {
@@ -78,10 +183,7 @@ func setupTestDB(t *testing.T) (*gorm.DB, *testAppProvider) {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.BillingLog{}, &models.BillingHourlyBucket{}, &models.BillingProjectionReceipt{}, &models.BillingProjectionBaseline{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Create(&models.BillingProjectionBaseline{ID: models.BillingProjectionBaselineID}).Error; err != nil {
+	if err := db.AutoMigrate(&models.BillingLog{}); err != nil {
 		t.Fatal(err)
 	}
 	return db, &testAppProvider{db: db}
@@ -95,89 +197,6 @@ func TestSetupTestDBOwnsSingleSQLiteMemoryConnection(t *testing.T) {
 	}
 	if got := sqlDB.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("MaxOpenConnections = %d, want 1 for connection-local SQLite memory schema", got)
-	}
-}
-
-// mockAggregator records every Submit invocation so tests can assert on
-// post-commit handoff semantics without exercising real dao writes.
-type mockAggregator struct {
-	mu      sync.Mutex
-	submits []models.BillingLog
-}
-
-func (m *mockAggregator) SubmitBilling(log *models.BillingLog) {
-	if log == nil {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.submits = append(m.submits, *log)
-}
-
-func (m *mockAggregator) snapshot() []models.BillingLog {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cp := make([]models.BillingLog, len(m.submits))
-	copy(cp, m.submits)
-	return cp
-}
-
-// syncAggregator drives the three dao upserts synchronously per-Submit. It
-// preserves the pre-T2.8 per-log inline rollup behavior for tests whose
-// assertions read token_daily_billings / channel_daily_billings rows directly.
-// Production code uses the real *billing.Aggregator (batched flush).
-type syncAggregator struct {
-	app dao.AppProvider
-}
-
-func (s *syncAggregator) SubmitBilling(fact *models.BillingLog) {
-	log := usageLogFromBilling(fact)
-	if log == nil {
-		return
-	}
-	m := dao.NewAdminMutation(dao.NewContext(s.app))
-	_ = m.Billing().UpsertTokenDaily(log)
-	_ = m.Billing().UpsertChannelDaily(log)
-	_ = m.Billing().UpsertBillingHourlyBuckets(context.Background(), []dao.BillingHourlyRow{billingHourlyTestRow(fact)})
-}
-
-func billingHourlyTestRow(fact *models.BillingLog) dao.BillingHourlyRow {
-	ts := fact.CreatedAt
-	ownerType := fact.OwnerType
-	if ownerType == "" {
-		ownerType = "admin"
-	}
-	success, failed := aggSuccessFailureCounts(fact.Status)
-	return dao.BillingHourlyRow{
-		Date: time.Unix(ts, 0).UTC().Format("2006-01-02"), Hour: time.Unix(ts, 0).UTC().Hour(),
-		UserID: fact.UserID, TokenID: fact.TokenID, ChannelID: fact.ChannelID,
-		PrivateChannelID: fact.PrivateChannelID, OwnerType: ownerType, ModelName: fact.ModelName,
-		TokenName: fact.TokenName, ChannelName: fact.ChannelName, ChannelType: fact.ChannelType,
-		RequestCount: 1, SuccessCount: success, FailedCount: failed,
-		PromptTokens: int64(fact.PromptTokens), CompletionTokens: int64(fact.CompletionTokens),
-		CacheReadTokens: int64(fact.CacheReadTokens), CacheWriteTokens: int64(fact.CacheWriteTokens),
-		InputCost: fact.InputCost, OutputCost: fact.OutputCost, CacheReadCost: fact.CacheReadCost,
-		CacheWriteCost: fact.CacheWriteCost, TotalCost: fact.TotalCost, RawCost: fact.RawTotal(),
-		LastUsedAt: ts, UpdatedAt: ts,
-	}
-}
-
-func usageLogFromBilling(fact *models.BillingLog) *models.UsageLog {
-	if fact == nil {
-		return nil
-	}
-	return &models.UsageLog{
-		RequestID: fact.RequestID, UserID: fact.UserID, TokenID: fact.TokenID, TokenName: fact.TokenName,
-		ChannelID: fact.ChannelID, PrivateChannelID: fact.PrivateChannelID, OwnerType: fact.OwnerType,
-		ChannelName: fact.ChannelName, ChannelType: fact.ChannelType, ModelName: fact.ModelName,
-		PromptTokens: fact.PromptTokens, CompletionTokens: fact.CompletionTokens,
-		CacheReadTokens: fact.CacheReadTokens, CacheWriteTokens: fact.CacheWriteTokens,
-		InputCost: fact.InputCost, OutputCost: fact.OutputCost, CacheReadCost: fact.CacheReadCost,
-		CacheWriteCost: fact.CacheWriteCost, TotalCost: fact.TotalCost,
-		RawInputCost: fact.RawInputCost, RawOutputCost: fact.RawOutputCost,
-		RawCacheReadCost: fact.RawCacheReadCost, RawCacheWriteCost: fact.RawCacheWriteCost,
-		BillingFactor: fact.BillingFactor, PriceRatio: fact.PriceRatio, Free: fact.Free,
-		Status: fact.Status, CreatedAt: fact.CreatedAt,
 	}
 }
 
@@ -722,137 +741,6 @@ func TestSettleOne_NoTrace(t *testing.T) {
 	}
 }
 
-func TestSettler_WritesBillingRollups(t *testing.T) {
-	db, appProv := setupTestDB(t)
-	bus := eventbus.NewMemoryBus()
-	logger, _ := zap.NewDevelopment()
-
-	db.Create(&models.User{Username: "billing-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
-	db.Create(&models.Token{UserID: 1, Key: "sk-billing", Name: "primary-key", Status: 1, ExpiredAt: -1})
-	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
-
-	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
-	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
-		{
-			RequestID:        "req-rollup-1",
-			UserID:           1,
-			TokenID:          1,
-			TokenName:        "primary-key",
-			ChannelID:        1,
-			ModelName:        "gpt-4o",
-			PromptTokens:     1000,
-			CompletionTokens: 500,
-			Status:           1,
-			Other:            `{"channel_type":1,"channel_name":"openai-primary"}`,
-			Timestamp:        time.Now().Unix(),
-		},
-	})
-
-	var log models.UsageLog
-	if err := db.Where("request_id = ?", "req-rollup-1").First(&log).Error; err != nil {
-		t.Fatalf("query usage log failed: %v", err)
-	}
-	if log.ChannelName != "openai-primary" {
-		t.Fatalf("channel_name = %q, want %q", log.ChannelName, "openai-primary")
-	}
-	if log.ChannelType != 1 {
-		t.Fatalf("channel_type = %d, want 1", log.ChannelType)
-	}
-
-	var tokenDaily models.TokenDailyBilling
-	if err := db.Where("token_id = ?", 1).First(&tokenDaily).Error; err != nil {
-		t.Fatalf("query token daily billing failed: %v", err)
-	}
-	if tokenDaily.TokenName != "primary-key" {
-		t.Fatalf("token_name = %q, want %q", tokenDaily.TokenName, "primary-key")
-	}
-	if tokenDaily.RequestCount != 1 {
-		t.Fatalf("request_count = %d, want 1", tokenDaily.RequestCount)
-	}
-	if tokenDaily.SuccessCount != 1 {
-		t.Fatalf("success_count = %d, want 1", tokenDaily.SuccessCount)
-	}
-	if tokenDaily.TotalCost != log.TotalCost {
-		t.Fatalf("total_cost = %d, want %d", tokenDaily.TotalCost, log.TotalCost)
-	}
-
-	var channelDaily models.ChannelDailyBilling
-	if err := db.Where("channel_id = ?", 1).First(&channelDaily).Error; err != nil {
-		t.Fatalf("query channel daily billing failed: %v", err)
-	}
-	if channelDaily.ChannelName != "openai-primary" {
-		t.Fatalf("channel_name = %q, want %q", channelDaily.ChannelName, "openai-primary")
-	}
-	if channelDaily.ChannelType != 1 {
-		t.Fatalf("channel_type = %d, want 1", channelDaily.ChannelType)
-	}
-	if channelDaily.RequestCount != 1 {
-		t.Fatalf("request_count = %d, want 1", channelDaily.RequestCount)
-	}
-	if channelDaily.SuccessCount != 1 {
-		t.Fatalf("success_count = %d, want 1", channelDaily.SuccessCount)
-	}
-	if channelDaily.TotalCost != log.TotalCost {
-		t.Fatalf("total_cost = %d, want %d", channelDaily.TotalCost, log.TotalCost)
-	}
-}
-
-func TestSettler_TracksFailedRequests(t *testing.T) {
-	db, appProv := setupTestDB(t)
-	bus := eventbus.NewMemoryBus()
-	logger, _ := zap.NewDevelopment()
-
-	db.Create(&models.User{Username: "billing-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
-	db.Create(&models.Token{UserID: 1, Key: "sk-billing", Name: "primary-key", Status: 1, ExpiredAt: -1})
-	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
-
-	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
-	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
-		{
-			RequestID:    "req-rollup-failed-1",
-			UserID:       1,
-			TokenID:      1,
-			TokenName:    "primary-key",
-			ChannelID:    1,
-			ModelName:    "gpt-4o",
-			Status:       0,
-			ErrorMessage: "upstream timeout",
-			Other:        `{"channel_type":1,"channel_name":"openai-primary"}`,
-			Timestamp:    time.Now().Unix(),
-		},
-	})
-
-	var tokenDaily models.TokenDailyBilling
-	if err := db.Where("token_id = ?", 1).First(&tokenDaily).Error; err != nil {
-		t.Fatalf("query token daily billing failed: %v", err)
-	}
-	if tokenDaily.RequestCount != 1 {
-		t.Fatalf("request_count = %d, want 1", tokenDaily.RequestCount)
-	}
-	if tokenDaily.SuccessCount != 0 {
-		t.Fatalf("success_count = %d, want 0", tokenDaily.SuccessCount)
-	}
-	if tokenDaily.FailedCount != 1 {
-		t.Fatalf("failed_count = %d, want 1", tokenDaily.FailedCount)
-	}
-
-	var channelDaily models.ChannelDailyBilling
-	if err := db.Where("channel_id = ?", 1).First(&channelDaily).Error; err != nil {
-		t.Fatalf("query channel daily billing failed: %v", err)
-	}
-	if channelDaily.RequestCount != 1 {
-		t.Fatalf("request_count = %d, want 1", channelDaily.RequestCount)
-	}
-	if channelDaily.SuccessCount != 0 {
-		t.Fatalf("success_count = %d, want 0", channelDaily.SuccessCount)
-	}
-	if channelDaily.FailedCount != 1 {
-		t.Fatalf("failed_count = %d, want 1", channelDaily.FailedCount)
-	}
-}
-
 func TestSettler_PersistsErrorStageAndTimings(t *testing.T) {
 	db, appProv := setupTestDB(t)
 	bus := eventbus.NewMemoryBus()
@@ -1009,265 +897,6 @@ func TestSettler_TraceDataNonEmpty_FailedRequest(t *testing.T) {
 	}
 }
 
-func TestSettler_IgnoresDuplicateRequestID(t *testing.T) {
-	db, appProv := setupTestDB(t)
-	bus := eventbus.NewMemoryBus()
-	logger, _ := zap.NewDevelopment()
-
-	db.Create(&models.User{Username: "billing-user", Password: "x", Role: 1, Status: 1, Quota: 10000})
-	db.Create(&models.Token{UserID: 1, Key: "sk-billing", Name: "primary-key", Status: 1, ExpiredAt: -1})
-	db.Create(&models.Channel{ChannelCore: models.ChannelCore{Name: "openai-primary", Type: 1, Status: 1}, Key: "sk-upstream"})
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
-
-	entry := protocol.UsageLogEntry{
-		RequestID:        "req-rollup-dup-1",
-		UserID:           1,
-		TokenID:          1,
-		TokenName:        "primary-key",
-		ChannelID:        1,
-		ModelName:        "gpt-4o",
-		PromptTokens:     1000,
-		CompletionTokens: 500,
-		Status:           1,
-		Other:            `{"channel_type":1,"channel_name":"openai-primary"}`,
-		Timestamp:        time.Now().Unix(),
-	}
-
-	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
-	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{entry})
-	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{entry})
-
-	var logCount int64
-	if err := db.Model(&models.UsageLog{}).Where("request_id = ?", entry.RequestID).Count(&logCount).Error; err != nil {
-		t.Fatalf("count usage logs failed: %v", err)
-	}
-	if logCount != 1 {
-		t.Fatalf("usage_logs = %d, want 1", logCount)
-	}
-
-	var tokenRollupCount int64
-	if err := db.Model(&models.TokenDailyBilling{}).Where("token_id = ?", 1).Count(&tokenRollupCount).Error; err != nil {
-		t.Fatalf("count token daily billing failed: %v", err)
-	}
-	if tokenRollupCount != 1 {
-		t.Fatalf("token_daily_billings = %d, want 1", tokenRollupCount)
-	}
-
-	var tokenDaily models.TokenDailyBilling
-	if err := db.Where("token_id = ?", 1).First(&tokenDaily).Error; err != nil {
-		t.Fatalf("query token daily billing failed: %v", err)
-	}
-	if tokenDaily.RequestCount != 1 {
-		t.Fatalf("request_count = %d, want 1", tokenDaily.RequestCount)
-	}
-
-	var channelRollupCount int64
-	if err := db.Model(&models.ChannelDailyBilling{}).Where("channel_id = ?", 1).Count(&channelRollupCount).Error; err != nil {
-		t.Fatalf("count channel daily billing failed: %v", err)
-	}
-	if channelRollupCount != 1 {
-		t.Fatalf("channel_daily_billings = %d, want 1", channelRollupCount)
-	}
-
-	var channelDaily models.ChannelDailyBilling
-	if err := db.Where("channel_id = ?", 1).First(&channelDaily).Error; err != nil {
-		t.Fatalf("query channel daily billing failed: %v", err)
-	}
-	if channelDaily.RequestCount != 1 {
-		t.Fatalf("request_count = %d, want 1", channelDaily.RequestCount)
-	}
-}
-
-// TestSettler_SubmitsToAggregatorAfterCommit 验证 T2.8 的核心契约：settler
-// 事务提交后才把 UsageLog 交给注入的 UsageAggregator，且重复 request_id
-// 不会重复 Submit（去重短路在事务内 return nil 时 inserted 仍为 false）。
-func TestSettler_SubmitsToAggregatorAfterCommit(t *testing.T) {
-	db, appProv := setupTestDB(t)
-	bus := eventbus.NewMemoryBus()
-	logger := zap.NewNop()
-
-	db.Create(&models.User{Username: "agg-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
-
-	mockAgg := &mockAggregator{}
-	settler := newTestSettlerWithAggregator(appProv, bus, logger, mockAgg)
-
-	// success: 第一次 settle → aggregator 收到 1 条
-	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
-		RequestID:        "req-agg-1",
-		UserID:           1,
-		TokenID:          1,
-		ChannelID:        1,
-		ModelName:        "gpt-4o",
-		PromptTokens:     100,
-		CompletionTokens: 50,
-		Status:           1,
-		Timestamp:        time.Now().Unix(),
-	}})
-	submits := mockAgg.snapshot()
-	require.Len(t, submits, 1, "first settle should Submit once")
-	require.Equal(t, "req-agg-1", submits[0].RequestID)
-	require.Equal(t, uint(1), submits[0].UserID)
-
-	// 同 RequestID 第二次 → 去重，aggregator NOT 再 Submit
-	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
-		RequestID:        "req-agg-1",
-		UserID:           1,
-		TokenID:          1,
-		ChannelID:        1,
-		ModelName:        "gpt-4o",
-		PromptTokens:     100,
-		CompletionTokens: 50,
-		Status:           1,
-		Timestamp:        time.Now().Unix(),
-	}})
-	require.Len(t, mockAgg.snapshot(), 1, "duplicate RequestID must NOT re-Submit")
-
-	// ownerless usage 仍 Submit（聚合不区分 owner-less，只关心是否成功落 UsageLog）
-	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
-		RequestID:        "req-agg-2",
-		UserID:           0,
-		TokenID:          1,
-		ChannelID:        1,
-		ModelName:        "gpt-4o",
-		PromptTokens:     50,
-		CompletionTokens: 0,
-		Status:           1,
-		TokenName:        "anon",
-		Timestamp:        time.Now().Unix(),
-	}})
-	submits = mockAgg.snapshot()
-	require.Len(t, submits, 2, "ownerless usage must also Submit")
-	require.Equal(t, "req-agg-2", submits[1].RequestID)
-	require.Equal(t, uint(0), submits[1].UserID)
-}
-
-// TestSettler_BehaviorEquivalentToLegacy 验证 T2 重构核心契约：把同一批
-// UsageLogEntry 跑两遍——
-//
-//	Path A: settler + *billing.Aggregator (T2.6 批量 flush)
-//	Path B: settler + syncAggregator      (T2.8 legacy 行为, 每条 log 即时调 dao 单行 upsert)
-//
-// flush 之后比较 token_daily_billings / channel_daily_billings /
-// usage_hourly_buckets 三张 rollup 表逐行相等 (zero-out 掉自动时间戳)。
-func TestSettler_BehaviorEquivalentToLegacy(t *testing.T) {
-	logger := zap.NewNop()
-
-	// --- Path A: aggregator-based ---
-	dbA, appA := setupTestDB(t)
-	busA := eventbus.NewMemoryBus()
-
-	dbA.Create(&models.User{Username: "ua", Password: "x", Role: 1, Status: 1, Quota: 1_000_000})
-	dbA.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
-
-	agg := NewAggregator(appA, zap.NewNop(), AggregatorOptions{})
-	agg.SetFlushFns(
-		func(rows []dao.TokenDailyRow) error {
-			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertTokenDaily(rows)
-		},
-		func(rows []dao.ChannelDailyRow) error {
-			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().BatchUpsertChannelDaily(rows)
-		},
-		func(rows []dao.BillingHourlyRow) error {
-			return dao.NewAdminMutation(dao.NewContext(appA)).Billing().UpsertBillingHourlyBuckets(context.Background(), rows)
-		},
-	)
-	settlerA := newTestSettlerWithAggregator(appA, busA, logger, agg)
-
-	// --- Path B: legacy (syncAggregator drives per-log UpsertXxx) ---
-	dbB, appB := setupTestDB(t)
-	busB := eventbus.NewMemoryBus()
-	dbB.Create(&models.User{Username: "ub", Password: "x", Role: 1, Status: 1, Quota: 1_000_000})
-	dbB.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
-
-	settlerB := newTestSettlerWithAggregator(appB, busB, logger, &syncAggregator{app: appB})
-
-	// --- Mixed inputs covering edge cases ---
-	// 用固定的 ts 避免两次跑出现在不同分钟/小时窗口的边界 flake。
-	now := time.Now().Unix()
-	entries := []protocol.UsageLogEntry{
-		// success stream
-		{
-			RequestID: "r-stream-success", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "gpt-4o",
-			PromptTokens: 100, CompletionTokens: 50, Status: 1, IsStream: true,
-			FirstResponseMs: 300, Duration: 2200,
-			InboundDecodeMs: 5, UpstreamDispatchMs: 6, UpstreamDecodeMs: 7, OutboundEncodeMs: 8, ClientEncodeMs: 9,
-			Timestamp: now,
-		},
-		// failed
-		{
-			RequestID: "r-failed", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "gpt-4o",
-			PromptTokens: 50, Status: 0,
-			Timestamp: now,
-		},
-		// non-stream success
-		{
-			RequestID: "r-nonstream", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "gpt-4o",
-			PromptTokens: 200, CompletionTokens: 100, Status: 1, IsStream: false,
-			InboundDecodeMs: 10, OutboundEncodeMs: 20,
-			Timestamp: now,
-		},
-		// different token same user
-		{
-			RequestID: "r-other-token", UserID: 1, TokenID: 2, ChannelID: 1, ModelName: "gpt-4o",
-			PromptTokens: 75, CompletionTokens: 25, Status: 1,
-			Timestamp: now,
-		},
-		// different channel same user/token
-		{
-			RequestID: "r-other-channel", UserID: 1, TokenID: 1, ChannelID: 2, ModelName: "gpt-4o",
-			PromptTokens: 30, CompletionTokens: 15, Status: 1,
-			Timestamp: now,
-		},
-	}
-
-	settlerA.Settle(context.Background(), "agent-x", entries)
-	settlerB.Settle(context.Background(), "agent-x", entries)
-
-	// Path A: flush aggregator into DB
-	require.NoError(t, agg.Flush())
-
-	// --- Compare each rollup table row-by-row ---
-	var tokA, tokB []models.TokenDailyBilling
-	require.NoError(t, dbA.Order("date, user_id, token_id").Find(&tokA).Error)
-	require.NoError(t, dbB.Order("date, user_id, token_id").Find(&tokB).Error)
-	require.Equal(t, len(tokB), len(tokA), "token_daily row count")
-	for i := range tokB {
-		// Ignore CreatedAt/UpdatedAt: autoCreateTime/autoUpdateTime differ
-		// across the two sequential settle calls; behavior equivalence is
-		// about counter math + dimension keys, not wall-clock.
-		// Also zero ID since the two DBs are independent.
-		tokA[i].ID, tokB[i].ID = 0, 0
-		tokA[i].CreatedAt, tokB[i].CreatedAt = 0, 0
-		tokA[i].UpdatedAt, tokB[i].UpdatedAt = 0, 0
-		require.Equal(t, tokB[i], tokA[i], "token_daily row %d", i)
-	}
-
-	var chA, chB []models.ChannelDailyBilling
-	require.NoError(t, dbA.Order("date, channel_id, private_channel_id").Find(&chA).Error)
-	require.NoError(t, dbB.Order("date, channel_id, private_channel_id").Find(&chB).Error)
-	require.Equal(t, len(chB), len(chA), "channel_daily row count")
-	for i := range chB {
-		chA[i].ID, chB[i].ID = 0, 0
-		chA[i].CreatedAt, chB[i].CreatedAt = 0, 0
-		chA[i].UpdatedAt, chB[i].UpdatedAt = 0, 0
-		require.Equal(t, chB[i], chA[i], "channel_daily row %d", i)
-	}
-
-	var hA, hB []models.BillingHourlyBucket
-	require.NoError(t, dbA.Order("date, hour, user_id, token_id, channel_id, private_channel_id, owner_type, model_name").Find(&hA).Error)
-	require.NoError(t, dbB.Order("date, hour, user_id, token_id, channel_id, private_channel_id, owner_type, model_name").Find(&hB).Error)
-	require.Equal(t, len(hB), len(hA), "hourly_bucket row count")
-	for i := range hB {
-		hA[i].ID, hB[i].ID = 0, 0
-		hA[i].CreatedAt, hB[i].CreatedAt = 0, 0
-		hA[i].UpdatedAt, hB[i].UpdatedAt = 0, 0
-		require.Equal(t, hB[i], hA[i], "hourly_bucket row %d", i)
-	}
-}
-
-// TestSettle_PersistsFallbackChainAndTraces 验证 settler 正确落库 FallbackChain 列
-// 和多条 usage_log_traces 行（每候选一条，AttemptIndex 从 slice 顺序取）。
 func TestSettle_PersistsFallbackChainAndTraces(t *testing.T) {
 	db, appProv := setupTestDB(t)
 	bus := eventbus.NewMemoryBus()
@@ -1330,44 +959,6 @@ func TestSettle_PersistsFallbackChainAndTraces(t *testing.T) {
 	}
 }
 
-// TestSettler_NilAggregatorFallsBackToNoop 验证 newTestSettlerWithAggregator(nil)
-// 不会 panic：构造函数会把 nil 替换为 noopAggregator。
-func TestSettler_NilAggregatorFallsBackToNoop(t *testing.T) {
-	db, appProv := setupTestDB(t)
-	bus := eventbus.NewMemoryBus()
-	logger := zap.NewNop()
-
-	db.Create(&models.User{Username: "nil-agg-u", Password: "x", Role: 1, Status: 1, Quota: 10000})
-	db.Create(&models.ModelConfig{ModelName: "gpt-4o", InputPrice: 2.5, OutputPrice: 10.0, Status: 1})
-
-	settler := newTestSettlerWithAggregator(appProv, bus, logger, nil)
-	require.NotNil(t, settler.Aggregator, "nil aggregator must fall back to noopAggregator")
-
-	// settle 不应 panic
-	settler.Settle(context.Background(), "agent-x", []protocol.UsageLogEntry{{
-		RequestID:        "req-nil-agg-1",
-		UserID:           1,
-		TokenID:          1,
-		ChannelID:        1,
-		ModelName:        "gpt-4o",
-		PromptTokens:     10,
-		CompletionTokens: 5,
-		Status:           1,
-		Timestamp:        time.Now().Unix(),
-	}})
-
-	var count int64
-	db.Model(&models.UsageLog{}).Where("request_id = ?", "req-nil-agg-1").Count(&count)
-	require.Equal(t, int64(1), count, "usage log should still be created")
-}
-
-// TestSettleBatch_ReturnsErrorButSettlesRest 验证 SettleBatch 的同步、error-返回
-// 契约:供 HTTP 摄取路径用,调用方以非 nil 返回决定 5xx 让 agent 重试整批。
-//
-//   - success:全部条目结算成功 → 返回 nil,行都落库。
-//   - failure:usage_logs 表被 drop(模拟 SQLITE_BUSY 等结算期故障)→ 全部条目
-//     失败 → 返回非 nil 聚合错误。
-//   - Settle(void wrapper) 在同样的失败场景下不 panic(错误已在内部记日志吞掉)。
 func TestSettleBatch_ReturnsErrorButSettlesRest(t *testing.T) {
 	t.Run("success_all_settle_returns_nil_error", func(t *testing.T) {
 		db, appProv := setupTestDB(t)

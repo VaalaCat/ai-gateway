@@ -58,11 +58,12 @@ func (r ChannelResilience) Validate() error {
 type Channel struct {
 	ChannelCore
 
-	Key            string `gorm:"type:text" json:"key"`
-	Models         string `gorm:"type:text" json:"models"`
-	ModelMapping   string `gorm:"type:text" json:"model_mapping"`
-	ProxyURL       string `gorm:"size:256" json:"proxy_url"`
-	HeaderOverride string `gorm:"type:text" json:"header_override"`
+	PublicDisplayName string `gorm:"size:64;not null;default:''" json:"public_display_name"`
+	Key               string `gorm:"type:text" json:"key"`
+	Models            string `gorm:"type:text" json:"models"`
+	ModelMapping      string `gorm:"type:text" json:"model_mapping"`
+	ProxyURL          string `gorm:"size:256" json:"proxy_url"`
+	HeaderOverride    string `gorm:"type:text" json:"header_override"`
 
 	// Override embedded tag: admin Channel needs an index on Tag.
 	Tag string `gorm:"size:64;index" json:"tag"`
@@ -88,7 +89,7 @@ type Channel struct {
 	Limit datatypes.JSONType[ChannelLimit] `gorm:"type:text" json:"limit"`
 
 	// LimitState 是限额评估器写入的运行态(为何被自动禁/能否自动恢复),API 只读不写。
-	LimitState datatypes.JSONType[ChannelLimitState] `gorm:"type:text" json:"limit_state"`
+	LimitState datatypes.JSONType[ChannelDisableState] `gorm:"type:text" json:"limit_state"`
 }
 
 // GetBaseURL returns the channel's base URL, falling back to the default

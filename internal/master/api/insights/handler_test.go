@@ -409,8 +409,7 @@ func TestGet_RangeOutOfBounds_Returns400(t *testing.T) {
 	seedAgentRow(t, db, "ag-1", "Agent One", 1, now-1800)
 
 	ctx := makeInsightsCtx(t, application, 1, true)
-	// gran=day 上限 365 天,400 天必越界。
-	_, err := h.Get(ctx, GetRequest{Type: "agent", ID: "ag-1", Start: now - 400*86400, End: now, Gran: "day"})
+	_, err := h.Get(ctx, GetRequest{Type: "agent", ID: "ag-1", Start: now - 8*86400, End: now, Gran: "hour"})
 	if err == nil {
 		t.Fatalf("expected 400, got nil")
 	}
@@ -423,5 +422,20 @@ func TestGet_RangeOutOfBounds_Returns400(t *testing.T) {
 	}
 	if apiErr.Code != "RangeOutOfBounds" {
 		t.Fatalf("Code = %q, want RangeOutOfBounds", apiErr.Code)
+	}
+}
+
+func TestGet_LongDayRange_IsAllowed(t *testing.T) {
+	h, db, application := newInsightsTestCtx(t)
+	now := time.Now().UTC().Unix()
+	seedAgentRow(t, db, "ag-long", "Long Range Agent", 1, now-1800)
+	ctx := makeInsightsCtx(t, application, 1, true)
+
+	_, err := h.Get(ctx, GetRequest{
+		Type: "agent", ID: "ag-long", Start: now - 400*86400, End: now, Gran: "day",
+	})
+
+	if err != nil {
+		t.Fatalf("Get long day range: %v", err)
 	}
 }

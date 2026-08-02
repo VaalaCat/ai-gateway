@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	gosync "sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +36,7 @@ type HeartbeatTracker struct {
 	started       bool
 	closing       bool
 	closeOnce     gosync.Once
+	closeErr      error
 	workerCancel  context.CancelCauseFunc
 	workers       conc.WaitGroup
 	done          chan struct{}
@@ -53,6 +55,11 @@ type configFingerprintState struct {
 // Inject the real dao.BatchUpdateLastSeen for production; nil makes Flush a no-op.
 type LastSeenPersistFn func(updates map[string]int64) error
 type LastSeenPersistContextFn func(context.Context, map[string]int64) error
+
+const (
+	heartbeatFinalFlushAttempts = 3
+	heartbeatFinalFlushBackoff  = 10 * time.Millisecond
+)
 
 // NewHeartbeatTracker constructs a tracker. app may be nil for pure-memory
 // tests. flushEvery <= 0 disables the background ticker.
@@ -121,11 +128,9 @@ func (t *HeartbeatTracker) SetLastSeenPersistContextFn(fn LastSeenPersistContext
 	t.persistFn = fn
 }
 
-// Flush snapshots dirty entries to DB and clears the dirty set.
-// On persistence failure: dirty is cleared but updates are dropped.
-// Live agents recover on their next Touch (re-marks dirty). For agents that
-// never heartbeat again, last_seen may stay stale in DB — acceptable, since
-// such agents are stale anyway and the UI reads memory first.
+// Flush snapshots dirty entries to DB and clears the dirty set. Persistence
+// failures merge the snapshot IDs back into dirty; a Touch that arrives during
+// persistence keeps its newer value in seen for the next Flush.
 func (t *HeartbeatTracker) Flush() error {
 	return t.FlushContext(context.Background())
 }
@@ -149,7 +154,21 @@ func (t *HeartbeatTracker) FlushContext(ctx context.Context) error {
 	}
 	t.inflight.Add(1)
 	defer t.inflight.Add(-1)
-	return fn(ctx, snapshot)
+	if err := fn(ctx, snapshot); err != nil {
+		// behavior change: failed persistence restores pending IDs instead of
+		// dropping their latest in-memory last_seen values.
+		t.mergeDirtySnapshot(snapshot)
+		return err
+	}
+	return nil
+}
+
+func (t *HeartbeatTracker) mergeDirtySnapshot(snapshot map[string]int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id := range snapshot {
+		t.dirty[id] = struct{}{}
+	}
 }
 
 // Start spawns a background goroutine that calls Flush every flushEvery.
@@ -190,9 +209,9 @@ func (t *HeartbeatTracker) Start(ctx context.Context) {
 	})
 }
 
-// Stop signals the ticker goroutine to exit and runs one final Flush
-// to persist anything still in dirty. Safe to call concurrently and idempotent:
-// stopCh 关闭走 sync.Once，Flush 自身由 mu 保护可重复调用。
+// Close stops the ticker and retries the final dirty flush with bounded,
+// context-aware backoff. Concurrent callers observe the same final error once
+// the lifecycle worker has completed.
 func (t *HeartbeatTracker) Close(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("heartbeat tracker: nil close context")
@@ -207,17 +226,66 @@ func (t *HeartbeatTracker) Close(ctx context.Context) error {
 		t.lifecycleMu.Unlock()
 		go func() {
 			t.workers.Wait()
-			if err := t.FlushContext(ctx); err != nil && t.logger != nil {
-				t.logger.Warn("heartbeat_flush failed on shutdown", zap.Error(err))
+			finalErr := t.flushFinalWithRetry(ctx)
+			t.lifecycleMu.Lock()
+			t.closeErr = finalErr
+			t.lifecycleMu.Unlock()
+			if finalErr != nil && t.logger != nil {
+				t.logger.Warn("heartbeat_flush failed on shutdown", zap.Error(finalErr))
 			}
 			close(t.done)
 		}()
 	})
 	select {
 	case <-t.done:
-		return nil
+		t.lifecycleMu.Lock()
+		defer t.lifecycleMu.Unlock()
+		return t.closeErr
 	case <-ctx.Done():
 		return context.Cause(ctx)
+	}
+}
+
+func (t *HeartbeatTracker) flushFinalWithRetry(ctx context.Context) error {
+	var finalErr error
+	backoff := heartbeatFinalFlushBackoff
+	for attempt := 1; attempt <= heartbeatFinalFlushAttempts; attempt++ {
+		if cause := context.Cause(ctx); cause != nil {
+			return errors.Join(finalErr, cause)
+		}
+		err := t.FlushContext(ctx)
+		if err == nil {
+			return nil
+		}
+		finalErr = err
+		if attempt == heartbeatFinalFlushAttempts {
+			break
+		}
+		if waitErr := t.waitFinalFlushRetry(ctx, backoff); waitErr != nil {
+			return errors.Join(finalErr, waitErr)
+		}
+		backoff *= 2
+	}
+	return fmt.Errorf("heartbeat final flush failed after %d attempts: %w", heartbeatFinalFlushAttempts, finalErr)
+}
+
+func (t *HeartbeatTracker) waitFinalFlushRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	t.activeTimers.Add(1)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		t.activeTimers.Add(-1)
+	}()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-timer.C:
+		return nil
 	}
 }
 

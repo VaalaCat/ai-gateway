@@ -2,6 +2,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
 import type { AgentRoute, AgentRouteOverviewItem, PaginatedResponse, PaginatedParams } from "@/lib/types";
 
+export interface AgentRouteOverviewParams extends PaginatedParams {
+  q?: string;
+  source_type?: "token" | "channel";
+  source_id?: number;
+  model?: string;
+  agent_id?: string;
+}
+
 export function useAgentRoutes(
   params: PaginatedParams & { source_type?: string; source_id?: number } = {},
   options: { enabled?: boolean } = {},
@@ -16,7 +24,7 @@ export function useAgentRoutes(
   });
 }
 
-export function useAgentRoutesOverview(params: PaginatedParams & { source_type?: string } = {}) {
+export function useAgentRoutesOverview(params: AgentRouteOverviewParams = {}) {
   return useQuery({
     queryKey: ["agent-routes-overview", params],
     queryFn: () =>

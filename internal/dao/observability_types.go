@@ -25,8 +25,6 @@ type ObsRange struct {
 const (
 	// MaxHourRangeDays 限制 hour 粒度查询窗口最大天数。
 	MaxHourRangeDays = 7
-	// MaxDayRangeDays 限制 day 粒度查询窗口最大天数。
-	MaxDayRangeDays = 365
 )
 
 // ErrRangeOutOfBounds 是从 listfilter 包导出的别名，保持现有
@@ -52,7 +50,7 @@ func (r ObsRange) Validate() error {
 	case GranHour:
 		return r.TimeWindow().Validate(MaxHourRangeDays)
 	case GranDay:
-		return r.TimeWindow().Validate(MaxDayRangeDays)
+		return r.TimeWindow().Validate(0)
 	}
 	return nil
 }
@@ -93,8 +91,8 @@ type TimeBucket struct {
 	CacheWriteTokens int64  `json:"cache_write_tokens"`
 	// TTFTMs/TPS 是该桶的均值(仅 stream 累计有效时才非零); CacheHitRate 是 0-100 百分比
 	// (= cache_read/(prompt+cache_read)*100)。CacheHitRate 三条聚合路径都填充;
-	// TTFTMs/TPS 在 hourlyTrendFromBuckets 与 hourlyTrendFromUsageLog 路径填充,
-	// token_daily 路径无 stream/first_response 逐请求列, 该路径下 TTFTMs/TPS 恒为 0。
+	// TTFTMs/TPS 在 hourlyTrendHybrid 与 hourlyTrendFromUsageLog 路径填充;
+	// 完整 token_daily 日无 stream/first_response 逐请求列，因此这两项为 0。
 	TTFTMs       int64   `json:"ttft_ms"`
 	TPS          float64 `json:"tps"`
 	CacheHitRate float64 `json:"cache_hit_rate"`

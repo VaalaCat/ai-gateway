@@ -24,15 +24,14 @@ type AdminStatsQuery interface {
 	Distribution(by string, r ObsRange, scope Scope, f ObsFilter) ([]Bucket, error)
 	ModelDistribution(r ObsRange, scope Scope, topN int, f ObsFilter) ([]Bucket, error)
 	Leaderboard(by, metric string, limit int, r ObsRange, scope Scope, f ObsFilter) ([]LeaderRow, error)
-	SpeedCompare(dimension string, r ObsRange, scope Scope, f ObsFilter) ([]SpeedRow, error)
+	SpeedCompare(dimension string, r ObsRange, scope Scope, topN int, f ObsFilter) ([]SpeedRow, error)
 	ChannelMetrics(r ObsRange) ([]ChannelMetric, error)
 	ChannelModelBreakdown(channelID uint, r ObsRange) ([]ChannelModelBreakdownRow, error)
 	AgentMetrics(r ObsRange) ([]AgentMetric, error)
 	ErrorDistribution(by string, r ObsRange, scope Scope) ([]ErrBucket, error)
 	StageLatencyP95(filter UsageLogListFilter, r ObsRange) (StageLatency, error)
 	DashboardKpis(r ObsRange, scope Scope, f ObsFilter) (KpiBundle, error)
-	CoreDashboardKpis(r ObsRange, scope Scope, f ObsFilter) (KpiBundle, error)
-	CoreDashboardTrend(r ObsRange, scope Scope, f ObsFilter) ([]TimeBucket, error)
+	DashboardTrend(r ObsRange, scope Scope, f ObsFilter) ([]TimeBucket, error)
 	DashboardSuccessRate(r ObsRange, scope Scope, f ObsFilter) (KpiMetric, error)
 	CostTrendStackedByModel(r ObsRange, scope Scope, topN int, f ObsFilter) (CostTrendStacked, error)
 	MarketShareTrend(dim string, r ObsRange, scope Scope, topN int, f ObsFilter) (CostTrendStacked, error)
@@ -130,7 +129,7 @@ func (q *adminStatsQuery) requestLogDB() (*gorm.DB, error) {
 		return nil, err
 	}
 	if mode == app.DatabaseLayoutSplit {
-		return db.Table("request_logs"), nil
+		return db.Table("request_logs").Session(&gorm.Session{}), nil
 	}
 	return db, nil
 }
@@ -160,14 +159,7 @@ func (q *adminStatsQuery) GetOverview() (*OverviewStats, error) {
 	if err := logDB.Model(&models.UsageLog{}).Count(&s.UsageLogCount).Error; err != nil {
 		return nil, WrapLogDatabaseError(err)
 	}
-	mode, err := q.ctx.DatabaseLayoutMode()
-	if err != nil {
-		return nil, err
-	}
-	costQuery := db.Model(&models.UsageLog{})
-	if mode == app.DatabaseLayoutSplit {
-		costQuery = db.Model(&models.BillingLog{})
-	}
+	costQuery := logDB.Model(&models.UsageLog{})
 	if err := costQuery.Select("COALESCE(SUM(total_cost), 0)").Scan(&s.TotalCost).Error; err != nil {
 		return nil, err
 	}
@@ -205,31 +197,25 @@ func (q *adminStatsQuery) GetTableCount(table KnownTable) (int64, error) {
 }
 
 func (q *adminStatsQuery) GetTotalCost(filter UsageLogListFilter) (int64, error) {
-	mode, err := q.ctx.DatabaseLayoutMode()
+	db, err := q.requestLogDB()
 	if err != nil {
 		return 0, err
 	}
-	db := q.ctx.GetCoreDB().Model(&models.UsageLog{})
-	if mode == app.DatabaseLayoutSplit {
-		db = q.ctx.GetCoreDB().Model(&models.BillingLog{})
-	}
+	db = db.Model(&models.UsageLog{})
 	db = applyUsageLogFilter(db, filter)
 	var cost int64
 	err = db.Select("COALESCE(SUM(total_cost), 0)").Scan(&cost).Error
-	return cost, err
+	return cost, WrapLogDatabaseError(err)
 }
 
 func (q *adminStatsQuery) GetTrend(days int, userID *uint) ([]TrendItem, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Unix()
 
-	mode, err := q.ctx.DatabaseLayoutMode()
+	db, err := q.requestLogDB()
 	if err != nil {
 		return nil, err
 	}
-	db := q.ctx.GetCoreDB().Model(&models.UsageLog{})
-	if mode == app.DatabaseLayoutSplit {
-		db = q.ctx.GetCoreDB().Model(&models.BillingLog{})
-	}
+	db = db.Model(&models.UsageLog{})
 	db = db.Where("created_at >= ?", cutoff)
 	if userID != nil {
 		db = db.Where("user_id = ?", *userID)
@@ -243,7 +229,7 @@ func (q *adminStatsQuery) GetTrend(days int, userID *uint) ([]TrendItem, error) 
 			"COALESCE(SUM(completion_tokens), 0) as completion_tokens, " +
 			"COALESCE(SUM(total_cost), 0) as cost",
 	).Group("date").Order("date ASC").Find(&items).Error
-	return items, err
+	return items, WrapLogDatabaseError(err)
 }
 
 func (q *adminStatsQuery) HourlyTrend(r ObsRange, scope Scope, f ObsFilter) ([]TimeBucket, error) {
@@ -251,18 +237,27 @@ func (q *adminStatsQuery) HourlyTrend(r ObsRange, scope Scope, f ObsFilter) ([]T
 		return nil, nil
 	}
 	uid := f.EffectiveUserID(scope)
-	if f.TokenID != 0 {
-		return hourlyTrendFromBillingFacts(q.ctx.GetCoreDB(), r, uid, f.TokenID, f.ModelName)
-	}
 	if uid == 0 {
-		db, err := q.logDB()
+		if f.TokenID != 0 || f.ModelName != "" {
+			db, err := q.requestLogDB()
+			if err != nil {
+				return nil, err
+			}
+			rows, err := hourlyTrendFromUsageLog(db, r, uid, f.TokenID, f.ModelName)
+			return rows, WrapLogDatabaseError(err)
+		}
+		hourlyDB, err := q.logDB()
 		if err != nil {
 			return nil, err
 		}
-		rows, err := hourlyTrendFromBuckets(db, r, f.ModelName)
+		requestDB, err := q.requestLogDB()
+		if err != nil {
+			return nil, err
+		}
+		rows, err := hourlyTrendHybrid(hourlyDB, requestDB, r)
 		return rows, WrapLogDatabaseError(err)
 	}
-	if f.ModelName != "" || r.Gran == GranHour {
+	if f.TokenID != 0 || f.ModelName != "" || r.Gran == GranHour {
 		db, err := q.requestLogDB()
 		if err != nil {
 			return nil, err
@@ -270,13 +265,172 @@ func (q *adminStatsQuery) HourlyTrend(r ObsRange, scope Scope, f ObsFilter) ([]T
 		rows, err := hourlyTrendFromUsageLog(db, r, uid, f.TokenID, f.ModelName)
 		return rows, WrapLogDatabaseError(err)
 	}
-	return hourlyTrendFromTokenDaily(q.ctx.GetCoreDB(), r, uid)
+	db, err := q.logDB()
+	if err != nil {
+		return nil, err
+	}
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := hourlyTrendFromTokenDailyHybrid(db, requestDB, r, uid)
+	return rows, WrapLogDatabaseError(err)
+}
+
+func hourlyTrendHybrid(hourlyDB, requestDB *gorm.DB, r ObsRange) ([]TimeBucket, error) {
+	window := splitExactBillingWindow(r.Start, r.End)
+	if !window.hasFullBuckets() {
+		return hourlyTrendFromUsageLog(requestDB, r, 0, 0, "")
+	}
+	rows, err := trendAggregatesFromBuckets(hourlyDB, r.Gran, window.fullStart, window.fullEnd)
+	if err != nil {
+		return nil, err
+	}
+	for _, boundary := range window.boundaries {
+		partial, err := trendAggregatesFromRequestFacts(requestDB, r.Gran, boundary.start, boundary.end, 0)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, partial...)
+	}
+	return mergeTrendAggregates(rows), nil
+}
+
+type trendAggregate struct {
+	Ts                        int64
+	Label                     string
+	Cost                      int64
+	Requests                  int64
+	PromptTokens              int64
+	CompletionTokens          int64
+	CacheReadTokens           int64
+	CacheWriteTokens          int64
+	SumFirstResponseMs        int64
+	StreamRequestCount        int64
+	SumStreamCompletionTokens int64
+	SumGenerationMs           int64
+}
+
+func trendAggregatesFromBuckets(db *gorm.DB, gran Gran, start, end int64) ([]trendAggregate, error) {
+	type row struct {
+		Date                      string
+		Hour                      int
+		Cost                      int64
+		Requests                  int64
+		PromptTokens              int64
+		CompletionTokens          int64
+		CacheReadTokens           int64
+		CacheWriteTokens          int64
+		SumFirstResponseMs        int64
+		StreamRequestCount        int64
+		SumStreamCompletionTokens int64
+		SumGenerationMs           int64
+	}
+	groupCols := "date, hour"
+	if gran == GranDay {
+		groupCols = "date"
+	}
+	var scanned []row
+	err := alignedHourWindow(db.Model(&models.UsageHourlyBucket{}), start, end).
+		Select(groupCols + `,
+			COALESCE(SUM(total_cost),0) cost, COALESCE(SUM(request_count),0) requests,
+			COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens,
+			COALESCE(SUM(cache_read_tokens),0) cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) cache_write_tokens,
+			COALESCE(SUM(sum_first_response_ms),0) sum_first_response_ms,
+			COALESCE(SUM(stream_request_count),0) stream_request_count,
+			COALESCE(SUM(sum_stream_completion_tokens),0) sum_stream_completion_tokens,
+			COALESCE(SUM(sum_generation_ms),0) sum_generation_ms`).
+		Group(groupCols).Scan(&scanned).Error
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]trendAggregate, 0, len(scanned))
+	for _, item := range scanned {
+		ts, label := bucketTsLabel(item.Date, item.Hour, gran)
+		rows = append(rows, trendAggregate{
+			Ts: ts, Label: label, Cost: item.Cost, Requests: item.Requests,
+			PromptTokens: item.PromptTokens, CompletionTokens: item.CompletionTokens,
+			CacheReadTokens: item.CacheReadTokens, CacheWriteTokens: item.CacheWriteTokens,
+			SumFirstResponseMs: item.SumFirstResponseMs, StreamRequestCount: item.StreamRequestCount,
+			SumStreamCompletionTokens: item.SumStreamCompletionTokens, SumGenerationMs: item.SumGenerationMs,
+		})
+	}
+	return rows, nil
+}
+
+func trendAggregatesFromRequestFacts(db *gorm.DB, gran Gran, start, end int64, userID uint) ([]trendAggregate, error) {
+	bucketSeconds := int64(3600)
+	if gran == GranDay {
+		bucketSeconds = 86400
+	}
+	var rows []trendAggregate
+	query := db.Model(&models.UsageLog{}).
+		Where("created_at >= ? AND created_at < ?", start, end)
+	if userID > 0 {
+		query = query.Where("user_id = ?", userID)
+	}
+	err := query.
+		Select(fmt.Sprintf(`(created_at-created_at %% %d) ts,
+			COALESCE(SUM(total_cost),0) cost, COUNT(*) requests,
+			COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens,
+			COALESCE(SUM(cache_read_tokens),0) cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) cache_write_tokens,
+			COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 THEN first_response_ms ELSE 0 END),0) sum_first_response_ms,
+			COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 THEN 1 ELSE 0 END),0) stream_request_count,
+			COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 THEN completion_tokens ELSE 0 END),0) sum_stream_completion_tokens,
+			COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 THEN duration-first_response_ms ELSE 0 END),0) sum_generation_ms`, bucketSeconds)).
+		Group("ts").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rows[i].Label = formatBucketLabel(rows[i].Ts, gran)
+	}
+	return rows, nil
+}
+
+func mergeTrendAggregates(rows []trendAggregate) []TimeBucket {
+	merged := make(map[int64]trendAggregate)
+	for _, row := range rows {
+		current := merged[row.Ts]
+		current.Ts, current.Label = row.Ts, row.Label
+		current.Cost += row.Cost
+		current.Requests += row.Requests
+		current.PromptTokens += row.PromptTokens
+		current.CompletionTokens += row.CompletionTokens
+		current.CacheReadTokens += row.CacheReadTokens
+		current.CacheWriteTokens += row.CacheWriteTokens
+		current.SumFirstResponseMs += row.SumFirstResponseMs
+		current.StreamRequestCount += row.StreamRequestCount
+		current.SumStreamCompletionTokens += row.SumStreamCompletionTokens
+		current.SumGenerationMs += row.SumGenerationMs
+		merged[row.Ts] = current
+	}
+	out := make([]TimeBucket, 0, len(merged))
+	for _, row := range merged {
+		var ttft int64
+		if row.StreamRequestCount > 0 {
+			ttft = row.SumFirstResponseMs / row.StreamRequestCount
+		}
+		var tps float64
+		if row.SumGenerationMs > 0 {
+			tps = float64(row.SumStreamCompletionTokens) * 1000 / float64(row.SumGenerationMs)
+		}
+		var cacheHitRate float64
+		if denominator := row.PromptTokens + row.CacheReadTokens; denominator > 0 {
+			cacheHitRate = float64(row.CacheReadTokens) * 100 / float64(denominator)
+		}
+		out = append(out, newTimeBucket(row.Ts, row.Label, row.Cost, row.Requests,
+			row.PromptTokens, row.CompletionTokens, row.CacheReadTokens, row.CacheWriteTokens,
+			ttft, tps, cacheHitRate))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ts < out[j].Ts })
+	return out
 }
 
 // newTimeBucket 组装 TimeBucket,Tokens = 4 类之和(含 cache),
 // 三条聚合路径共用以避免口径漂移。ttftMs/tps/cacheHitRate 是派生速度/命中率序列;
-// hourlyTrendFromBuckets/hourlyTrendFromUsageLog 两条路径都能算全 3 项,
-// hourlyTrendFromTokenDaily 缺逐请求 stream 明细,只能算 cacheHitRate,ttft/tps 传 0。
+// hourlyTrendHybrid/hourlyTrendFromUsageLog 能算全 3 项;完整 token_daily 日
+// 缺逐请求 stream 明细，只能算 cacheHitRate，ttft/tps 保持 0。
 func newTimeBucket(ts int64, label string, cost, requests, prompt, completion, cacheRead, cacheWrite, ttftMs int64, tps, cacheHitRate float64) TimeBucket {
 	return TimeBucket{
 		Ts: ts, Label: label, Cost: cost, Requests: requests,
@@ -289,71 +443,6 @@ func newTimeBucket(ts int64, label string, cost, requests, prompt, completion, c
 		TPS:              tps,
 		CacheHitRate:     cacheHitRate,
 	}
-}
-
-func hourlyTrendFromBuckets(db *gorm.DB, r ObsRange, modelName string) ([]TimeBucket, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
-	type row struct {
-		Date             string
-		Hour             int
-		Requests         int64
-		PromptTokens     int64
-		CompletionTokens int64
-		CacheReadTokens  int64
-		CacheWriteTokens int64
-		Cost             int64
-		TTFTMs           int64
-		TPS              float64
-		CacheHitRate     float64
-	}
-	groupCols := "date, hour"
-	if r.Gran == GranDay {
-		groupCols = "date"
-	}
-
-	var rows []row
-	query := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ?", startDate, endDate)
-	if modelName != "" {
-		query = query.Where("model_name = ?", modelName)
-	}
-	err := query.
-		Select(groupCols + `,
-			COALESCE(SUM(request_count), 0) AS requests,
-			COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-			COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-			COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-			COALESCE(SUM(total_cost), 0) AS cost,` + hourlyBucketStreamSelect + `,
-			CASE WHEN SUM(prompt_tokens) + SUM(cache_read_tokens) > 0
-			     THEN SUM(cache_read_tokens) * 100.0 / (SUM(prompt_tokens) + SUM(cache_read_tokens))
-			     ELSE 0 END AS cache_hit_rate`).
-		Group(groupCols).
-		Order(groupCols).
-		Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-
-	bucketSec := int64(3600)
-	if r.Gran == GranDay {
-		bucketSec = 86400
-	}
-
-	out := make([]TimeBucket, 0, len(rows))
-	for _, x := range rows {
-		ts, label := bucketTsLabel(x.Date, x.Hour, r.Gran)
-		// 区间重叠: bucket [ts, ts+bucketSec) 与 [r.Start, r.End) 有交集
-		if ts+bucketSec <= r.Start || ts >= r.End {
-			continue
-		}
-		out = append(out, newTimeBucket(ts, label, x.Cost, x.Requests,
-			x.PromptTokens, x.CompletionTokens, x.CacheReadTokens, x.CacheWriteTokens,
-			x.TTFTMs, x.TPS, x.CacheHitRate))
-	}
-	return out, nil
 }
 
 func hourlyTrendFromUsageLog(db *gorm.DB, r ObsRange, userID, tokenID uint, modelName string) ([]TimeBucket, error) {
@@ -412,91 +501,40 @@ func hourlyTrendFromUsageLog(db *gorm.DB, r ObsRange, userID, tokenID uint, mode
 	return out, nil
 }
 
-type billingTrendRow struct {
-	Bucket           int64
-	Requests         int64
-	PromptTokens     int64
-	CompletionTokens int64
-	CacheReadTokens  int64
-	CacheWriteTokens int64
-	Cost             int64
-}
-
-func hourlyTrendFromBillingFacts(db *gorm.DB, r ObsRange, userID, tokenID uint, modelName string) ([]TimeBucket, error) {
-	window := splitExactBillingWindow(r.Start, r.End)
-	merged := make(map[int64]billingTrendRow)
-	add := func(rows []billingTrendRow) {
-		for _, row := range rows {
-			current := merged[row.Bucket]
-			current.Bucket = row.Bucket
-			current.Requests += row.Requests
-			current.PromptTokens += row.PromptTokens
-			current.CompletionTokens += row.CompletionTokens
-			current.CacheReadTokens += row.CacheReadTokens
-			current.CacheWriteTokens += row.CacheWriteTokens
-			current.Cost += row.Cost
-			merged[row.Bucket] = current
-		}
+// hourlyTrendFromTokenDailyHybrid merges complete UTC days from
+// token_daily_billings with exact request facts from partial boundary days.
+func hourlyTrendFromTokenDailyHybrid(dailyDB, requestDB *gorm.DB, r ObsRange, userID uint) ([]TimeBucket, error) {
+	window := splitExactDailyWindow(r.Start, r.End)
+	if !window.hasFullBuckets() {
+		return hourlyTrendFromUsageLog(requestDB, r, userID, 0, "")
 	}
-	if window.hasFullHours() {
-		rows, err := billingTrendRowsFromHourly(db, r, window, userID, tokenID, modelName)
-		if err != nil {
-			return nil, err
-		}
-		add(rows)
+	rows, err := trendAggregatesFromTokenDaily(dailyDB, window.fullStart, window.fullEnd, userID)
+	if err != nil {
+		return nil, err
 	}
 	for _, boundary := range window.boundaries {
-		rows, err := billingTrendRowsFromLogs(db, r, boundary, userID, tokenID, modelName)
+		partial, err := trendAggregatesFromRequestFacts(requestDB, GranDay, boundary.start, boundary.end, userID)
 		if err != nil {
 			return nil, err
 		}
-		add(rows)
+		rows = append(rows, partial...)
 	}
-	keys := make([]int64, 0, len(merged))
-	for key := range merged {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	out := make([]TimeBucket, 0, len(keys))
-	for _, key := range keys {
-		x := merged[key]
-		var hit float64
-		if denominator := x.PromptTokens + x.CacheReadTokens; denominator > 0 {
-			hit = float64(x.CacheReadTokens) * 100 / float64(denominator)
-		}
-		out = append(out, newTimeBucket(key, formatBucketLabel(key, r.Gran), x.Cost, x.Requests, x.PromptTokens, x.CompletionTokens, x.CacheReadTokens, x.CacheWriteTokens, 0, 0, hit))
-	}
-	return out, nil
+	return mergeTrendAggregates(rows), nil
 }
 
-func billingTrendRowsFromHourly(db *gorm.DB, r ObsRange, window exactBillingWindow, userID, tokenID uint, modelName string) ([]billingTrendRow, error) {
-	bucket := "CAST(strftime('%s', date || ' 00:00:00') AS INTEGER) + hour * 3600"
-	if r.Gran == GranDay {
-		bucket = "CAST(strftime('%s', date || ' 00:00:00') AS INTEGER)"
-	}
-	var rows []billingTrendRow
-	query := filterBillingStats(alignedHourWindow(db.Model(&models.BillingHourlyBucket{}), window.fullStart, window.fullEnd), userID, tokenID, modelName)
-	err := query.Select(bucket + ` AS bucket, COALESCE(SUM(request_count),0) requests, COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens, COALESCE(SUM(cache_read_tokens),0) cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) cache_write_tokens, COALESCE(SUM(total_cost),0) cost`).Group("bucket").Scan(&rows).Error
-	return rows, err
-}
-
-func billingTrendRowsFromLogs(db *gorm.DB, r ObsRange, boundary billingBoundary, userID, tokenID uint, modelName string) ([]billingTrendRow, error) {
-	bucketSec := int64(3600)
-	if r.Gran == GranDay {
-		bucketSec = 86400
-	}
-	var rows []billingTrendRow
-	query := filterBillingStats(db.Model(&models.BillingLog{}).Where("created_at >= ? AND created_at < ?", boundary.start, boundary.end), userID, tokenID, modelName)
-	err := query.Select(fmt.Sprintf(`(created_at - created_at %% %d) AS bucket, COUNT(*) requests, COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens, COALESCE(SUM(cache_read_tokens),0) cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) cache_write_tokens, COALESCE(SUM(total_cost),0) cost`, bucketSec)).Group("bucket").Scan(&rows).Error
-	return rows, err
-}
-
-// hourlyTrendFromTokenDaily 为 (单用户 + 天粒度 + 无模型) 走预聚合的按天账,
-// 比扫 usage_logs 快。口径与 newTimeBucket 一致(4 类 token 含 cache)。
-// token_daily_billings 无小时、无 model_name,故只服务该组合。
+// hourlyTrendFromTokenDaily reads complete UTC days only. Production callers
+// that may receive partial days use hourlyTrendFromTokenDailyHybrid.
 func hourlyTrendFromTokenDaily(db *gorm.DB, r ObsRange, userID uint) ([]TimeBucket, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
+	rows, err := trendAggregatesFromTokenDaily(db, r.Start, r.End, userID)
+	if err != nil {
+		return nil, err
+	}
+	return mergeTrendAggregates(rows), nil
+}
+
+func trendAggregatesFromTokenDaily(db *gorm.DB, start, end int64, userID uint) ([]trendAggregate, error) {
+	startDate := time.Unix(start, 0).UTC().Format("2006-01-02")
+	endDate := time.Unix(end, 0).UTC().Format("2006-01-02")
 	type row struct {
 		Date             string
 		Requests         int64
@@ -505,40 +543,32 @@ func hourlyTrendFromTokenDaily(db *gorm.DB, r ObsRange, userID uint) ([]TimeBuck
 		CacheReadTokens  int64
 		CacheWriteTokens int64
 		Cost             int64
-		CacheHitRate     float64
 	}
 	var rows []row
 	err := db.Model(&models.TokenDailyBilling{}).
-		Where("user_id = ? AND date >= ? AND date <= ?", userID, startDate, endDate).
+		Where("user_id = ? AND date >= ? AND date < ?", userID, startDate, endDate).
 		Select(`date,
 			COALESCE(SUM(request_count), 0) AS requests,
 			COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
 			COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
 			COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
 			COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-			COALESCE(SUM(total_cost), 0) AS cost,
-			CASE WHEN SUM(prompt_tokens) + SUM(cache_read_tokens) > 0
-			     THEN SUM(cache_read_tokens) * 100.0 / (SUM(prompt_tokens) + SUM(cache_read_tokens))
-			     ELSE 0 END AS cache_hit_rate`).
+			COALESCE(SUM(total_cost), 0) AS cost`).
 		Group("date").
 		Order("date").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	out := make([]TimeBucket, 0, len(rows))
+	out := make([]trendAggregate, 0, len(rows))
 	for _, x := range rows {
 		t, _ := time.Parse("2006-01-02", x.Date)
 		ts := t.Unix()
-		if ts+86400 <= r.Start || ts >= r.End {
-			continue
-		}
-		// token_daily_billings 无 is_stream/first_response_ms 等逐请求列,无法算 ttft/tps
-		// (预聚合表只有 token/cost/请求数,没有留存流式耗时明细),故 ttft/tps 恒为 0;
-		// 这是该聚合表的真实限制,不是遗漏。cache_hit_rate 有 prompt/cache_read 列可算,已补全。
-		out = append(out, newTimeBucket(ts, x.Date, x.Cost, x.Requests,
-			x.PromptTokens, x.CompletionTokens, x.CacheReadTokens, x.CacheWriteTokens,
-			0, 0, x.CacheHitRate))
+		out = append(out, trendAggregate{
+			Ts: ts, Label: x.Date, Cost: x.Cost, Requests: x.Requests,
+			PromptTokens: x.PromptTokens, CompletionTokens: x.CompletionTokens,
+			CacheReadTokens: x.CacheReadTokens, CacheWriteTokens: x.CacheWriteTokens,
+		})
 	}
 	return out, nil
 }
@@ -548,18 +578,15 @@ func (q *adminStatsQuery) Distribution(by string, r ObsRange, scope Scope, f Obs
 	if by != "model" {
 		return nil, fmt.Errorf("distribution: unsupported dimension %q", by)
 	}
-	if uid := f.EffectiveUserID(scope); uid != 0 {
-		db, err := q.requestLogDB()
-		if err != nil {
-			return nil, err
-		}
-		return distributionByModelFromUsageLog(db, r, uid, f.ModelName)
-	}
-	db, err := q.logDB()
+	hourlyDB, err := q.logDB()
 	if err != nil {
 		return nil, err
 	}
-	return distributionByModelFromBuckets(db, r, f.ModelName)
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return nil, err
+	}
+	return distributionByModelHybrid(hourlyDB, requestDB, r, f.EffectiveUserID(scope), f.ModelName)
 }
 
 // ModelDistribution returns request-count-ranked models with the remainder
@@ -568,19 +595,11 @@ func (q *adminStatsQuery) ModelDistribution(r ObsRange, scope Scope, topN int, f
 	if topN <= 0 {
 		topN = 5
 	}
-	rows, err := billingDimensionStackRows(q.ctx.GetCoreDB(), "model", "requests", r, f.EffectiveUserID(scope), 0, f.ModelName)
+	rows, err := q.Distribution("model", r, scope, f)
 	if err != nil {
 		return nil, err
 	}
-	totals := make(map[string]int64)
-	for _, row := range rows {
-		totals[row.Name] += row.Cost
-	}
-	buckets := make([]Bucket, 0, len(totals))
-	for name, value := range totals {
-		buckets = append(buckets, Bucket{Name: name, Value: value})
-	}
-	return foldDistributionBuckets(buckets, topN), nil
+	return foldDistributionBuckets(rows, topN), nil
 }
 
 func foldDistributionBuckets(buckets []Bucket, topN int) []Bucket {
@@ -611,16 +630,9 @@ func foldDistributionBuckets(buckets []Bucket, topN int) []Bucket {
 	return selected
 }
 
-func distributionByModelFromBuckets(db *gorm.DB, r ObsRange, modelName string) ([]Bucket, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
+func distributionByModelFromBuckets(db *gorm.DB, start, end int64) ([]Bucket, error) {
 	var rows []distributionScanRow
-	query := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ?", startDate, endDate)
-	if modelName != "" {
-		query = query.Where("model_name = ?", modelName)
-	}
+	query := alignedHourWindow(db.Model(&models.UsageHourlyBucket{}), start, end)
 	err := query.
 		Select("model_name AS name, COALESCE(SUM(request_count), 0) AS value").
 		Group("model_name").
@@ -635,7 +647,10 @@ func distributionByModelFromBuckets(db *gorm.DB, r ObsRange, modelName string) (
 func distributionByModelFromUsageLog(db *gorm.DB, r ObsRange, userID uint, modelName string) ([]Bucket, error) {
 	var rows []distributionScanRow
 	query := db.Model(&models.UsageLog{}).
-		Where("created_at >= ? AND created_at < ? AND user_id = ?", r.Start, r.End, userID)
+		Where("created_at >= ? AND created_at < ?", r.Start, r.End)
+	if userID != 0 {
+		query = query.Where("user_id = ?", userID)
+	}
 	if modelName != "" {
 		query = query.Where("model_name = ?", modelName)
 	}
@@ -647,6 +662,44 @@ func distributionByModelFromUsageLog(db *gorm.DB, r ObsRange, userID uint, model
 	if err != nil {
 		return nil, err
 	}
+	return normalizeBuckets(rows), nil
+}
+
+func distributionByModelHybrid(hourlyDB, requestDB *gorm.DB, r ObsRange, userID uint, modelName string) ([]Bucket, error) {
+	if userID != 0 || modelName != "" {
+		return distributionByModelFromUsageLog(requestDB, r, userID, modelName)
+	}
+	window := splitExactBillingWindow(r.Start, r.End)
+	merged := make(map[string]int64)
+	add := func(rows []Bucket) {
+		for _, row := range rows {
+			merged[row.Name] += row.Value
+		}
+	}
+	if window.hasFullBuckets() {
+		rows, err := distributionByModelFromBuckets(hourlyDB, window.fullStart, window.fullEnd)
+		if err != nil {
+			return nil, err
+		}
+		add(rows)
+	}
+	for _, boundary := range window.boundaries {
+		rows, err := distributionByModelFromUsageLog(requestDB, ObsRange{Start: boundary.start, End: boundary.end, Gran: r.Gran}, 0, "")
+		if err != nil {
+			return nil, err
+		}
+		add(rows)
+	}
+	rows := make([]distributionScanRow, 0, len(merged))
+	for name, value := range merged {
+		rows = append(rows, distributionScanRow{Name: name, Value: value})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Value != rows[j].Value {
+			return rows[i].Value > rows[j].Value
+		}
+		return rows[i].Name < rows[j].Name
+	})
 	return normalizeBuckets(rows), nil
 }
 
@@ -698,42 +751,209 @@ func (q *adminStatsQuery) Leaderboard(by, metric string, limit int, r ObsRange, 
 		if uid != 0 {
 			return nil, nil // admin 锁定了某个用户:用户榜退化为单行,前端隐藏
 		}
-		if f.ModelName != "" {
-			return leaderboardByUserFromBillingHourly(q.ctx.GetCoreDB(), metric, limit, r, f.ModelName)
-		}
-		return leaderboardByUser(q.ctx.GetCoreDB(), metric, limit, r)
-	case "model":
-		if uid != 0 {
-			db, err := q.requestLogDB()
-			if err != nil {
-				return nil, err
-			}
-			rows, err := leaderboardByModelUser(db, metric, limit, r, uid, f.ModelName)
-			return rows, WrapLogDatabaseError(err)
-		}
-		db, err := q.logDB()
+		db, err := q.requestLogDB()
 		if err != nil {
 			return nil, err
 		}
-		rows, err := leaderboardByModel(db, metric, limit, r, f.ModelName)
+		rows, err := leaderboardByUserFromRequestFacts(db, metric, limit, r, f.ModelName)
+		if err != nil {
+			return nil, WrapLogDatabaseError(err)
+		}
+		return q.withUserNames(rows)
+	case "model":
+		hourlyDB, err := q.logDB()
+		if err != nil {
+			return nil, err
+		}
+		requestDB, err := q.requestLogDB()
+		if err != nil {
+			return nil, err
+		}
+		rows, err := leaderboardByDimensionHybrid(hourlyDB, requestDB, "model", metric, limit, r, uid, f.ModelName)
 		return rows, WrapLogDatabaseError(err)
 	case "channel":
-		if uid != 0 {
-			db, err := q.requestLogDB()
-			if err != nil {
-				return nil, err
-			}
-			rows, err := leaderboardByChannelUser(db, metric, limit, r, uid, f.ModelName)
-			return rows, WrapLogDatabaseError(err)
-		}
-		db, err := q.logDB()
+		hourlyDB, err := q.logDB()
 		if err != nil {
 			return nil, err
 		}
-		rows, err := leaderboardByChannel(db, metric, limit, r, f.ModelName)
+		requestDB, err := q.requestLogDB()
+		if err != nil {
+			return nil, err
+		}
+		rows, err := leaderboardByDimensionHybrid(hourlyDB, requestDB, "channel", metric, limit, r, uid, f.ModelName)
 		return rows, WrapLogDatabaseError(err)
 	default:
 		return nil, fmt.Errorf("leaderboard: unsupported by %q", by)
+	}
+}
+
+type leaderboardComponentsRow struct {
+	ID                        uint
+	Name                      string
+	Cost                      int64
+	Requests                  int64
+	Tokens                    int64
+	SumFirstResponseMs        int64
+	StreamRequestCount        int64
+	SumStreamCompletionTokens int64
+	SumGenerationMs           int64
+}
+
+func leaderboardByDimensionHybrid(hourlyDB, requestDB *gorm.DB, dimension, metric string, limit int, r ObsRange, userID uint, modelName string) ([]LeaderRow, error) {
+	var components []leaderboardComponentsRow
+	if userID != 0 || modelName != "" {
+		rows, err := leaderboardComponentsFromRequestFacts(requestDB, dimension, r.Start, r.End, userID, modelName)
+		if err != nil {
+			return nil, err
+		}
+		components = append(components, rows...)
+	} else {
+		window := splitExactBillingWindow(r.Start, r.End)
+		if window.hasFullBuckets() {
+			rows, err := leaderboardComponentsFromHourly(hourlyDB, dimension, window.fullStart, window.fullEnd)
+			if err != nil {
+				return nil, err
+			}
+			components = append(components, rows...)
+		}
+		for _, boundary := range window.boundaries {
+			rows, err := leaderboardComponentsFromRequestFacts(requestDB, dimension, boundary.start, boundary.end, 0, "")
+			if err != nil {
+				return nil, err
+			}
+			components = append(components, rows...)
+		}
+	}
+	rows := mergeLeaderboardComponents(components, dimension, metric)
+	sortLeaderboardRows(rows, metric)
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
+func mergeLeaderboardComponents(components []leaderboardComponentsRow, dimension, metric string) []LeaderRow {
+	merged := make(map[string]leaderboardComponentsRow)
+	for _, row := range components {
+		key := row.Name
+		if dimension == "channel" {
+			key = fmt.Sprint(row.ID)
+		}
+		current := merged[key]
+		current.ID = row.ID
+		if current.Name == "" || row.Name != "" && row.Name < current.Name {
+			current.Name = row.Name
+		}
+		current.Cost += row.Cost
+		current.Requests += row.Requests
+		current.Tokens += row.Tokens
+		current.SumFirstResponseMs += row.SumFirstResponseMs
+		current.StreamRequestCount += row.StreamRequestCount
+		current.SumStreamCompletionTokens += row.SumStreamCompletionTokens
+		current.SumGenerationMs += row.SumGenerationMs
+		merged[key] = current
+	}
+	rows := make([]LeaderRow, 0, len(merged))
+	for _, row := range merged {
+		item := LeaderRow{ID: row.ID, Name: row.Name, Cost: row.Cost, Requests: row.Requests, Tokens: row.Tokens}
+		if row.SumGenerationMs > 0 {
+			item.TPS = float64(row.SumStreamCompletionTokens) * 1000 / float64(row.SumGenerationMs)
+		}
+		if row.StreamRequestCount > 0 {
+			item.TTFTMs = row.SumFirstResponseMs / row.StreamRequestCount
+		}
+		if !leaderboardNeedsStream(metric) || row.StreamRequestCount > 0 {
+			rows = append(rows, item)
+		}
+	}
+	return rows
+}
+
+func sortLeaderboardRows(rows []LeaderRow, metric string) {
+	sort.Slice(rows, func(i, j int) bool {
+		switch metric {
+		case "requests":
+			if rows[i].Requests != rows[j].Requests {
+				return rows[i].Requests > rows[j].Requests
+			}
+		case "tokens":
+			if rows[i].Tokens != rows[j].Tokens {
+				return rows[i].Tokens > rows[j].Tokens
+			}
+		case "tps":
+			if rows[i].TPS != rows[j].TPS {
+				return rows[i].TPS > rows[j].TPS
+			}
+		case "ttft":
+			if rows[i].TTFTMs != rows[j].TTFTMs {
+				return rows[i].TTFTMs < rows[j].TTFTMs
+			}
+		default:
+			if rows[i].Cost != rows[j].Cost {
+				return rows[i].Cost > rows[j].Cost
+			}
+		}
+		if rows[i].Name != rows[j].Name {
+			return rows[i].Name < rows[j].Name
+		}
+		return rows[i].ID < rows[j].ID
+	})
+}
+
+func leaderboardComponentsFromHourly(db *gorm.DB, dimension string, start, end int64) ([]leaderboardComponentsRow, error) {
+	id, name, group, err := leaderboardDimensionSQL(dimension)
+	if err != nil {
+		return nil, err
+	}
+	var rows []leaderboardComponentsRow
+	query := alignedHourWindow(db.Model(&models.UsageHourlyBucket{}), start, end)
+	if dimension == "channel" {
+		query = query.Where("channel_id > 0")
+	}
+	err = query.Select(fmt.Sprintf(`%s AS id, %s AS name,
+		COALESCE(SUM(total_cost),0) cost, COALESCE(SUM(request_count),0) requests,
+		COALESCE(SUM(prompt_tokens+completion_tokens+cache_read_tokens+cache_write_tokens),0) tokens,
+		COALESCE(SUM(sum_first_response_ms),0) sum_first_response_ms,
+		COALESCE(SUM(stream_request_count),0) stream_request_count,
+		COALESCE(SUM(sum_stream_completion_tokens),0) sum_stream_completion_tokens,
+		COALESCE(SUM(sum_generation_ms),0) sum_generation_ms`, id, name)).Group(group).Scan(&rows).Error
+	return rows, err
+}
+
+func leaderboardComponentsFromRequestFacts(db *gorm.DB, dimension string, start, end int64, userID uint, modelName string) ([]leaderboardComponentsRow, error) {
+	id, name, group, err := leaderboardDimensionSQL(dimension)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Model(&models.UsageLog{}).Where("created_at >= ? AND created_at < ?", start, end)
+	if dimension == "channel" {
+		query = query.Where("channel_id > 0")
+	}
+	if userID != 0 {
+		query = query.Where("user_id = ?", userID)
+	}
+	if modelName != "" {
+		query = query.Where("model_name = ?", modelName)
+	}
+	var rows []leaderboardComponentsRow
+	err = query.Select(fmt.Sprintf(`%s AS id, %s AS name,
+		COALESCE(SUM(total_cost),0) cost, COUNT(*) requests,
+		COALESCE(SUM(prompt_tokens+completion_tokens+cache_read_tokens+cache_write_tokens),0) tokens,
+		COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND first_response_ms>0 THEN first_response_ms ELSE 0 END),0) sum_first_response_ms,
+		COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND first_response_ms>0 THEN 1 ELSE 0 END),0) stream_request_count,
+		COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 AND duration-first_response_ms>0 THEN completion_tokens ELSE 0 END),0) sum_stream_completion_tokens,
+		COALESCE(SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 AND duration-first_response_ms>0 THEN duration-first_response_ms ELSE 0 END),0) sum_generation_ms`, id, name)).Group(group).Scan(&rows).Error
+	return rows, err
+}
+
+func leaderboardDimensionSQL(dimension string) (id, name, group string, err error) {
+	switch dimension {
+	case "model":
+		return "0", "model_name", "model_name", nil
+	case "channel":
+		return "channel_id", "COALESCE(MIN(NULLIF(channel_name, '')), '')", "channel_id", nil
+	default:
+		return "", "", "", fmt.Errorf("leaderboard: unsupported by %q", dimension)
 	}
 }
 
@@ -799,129 +1019,37 @@ const usageLogStreamSelect = `
 	          / SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 THEN 1 ELSE 0 END)
 	     ELSE 0 END AS ttft_ms`
 
-func leaderboardByModel(db *gorm.DB, metric string, limit int, r ObsRange, modelName string) ([]LeaderRow, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
-	q := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ?", startDate, endDate)
-	if modelName != "" {
-		q = q.Where("model_name = ?", modelName)
-	}
-	q = q.Select(`
-			0 AS id,
-			model_name AS name,
-			COALESCE(SUM(total_cost), 0) AS cost,
-			COALESCE(SUM(request_count), 0) AS requests,
-			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens,` + hourlyBucketStreamSelect).
-		Group("model_name")
-	if leaderboardNeedsStream(metric) {
-		q = q.Having("SUM(stream_request_count) > 0")
-	}
-	var rows []leaderboardScanRow
-	if err := q.Order(leaderboardOrderClause(metric)).Limit(limit).Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rowsToLeaderRows(rows), nil
-}
-
-func leaderboardByModelUser(db *gorm.DB, metric string, limit int, r ObsRange, userID uint, modelName string) ([]LeaderRow, error) {
-	q := db.Model(&models.UsageLog{}).
-		Where("user_id = ? AND created_at >= ? AND created_at < ?", userID, r.Start, r.End)
-	if modelName != "" {
-		q = q.Where("model_name = ?", modelName)
-	}
-	q = q.Select(`
-			0 AS id,
-			model_name AS name,
-			COALESCE(SUM(total_cost), 0) AS cost,
-			COUNT(*) AS requests,
-			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens,` + usageLogStreamSelect).
-		Group("model_name")
-	if leaderboardNeedsStream(metric) {
-		q = q.Having("SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 THEN 1 ELSE 0 END) > 0")
-	}
-	var rows []leaderboardScanRow
-	if err := q.Order(leaderboardOrderClause(metric)).Limit(limit).Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rowsToLeaderRows(rows), nil
-}
-
-func leaderboardByChannel(db *gorm.DB, metric string, limit int, r ObsRange, modelName string) ([]LeaderRow, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
-	q := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ? AND channel_id > 0", startDate, endDate)
-	if modelName != "" {
-		q = q.Where("model_name = ?", modelName)
-	}
-	q = q.Select(`
-			channel_id AS id,
-			COALESCE(MIN(NULLIF(channel_name, '')), '') AS name,
-			COALESCE(SUM(total_cost), 0) AS cost,
-			COALESCE(SUM(request_count), 0) AS requests,
-			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens,` + hourlyBucketStreamSelect).
-		Group("channel_id")
-	if leaderboardNeedsStream(metric) {
-		q = q.Having("SUM(stream_request_count) > 0")
-	}
-	var rows []leaderboardScanRow
-	if err := q.Order(leaderboardOrderClause(metric)).Limit(limit).Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rowsToLeaderRows(rows), nil
-}
-
-func leaderboardByChannelUser(db *gorm.DB, metric string, limit int, r ObsRange, userID uint, modelName string) ([]LeaderRow, error) {
-	q := db.Model(&models.UsageLog{}).
-		Where("user_id = ? AND created_at >= ? AND created_at < ? AND channel_id > 0", userID, r.Start, r.End)
-	if modelName != "" {
-		q = q.Where("model_name = ?", modelName)
-	}
-	q = q.Select(`
-			channel_id AS id,
-			COALESCE(MIN(NULLIF(channel_name, '')), '') AS name,
-			COALESCE(SUM(total_cost), 0) AS cost,
-			COUNT(*) AS requests,
-			COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens,` + usageLogStreamSelect).
-		Group("channel_id")
-	if leaderboardNeedsStream(metric) {
-		q = q.Having("SUM(CASE WHEN is_stream=1 AND status=1 AND completion_tokens>0 THEN 1 ELSE 0 END) > 0")
-	}
-	var rows []leaderboardScanRow
-	if err := q.Order(leaderboardOrderClause(metric)).Limit(limit).Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rowsToLeaderRows(rows), nil
-}
-
-func (q *adminStatsQuery) SpeedCompare(dimension string, r ObsRange, scope Scope, f ObsFilter) (out []SpeedRow, err error) {
+func (q *adminStatsQuery) SpeedCompare(dimension string, r ObsRange, scope Scope, topN int, f ObsFilter) (out []SpeedRow, err error) {
 	defer func() { err = WrapLogDatabaseError(err) }()
 	if !scope.IsAdmin {
 		return nil, nil
 	}
-	db, err := q.logDB()
+	hourlyDB, err := q.logDB()
 	if err != nil {
 		return nil, err
 	}
-	switch dimension {
-	case "model":
-		return speedCompareByModel(db, r, f.ModelName)
-	case "channel":
-		return speedCompareByChannel(db, r, f.ModelName)
-	default:
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return nil, err
+	}
+	finder, ok := speedCompareFinders[dimension]
+	if !ok {
 		return nil, fmt.Errorf("speed_compare: unsupported dimension %q", dimension)
 	}
+	return finder(hourlyDB, requestDB, r, topN, f.ModelName)
+}
+
+type speedCompareFinder func(*gorm.DB, *gorm.DB, ObsRange, int, string) ([]SpeedRow, error)
+
+var speedCompareFinders = map[string]speedCompareFinder{
+	"model":   speedCompareByModel,
+	"channel": speedCompareByChannel,
 }
 
 // ---- Task 7: TTFT p95 / TPS p5 percentile queries ----
 //
-// 复用 logsTotalsFromRollups(:1706 附近) 的 SUM(h0..h16)+MAX → EstimatePercentile
-// 范式,分别读 UsageTTFTHistogram / UsageTPSHistogram 两张侧表。分组版本
-// (ttftP95ByChannel/ttftP95ByAgent/ttftP95ByModel 等)在同一个 hourWindow 上
-// 一次性 Group() 取回每组一行,避免逐渠道/逐 agent/逐模型各查一次(N+1)。
+// 完整小时从 UsageTTFTHistogram / UsageTPSHistogram / UsageDurationHistogram
+// 一次性分组读取；部分边界小时从 request facts 构造同档位样本，合并后再估算。
 
 // histSumSelectFrag 是 SUM(h0)..SUM(h16) 的公共 SELECT 片段;duration/ttft/tps
 // 三张直方图侧表列名一致,可直接共用同一个片段与同一组扫描行结构体。
@@ -932,34 +1060,8 @@ const histSumSelectFrag = `COALESCE(SUM(h0),0) AS s0, COALESCE(SUM(h1),0) AS s1,
 	COALESCE(SUM(h12),0) AS s12, COALESCE(SUM(h13),0) AS s13, COALESCE(SUM(h14),0) AS s14,
 	COALESCE(SUM(h15),0) AS s15, COALESCE(SUM(h16),0) AS s16`
 
-// histGroupRowUint 同 histSumSelectFrag 的分组扫描行,多一个 uint 分组键(channel_id 分组用)。
-type histGroupRowUint struct {
-	Key uint  `gorm:"column:grp_key"`
-	Max int64 `gorm:"column:max_ms"`
-	H0  int64 `gorm:"column:s0"`
-	H1  int64 `gorm:"column:s1"`
-	H2  int64 `gorm:"column:s2"`
-	H3  int64 `gorm:"column:s3"`
-	H4  int64 `gorm:"column:s4"`
-	H5  int64 `gorm:"column:s5"`
-	H6  int64 `gorm:"column:s6"`
-	H7  int64 `gorm:"column:s7"`
-	H8  int64 `gorm:"column:s8"`
-	H9  int64 `gorm:"column:s9"`
-	H10 int64 `gorm:"column:s10"`
-	H11 int64 `gorm:"column:s11"`
-	H12 int64 `gorm:"column:s12"`
-	H13 int64 `gorm:"column:s13"`
-	H14 int64 `gorm:"column:s14"`
-	H15 int64 `gorm:"column:s15"`
-	H16 int64 `gorm:"column:s16"`
-}
-
-func (h histGroupRowUint) counts17() [17]int64 {
-	return [17]int64{h.H0, h.H1, h.H2, h.H3, h.H4, h.H5, h.H6, h.H7, h.H8, h.H9, h.H10, h.H11, h.H12, h.H13, h.H14, h.H15, h.H16}
-}
-
-// histGroupRowStr 同 histGroupRowUint,分组键是 string(agent_id / model_name 分组用)。
+// histGroupRowStr scans exact full-hour histograms grouped by a stable string
+// identity (model name, agent ID, or a decimal channel ID).
 type histGroupRowStr struct {
 	Key string `gorm:"column:grp_key"`
 	Max int64  `gorm:"column:max_ms"`
@@ -988,184 +1090,93 @@ func (h histGroupRowStr) counts17() [17]int64 {
 
 // ttftP95ByChannel 按 channel_id 一次性分组取回窗口内每渠道的 TTFT p95(ms);
 // modelFilter=="" 表示不筛模型。避免 ChannelMetrics/speedCompareByChannel 逐渠道各查一次。
-func ttftP95ByChannel(db *gorm.DB, r ObsRange, modelFilter string) (map[uint]int64, error) {
-	q := hourWindow(db.Model(&models.UsageTTFTHistogram{}), r.Start, r.End)
-	if modelFilter != "" {
-		q = q.Where("model_name = ?", modelFilter)
-	}
-	var rows []histGroupRowUint
-	if err := q.Select(`channel_id AS grp_key, COALESCE(MAX(max_first_response_ms),0) AS max_ms, ` + histSumSelectFrag).
-		Group("channel_id").
-		Scan(&rows).Error; err != nil {
+func ttftP95ByChannel(db *gorm.DB, r ObsRange, modelFilter string, requestDB ...*gorm.DB) (map[uint]int64, error) {
+	values, err := findExactPercentiles(db, requestFactsDB(db, requestDB), r, "channel", "ttft", modelFilter, "")
+	if err != nil {
 		return nil, err
 	}
-	out := make(map[uint]int64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = ttfthist.EstimatePercentile(row.counts17(), 0.95, row.Max)
-	}
-	return out, nil
+	return exactUintPercentiles(values)
 }
 
 // tpsP5ByChannel 是 ttftP95ByChannel 的 TPS 版(speedCompareByChannel 用)。
-func tpsP5ByChannel(db *gorm.DB, r ObsRange, modelFilter string) (map[uint]float64, error) {
-	q := hourWindow(db.Model(&models.UsageTPSHistogram{}), r.Start, r.End)
-	if modelFilter != "" {
-		q = q.Where("model_name = ?", modelFilter)
-	}
-	var rows []histGroupRowUint
-	if err := q.Select(`channel_id AS grp_key, COALESCE(MAX(max_tps),0) AS max_ms, ` + histSumSelectFrag).
-		Group("channel_id").
-		Scan(&rows).Error; err != nil {
+func tpsP5ByChannel(db *gorm.DB, r ObsRange, modelFilter string, requestDB ...*gorm.DB) (map[uint]float64, error) {
+	values, err := findExactPercentiles(db, requestFactsDB(db, requestDB), r, "channel", "tps", modelFilter, "")
+	if err != nil {
 		return nil, err
 	}
-	out := make(map[uint]float64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = float64(tpshist.EstimateP5(row.counts17(), row.Max))
+	parsed, err := exactUintPercentiles(values)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint]float64, len(parsed))
+	for id, value := range parsed {
+		out[id] = float64(value)
 	}
 	return out, nil
 }
 
 // latencyP95ByChannel 按 channel_id 分组取回窗口内每渠道的请求耗时 p95(ms,durhist)。
 // ChannelMetrics.LatencyP95Ms 用。
-func latencyP95ByChannel(db *gorm.DB, r ObsRange) (map[uint]int64, error) {
-	var rows []histGroupRowUint
-	if err := hourWindow(db.Model(&models.UsageDurationHistogram{}), r.Start, r.End).
-		Select(`channel_id AS grp_key, COALESCE(MAX(max_duration_ms),0) AS max_ms, ` + histSumSelectFrag).
-		Group("channel_id").
-		Scan(&rows).Error; err != nil {
+func latencyP95ByChannel(db *gorm.DB, r ObsRange, requestDB ...*gorm.DB) (map[uint]int64, error) {
+	values, err := findExactPercentiles(db, requestFactsDB(db, requestDB), r, "channel", "duration", "", "")
+	if err != nil {
 		return nil, err
 	}
-	out := make(map[uint]int64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = durhist.EstimatePercentile(row.counts17(), 0.95, row.Max)
-	}
-	return out, nil
+	return exactUintPercentiles(values)
 }
 
 // ttftP95ByAgent 按 agent_id 一次性分组取回窗口内每 agent 的 TTFT p95(ms)。
-func ttftP95ByAgent(db *gorm.DB, r ObsRange) (map[string]int64, error) {
-	var rows []histGroupRowStr
-	if err := hourWindow(db.Model(&models.UsageTTFTHistogram{}), r.Start, r.End).
-		Where("agent_id <> ''").
-		Select(`agent_id AS grp_key, COALESCE(MAX(max_first_response_ms),0) AS max_ms, ` + histSumSelectFrag).
-		Group("agent_id").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make(map[string]int64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = ttfthist.EstimatePercentile(row.counts17(), 0.95, row.Max)
-	}
-	return out, nil
+func ttftP95ByAgent(db *gorm.DB, r ObsRange, requestDB ...*gorm.DB) (map[string]int64, error) {
+	return findExactPercentiles(db, requestFactsDB(db, requestDB), r, "agent", "ttft", "", "agent_id <> ''")
 }
 
 // tpsP5ByAgent 是 ttftP95ByAgent 的 TPS 版(tpshist),AgentMetrics.TPSP5 用(Task 16)。
-func tpsP5ByAgent(db *gorm.DB, r ObsRange) (map[string]float64, error) {
-	var rows []histGroupRowStr
-	if err := hourWindow(db.Model(&models.UsageTPSHistogram{}), r.Start, r.End).
-		Where("agent_id <> ''").
-		Select(`agent_id AS grp_key, COALESCE(MAX(max_tps),0) AS max_ms, ` + histSumSelectFrag).
-		Group("agent_id").
-		Scan(&rows).Error; err != nil {
+func tpsP5ByAgent(db *gorm.DB, r ObsRange, requestDB ...*gorm.DB) (map[string]float64, error) {
+	values, err := findExactPercentiles(db, requestFactsDB(db, requestDB), r, "agent", "tps", "", "agent_id <> ''")
+	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]float64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = float64(tpshist.EstimateP5(row.counts17(), row.Max))
+	out := make(map[string]float64, len(values))
+	for id, value := range values {
+		out[id] = float64(value)
 	}
 	return out, nil
 }
 
 // latencyP95ByAgent 是 ttftP95ByAgent 的耗时版(durhist),AgentMetrics.LatencyP95Ms 用。
-func latencyP95ByAgent(db *gorm.DB, r ObsRange) (map[string]int64, error) {
-	var rows []histGroupRowStr
-	if err := hourWindow(db.Model(&models.UsageDurationHistogram{}), r.Start, r.End).
-		Where("agent_id <> ''").
-		Select(`agent_id AS grp_key, COALESCE(MAX(max_duration_ms),0) AS max_ms, ` + histSumSelectFrag).
-		Group("agent_id").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make(map[string]int64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = durhist.EstimatePercentile(row.counts17(), 0.95, row.Max)
-	}
-	return out, nil
+func latencyP95ByAgent(db *gorm.DB, r ObsRange, requestDB ...*gorm.DB) (map[string]int64, error) {
+	return findExactPercentiles(db, requestFactsDB(db, requestDB), r, "agent", "duration", "", "agent_id <> ''")
 }
 
 // ttftP95ByModel / tpsP5ByModel 按 model_name 一次性分组取回慢尾分位,
 // speedCompareByModel 用(避免逐模型各查一次)。
-func ttftP95ByModel(db *gorm.DB, r ObsRange, modelFilter string) (map[string]int64, error) {
-	q := hourWindow(db.Model(&models.UsageTTFTHistogram{}), r.Start, r.End)
-	if modelFilter != "" {
-		q = q.Where("model_name = ?", modelFilter)
-	}
-	var rows []histGroupRowStr
-	if err := q.Select(`model_name AS grp_key, COALESCE(MAX(max_first_response_ms),0) AS max_ms, ` + histSumSelectFrag).
-		Group("model_name").
-		Scan(&rows).Error; err != nil {
+func ttftP95ByModel(db *gorm.DB, r ObsRange, modelFilter string, requestDB ...*gorm.DB) (map[string]int64, error) {
+	return findExactPercentiles(db, requestFactsDB(db, requestDB), r, "model", "ttft", modelFilter, "")
+}
+
+func tpsP5ByModel(db *gorm.DB, r ObsRange, modelFilter string, requestDB ...*gorm.DB) (map[string]float64, error) {
+	values, err := findExactPercentiles(db, requestFactsDB(db, requestDB), r, "model", "tps", modelFilter, "")
+	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]int64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = ttfthist.EstimatePercentile(row.counts17(), 0.95, row.Max)
+	out := make(map[string]float64, len(values))
+	for name, value := range values {
+		out[name] = float64(value)
 	}
 	return out, nil
 }
 
-func tpsP5ByModel(db *gorm.DB, r ObsRange, modelFilter string) (map[string]float64, error) {
-	q := hourWindow(db.Model(&models.UsageTPSHistogram{}), r.Start, r.End)
-	if modelFilter != "" {
-		q = q.Where("model_name = ?", modelFilter)
-	}
-	var rows []histGroupRowStr
-	if err := q.Select(`model_name AS grp_key, COALESCE(MAX(max_tps),0) AS max_ms, ` + histSumSelectFrag).
-		Group("model_name").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make(map[string]float64, len(rows))
-	for _, row := range rows {
-		out[row.Key] = float64(tpshist.EstimateP5(row.counts17(), row.Max))
-	}
-	return out, nil
-}
-
-func speedCompareByModel(db *gorm.DB, r ObsRange, modelName string) ([]SpeedRow, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-	type row struct {
-		Name   string
-		TTFTMs int64
-		TPS    float64
-	}
-	var rows []row
-	query := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ?", startDate, endDate)
-	if modelName != "" {
-		query = query.Where("model_name = ?", modelName)
-	}
-	err := query.Select(`model_name AS name,
-			SUM(sum_first_response_ms) / SUM(stream_request_count) AS ttft_ms,
-			(SUM(sum_stream_completion_tokens) * 1000.0) / SUM(sum_generation_ms) AS tps`).
-		Group("model_name").
-		Having("SUM(stream_request_count) > 0 AND SUM(sum_generation_ms) > 0").
-		Order("ttft_ms ASC").
-		Limit(10).
-		Scan(&rows).Error
+func speedCompareByModel(hourlyDB, requestDB *gorm.DB, r ObsRange, topN int, modelName string) ([]SpeedRow, error) {
+	rows, err := findExactUsageRows(hourlyDB, requestDB, r, "model", modelName, "")
 	if err != nil {
 		return nil, err
 	}
-	out := make([]SpeedRow, 0, len(rows))
-	for _, x := range rows {
-		out = append(out, SpeedRow{Name: x.Name, TTFTMs: x.TTFTMs, TPS: x.TPS})
-	}
-
-	ttftP95s, err := ttftP95ByModel(db, r, modelName)
+	out := speedRowsFromExactUsage(rows)
+	ttftP95s, err := ttftP95ByModel(hourlyDB, r, modelName, requestDB)
 	if err != nil {
 		return nil, err
 	}
-	tpsP5s, err := tpsP5ByModel(db, r, modelName)
+	tpsP5s, err := tpsP5ByModel(hourlyDB, r, modelName, requestDB)
 	if err != nil {
 		return nil, err
 	}
@@ -1173,46 +1184,20 @@ func speedCompareByModel(db *gorm.DB, r ObsRange, modelName string) ([]SpeedRow,
 		out[i].TTFTP95Ms = ttftP95s[out[i].Name]
 		out[i].TPSP5 = tpsP5s[out[i].Name]
 	}
-	return out, nil
+	return pickSpeedRankingRows(out, topN), nil
 }
 
-func speedCompareByChannel(db *gorm.DB, r ObsRange, modelName string) ([]SpeedRow, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-	type row struct {
-		ID     uint
-		Name   string
-		TTFTMs int64
-		TPS    float64
-	}
-	var rows []row
-	query := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ?", startDate, endDate)
-	if modelName != "" {
-		query = query.Where("model_name = ?", modelName)
-	}
-	err := query.Select(`channel_id AS id,
-			COALESCE(MIN(NULLIF(channel_name, '')), '') AS name,
-			SUM(sum_first_response_ms) / SUM(stream_request_count) AS ttft_ms,
-			(SUM(sum_stream_completion_tokens) * 1000.0) / SUM(sum_generation_ms) AS tps`).
-		Group("channel_id").
-		Having("SUM(stream_request_count) > 0 AND SUM(sum_generation_ms) > 0").
-		Order("ttft_ms ASC").
-		Limit(10).
-		Scan(&rows).Error
+func speedCompareByChannel(hourlyDB, requestDB *gorm.DB, r ObsRange, topN int, modelName string) ([]SpeedRow, error) {
+	rows, err := findExactUsageRows(hourlyDB, requestDB, r, "channel", modelName, "")
 	if err != nil {
 		return nil, err
 	}
-	out := make([]SpeedRow, 0, len(rows))
-	for _, x := range rows {
-		out = append(out, SpeedRow{ID: x.ID, Name: x.Name, TTFTMs: x.TTFTMs, TPS: x.TPS})
-	}
-
-	ttftP95s, err := ttftP95ByChannel(db, r, modelName)
+	out := speedRowsFromExactUsage(rows)
+	ttftP95s, err := ttftP95ByChannel(hourlyDB, r, modelName, requestDB)
 	if err != nil {
 		return nil, err
 	}
-	tpsP5s, err := tpsP5ByChannel(db, r, modelName)
+	tpsP5s, err := tpsP5ByChannel(hourlyDB, r, modelName, requestDB)
 	if err != nil {
 		return nil, err
 	}
@@ -1220,7 +1205,90 @@ func speedCompareByChannel(db *gorm.DB, r ObsRange, modelName string) ([]SpeedRo
 		out[i].TTFTP95Ms = ttftP95s[out[i].ID]
 		out[i].TPSP5 = tpsP5s[out[i].ID]
 	}
-	return out, nil
+	return pickSpeedRankingRows(out, topN), nil
+}
+
+func speedRowsFromExactUsage(rows []exactUsageRow) []SpeedRow {
+	out := make([]SpeedRow, 0, len(rows))
+	for _, row := range rows {
+		hasTTFT := row.StreamRequests > 0 && row.SumFirstResponseMs > 0
+		hasTPS := row.SumGenerationMs > 0 && row.SumStreamTokens > 0
+		if !hasTTFT && !hasTPS {
+			continue
+		}
+		speed := SpeedRow{ID: row.ID, Name: row.Name}
+		if hasTTFT {
+			speed.TTFTMs = row.SumFirstResponseMs / row.StreamRequests
+		}
+		if hasTPS {
+			speed.TPS = float64(row.SumStreamTokens) * 1000 / float64(row.SumGenerationMs)
+		}
+		out = append(out, speed)
+	}
+	return out
+}
+
+func pickSpeedRankingRows(rows []SpeedRow, topN int) []SpeedRow {
+	if topN <= 0 || len(rows) == 0 {
+		return nil
+	}
+
+	byTTFT := append([]SpeedRow(nil), rows...)
+	sort.SliceStable(byTTFT, func(i, j int) bool {
+		left, right := byTTFT[i], byTTFT[j]
+		leftValid, rightValid := left.TTFTP95Ms > 0, right.TTFTP95Ms > 0
+		if leftValid != rightValid {
+			return leftValid
+		}
+		if leftValid && left.TTFTP95Ms != right.TTFTP95Ms {
+			return left.TTFTP95Ms < right.TTFTP95Ms
+		}
+		return speedRowIdentityLess(left, right)
+	})
+
+	byTPS := append([]SpeedRow(nil), rows...)
+	sort.SliceStable(byTPS, func(i, j int) bool {
+		left, right := byTPS[i], byTPS[j]
+		leftValid, rightValid := left.TPSP5 > 0, right.TPSP5 > 0
+		if leftValid != rightValid {
+			return leftValid
+		}
+		if leftValid && left.TPSP5 != right.TPSP5 {
+			return left.TPSP5 > right.TPSP5
+		}
+		return speedRowIdentityLess(left, right)
+	})
+
+	type rowKey struct {
+		id   uint
+		name string
+	}
+	selected := make(map[rowKey]SpeedRow, min(len(rows), topN*2))
+	for _, ranked := range [][]SpeedRow{byTTFT, byTPS} {
+		limit := min(topN, len(ranked))
+		for _, row := range ranked[:limit] {
+			selected[rowKey{id: row.ID, name: row.Name}] = row
+		}
+	}
+
+	out := make([]SpeedRow, 0, len(selected))
+	for _, row := range selected {
+		out = append(out, row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TTFTMs != out[j].TTFTMs {
+			return out[i].TTFTMs < out[j].TTFTMs
+		}
+		return speedRowIdentityLess(out[i], out[j])
+	})
+	return out
+}
+
+func speedRowIdentityLess(left, right SpeedRow) bool {
+	if left.Name != right.Name {
+		return left.Name < right.Name
+	}
+	return left.ID < right.ID
 }
 
 // ChannelMetric 是 Monitoring 页面 channel 维度的一行,聚合 24h 内 channel 用量。
@@ -1257,75 +1325,43 @@ type AgentMetric struct {
 	Spark24h     []int64 `json:"spark_24h"`
 }
 
-// channelMetricAggRow 是 ChannelMetrics 聚合扫描的中间行。
-// StreamReqs/SumFirstResponseMs 与 SumComp/SumGenMs 同源(UsageHourlyBucket),
-// 用于算 TTFTAvgMs = SumFirstResponseMs/StreamReqs(同 SpeedRow.TTFTMs 口径)。
-type channelMetricAggRow struct {
-	ID                 uint
-	Name               string
-	Requests           int64
-	FailedCount        int64
-	SumComp            int64
-	SumGenMs           int64
-	StreamReqs         int64
-	SumFirstResponseMs int64
-}
-
-// agentMetricAggRow 是 AgentMetrics 聚合扫描的中间行。
-// StreamReqs/SumFirstResponseMs 同 channelMetricAggRow,算 TTFTAvgMs 用。
-type agentMetricAggRow struct {
-	ID                 string
-	Requests           int64
-	FailedCount        int64
-	SumComp            int64
-	SumGenMs           int64
-	StreamReqs         int64
-	SumFirstResponseMs int64
-}
-
 // ChannelMetrics 返回 Monitoring 页面 channel 维度的指标行;
 // 过滤 channel_id > 0 → 排除 BYOK 行 (Monitoring 页只看 admin channel)。
 func (q *adminStatsQuery) ChannelMetrics(r ObsRange) (out []ChannelMetric, err error) {
 	defer func() { err = WrapLogDatabaseError(err) }()
-	db, err := q.logDB()
+	hourlyDB, err := q.logDB()
 	if err != nil {
 		return nil, err
 	}
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
-	var aggs []channelMetricAggRow
-	err = db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ? AND channel_id > 0", startDate, endDate).
-		Select(`channel_id AS id,
-			COALESCE(MIN(NULLIF(channel_name, '')), '') AS name,
-			COALESCE(SUM(request_count), 0) AS requests,
-			COALESCE(SUM(failed_count), 0) AS failed_count,
-			COALESCE(SUM(sum_stream_completion_tokens), 0) AS sum_comp,
-			COALESCE(SUM(sum_generation_ms), 0) AS sum_gen_ms,
-			COALESCE(SUM(stream_request_count), 0) AS stream_reqs,
-			COALESCE(SUM(sum_first_response_ms), 0) AS sum_first_response_ms`).
-		Group("channel_id").
-		Order("requests DESC").
-		Scan(&aggs).Error
+	requestDB, err := q.requestLogDB()
 	if err != nil {
 		return nil, err
 	}
+	aggs, err := findExactUsageRows(hourlyDB, requestDB, r, "channel", "", "channel_id > 0")
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(aggs, func(i, j int) bool {
+		if aggs[i].Requests != aggs[j].Requests {
+			return aggs[i].Requests > aggs[j].Requests
+		}
+		return aggs[i].ID < aggs[j].ID
+	})
 
-	sparks, err := channelSpark24h(db, r)
+	sparks, err := channelSpark24h(hourlyDB, requestDB, r)
 	if err != nil {
 		return nil, err
 	}
 
-	ttftP95s, err := ttftP95ByChannel(db, r, "")
+	ttftP95s, err := ttftP95ByChannel(hourlyDB, r, "", requestDB)
 	if err != nil {
 		return nil, err
 	}
-	tpsP5s, err := tpsP5ByChannel(db, r, "")
+	tpsP5s, err := tpsP5ByChannel(hourlyDB, r, "", requestDB)
 	if err != nil {
 		return nil, err
 	}
-	latencyP95s, err := latencyP95ByChannel(db, r)
+	latencyP95s, err := latencyP95ByChannel(hourlyDB, r, requestDB)
 	if err != nil {
 		return nil, err
 	}
@@ -1337,12 +1373,12 @@ func (q *adminStatsQuery) ChannelMetrics(r ObsRange) (out []ChannelMetric, err e
 			errorRatio = float64(a.FailedCount) / float64(a.Requests)
 		}
 		var tps float64
-		if a.SumGenMs > 0 {
-			tps = float64(a.SumComp) * 1000.0 / float64(a.SumGenMs)
+		if a.SumGenerationMs > 0 {
+			tps = float64(a.SumStreamTokens) * 1000.0 / float64(a.SumGenerationMs)
 		}
 		var ttftAvg int64
-		if a.StreamReqs > 0 {
-			ttftAvg = a.SumFirstResponseMs / a.StreamReqs
+		if a.StreamRequests > 0 {
+			ttftAvg = a.SumFirstResponseMs / a.StreamRequests
 		}
 		out = append(out, ChannelMetric{
 			ID:           a.ID,
@@ -1376,56 +1412,61 @@ type ChannelModelBreakdownRow struct {
 // ChannelModelBreakdown 返回指定渠道在 [r.Start, r.End) 窗口内按 model_name 分组
 // 的用量/计费细分,按 total_cost 降序排列。给 Billing 展开行 + 渠道详情卡片共用。
 func (q *adminStatsQuery) ChannelModelBreakdown(channelID uint, r ObsRange) ([]ChannelModelBreakdownRow, error) {
-	db, err := q.logDB()
+	hourlyDB, err := q.logDB()
 	if err != nil {
 		return nil, err
 	}
-	var rows []ChannelModelBreakdownRow
-	err = hourWindow(db.Model(&models.UsageHourlyBucket{}), r.Start, r.End).
-		Where("channel_id = ?", channelID).
-		Select(`model_name, SUM(request_count) AS requests,
-			SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens,
-			SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens,
-			SUM(total_cost) AS total_cost, SUM(raw_cost) AS raw_cost`).
-		Group("model_name").
-		Order("total_cost DESC").
-		Scan(&rows).Error
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return nil, err
+	}
+	aggregates, err := findExactUsageRows(hourlyDB, requestDB, r, "model", "", "channel_id = ?", channelID)
 	if err != nil {
 		return nil, WrapLogDatabaseError(err)
 	}
+	rows := make([]ChannelModelBreakdownRow, 0, len(aggregates))
+	for _, aggregate := range aggregates {
+		rows = append(rows, ChannelModelBreakdownRow{
+			ModelName: aggregate.Identity, Requests: aggregate.Requests,
+			PromptTokens: aggregate.PromptTokens, CompletionTokens: aggregate.CompletionTokens,
+			CacheReadTokens: aggregate.CacheReadTokens, CacheWriteTokens: aggregate.CacheWriteTokens,
+			TotalCost: aggregate.TotalCost, RawCost: aggregate.RawCost,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].TotalCost != rows[j].TotalCost {
+			return rows[i].TotalCost > rows[j].TotalCost
+		}
+		return rows[i].ModelName < rows[j].ModelName
+	})
 	return rows, nil
 }
 
 // AgentMetrics 返回 Monitoring 页面 agent 维度的指标行;
 // 过滤 agent_id <> ” → 排除未归属 agent 的旧行。JOIN agents 表拿 Name/Status/LastSeen。
 func (q *adminStatsQuery) AgentMetrics(r ObsRange) (out []AgentMetric, err error) {
-	db, err := q.logDB()
+	hourlyDB, err := q.logDB()
 	if err != nil {
 		return nil, err
 	}
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
-	var aggs []agentMetricAggRow
-	err = db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ? AND agent_id <> ''", startDate, endDate).
-		Select(`agent_id AS id,
-			COALESCE(SUM(request_count), 0) AS requests,
-			COALESCE(SUM(failed_count), 0) AS failed_count,
-			COALESCE(SUM(sum_stream_completion_tokens), 0) AS sum_comp,
-			COALESCE(SUM(sum_generation_ms), 0) AS sum_gen_ms,
-			COALESCE(SUM(stream_request_count), 0) AS stream_reqs,
-			COALESCE(SUM(sum_first_response_ms), 0) AS sum_first_response_ms`).
-		Group("agent_id").
-		Order("requests DESC").
-		Scan(&aggs).Error
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return nil, err
+	}
+	aggs, err := findExactUsageRows(hourlyDB, requestDB, r, "agent", "", "agent_id <> ''")
 	if err != nil {
 		return nil, WrapLogDatabaseError(err)
 	}
+	sort.Slice(aggs, func(i, j int) bool {
+		if aggs[i].Requests != aggs[j].Requests {
+			return aggs[i].Requests > aggs[j].Requests
+		}
+		return aggs[i].Identity < aggs[j].Identity
+	})
 
 	agentIDs := make([]string, 0, len(aggs))
 	for _, agg := range aggs {
-		agentIDs = append(agentIDs, agg.ID)
+		agentIDs = append(agentIDs, agg.Identity)
 	}
 	var agents []models.Agent
 	if len(agentIDs) > 0 {
@@ -1439,20 +1480,20 @@ func (q *adminStatsQuery) AgentMetrics(r ObsRange) (out []AgentMetric, err error
 		byID[agents[i].AgentID] = &agents[i]
 	}
 
-	sparks, err := agentSpark24h(db, r)
+	sparks, err := agentSpark24h(hourlyDB, requestDB, r)
 	if err != nil {
 		return nil, WrapLogDatabaseError(err)
 	}
 
-	ttftP95s, err := ttftP95ByAgent(db, r)
+	ttftP95s, err := ttftP95ByAgent(hourlyDB, r, requestDB)
 	if err != nil {
 		return nil, WrapLogDatabaseError(err)
 	}
-	tpsP5s, err := tpsP5ByAgent(db, r)
+	tpsP5s, err := tpsP5ByAgent(hourlyDB, r, requestDB)
 	if err != nil {
 		return nil, WrapLogDatabaseError(err)
 	}
-	latencyP95s, err := latencyP95ByAgent(db, r)
+	latencyP95s, err := latencyP95ByAgent(hourlyDB, r, requestDB)
 	if err != nil {
 		return nil, WrapLogDatabaseError(err)
 	}
@@ -1460,20 +1501,20 @@ func (q *adminStatsQuery) AgentMetrics(r ObsRange) (out []AgentMetric, err error
 	out = make([]AgentMetric, 0, len(aggs))
 	for _, a := range aggs {
 		am := AgentMetric{
-			ID:           a.ID,
+			ID:           a.Identity,
 			Requests:     a.Requests,
-			TTFTP95Ms:    ttftP95s[a.ID],
-			TPSP5:        tpsP5s[a.ID],
-			LatencyP95Ms: latencyP95s[a.ID],
-			Spark24h:     sparks[a.ID],
+			TTFTP95Ms:    ttftP95s[a.Identity],
+			TPSP5:        tpsP5s[a.Identity],
+			LatencyP95Ms: latencyP95s[a.Identity],
+			Spark24h:     sparks[a.Identity],
 		}
-		if a.SumGenMs > 0 {
-			am.TPSAvg = float64(a.SumComp) * 1000.0 / float64(a.SumGenMs)
+		if a.SumGenerationMs > 0 {
+			am.TPSAvg = float64(a.SumStreamTokens) * 1000.0 / float64(a.SumGenerationMs)
 		}
-		if a.StreamReqs > 0 {
-			am.TTFTAvgMs = a.SumFirstResponseMs / a.StreamReqs
+		if a.StreamRequests > 0 {
+			am.TTFTAvgMs = a.SumFirstResponseMs / a.StreamRequests
 		}
-		if agent, ok := byID[a.ID]; ok {
+		if agent, ok := byID[a.Identity]; ok {
 			am.Name = agent.Name
 			am.LastSeen = agent.LastSeen
 			am.Online = agent.Status == 1
@@ -1488,85 +1529,17 @@ func (q *adminStatsQuery) AgentMetrics(r ObsRange) (out []AgentMetric, err error
 // winStart = max(r.End - 24h, r.Start) (clamp 到 ObsRange 起点)。
 // 没有数据的 entity 不会在结果 map 中出现 (调用方读到 nil slice);
 // 有数据的 entity 槽位长度恒为 24,缺失小时填 0。
-func channelSpark24h(db *gorm.DB, r ObsRange) (map[uint][]int64, error) {
-	winStart := r.End - 24*3600
-	if winStart < r.Start {
-		winStart = r.Start
-	}
-	startDate := time.Unix(winStart, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-	type row struct {
-		ID       uint
-		Date     string
-		Hour     int
-		Requests int64
-	}
-	var rows []row
-	err := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ? AND channel_id > 0", startDate, endDate).
-		Select("channel_id AS id, date, hour, COALESCE(SUM(request_count), 0) AS requests").
-		Group("channel_id, date, hour").
-		Scan(&rows).Error
+func channelSpark24h(hourlyDB, requestDB *gorm.DB, r ObsRange) (map[uint][]int64, error) {
+	rows, err := findExactSparkSlots(hourlyDB, requestDB, r, "channel", "channel_id > 0")
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[uint][]int64)
-	for _, row := range rows {
-		ts, _ := bucketTsLabel(row.Date, row.Hour, GranHour)
-		if ts < winStart || ts >= r.End {
-			continue
-		}
-		offset := int((ts - winStart) / 3600)
-		if offset < 0 || offset >= 24 {
-			continue
-		}
-		if out[row.ID] == nil {
-			out[row.ID] = make([]int64, 24)
-		}
-		out[row.ID][offset] += row.Requests
-	}
-	return out, nil
+	return exactUintSparkSlots(rows)
 }
 
 // agentSpark24h 与 channelSpark24h 同语义,但维度为 agent_id (string)。
-func agentSpark24h(db *gorm.DB, r ObsRange) (map[string][]int64, error) {
-	winStart := r.End - 24*3600
-	if winStart < r.Start {
-		winStart = r.Start
-	}
-	startDate := time.Unix(winStart, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-	type row struct {
-		ID       string
-		Date     string
-		Hour     int
-		Requests int64
-	}
-	var rows []row
-	err := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ? AND agent_id <> ''", startDate, endDate).
-		Select("agent_id AS id, date, hour, COALESCE(SUM(request_count), 0) AS requests").
-		Group("agent_id, date, hour").
-		Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string][]int64)
-	for _, row := range rows {
-		ts, _ := bucketTsLabel(row.Date, row.Hour, GranHour)
-		if ts < winStart || ts >= r.End {
-			continue
-		}
-		offset := int((ts - winStart) / 3600)
-		if offset < 0 || offset >= 24 {
-			continue
-		}
-		if out[row.ID] == nil {
-			out[row.ID] = make([]int64, 24)
-		}
-		out[row.ID][offset] += row.Requests
-	}
-	return out, nil
+func agentSpark24h(hourlyDB, requestDB *gorm.DB, r ObsRange) (map[string][]int64, error) {
+	return findExactSparkSlots(hourlyDB, requestDB, r, "agent", "agent_id <> ''")
 }
 
 // ErrBucket 是 ErrorDistribution 输出的一行。
@@ -1792,20 +1765,27 @@ type KpiQuota struct {
 	UsedQuota int64 `json:"used_quota"`
 }
 
+func dashboardKPIGranularity(r ObsRange) Gran {
+	if r.End-r.Start > int64(MaxHourRangeDays)*86_400 {
+		return GranDay
+	}
+	return GranHour
+}
+
 // DashboardKpis 组合 HourlyTrend + 周期对比 + admin/user 专属字段, 输出 Dashboard 顶部卡片所需的 KpiBundle。
-// Spark 固定走 hour 粒度 (r.Gran=GranDay 时内部强制为 GranHour); admin scope 额外输出 SuccessRate / Users,
+// Spark 在 7 天内走 hour 粒度,长范围走 day 粒度;admin scope 额外输出 SuccessRate / Users,
 // user scope 额外输出 Quota。previous 周期为紧邻 r.Start 之前等长度窗口,用于计算 Delta。
 func (q *adminStatsQuery) DashboardKpis(r ObsRange, scope Scope, f ObsFilter) (KpiBundle, error) {
-	hourR := r
-	hourR.Gran = GranHour
+	sparkRange := r
+	sparkRange.Gran = dashboardKPIGranularity(r)
 
-	currentBuckets, err := q.HourlyTrend(hourR, scope, f)
+	currentBuckets, err := q.HourlyTrend(sparkRange, scope, f)
 	if err != nil {
 		return KpiBundle{}, err
 	}
 
 	duration := r.End - r.Start
-	prevR := ObsRange{Start: r.Start - duration, End: r.Start, Gran: GranHour}
+	prevR := ObsRange{Start: r.Start - duration, End: r.Start, Gran: sparkRange.Gran}
 	prevBuckets, err := q.HourlyTrend(prevR, scope, f)
 	if err != nil {
 		return KpiBundle{}, err
@@ -1818,17 +1798,17 @@ func (q *adminStatsQuery) DashboardKpis(r ObsRange, scope Scope, f ObsFilter) (K
 	}
 
 	if scope.IsAdmin {
-		logDB, err := q.logDB()
+		logDB, requestLogModel, err := q.ctx.RequestLogModel()
 		if err != nil {
 			return KpiBundle{}, err
 		}
-		successRate, err := kpiSuccessRate(logDB, r, hourR, scope, f)
+		successRate, err := kpiSuccessRate(logDB, requestLogModel, r, sparkRange, scope, f)
 		if err != nil {
 			return KpiBundle{}, WrapLogDatabaseError(err)
 		}
 		bundle.SuccessRate = &successRate
 
-		users, err := kpiUsers(q.ctx.GetCoreDB(), r, f)
+		users, err := kpiUsers(q.ctx.GetCoreDB(), logDB, requestLogModel, r, f)
 		if err != nil {
 			return KpiBundle{}, err
 		}
@@ -1844,58 +1824,21 @@ func (q *adminStatsQuery) DashboardKpis(r ObsRange, scope Scope, f ObsFilter) (K
 	return bundle, nil
 }
 
-// CoreDashboardKpis returns billing and account facts that remain available
-// while the split log database is degraded.
-func (q *adminStatsQuery) CoreDashboardKpis(r ObsRange, scope Scope, f ObsFilter) (KpiBundle, error) {
-	hourRange := r
-	hourRange.Gran = GranHour
-	userID := f.EffectiveUserID(scope)
-	current, err := hourlyTrendFromBillingFacts(q.ctx.GetCoreDB(), hourRange, userID, f.TokenID, f.ModelName)
-	if err != nil {
-		return KpiBundle{}, err
-	}
-	duration := r.End - r.Start
-	previousRange := ObsRange{Start: r.Start - duration, End: r.Start, Gran: GranHour}
-	previous, err := hourlyTrendFromBillingFacts(q.ctx.GetCoreDB(), previousRange, userID, f.TokenID, f.ModelName)
-	if err != nil {
-		return KpiBundle{}, err
-	}
-	bundle := KpiBundle{
-		Requests: kpiMetric(current, previous, func(bucket TimeBucket) int64 { return bucket.Requests }),
-		Cost:     kpiMetric(current, previous, func(bucket TimeBucket) int64 { return bucket.Cost }),
-		Tokens:   kpiMetric(current, previous, func(bucket TimeBucket) int64 { return bucket.Tokens }),
-	}
-	if scope.IsAdmin {
-		users, err := kpiUsers(q.ctx.GetCoreDB(), r, f)
-		if err != nil {
-			return KpiBundle{}, err
-		}
-		bundle.Users = &users
-		return bundle, nil
-	}
-	quota, err := kpiQuota(q.ctx.GetCoreDB(), scope.UserID)
-	if err != nil {
-		return KpiBundle{}, err
-	}
-	bundle.Quota = &quota
-	return bundle, nil
-}
-
-// CoreDashboardTrend returns the billing-owned cost, request and token series.
-func (q *adminStatsQuery) CoreDashboardTrend(r ObsRange, scope Scope, f ObsFilter) ([]TimeBucket, error) {
-	return hourlyTrendFromBillingFacts(q.ctx.GetCoreDB(), r, f.EffectiveUserID(scope), f.TokenID, f.ModelName)
+// DashboardTrend returns cost, request and token series from log-owned request facts.
+func (q *adminStatsQuery) DashboardTrend(r ObsRange, scope Scope, f ObsFilter) ([]TimeBucket, error) {
+	return q.HourlyTrend(r, scope, f)
 }
 
 // DashboardSuccessRate returns the log-owned success KPI without loading the
-// core billing KPIs a second time.
+// request and token metrics a second time.
 func (q *adminStatsQuery) DashboardSuccessRate(r ObsRange, scope Scope, f ObsFilter) (KpiMetric, error) {
-	hourRange := r
-	hourRange.Gran = GranHour
-	db, err := q.logDB()
+	sparkRange := r
+	sparkRange.Gran = dashboardKPIGranularity(r)
+	db, requestLogModel, err := q.ctx.RequestLogModel()
 	if err != nil {
 		return KpiMetric{}, err
 	}
-	metric, err := kpiSuccessRate(db, r, hourRange, scope, f)
+	metric, err := kpiSuccessRate(db, requestLogModel, r, sparkRange, scope, f)
 	return metric, WrapLogDatabaseError(err)
 }
 
@@ -1923,68 +1866,97 @@ func kpiMetric(curr, prev []TimeBucket, value func(TimeBucket) int64) KpiMetric 
 // kpiSuccessRate 计算 admin scope 的成功请求 KPI;
 // Value 语义: 成功请求总数 (success count, 非比率) —— KpiMetric.Value 是 int64,
 // 选择计数而非 ratio 以避免精度损失,前端需要 ratio 时按 success/requests 算。
-// Spark 同样为逐小时 success 计数。Delta 暂固定为 0。
+// Spark 在 7 天内为逐小时 success 计数,长范围按天聚合。Delta 暂固定为 0。
 //
 // 过滤策略:
-//   - 有 EffectiveUserID 时走 usage_logs (uhb 无 user_id), 按小时桶聚合 status=1。
+//   - 有 EffectiveUserID 时走当前布局的 request log 表 (uhb 无 user_id), 按 sparkRange 粒度聚合 status=1。
 //   - 否则走 usage_hourly_buckets (预聚合 success_count), 额外按 model_name 过滤
-//     (与 HourlyTrend/Distribution/Leaderboard 一致: 重查询走预聚合表, 不碰 usage_logs)。
+//     (与 HourlyTrend/Distribution/Leaderboard 一致: 重查询走预聚合表, 不碰原始 request log 表)。
 //     SQL 仅按 date 粗筛 (避免按 hour 算 ts 后跨日 join 复杂度),
-//     然后在 Go 里按 hourR.Start/End 二次过滤,保证起点当天 hourR.Start 之前的
-//     hour 不被计入 total。
-func kpiSuccessRate(db *gorm.DB, r, hourR ObsRange, scope Scope, f ObsFilter) (KpiMetric, error) {
-	if uid := f.EffectiveUserID(scope); uid != 0 {
-		return kpiSuccessRateFromUsageLog(db, hourR, uid, f.ModelName)
-	}
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
-	type sparkRow struct {
-		Date    string
-		Hour    int
-		Success int64
-	}
-	query := db.Model(&models.UsageHourlyBucket{}).
-		Where("date >= ? AND date <= ?", startDate, endDate)
-	if f.ModelName != "" {
-		query = query.Where("model_name = ?", f.ModelName)
-	}
-	var rows []sparkRow
-	if err := query.
-		Select("date, hour, COALESCE(SUM(success_count), 0) AS success").
-		Group("date, hour").
-		Order("date, hour").
-		Scan(&rows).Error; err != nil {
-		return KpiMetric{}, err
-	}
-
-	var success int64
-	spark := make([]int64, 0, len(rows))
-	for _, x := range rows {
-		ts, _ := bucketTsLabel(x.Date, x.Hour, GranHour)
-		if ts < hourR.Start || ts >= hourR.End {
-			continue
-		}
-		success += x.Success
-		spark = append(spark, x.Success)
-	}
-	return KpiMetric{Value: success, Spark: spark, Delta: 0}, nil
+//     然后在 Go 里按 sparkRange.Start/End 二次过滤,保证边界外的桶不被计入 total。
+type kpiSuccessRow struct {
+	Date    string
+	Hour    int
+	Success int64
 }
 
-// kpiSuccessRateFromUsageLog 是单用户成功请求 KPI(uhb 无 user_id),按小时桶聚合 status=1。
-func kpiSuccessRateFromUsageLog(db *gorm.DB, hourR ObsRange, userID uint, modelName string) (KpiMetric, error) {
+func kpiSuccessRate(db *gorm.DB, requestLogModel any, r, sparkRange ObsRange, scope Scope, f ObsFilter) (KpiMetric, error) {
+	if uid := f.EffectiveUserID(scope); uid != 0 || f.ModelName != "" {
+		return kpiSuccessRateFromRequestLog(db, requestLogModel, sparkRange, uid, f.ModelName)
+	}
+	window := splitExactBillingWindow(r.Start, r.End)
+	var rows []kpiSuccessRow
+	if window.hasFullBuckets() {
+		var full []kpiSuccessRow
+		if err := alignedHourWindow(db.Model(&models.UsageHourlyBucket{}), window.fullStart, window.fullEnd).
+			Select("date, hour, COALESCE(SUM(success_count), 0) AS success").
+			Group("date, hour").Scan(&full).Error; err != nil {
+			return KpiMetric{}, err
+		}
+		rows = append(rows, full...)
+	}
+	for _, boundary := range window.boundaries {
+		var partial []struct {
+			Bucket  int64
+			Success int64
+		}
+		if err := db.Session(&gorm.Session{}).Model(requestLogModel).
+			Where("created_at >= ? AND created_at < ? AND status = 1", boundary.start, boundary.end).
+			Select("(created_at - created_at % 3600) AS bucket, COUNT(*) AS success").
+			Group("bucket").Scan(&partial).Error; err != nil {
+			return KpiMetric{}, err
+		}
+		for _, row := range partial {
+			date, hour := utcDateHour(row.Bucket)
+			rows = append(rows, kpiSuccessRow{Date: date, Hour: hour, Success: row.Success})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Date != rows[j].Date {
+			return rows[i].Date < rows[j].Date
+		}
+		return rows[i].Hour < rows[j].Hour
+	})
+	return kpiSuccessMetric(rows, sparkRange), nil
+}
+
+func kpiSuccessMetric(rows []kpiSuccessRow, sparkRange ObsRange) KpiMetric {
+	var success int64
+	spark := make([]int64, 0, len(rows))
+	lastDate := ""
+	for _, x := range rows {
+		success += x.Success
+		if sparkRange.Gran == GranDay && x.Date == lastDate {
+			spark[len(spark)-1] += x.Success
+			continue
+		}
+		spark = append(spark, x.Success)
+		lastDate = x.Date
+	}
+	return KpiMetric{Value: success, Spark: spark, Delta: 0}
+}
+
+// kpiSuccessRateFromRequestLog 是单用户成功请求 KPI(uhb 无 user_id),按 sparkRange 粒度聚合 status=1。
+func kpiSuccessRateFromRequestLog(db *gorm.DB, requestLogModel any, sparkRange ObsRange, userID uint, modelName string) (KpiMetric, error) {
 	type row struct {
 		Bucket  int64
 		Success int64
 	}
-	query := db.Model(&models.UsageLog{}).
-		Where("created_at >= ? AND created_at < ? AND user_id = ? AND status = 1", hourR.Start, hourR.End, userID)
+	query := db.Model(requestLogModel).
+		Where("created_at >= ? AND created_at < ? AND status = 1", sparkRange.Start, sparkRange.End)
+	if userID != 0 {
+		query = query.Where("user_id = ?", userID)
+	}
 	if modelName != "" {
 		query = query.Where("model_name = ?", modelName)
 	}
+	bucketSec := int64(3600)
+	if sparkRange.Gran == GranDay {
+		bucketSec = 86400
+	}
 	var rows []row
 	if err := query.
-		Select("(created_at - (created_at % 3600)) AS bucket, COUNT(*) AS success").
+		Select("(created_at - (created_at % ?)) AS bucket, COUNT(*) AS success", bucketSec).
 		Group("bucket").Order("bucket").
 		Scan(&rows).Error; err != nil {
 		return KpiMetric{}, err
@@ -2002,7 +1974,7 @@ func kpiSuccessRateFromUsageLog(db *gorm.DB, hourR ObsRange, userID uint, modelN
 // Value=总用户数 (全表 count), Active=range 内有 billing hourly fact 的 distinct user_id 数,
 // New=range 内 created_at 落在窗口内的 users 数。
 // f.ModelName 非空时 Active 仅统计用了该 model 的用户; total/new 始终全局不变。
-func kpiUsers(coreDB *gorm.DB, r ObsRange, f ObsFilter) (KpiUsers, error) {
+func kpiUsers(coreDB, logDB *gorm.DB, requestLogModel any, r ObsRange, f ObsFilter) (KpiUsers, error) {
 	var total int64
 	if err := coreDB.Model(&models.User{}).Count(&total).Error; err != nil {
 		return KpiUsers{}, err
@@ -2013,33 +1985,15 @@ func kpiUsers(coreDB *gorm.DB, r ObsRange, f ObsFilter) (KpiUsers, error) {
 		Count(&newCount).Error; err != nil {
 		return KpiUsers{}, err
 	}
-	window := splitExactBillingWindow(r.Start, r.End)
-	activeUsers := make(map[uint]struct{})
-	addUsers := func(query *gorm.DB) error {
-		if f.ModelName != "" {
-			query = query.Where("model_name = ?", f.ModelName)
-		}
-		var userIDs []uint
-		if err := query.Where("user_id > 0").Distinct().Pluck("user_id", &userIDs).Error; err != nil {
-			return err
-		}
-		for _, userID := range userIDs {
-			activeUsers[userID] = struct{}{}
-		}
-		return nil
+	query := logDB.Model(requestLogModel).Where("created_at >= ? AND created_at < ? AND user_id > 0", r.Start, r.End)
+	if f.ModelName != "" {
+		query = query.Where("model_name = ?", f.ModelName)
 	}
-	if window.hasFullHours() {
-		if err := addUsers(alignedHourWindow(coreDB.Model(&models.BillingHourlyBucket{}), window.fullStart, window.fullEnd)); err != nil {
-			return KpiUsers{}, err
-		}
+	var active int64
+	if err := query.Distinct("user_id").Count(&active).Error; err != nil {
+		return KpiUsers{}, WrapLogDatabaseError(err)
 	}
-	for _, boundary := range window.boundaries {
-		query := coreDB.Model(&models.BillingLog{}).Where("created_at >= ? AND created_at < ?", boundary.start, boundary.end)
-		if err := addUsers(query); err != nil {
-			return KpiUsers{}, err
-		}
-	}
-	return KpiUsers{Value: total, Active: int64(len(activeUsers)), New: newCount}, nil
+	return KpiUsers{Value: total, Active: active, New: newCount}, nil
 }
 
 // kpiQuota 读取 user scope 自身 quota / used_quota; 找不到用户时返回错误。
@@ -2157,69 +2111,78 @@ func assembleCostStacked(rows []stackRow, r ObsRange, topN int) CostTrendStacked
 	return CostTrendStacked{Buckets: out, SeriesOrder: seriesOrder}
 }
 
-// costStackRowsFromBillingHourly reads the core billing projection for both
-// global and user-scoped cost trends.
-func costStackRowsFromBillingHourly(db *gorm.DB, r ObsRange, userID, tokenID uint, modelName string) ([]stackRow, error) {
-	window := splitExactBillingWindow(r.Start, r.End)
-	merged := make(map[stackRowKey]int64)
-	if window.hasFullHours() {
-		rows, err := billingHourlyStackRows(db, r, window, userID, tokenID, modelName)
-		if err != nil {
-			return nil, err
-		}
-		mergeStackRows(merged, rows)
-	}
-	for _, boundary := range window.boundaries {
-		rows, err := billingBoundaryStackRows(db, r, boundary, userID, tokenID, modelName)
-		if err != nil {
-			return nil, err
-		}
-		mergeStackRows(merged, rows)
-	}
-	return sortedStackRows(merged), nil
-}
-
-func billingHourlyStackRows(db *gorm.DB, r ObsRange, window exactBillingWindow, userID, tokenID uint, modelName string) ([]stackRow, error) {
-	selectCols := "date, hour, model_name AS name, COALESCE(SUM(total_cost), 0) AS cost"
-	groupCols := "date, hour, model_name"
-	if r.Gran == GranDay {
-		selectCols = "date, 0 AS hour, model_name AS name, COALESCE(SUM(total_cost), 0) AS cost"
-		groupCols = "date, model_name"
-	}
-	var rows []stackRow
-	query := alignedHourWindow(db.Model(&models.BillingHourlyBucket{}), window.fullStart, window.fullEnd)
-	err := filterBillingStats(query, userID, tokenID, modelName).Select(selectCols).Group(groupCols).Scan(&rows).Error
-	return rows, err
-}
-
-func billingBoundaryStackRows(db *gorm.DB, r ObsRange, boundary billingBoundary, userID, tokenID uint, modelName string) ([]stackRow, error) {
-	type rawStackRow struct {
-		Bucket int64
-		Name   string
-		Cost   int64
-	}
+// costStackRowsFromRequestFacts reads exact log-owned request facts.
+func costStackRowsFromRequestFacts(db *gorm.DB, r ObsRange, userID, tokenID uint, modelName string) ([]stackRow, error) {
 	bucketSeconds := int64(3600)
 	if r.Gran == GranDay {
 		bucketSeconds = 86400
 	}
-	var rawRows []rawStackRow
-	query := db.Model(&models.BillingLog{}).Where("created_at >= ? AND created_at < ?", boundary.start, boundary.end)
-	err := filterBillingStats(query, userID, tokenID, modelName).
-		Select(fmt.Sprintf("(created_at - (created_at %% %d)) AS bucket, model_name AS name, COALESCE(SUM(total_cost), 0) AS cost", bucketSeconds)).
+	var rawRows []struct {
+		Bucket int64
+		Name   string
+		Cost   int64
+	}
+	query := filterBillingStats(db.Model(&models.UsageLog{}).Where("created_at >= ? AND created_at < ?", r.Start, r.End), userID, tokenID, modelName)
+	err := query.Select(fmt.Sprintf("(created_at - created_at %% %d) AS bucket, model_name AS name, COALESCE(SUM(total_cost), 0) AS cost", bucketSeconds)).
 		Group("bucket, model_name").Scan(&rawRows).Error
 	if err != nil {
 		return nil, err
 	}
 	rows := make([]stackRow, 0, len(rawRows))
 	for _, row := range rawRows {
-		bucketTime := time.Unix(row.Bucket, 0).UTC()
-		hour := bucketTime.Hour()
+		date, hour := utcDateHour(row.Bucket)
 		if r.Gran == GranDay {
 			hour = 0
 		}
-		rows = append(rows, stackRow{Date: bucketTime.Format("2006-01-02"), Hour: hour, Name: row.Name, Cost: row.Cost})
+		rows = append(rows, stackRow{Date: date, Hour: hour, Name: row.Name, Cost: row.Cost})
 	}
-	return rows, nil
+	return sortedStackRowsFromSlice(rows), nil
+}
+
+func costStackRowsHybrid(hourlyDB, requestDB *gorm.DB, r ObsRange, userID, tokenID uint, modelName string) ([]stackRow, error) {
+	if userID != 0 || tokenID != 0 || modelName != "" {
+		return costStackRowsFromRequestFacts(requestDB, r, userID, tokenID, modelName)
+	}
+	window := splitExactBillingWindow(r.Start, r.End)
+	rows := make([]stackRow, 0)
+	if window.hasFullBuckets() {
+		selectCols := "date, hour, model_name AS name, COALESCE(SUM(total_cost),0) AS cost"
+		groupCols := "date, hour, model_name"
+		if r.Gran == GranDay {
+			selectCols, groupCols = "date, 0 AS hour, model_name AS name, COALESCE(SUM(total_cost),0) AS cost", "date, model_name"
+		}
+		var hourly []stackRow
+		if err := alignedHourWindow(hourlyDB.Model(&models.UsageHourlyBucket{}), window.fullStart, window.fullEnd).
+			Select(selectCols).Group(groupCols).Scan(&hourly).Error; err != nil {
+			return nil, err
+		}
+		rows = append(rows, hourly...)
+	}
+	for _, boundary := range window.boundaries {
+		partial, err := costStackRowsFromRequestFacts(requestDB, ObsRange{Start: boundary.start, End: boundary.end, Gran: r.Gran}, 0, 0, "")
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, partial...)
+	}
+	return mergeCostStackRows(rows), nil
+}
+
+func mergeCostStackRows(rows []stackRow) []stackRow {
+	type key struct {
+		date string
+		hour int
+		name string
+	}
+	merged := make(map[key]int64)
+	for _, row := range rows {
+		merged[key{row.Date, row.Hour, row.Name}] += row.Cost
+	}
+	out := make([]stackRow, 0, len(merged))
+	for item, cost := range merged {
+		out = append(out, stackRow{Date: item.date, Hour: item.hour, Name: item.name, Cost: cost})
+	}
+	return sortedStackRowsFromSlice(out)
 }
 
 func filterBillingStats(query *gorm.DB, userID, tokenID uint, modelName string) *gorm.DB {
@@ -2235,41 +2198,12 @@ func filterBillingStats(query *gorm.DB, userID, tokenID uint, modelName string) 
 	return query
 }
 
-func mergeStackRows(merged map[stackRowKey]int64, rows []stackRow) {
-	for _, row := range rows {
-		merged[stackRowKey{date: row.Date, hour: row.Hour, name: row.Name}] += row.Cost
-	}
-}
-
-func sortedStackRows(merged map[stackRowKey]int64) []stackRow {
-	rows := make([]stackRow, 0, len(merged))
-	for key, cost := range merged {
-		rows = append(rows, stackRow{Date: key.date, Hour: key.hour, Name: key.name, Cost: cost})
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Date != rows[j].Date {
-			return rows[i].Date < rows[j].Date
-		}
-		if rows[i].Hour != rows[j].Hour {
-			return rows[i].Hour < rows[j].Hour
-		}
-		return rows[i].Name < rows[j].Name
-	})
-	return rows
-}
-
-type stackRowKey struct {
-	date string
-	hour int
-	name string
-}
-
 // CostTrendStackedByModel 按 (time-bucket × model_name) 聚合 total_cost,
 // 时间槽由 r.Gran 决定: hour → (date, hour) 桶; day → date 桶。
 // 仅返回 series 总成本 top-N 的 model, 其余合并为 "others"。
 //
-// 数据源路由: global 与 user scope 都走 core billing_hourly_buckets；
-// 非 admin 无 uid 返回空。
+// 数据源路由: global 无精确筛选时合并完整小时投影与边界 request facts；
+// user/token/model 精确筛选全程读取 request facts。非 admin 无 uid 返回空。
 func (q *adminStatsQuery) CostTrendStackedByModel(r ObsRange, scope Scope, topN int, f ObsFilter) (result CostTrendStacked, err error) {
 	empty := CostTrendStacked{Buckets: []StackedBucket{}, SeriesOrder: []string{}}
 	if topN <= 0 {
@@ -2280,12 +2214,18 @@ func (q *adminStatsQuery) CostTrendStackedByModel(r ObsRange, scope Scope, topN 
 	}
 	uid := f.EffectiveUserID(scope)
 
-	var rows []stackRow
-	if uid != 0 || scope.IsAdmin {
-		rows, err = costStackRowsFromBillingHourly(q.ctx.GetCoreDB(), r, uid, f.TokenID, f.ModelName)
-	} else {
+	if uid == 0 && !scope.IsAdmin {
 		return empty, nil
 	}
+	hourlyDB, err := q.logDB()
+	if err != nil {
+		return CostTrendStacked{}, err
+	}
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return CostTrendStacked{}, err
+	}
+	rows, err := costStackRowsHybrid(hourlyDB, requestDB, r, uid, f.TokenID, f.ModelName)
 	if err != nil {
 		return CostTrendStacked{}, err
 	}
@@ -2306,18 +2246,20 @@ type billingDimensionRow struct {
 	Value       int64
 }
 
-func billingDimensionStackRows(db *gorm.DB, dim, value string, r ObsRange, userID, tokenID uint, modelName string) ([]stackRow, error) {
+func requestDimensionStackRows(hourlyDB, requestDB *gorm.DB, dim, value string, r ObsRange, userID, tokenID uint, modelName string) ([]stackRow, error) {
 	window := splitExactBillingWindow(r.Start, r.End)
 	rows := make([]billingDimensionRow, 0)
-	if window.hasFullHours() {
-		full, err := billingDimensionRowsFromHourly(db, dim, value, r, window, userID, tokenID, modelName)
+	if userID == 0 && tokenID == 0 && modelName == "" && window.hasFullBuckets() {
+		full, err := billingDimensionRowsFromHourly(hourlyDB, dim, value, r, window, userID, tokenID, modelName)
 		if err != nil {
 			return nil, err
 		}
 		rows = append(rows, full...)
+	} else if window.hasFullBuckets() {
+		window.boundaries = append(window.boundaries, billingBoundary{start: window.fullStart, end: window.fullEnd})
 	}
 	for _, boundary := range window.boundaries {
-		partial, err := billingDimensionRowsFromLogs(db, dim, value, r, boundary, userID, tokenID, modelName)
+		partial, err := billingDimensionRowsFromLogs(requestDB, dim, value, r, boundary, userID, tokenID, modelName)
 		if err != nil {
 			return nil, err
 		}
@@ -2362,7 +2304,7 @@ func billingDimensionRowsFromHourly(db *gorm.DB, dim, value string, r ObsRange, 
 		valueSQL = "COALESCE(SUM(prompt_tokens + completion_tokens + cache_read_tokens + cache_write_tokens),0)"
 	}
 	var rows []billingDimensionRow
-	query := filterBillingStats(alignedHourWindow(db.Model(&models.BillingHourlyBucket{}), window.fullStart, window.fullEnd), userID, tokenID, modelName)
+	query := filterBillingStats(alignedHourWindow(db.Model(&models.UsageHourlyBucket{}), window.fullStart, window.fullEnd), userID, tokenID, modelName)
 	err = query.Select(fmt.Sprintf("%s bucket, %s identity, %s display_name, %s value", bucket, identity, display, valueSQL)).Group(group).Scan(&rows).Error
 	return rows, err
 }
@@ -2381,7 +2323,7 @@ func billingDimensionRowsFromLogs(db *gorm.DB, dim, value string, r ObsRange, bo
 		valueSQL = "COALESCE(SUM(prompt_tokens + completion_tokens + cache_read_tokens + cache_write_tokens),0)"
 	}
 	var rows []billingDimensionRow
-	query := filterBillingStats(db.Model(&models.BillingLog{}).Where("created_at >= ? AND created_at < ?", boundary.start, boundary.end), userID, tokenID, modelName)
+	query := filterBillingStats(db.Model(&models.UsageLog{}).Where("created_at >= ? AND created_at < ?", boundary.start, boundary.end), userID, tokenID, modelName)
 	err = query.Select(fmt.Sprintf("(created_at - created_at %% %d) bucket, %s identity, %s display_name, %s value", bucketSec, identity, display, valueSQL)).Group("bucket, " + groupDim).Scan(&rows).Error
 	return rows, err
 }
@@ -2464,7 +2406,15 @@ func (q *adminStatsQuery) MarketShareTrend(dim string, r ObsRange, scope Scope, 
 	if !scope.IsAdmin {
 		return empty, nil
 	}
-	rows, err := billingDimensionStackRows(q.ctx.GetCoreDB(), dim, "tokens", r, f.EffectiveUserID(scope), 0, f.ModelName)
+	hourlyDB, err := q.logDB()
+	if err != nil {
+		return CostTrendStacked{}, err
+	}
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return CostTrendStacked{}, err
+	}
+	rows, err := requestDimensionStackRows(hourlyDB, requestDB, dim, "tokens", r, f.EffectiveUserID(scope), 0, f.ModelName)
 	if err != nil {
 		return CostTrendStacked{}, err
 	}
@@ -2718,7 +2668,7 @@ func metricTrendStackRows(db *gorm.DB, rawTable, metric, dim string, r ObsRange,
 
 	window := splitExactBillingWindow(r.Start, r.End)
 	var comps []metricComponentsRow
-	if userID == 0 && window.hasFullHours() {
+	if userID == 0 && modelName == "" && window.hasFullBuckets() {
 		query := alignedHourWindow(db.Model(&models.UsageHourlyBucket{}), window.fullStart, window.fullEnd)
 		if modelName != "" {
 			query = query.Where("model_name = ?", modelName)
@@ -2730,7 +2680,7 @@ func metricTrendStackRows(db *gorm.DB, rawTable, metric, dim string, r ObsRange,
 		comps = append(comps, rows...)
 	}
 	boundaries := window.boundaries
-	if userID != 0 {
+	if userID != 0 || modelName != "" {
 		boundaries = []billingBoundary{{start: r.Start, end: r.End}}
 	}
 	for _, boundary := range boundaries {
@@ -2912,9 +2862,12 @@ func (row metricHistogramScanRow) histogramRow() metricHistogramRow {
 }
 
 func metricTrendHistogramRows(db *gorm.DB, rawTable, metric, dim string, r ObsRange, userID uint, modelName string) ([]metricHistogramRow, error) {
+	if userID != 0 || modelName != "" {
+		return metricHistogramBoundaryRows(db, rawTable, metric, dim, r, billingBoundary{start: r.Start, end: r.End}, userID, modelName)
+	}
 	window := splitExactBillingWindow(r.Start, r.End)
 	rows := make([]metricHistogramRow, 0)
-	if window.hasFullHours() {
+	if window.hasFullBuckets() {
 		full, err := metricHistogramFullHourRows(db, metric, dim, r, window, userID, modelName)
 		if err != nil {
 			return nil, err
@@ -3165,8 +3118,8 @@ func assembleMetricPercentileStacked(rankRows []metricStackRow, histRows []metri
 
 // CacheSaving 计算窗口内的缓存命中收益。
 //
-// 数据源为 core billing facts: 完整小时走 billing_hourly_buckets，部分小时边界
-// 走 billing_logs；有效 user_id (admin 锁定某用户或 user scope) 作为过滤条件。
+// 数据源为 log-owned request facts；有效 user_id (admin 锁定某用户或 user scope)
+// 作为过滤条件。
 // CacheSaving 不跟随 f.ModelName (cache 卡片设计为模型无关)。
 // 公式:
 //
@@ -3179,44 +3132,70 @@ func (q *adminStatsQuery) CacheSaving(r ObsRange, scope Scope, f ObsFilter) (res
 	if r.End <= r.Start {
 		return CacheSaving{VsLabel: "vs no-cache"}, nil
 	}
-	return cacheSavingFromBillingFacts(q.ctx.GetCoreDB(), r, f.EffectiveUserID(scope))
+	hourlyDB, err := q.logDB()
+	if err != nil {
+		return CacheSaving{}, err
+	}
+	requestDB, err := q.requestLogDB()
+	if err != nil {
+		return CacheSaving{}, err
+	}
+	result, err = cacheSavingHybrid(hourlyDB, requestDB, r, f.EffectiveUserID(scope), f.TokenID, f.ModelName)
+	return result, WrapLogDatabaseError(err)
 }
 
-func cacheSavingFromBillingFacts(db *gorm.DB, r ObsRange, userID uint) (CacheSaving, error) {
-	type agg struct {
-		Prompt     int64
-		CacheRead  int64
-		CacheWrite int64
-		InputCost  int64
-	}
-	window := splitExactBillingWindow(r.Start, r.End)
-	var total agg
-	add := func(query *gorm.DB) error {
-		if userID != 0 {
-			query = query.Where("user_id = ?", userID)
-		}
-		var a agg
-		if err := query.Select(`COALESCE(SUM(prompt_tokens), 0) AS prompt,
+type cacheSavingAgg struct {
+	Prompt     int64
+	CacheRead  int64
+	CacheWrite int64
+	InputCost  int64
+}
+
+func cacheSavingFromRequestFacts(db *gorm.DB, r ObsRange, userID, tokenID uint, modelName string) (cacheSavingAgg, error) {
+	var total cacheSavingAgg
+	query := db.Model(&models.UsageLog{}).Where("created_at >= ? AND created_at < ?", r.Start, r.End)
+	query = filterBillingStats(query, userID, tokenID, modelName)
+	if err := query.Select(`COALESCE(SUM(prompt_tokens), 0) AS prompt,
 			COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
 			COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
 			COALESCE(SUM(input_cost), 0) AS input_cost`).
-			Scan(&a).Error; err != nil {
-			return err
-		}
-		total.Prompt += a.Prompt
-		total.CacheRead += a.CacheRead
-		total.CacheWrite += a.CacheWrite
-		total.InputCost += a.InputCost
-		return nil
+		Scan(&total).Error; err != nil {
+		return cacheSavingAgg{}, err
 	}
-	if window.hasFullHours() {
-		if err := add(alignedHourWindow(db.Model(&models.BillingHourlyBucket{}), window.fullStart, window.fullEnd)); err != nil {
+	return total, nil
+}
+
+func cacheSavingHybrid(hourlyDB, requestDB *gorm.DB, r ObsRange, userID, tokenID uint, modelName string) (CacheSaving, error) {
+	var total cacheSavingAgg
+	add := func(row cacheSavingAgg) {
+		total.Prompt += row.Prompt
+		total.CacheRead += row.CacheRead
+		total.CacheWrite += row.CacheWrite
+		total.InputCost += row.InputCost
+	}
+	if userID != 0 || tokenID != 0 || modelName != "" {
+		row, err := cacheSavingFromRequestFacts(requestDB, r, userID, tokenID, modelName)
+		if err != nil {
 			return CacheSaving{}, err
 		}
-	}
-	for _, boundary := range window.boundaries {
-		if err := add(db.Model(&models.BillingLog{}).Where("created_at >= ? AND created_at < ?", boundary.start, boundary.end)); err != nil {
-			return CacheSaving{}, err
+		add(row)
+	} else {
+		window := splitExactBillingWindow(r.Start, r.End)
+		if window.hasFullBuckets() {
+			var row cacheSavingAgg
+			if err := alignedHourWindow(hourlyDB.Model(&models.UsageHourlyBucket{}), window.fullStart, window.fullEnd).
+				Select(`COALESCE(SUM(prompt_tokens),0) prompt, COALESCE(SUM(cache_read_tokens),0) cache_read,
+					COALESCE(SUM(cache_write_tokens),0) cache_write, COALESCE(SUM(input_cost),0) input_cost`).Scan(&row).Error; err != nil {
+				return CacheSaving{}, err
+			}
+			add(row)
+		}
+		for _, boundary := range window.boundaries {
+			row, err := cacheSavingFromRequestFacts(requestDB, ObsRange{Start: boundary.start, End: boundary.end, Gran: r.Gran}, 0, 0, "")
+			if err != nil {
+				return CacheSaving{}, err
+			}
+			add(row)
 		}
 	}
 	out := CacheSaving{
@@ -3354,8 +3333,8 @@ func utcDateHour(ts int64) (string, int) {
 }
 
 // hourWindow selects every rollup bucket intersecting [start,end). It is not
-// exact for partial boundary hours; exact billing queries split those ranges
-// to billing_logs with splitExactBillingWindow.
+// exact for partial boundary hours; exact queries split those ranges to
+// layout-aware request facts with splitExactBillingWindow.
 func hourWindow(db *gorm.DB, start, end int64) *gorm.DB {
 	sd, sh := utcDateHour(start)
 	ed, eh := utcDateHour(end - 1)
@@ -3372,18 +3351,26 @@ type exactBillingWindow struct {
 	boundaries         []billingBoundary
 }
 
-func (w exactBillingWindow) hasFullHours() bool { return w.fullStart < w.fullEnd }
+func (w exactBillingWindow) hasFullBuckets() bool { return w.fullStart < w.fullEnd }
 
 func splitExactBillingWindow(start, end int64) exactBillingWindow {
+	return splitExactRollupWindow(start, end, 3600)
+}
+
+func splitExactDailyWindow(start, end int64) exactBillingWindow {
+	return splitExactRollupWindow(start, end, 86400)
+}
+
+func splitExactRollupWindow(start, end, bucketSeconds int64) exactBillingWindow {
 	if end <= start {
 		return exactBillingWindow{}
 	}
-	startFloor := start - start%3600
+	startFloor := start - start%bucketSeconds
 	fullStart := startFloor
 	if start != startFloor {
-		fullStart += 3600
+		fullStart += bucketSeconds
 	}
-	fullEnd := end - end%3600
+	fullEnd := end - end%bucketSeconds
 	if fullStart >= fullEnd {
 		return exactBillingWindow{boundaries: []billingBoundary{{start: start, end: end}}}
 	}
@@ -3623,121 +3610,40 @@ func logsHourlySparkMax(base *gorm.DB, winStart, end int64) ([]int64, error) {
 	return out, nil
 }
 
-// leaderboardByUser 仅 admin 调用; token_daily_billings 不带 stream 累计字段,
-// 故 user 维度 leaderboard 上 tps/ttft 始终为 0 (metric=tps/ttft 时该维度退化为按 0 排序)。
-func leaderboardByUser(db *gorm.DB, metric string, limit int, r ObsRange) ([]LeaderRow, error) {
-	startDate := time.Unix(r.Start, 0).UTC().Format("2006-01-02")
-	endDate := time.Unix(r.End, 0).UTC().Format("2006-01-02")
-
-	q := db.Table("token_daily_billings AS tdb").
-		Joins("LEFT JOIN users u ON u.id = tdb.user_id").
-		Where("tdb.date >= ? AND tdb.date <= ?", startDate, endDate).
-		Select(`
-			tdb.user_id AS id,
-			COALESCE(u.username, '') AS name,
-			COALESCE(SUM(tdb.total_cost), 0) AS cost,
-			COALESCE(SUM(tdb.request_count), 0) AS requests,
-			COALESCE(SUM(tdb.prompt_tokens) + SUM(tdb.completion_tokens) + SUM(tdb.cache_read_tokens) + SUM(tdb.cache_write_tokens), 0) AS tokens,
-			0 AS tps,
-			0 AS ttft_ms`).
-		Group("tdb.user_id, u.username")
+func leaderboardByUserFromRequestFacts(db *gorm.DB, metric string, limit int, r ObsRange, modelName string) ([]LeaderRow, error) {
+	query := db.Model(&models.UsageLog{}).
+		Where("created_at >= ? AND created_at < ? AND user_id > 0", r.Start, r.End)
+	if modelName != "" {
+		query = query.Where("model_name = ?", modelName)
+	}
 	var rows []leaderboardScanRow
-	if err := q.Order(leaderboardOrderClause(metric)).Limit(limit).Scan(&rows).Error; err != nil {
+	err := query.Select(`user_id AS id,
+		COALESCE(SUM(total_cost), 0) AS cost,
+		COUNT(*) AS requests,
+		COALESCE(SUM(prompt_tokens) + SUM(completion_tokens) + SUM(cache_read_tokens) + SUM(cache_write_tokens), 0) AS tokens,
+		0 AS tps, 0 AS ttft_ms`).
+		Group("user_id").Order(leaderboardOrderClause(metric)).Limit(limit).Scan(&rows).Error
+	return rowsToLeaderRows(rows), err
+}
+
+func (q *adminStatsQuery) withUserNames(rows []LeaderRow) ([]LeaderRow, error) {
+	if len(rows) == 0 {
+		return rows, nil
+	}
+	ids := make([]uint, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	var users []models.User
+	if err := q.ctx.GetCoreDB().Where("id IN ?", ids).Find(&users).Error; err != nil {
 		return nil, err
 	}
-	return rowsToLeaderRows(rows), nil
-}
-
-// leaderboardByUserFromBillingHourly 是 by=user 在 model 筛选下的实现:
-// token_daily_billings 无 model_name,故按模型筛用户榜时走 billing hourly 按 user_id 聚合。
-// tps/ttft 这里不计算(用户榜不展示速度),固定 0。
-func leaderboardByUserFromBillingHourly(db *gorm.DB, metric string, limit int, r ObsRange, modelName string) ([]LeaderRow, error) {
-	window := splitExactBillingWindow(r.Start, r.End)
-	merged := make(map[uint]leaderboardScanRow)
-	if window.hasFullHours() {
-		query := alignedHourWindow(db.Table("billing_hourly_buckets AS bhb"), window.fullStart, window.fullEnd)
-		rows, err := billingLeaderboardRows(query, "bhb", "COALESCE(SUM(bhb.request_count), 0)", modelName)
-		if err != nil {
-			return nil, err
-		}
-		mergeLeaderboardRows(merged, rows)
+	names := make(map[uint]string, len(users))
+	for _, user := range users {
+		names[user.ID] = user.Username
 	}
-	for _, boundary := range window.boundaries {
-		query := db.Table("billing_logs AS bl").Where("bl.created_at >= ? AND bl.created_at < ?", boundary.start, boundary.end)
-		rows, err := billingLeaderboardRows(query, "bl", "COUNT(*)", modelName)
-		if err != nil {
-			return nil, err
-		}
-		mergeLeaderboardRows(merged, rows)
+	for i := range rows {
+		rows[i].Name = names[rows[i].ID]
 	}
-	rows := sortedLeaderboardRows(merged, metric)
-	if len(rows) > limit {
-		rows = rows[:limit]
-	}
-	return rowsToLeaderRows(rows), nil
-}
-
-func billingLeaderboardRows(query *gorm.DB, alias, requestsExpr, modelName string) ([]leaderboardScanRow, error) {
-	query = query.Joins("LEFT JOIN users u ON u.id = " + alias + ".user_id").Where(alias + ".user_id > 0")
-	if modelName != "" {
-		query = query.Where(alias+".model_name = ?", modelName)
-	}
-	var rows []leaderboardScanRow
-	err := query.Select(fmt.Sprintf(`
-		%s.user_id AS id,
-		COALESCE(MIN(u.username), '') AS name,
-		COALESCE(SUM(%s.total_cost), 0) AS cost,
-		%s AS requests,
-		COALESCE(SUM(%s.prompt_tokens) + SUM(%s.completion_tokens) + SUM(%s.cache_read_tokens) + SUM(%s.cache_write_tokens), 0) AS tokens,
-		0 AS tps,
-		0 AS ttft_ms`, alias, alias, requestsExpr, alias, alias, alias, alias)).
-		Group(alias + ".user_id").Scan(&rows).Error
-	return rows, err
-}
-
-func mergeLeaderboardRows(merged map[uint]leaderboardScanRow, rows []leaderboardScanRow) {
-	for _, row := range rows {
-		current := merged[row.ID]
-		current.ID = row.ID
-		if current.Name == "" {
-			current.Name = row.Name
-		}
-		current.Cost += row.Cost
-		current.Requests += row.Requests
-		current.Tokens += row.Tokens
-		merged[row.ID] = current
-	}
-}
-
-func sortedLeaderboardRows(merged map[uint]leaderboardScanRow, metric string) []leaderboardScanRow {
-	rows := make([]leaderboardScanRow, 0, len(merged))
-	for _, row := range merged {
-		rows = append(rows, row)
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		switch metric {
-		case "requests":
-			if rows[i].Requests != rows[j].Requests {
-				return rows[i].Requests > rows[j].Requests
-			}
-		case "tokens":
-			if rows[i].Tokens != rows[j].Tokens {
-				return rows[i].Tokens > rows[j].Tokens
-			}
-		case "tps":
-			if rows[i].TPS != rows[j].TPS {
-				return rows[i].TPS > rows[j].TPS
-			}
-		case "ttft":
-			if rows[i].TTFTMs != rows[j].TTFTMs {
-				return rows[i].TTFTMs < rows[j].TTFTMs
-			}
-		default:
-			if rows[i].Cost != rows[j].Cost {
-				return rows[i].Cost > rows[j].Cost
-			}
-		}
-		return rows[i].ID < rows[j].ID
-	})
-	return rows
+	return rows, nil
 }

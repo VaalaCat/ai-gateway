@@ -10,7 +10,7 @@ type byokOnlyFilter struct{}
 func (byokOnlyFilter) Name() string { return "byok_only" }
 
 func (byokOnlyFilter) Apply(fctx *FilterContext, in []ScoredCandidate) ([]ScoredCandidate, DropCode) {
-	ui := fctx.Rctx.Input.UserInfo
+	ui := fctx.viewerInfo()
 	if ui == nil || ui.UserID == 0 || !ui.BYOKOnly {
 		return in, DropNone
 	}

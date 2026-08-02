@@ -10,7 +10,9 @@ vi.mock("next-intl", () => ({
 vi.mock("recharts", () => ({
   CartesianGrid: () => null,
   LineChart: ({ children }: React.PropsWithChildren) => <div>{children}</div>,
-  Line: ({ dot }: { dot: boolean }) => <span data-testid="trend-line" data-dot={String(dot)} />,
+  Line: ({ dot, activeDot }: { dot: boolean; activeDot?: unknown }) => (
+    <span data-testid="trend-line" data-dot={JSON.stringify(dot)} data-active-dot={JSON.stringify(activeDot)} />
+  ),
   XAxis: () => null,
   YAxis: () => null,
 }));
@@ -36,14 +38,16 @@ const bucket = {
   tokens: 20,
 };
 
-it("shows the data point when a trend contains one bucket", () => {
+it("keeps the line clean when a trend contains one bucket", () => {
   render(<TrendChart title="Trend" buckets={[bucket]} />);
 
-  expect(screen.getByTestId("trend-line")).toHaveAttribute("data-dot", "true");
+  expect(screen.getByTestId("trend-line")).toHaveAttribute("data-dot", "false");
+  expect(screen.getByTestId("trend-line")).toHaveAttribute("data-active-dot", '{"r":4,"strokeWidth":2}');
 });
 
-it("keeps point markers hidden when a trend contains multiple buckets", () => {
+it("keeps point markers hidden until hover", () => {
   render(<TrendChart title="Trend" buckets={[bucket, { ...bucket, ts: 2, label: "2026-07-25" }]} />);
 
   expect(screen.getByTestId("trend-line")).toHaveAttribute("data-dot", "false");
+  expect(screen.getByTestId("trend-line")).toHaveAttribute("data-active-dot", '{"r":4,"strokeWidth":2}');
 });

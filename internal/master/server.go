@@ -21,6 +21,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent"
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
+	relayplan "github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -37,6 +38,7 @@ import (
 	apilog "github.com/VaalaCat/ai-gateway/internal/master/api/log"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/model"
+	apimodelmarketplace "github.com/VaalaCat/ai-gateway/internal/master/api/model_marketplace"
 	apimodelrouting "github.com/VaalaCat/ai-gateway/internal/master/api/model_routing"
 	apimonitoring "github.com/VaalaCat/ai-gateway/internal/master/api/monitoring"
 	apioauth "github.com/VaalaCat/ai-gateway/internal/master/api/oauth"
@@ -52,6 +54,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api/user"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/user_group"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
+	"github.com/VaalaCat/ai-gateway/internal/master/channelautodisable"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
 	masterdatabase "github.com/VaalaCat/ai-gateway/internal/master/database"
 	masterhistorybackfill "github.com/VaalaCat/ai-gateway/internal/master/historybackfill"
@@ -74,6 +77,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sourcegraph/conc"
+	"github.com/sourcegraph/conc/pool"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -113,47 +117,52 @@ func (l *readyListener) Accept() (net.Conn, error) {
 }
 
 type Server struct {
-	Cfg                   *config.MasterRuntimeConfig
-	Logger                *zap.Logger
-	DB                    *gorm.DB
-	LogDB                 *gorm.DB
-	Bus                   app.EventBus
-	Router                *gin.Engine
-	Version               atomic.Int64
-	lastSavedVersion      atomic.Int64
-	Hub                   *msync.Hub
-	RelayHub              *mastertunnel.Hub
-	InstanceID            string
-	Signer                *masteragentauth.Signer
-	Connections           *connectivity.Service
-	ProbeScheduler        *connectivity.Scheduler
-	Operations            *masteroperations.Service
-	Listener              net.Listener
-	httpSrv               *http.Server
-	App                   app.Application
-	MetricsRegistry       *prometheus.Registry
-	RelayMetrics          *pkgmetrics.AgentRelayMetrics
-	StatsCache            *dao.StatsCache
-	LogDeliveryWorker     *masterlogqueue.LogDeliveryWorker
-	HistoryBackfillWorker *masterhistorybackfill.Worker
+	Cfg                     *config.MasterRuntimeConfig
+	Logger                  *zap.Logger
+	DB                      *gorm.DB
+	LogDB                   *gorm.DB
+	Bus                     app.EventBus
+	Router                  *gin.Engine
+	Version                 atomic.Int64
+	lastSavedVersion        atomic.Int64
+	Hub                     *msync.Hub
+	RelayHub                *mastertunnel.Hub
+	InstanceID              string
+	Signer                  *masteragentauth.Signer
+	Connections             *connectivity.Service
+	ProbeScheduler          *connectivity.Scheduler
+	Operations              *masteroperations.Service
+	Listener                net.Listener
+	httpSrv                 *http.Server
+	MetricsListener         net.Listener
+	metricsHTTPServer       *http.Server
+	App                     app.Application
+	MetricsRegistry         *prometheus.Registry
+	RelayMetrics            *pkgmetrics.AgentRelayMetrics
+	StatsCache              *dao.StatsCache
+	ModelPerformanceCache   *apimodelmarketplace.GlobalModelPerformanceCache
+	ModelMarketplaceHandler *apimodelmarketplace.Handler
+	LogDeliveryWorker       *masterlogqueue.LogDeliveryWorker
+	HistoryBackfillWorker   *masterhistorybackfill.Worker
 
 	// Heartbeat captures agent last_seen in memory and periodically flushes
 	// to DB; also serves freshness reads for API enrichment. Started in Run
 	// and stopped (force-flushed) in Shutdown.
 	Heartbeat *msync.HeartbeatTracker
 
-	// Aggregator buffers per-key billing rollup deltas (token_daily /
-	// channel_daily / hourly_bucket) in memory and flushes them in
-	// batched UPSERTs. Settler hands off each committed BillingLog to it
-	// via the UsageAggregator interface. Started in Run; Stop() in
-	// Shutdown drains the final batch before Heartbeat.Stop.
-	Aggregator *billing.Aggregator
-
-	// RebuildRunner schedules async per-hour billing rollup rebuilds.
+	// RebuildRunner schedules async log-owned daily billing rebuilds.
 	// Submitted jobs run as background goroutines (one per Submit);
 	// the gc loop spawns inside NewRebuildRunner. Stopped in Shutdown
-	// between Aggregator and Heartbeat (spec §9).
+	// before Heartbeat shutdown.
 	RebuildRunner *billing.RebuildRunner
+
+	// DailyBillingBackfill discovers request-log history and submits the
+	// versioned daily-only rebuild after RebuildRunner starts.
+	DailyBillingBackfill *billing.DailyBillingBackfill
+
+	// BillingLogRetention removes billing facts older than the live retention
+	// setting. It starts only after Run commits and stops before database close.
+	BillingLogRetention *billing.LogRetentionWorker
 
 	// LimitEvaluator periodically evaluates per-channel usage limits,
 	// toggling Status + LimitState. Stopped in Shutdown.
@@ -291,9 +300,13 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 
 	application := app.NewApplication()
 	application.SetCoreDB(db)
+	if err := apisystem.SeedMasterSettingsSnapshot(application); err != nil {
+		return nil, fmt.Errorf("seed master settings snapshot: %w", err)
+	}
 	application.SetLogDB(logDB)
 	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
 	application.SetEventBus(bus)
+	modelPerformanceQuery := dao.NewModelMarketplacePerformanceQuery(dao.NewContext(application))
 
 	s := &Server{
 		Cfg:             runtimeCfg,
@@ -308,6 +321,22 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		MetricsRegistry: metricsRegistry,
 		RelayMetrics:    pkgmetrics.NewAgentRelayMetrics(metricsRegistry, metricsRegistry),
 		StatsCache:      dao.NewStatsCache(),
+	}
+	s.initLifecycle()
+	s.ModelPerformanceCache = apimodelmarketplace.NewGlobalModelPerformanceCacheWithLifecycle(
+		s.lifecycleContext(),
+		apimodelmarketplace.NewModelPerformanceSnapshotLoader(modelPerformanceQuery),
+	)
+	marketplaceQuery := dao.NewModelMarketplaceQuery(dao.NewContext(application))
+	s.ModelMarketplaceHandler, err = apimodelmarketplace.NewHandler(
+		marketplaceQuery,
+		dao.NewModelMarketplaceUsageQuery(dao.NewContext(application)),
+		s.ModelPerformanceCache,
+		application.GetMasterSettings(),
+		runtimeCfg.Master.JWTSecret,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("init model marketplace handler: %w", err)
 	}
 	logDeliveryMetrics := pkgmetrics.NewLogDeliveryMetrics(metricsRegistry)
 	settingsFinder := masterlogqueue.NewCoreSettingsFinder(application.GetCoreDB, func(err error) {
@@ -329,7 +358,6 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		SnapshotPath: masterLogSnapshotPath(runtimeCfg.Master.LogDBPath, s.InstanceID),
 		OnError:      func(err error) { logger.Error("log delivery degraded", zap.Error(err)) },
 	})
-	s.initLifecycle()
 	if err := s.LogDeliveryWorker.Start(s.lifecycleContext()); err != nil {
 		return nil, fmt.Errorf("start log delivery worker: %w", err)
 	}
@@ -479,18 +507,19 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		"billing.rebuild_job_retain_seconds", 86400,
 	)
 	s.RebuildRunner = billing.NewRebuildRunner(application, logger, time.Duration(retainSec)*time.Second)
-	s.Aggregator = billing.NewAggregator(application, logger, buildBillingAggregatorOptions(settingQuery))
-	s.Aggregator.SetProjectionFlushContextFn(func(ctx context.Context, facts []models.BillingLog) error {
-		return application.GetCoreDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			return billing.ProjectCommittedBillingFactsInTx(ctx, tx, facts)
-		})
-	})
-	s.RebuildRunner.SetCoreRebuildAdmission(s.Aggregator)
 	// 片间 sleep:后台回填对 DB 细水长流,别抢高峰 IO。默认 1s,admin 可调 [0,60000]ms。
 	sliceSleepMs := lookupIntInRange(settingQuery, consts.SettingKeyRebuildSliceSleepMs, 1000, 0, 60000)
 	s.RebuildRunner.SetSliceSleep(time.Duration(sliceSleepMs) * time.Millisecond)
+	s.DailyBillingBackfill = billing.NewDailyBillingBackfill(application, s.RebuildRunner, logger, func(ctx context.Context) error {
+		_, err := masterdatabase.RetireCoreBillingProjectionTables(ctx, application.GetCoreDB(), application.GetLogDB())
+		return err
+	})
+	s.BillingLogRetention = billing.NewLogRetentionWorker(db, func(ctx context.Context) (int, error) {
+		return billing.FindBillingLogRetentionDays(ctx, db)
+	}, logger)
 
-	settler := billing.NewCoreFactSettler(application, bus, logger, s.Aggregator, s.LogDeliveryWorker)
+	settler := billing.NewCoreFactSettler(application, bus, logger, s.LogDeliveryWorker)
+	settler.AutoDisabler = channelautodisable.New(application, bus, logger)
 	settler.Start()
 	// 数据面同步结算入口:HTTP 摄取(POST /api/agents/usage)只在 SettleBatch 落库
 	// 成功后才 200,把 ack 语义从"进了内存 bus"收紧到"已持久化"。ws 路径(usage.reported
@@ -512,17 +541,6 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	logWorkerOwned = false
 	historyWorkerOwned = false
 	return s, nil
-}
-
-type billingAggregatorSettingFinder interface {
-	LookupInt(key string, fallback int) int
-}
-
-func buildBillingAggregatorOptions(settings billingAggregatorSettingFinder) billing.AggregatorOptions {
-	return billing.AggregatorOptions{
-		FlushEvery: time.Duration(settings.LookupInt("billing.aggregator_flush_interval_seconds", 30)) * time.Second,
-		MaxRows:    settings.LookupInt("billing.aggregator_max_buffered_rows", 5000),
-	}
 }
 
 func lookupIntInRange(query dao.AdminSettingQuery, key string, fallback, minimum, maximum int) int {
@@ -577,6 +595,7 @@ func (s *Server) setupRoutes() {
 		LegacyDatabasePath: s.Cfg.Master.LegacyDBPath,
 		CoreDatabase:       s.App.GetCoreDB,
 		LogDatabase:        s.App.GetLogDB,
+		StatsCache:         s.StatsCache,
 		LogDatabaseReady:   s.LogDeliveryWorker.SchemaReady,
 		LogDatabaseError:   func() string { return s.LogDeliveryWorker.Status().LastError },
 		LogQueueSnapshot: func() apisystem.LogQueueStatus {
@@ -705,6 +724,7 @@ func (s *Server) setupRoutes() {
 	mrH := &apimodelrouting.Handler{Bus: s.Bus}
 	capabilityH := &apicapability.Handler{}
 	pcH := private_channel.NewHandler(s.App, s.BYOKProvider)
+	marketplaceH := s.ModelMarketplaceHandler
 
 	// User-level authenticated routes (no admin required)
 	userAuth := s.Router.Group("/api")
@@ -712,6 +732,8 @@ func (s *Server) setupRoutes() {
 	userAuth.Use(middleware.ScopeMiddleware())
 	userAuth.GET("/profile", api.Adapt(adapter, api.BindNone, userH.GetProfile))
 	userAuth.GET("/capabilities", api.Adapt(adapter, api.BindNone, capabilityH.Get))
+	userAuth.GET("/model-marketplace", marketplaceH.UserFeatureEnabledMiddleware(adapter), api.Adapt(adapter, api.BindQuery, marketplaceH.List))
+	userAuth.GET("/model-marketplace/detail", marketplaceH.UserFeatureEnabledMiddleware(adapter), api.Adapt(adapter, api.BindQuery, marketplaceH.Detail))
 	userAuth.PUT("/profile", api.Adapt(adapter, api.BindJSON, userH.UpdateProfile))
 	userAuth.PUT("/profile/password", api.Adapt(adapter, api.BindJSON, userH.ChangePassword))
 	userAuth.POST("/oauth/link-ticket", api.Adapt(adapter, api.BindNone, oauthH.IssueLinkTicket))
@@ -764,6 +786,8 @@ func (s *Server) setupRoutes() {
 	auth.Use(middleware.AuthMiddleware(s.Cfg.Master.JWTSecret))
 	auth.Use(middleware.AdminOnly())
 	auth.Use(middleware.ScopeMiddleware())
+	auth.GET("/model-marketplace", api.Adapt(adapter, api.BindQuery, marketplaceH.AdminList))
+	auth.GET("/model-marketplace/detail", api.Adapt(adapter, api.BindQuery, marketplaceH.AdminDetail))
 
 	auth.GET("/users", api.Adapt(adapter, api.BindQuery, userH.List))
 	auth.POST("/users", api.Adapt(adapter, api.BindJSON, userH.Create))
@@ -799,6 +823,7 @@ func (s *Server) setupRoutes() {
 	auth.POST("/channels/export", channelH.ExportHTTP(adapter))
 	auth.POST("/channels/import", channelH.ImportHTTP(adapter))
 	auth.GET("/channels/types", api.Adapt(adapter, api.BindNone, channelH.Types))
+	auth.POST("/channels/batch-edit", api.Adapt(adapter, api.BindJSON, channelH.BatchEdit))
 	auth.GET("/channels/:id", api.Adapt(adapter, api.BindURI, channelH.Get))
 	auth.GET("/channels/:id/dataflow", api.Adapt(adapter, api.BindURI, channelH.DataFlow))
 	auth.PUT("/channels/:id", api.Adapt(adapter, api.BindURIAndBodyMap, channelH.Update))
@@ -943,8 +968,8 @@ func (s *Server) setupRoutes() {
 	auth.POST("/system/history-backfill/complete", api.Adapt(adapter, api.BindJSON, systemH.CompleteHistoryBackfillNow))
 	auth.DELETE("/system/history-backfill/source", api.Adapt(adapter, api.BindQuery, systemH.DeleteHistoryBackfillSource))
 	auth.DELETE("/system/history-backfill/legacy-artifact", api.Adapt(adapter, api.BindQuery, systemH.DeleteHistoryBackfillLegacyArtifact))
-	auth.GET("/system/cleanup/preview", api.Adapt(adapter, api.BindQuery, systemH.CleanupPreview))
-	auth.POST("/system/cleanup", api.Adapt(adapter, api.BindJSON, systemH.Cleanup))
+	auth.GET("/system/cleanup/preview", api.Adapt(adapter, api.BindQuery, systemH.CleanupTablePreview))
+	auth.POST("/system/cleanup/batch", api.Adapt(adapter, api.BindJSON, systemH.CleanupTableBatch))
 	auth.GET("/system/settings", api.Adapt(adapter, api.BindNone, systemH.GetSettings))
 	auth.PUT("/system/settings", api.Adapt(adapter, api.BindJSON, systemH.UpdateSettings))
 	auth.GET("/byok-system-baseurls", api.Adapt(adapter, api.BindNone, systemH.BYOKSystemBaseURLs))
@@ -968,9 +993,13 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) setupMetricsRoute() {
-	if s != nil && s.Router != nil && s.RelayMetrics != nil {
-		s.Router.GET("/metrics", gin.WrapH(s.RelayMetrics.Handler()))
+	if s == nil || s.Cfg == nil || s.Router == nil || s.MetricsRegistry == nil ||
+		s.Cfg.Metrics.Token == "" || s.Cfg.Metrics.Listen != "" {
+		return
 	}
+	s.Router.GET("/metrics", gin.WrapH(
+		pkgmetrics.NewAuthenticatedHandler(s.MetricsRegistry, s.Cfg.Metrics.Token),
+	))
 }
 
 // SetChannelMasterListen overrides the channel handler's MasterListen
@@ -1229,9 +1258,7 @@ func (s *Server) commitEmbeddedAgent(candidate *embeddedAgentCandidate, startup 
 		}
 		return ErrAlreadyRunning
 	}
-	if s.channelHandler != nil {
-		s.channelHandler.AgentStore = candidate.server.Store
-	}
+	s.publishEmbeddedAgentStore(candidate.server.Store)
 
 	// Mount relay routes on master's router
 	candidate.server.MountRoutes(s.Router)
@@ -1244,6 +1271,15 @@ func (s *Server) commitEmbeddedAgent(candidate *embeddedAgentCandidate, startup 
 	candidate.background.Commit()
 	close(ready)
 	return nil
+}
+
+func (s *Server) publishEmbeddedAgentStore(store *cache.Store) {
+	if s.channelHandler != nil {
+		s.channelHandler.AgentStore = store
+	}
+	if s.ModelMarketplaceHandler != nil {
+		s.ModelMarketplaceHandler.SetModelOfferPlanFinder(relayplan.NewModelOfferPlanFinder(store))
+	}
 }
 
 // setupEmbeddedAgent creates a full agent instance embedded in the master
@@ -1276,10 +1312,12 @@ func (s *Server) setupEmbeddedAgent(ctx context.Context, listenAddr string) erro
 }
 
 type masterRunResources struct {
-	listener   net.Listener
-	httpServer *http.Server
-	selfListen string
-	embedded   *embeddedAgentCandidate
+	listener          net.Listener
+	httpServer        *http.Server
+	metricsListener   net.Listener
+	metricsHTTPServer *http.Server
+	selfListen        string
+	embedded          *embeddedAgentCandidate
 }
 
 func (s *Server) commitRunResources(startupCtx, rootCtx context.Context, startup *registrationLease, resources masterRunResources) bool {
@@ -1291,11 +1329,13 @@ func (s *Server) commitRunResources(startupCtx, rootCtx context.Context, startup
 	}
 	if s.channelHandler != nil {
 		s.channelHandler.MasterListen = resources.selfListen
-		s.channelHandler.AgentStore = resources.embedded.server.Store
 	}
+	s.publishEmbeddedAgentStore(resources.embedded.server.Store)
 	resources.embedded.server.MountRoutes(s.Router)
 	s.Listener = resources.listener
 	s.httpSrv = resources.httpServer
+	s.MetricsListener = resources.metricsListener
+	s.metricsHTTPServer = resources.metricsHTTPServer
 	s.embeddedAgent = resources.embedded.server
 	s.embeddedBackground = resources.embedded.background
 	start := func(run func()) {
@@ -1320,11 +1360,13 @@ func (s *Server) commitRunResources(startupCtx, rootCtx context.Context, startup
 	start(func() { s.Heartbeat.Start(rootCtx) })
 	start(func() { s.Connections.Run(rootCtx) })
 	start(func() { _ = s.ProbeScheduler.Run(rootCtx) })
-	if s.Aggregator != nil {
-		start(func() { s.Aggregator.Start(rootCtx) })
-	}
 	if s.RebuildRunner != nil {
-		start(func() { s.RebuildRunner.Start(rootCtx) })
+		start(func() { s.startBillingRebuildWorkers(rootCtx) })
+	} else if s.DailyBillingBackfill != nil {
+		start(func() { s.startBillingRebuildWorkers(rootCtx) })
+	}
+	if s.BillingLogRetention != nil {
+		start(func() { s.BillingLogRetention.Start(rootCtx) })
 	}
 	if s.LimitEvaluator != nil {
 		start(s.LimitEvaluator.Start)
@@ -1350,6 +1392,39 @@ func runAfterMasterCommit(ctx context.Context, ready <-chan struct{}, run func()
 	run()
 }
 
+func (s *Server) startBillingRebuildWorkers(ctx context.Context) {
+	if s.RebuildRunner != nil {
+		s.RebuildRunner.Start(ctx)
+	}
+	if s.DailyBillingBackfill != nil {
+		s.DailyBillingBackfill.Start(ctx)
+	}
+}
+
+func (s *Server) prepareMetricsHTTPServer(ctx context.Context) (net.Listener, *http.Server, error) {
+	if s.Cfg.Metrics.Listen == "" {
+		return nil, nil, nil
+	}
+	listener, err := netaddr.Listen(s.Cfg.Metrics.Listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen metrics: %w", err)
+	}
+	authenticated := pkgmetrics.NewAuthenticatedHandler(s.MetricsRegistry, s.Cfg.Metrics.Token)
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/metrics" {
+			http.NotFound(response, request)
+			return
+		}
+		authenticated.ServeHTTP(response, request)
+	})
+	server := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 30 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+	return listener, server, nil
+}
+
 func (s *Server) Run() error {
 	ctx := s.lifecycleContext()
 	if err := context.Cause(ctx); err != nil {
@@ -1373,9 +1448,19 @@ func (s *Server) Run() error {
 	}
 	resourcesCommitted := false
 	var embedded *embeddedAgentCandidate
+	metricsListener, metricsHTTPServer, err := s.prepareMetricsHTTPServer(ctx)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
 	defer func() {
 		if !resourcesCommitted {
 			_ = ln.Close()
+			if metricsHTTPServer != nil {
+				_ = metricsHTTPServer.Close()
+			} else if metricsListener != nil {
+				_ = metricsListener.Close()
+			}
 			s.closeEmbeddedCandidate(embedded)
 		}
 	}()
@@ -1410,10 +1495,12 @@ func (s *Server) Run() error {
 		s.beforeRunCommit()
 	}
 	if !s.commitRunResources(registration.Context(), ctx, registration, masterRunResources{
-		listener:   ln,
-		httpServer: httpSrv,
-		selfListen: selfListen,
-		embedded:   embedded,
+		listener:          ln,
+		httpServer:        httpSrv,
+		metricsListener:   metricsListener,
+		metricsHTTPServer: metricsHTTPServer,
+		selfListen:        selfListen,
+		embedded:          embedded,
 	}) {
 		return errMasterServerClosing
 	}
@@ -1422,38 +1509,63 @@ func (s *Server) Run() error {
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
-	readyLn := newReadyListener(ln)
-	var serveErr error
-	var serveGroup conc.WaitGroup
-	serveDone := make(chan struct{})
-	serveGroup.Go(func() {
-		defer close(serveDone)
-		serveErr = httpSrv.Serve(readyLn)
-	})
+	return s.serveHTTPServers(ctx, ln, httpSrv, metricsListener, metricsHTTPServer)
+}
+
+type masterServeResult struct {
+	name string
+	err  error
+}
+
+func (s *Server) serveHTTPServers(ctx context.Context, listener net.Listener, httpServer *http.Server, metricsListener net.Listener, metricsServer *http.Server) error {
+	readyLn := newReadyListener(listener)
+	serverCount := 1
+	if metricsServer != nil {
+		serverCount++
+	}
+	results := make(chan masterServeResult, serverCount)
+	var servers conc.WaitGroup
+	servers.Go(func() { results <- masterServeResult{name: "business", err: httpServer.Serve(readyLn)} })
+	if metricsServer != nil {
+		servers.Go(func() { results <- masterServeResult{name: "metrics", err: metricsServer.Serve(metricsListener)} })
+	}
 	// behavior change: Shutdown may stop http.Server after startup commit but
 	// before Serve reaches its first Accept; in that case ready never closes.
 	select {
 	case <-readyLn.ready:
-	case <-serveDone:
+	case result := <-results:
+		_ = httpServer.Close()
+		if metricsServer != nil {
+			_ = metricsServer.Close()
+		}
+		servers.Wait()
 		if cause := context.Cause(ctx); cause != nil {
 			return cause
 		}
-		return serveErr
+		return result.err
 	}
 	if s.afterHTTPServeStarted != nil {
 		s.afterHTTPServeStarted()
 	}
-	s.Logger.Info("master listening", zap.String("addr", ln.Addr().String()))
+	s.Logger.Info("master listening", zap.String("addr", listener.Addr().String()))
 	if s.HistoryBackfillWorker != nil {
 		if err := s.HistoryBackfillWorker.Start(s.lifecycleContext()); err != nil {
-			_ = httpSrv.Close()
-			serveGroup.Wait()
+			_ = httpServer.Close()
+			if metricsServer != nil {
+				_ = metricsServer.Close()
+			}
+			servers.Wait()
 			return fmt.Errorf("start history backfill worker: %w", err)
 		}
 		s.Logger.Info("database_split_history_backfill_started")
 	}
-	serveGroup.Wait()
-	return serveErr
+	first := <-results
+	_ = httpServer.Close()
+	if metricsServer != nil {
+		_ = metricsServer.Close()
+	}
+	servers.Wait()
+	return first.err
 }
 
 func (s *Server) runStateSweeper(ctx context.Context, store *apioauth.StateStore) {
@@ -1601,6 +1713,16 @@ func (s *Server) isClosing() bool {
 	return s.closing
 }
 
+// ListenAddress returns a snapshot of the published listener address.
+func (s *Server) ListenAddress() (string, bool) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.Listener == nil {
+		return "", false
+	}
+	return s.Listener.Addr().String(), true
+}
+
 func (s *Server) registerListener(ln net.Listener) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
@@ -1656,12 +1778,18 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	s.lifecycleMu.Lock()
 	httpSrv := s.httpSrv
 	listener := s.Listener
+	metricsHTTPServer := s.metricsHTTPServer
+	metricsListener := s.MetricsListener
 	relayHub := s.RelayHub
 	s.lifecycleMu.Unlock()
-	var drainErr error
+	drains := pool.New().WithContext(ctx)
 	if httpSrv != nil {
-		drainErr = httpSrv.Shutdown(ctx)
+		drains.Go(func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
 	}
+	if metricsHTTPServer != nil {
+		drains.Go(func(ctx context.Context) error { return metricsHTTPServer.Shutdown(ctx) })
+	}
+	drainErr := drains.Wait()
 	shutdownCause := context.Cause(ctx)
 	if shutdownCause == nil {
 		shutdownCause = errors.New("master server: shutdown")
@@ -1698,6 +1826,11 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	} else if listener != nil {
 		_ = listener.Close()
 	}
+	if metricsHTTPServer != nil {
+		_ = metricsHTTPServer.Close()
+	} else if metricsListener != nil {
+		_ = metricsListener.Close()
+	}
 	if relayHub != nil {
 		_ = relayHub.Close(ctx)
 		<-relayHub.Done()
@@ -1708,21 +1841,50 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	}
 	// behavior change: shared-listener handlers cannot extend shutdown past its context.
 	drainErr = errors.Join(drainErr, s.waitHTTPHandlers(ctx))
-	if s.Aggregator != nil {
-		drainErr = errors.Join(drainErr, s.Aggregator.Close(ctx))
-		<-s.Aggregator.Done()
-	}
 	if s.RebuildRunner != nil {
-		_ = s.RebuildRunner.Close(ctx)
-		<-s.RebuildRunner.Done()
+		if s.DailyBillingBackfill != nil {
+			dailyBackfillErr := s.DailyBillingBackfill.Close(ctx)
+			drainErr = errors.Join(drainErr, dailyBackfillErr)
+			if dailyBackfillErr == nil {
+				<-s.DailyBillingBackfill.Done()
+			}
+		}
+		rebuildRunnerErr := s.RebuildRunner.Close(ctx)
+		drainErr = errors.Join(drainErr, rebuildRunnerErr)
+		if rebuildRunnerErr == nil {
+			<-s.RebuildRunner.Done()
+		}
+	} else if s.DailyBillingBackfill != nil {
+		dailyBackfillErr := s.DailyBillingBackfill.Close(ctx)
+		drainErr = errors.Join(drainErr, dailyBackfillErr)
+		if dailyBackfillErr == nil {
+			<-s.DailyBillingBackfill.Done()
+		}
+	}
+	if s.BillingLogRetention != nil {
+		retentionErr := s.BillingLogRetention.Close(ctx)
+		drainErr = errors.Join(drainErr, retentionErr)
+		if retentionErr == nil {
+			<-s.BillingLogRetention.Done()
+		}
 	}
 	if s.LimitEvaluator != nil {
 		_ = s.LimitEvaluator.Close(ctx)
 		<-s.LimitEvaluator.Done()
 	}
 	if s.Heartbeat != nil {
-		_ = s.Heartbeat.Close(ctx)
-		<-s.Heartbeat.Done()
+		// behavior change: root cancellation stops ticker work, while the still-live
+		// caller context remains available for the graceful final persistence.
+		heartbeatErr := s.Heartbeat.Close(ctx)
+		drainErr = errors.Join(drainErr, heartbeatErr)
+		if heartbeatErr == nil {
+			<-s.Heartbeat.Done()
+		} else {
+			select {
+			case <-s.Heartbeat.Done():
+			case <-ctx.Done():
+			}
+		}
 	}
 	if s.HistoryBackfillWorker != nil {
 		drainErr = errors.Join(drainErr, s.HistoryBackfillWorker.Stop(ctx))
@@ -1814,15 +1976,18 @@ func (s *Server) ResourceCountsForTest() app.ResourceCounts {
 		counts.RelayStreams += relay.RelayStreams
 		counts.RelaySockets += relay.RelaySockets
 	}
-	owned := make([]app.ResourceCounts, 0, 4)
+	owned := make([]app.ResourceCounts, 0, 6)
 	if s.Heartbeat != nil {
 		owned = append(owned, s.Heartbeat.ResourceCounts())
 	}
-	if s.Aggregator != nil {
-		owned = append(owned, s.Aggregator.ResourceCounts())
-	}
 	if s.RebuildRunner != nil {
 		owned = append(owned, s.RebuildRunner.ResourceCounts())
+	}
+	if s.DailyBillingBackfill != nil {
+		owned = append(owned, s.DailyBillingBackfill.ResourceCounts())
+	}
+	if s.BillingLogRetention != nil {
+		owned = append(owned, s.BillingLogRetention.ResourceCounts())
 	}
 	if s.LimitEvaluator != nil {
 		owned = append(owned, s.LimitEvaluator.ResourceCounts())

@@ -2,6 +2,7 @@ package private_channel
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/byokcrypto"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
 
@@ -127,6 +129,24 @@ func TestPrivateChannelImportHTTP(t *testing.T) {
 		}
 		if preview.Kind != channelfile.KindBYOKChannels || preview.Total != 0 {
 			t.Fatalf("unexpected preview: %#v", preview)
+		}
+	})
+
+	t.Run("rejects non-binary auto ban without creating rows", func(t *testing.T) {
+		for name, value := range map[string]string{"positive": "2", "negative": "-1", "fractional": "0.5", "string": `"1"`} {
+			t.Run(name, func(t *testing.T) {
+				h, ctx, db := newHandlerTestCtx(t)
+				invalidations := recordPrivateChannelInvalidations(t, ctx)
+				body := fmt.Sprintf(`{"schema_version":1,"kind":"byok_channels","exported_at":"2026-07-16T00:00:00Z","channels":[{"name":"bad-auto-ban","status":1,"type":1,"key":"sk-test","base_url":"https://api.openai.com","models":["gpt-4o"],"model_mapping":{},"auto_ban":%s,"affinity":{}}]}`, value)
+				status, _ := runPrivateChannelImport(t, h, ctx.App, ctx.UserInfo, false, body)
+				if status != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400", status)
+				}
+				var count int64
+				require.NoError(t, db.Model(&models.PrivateChannel{}).Count(&count).Error)
+				require.Zero(t, count)
+				require.Empty(t, *invalidations)
+			})
 		}
 	})
 }

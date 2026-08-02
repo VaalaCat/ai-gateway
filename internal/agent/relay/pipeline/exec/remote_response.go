@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -263,7 +264,8 @@ func outcomeFromAttemptResult(
 		ProviderResultKnown: result.ProviderResultKnown, ProviderDispatched: result.ProviderDispatched || result.Dispatches > 0,
 		PlanAdvanceAllowed: result.PlanAdvanceAllowed, ResponseStarted: result.ResponseStarted,
 		ReasonCode: result.ReasonCode, Dispatches: result.Dispatches,
-		Trace: traceRecordFromWire(result.Trace),
+		AutoDisableTriggers: slices.Clone(result.AutoDisableTriggers),
+		Trace:               traceRecordFromWire(result.Trace),
 		Result: state.AttemptResult{
 			PromptTokens: result.PromptTokens, CompletionTokens: result.CompletionTokens,
 			CacheReadTokens: result.CacheReadTokens, CacheWriteTokens: result.CacheWriteTokens,

@@ -45,6 +45,22 @@ describe("URL-backed table state", () => {
     expect(replace).toHaveBeenCalledWith("/items?page_size=50&search=new");
   });
 
+  it("reads both date bounds when the URL state spec includes a time field", () => {
+    query = "start=1768867200&end=1768953599&model_name=gpt-5";
+    const spec = {
+      time: { kind: "time" as const },
+      model_name: { kind: "text" as const },
+    };
+
+    const { result } = renderHook(() => useFilterState(spec));
+
+    expect(result.current[0]).toEqual({
+      start: 1_768_867_200,
+      end: 1_768_953_599,
+      model_name: "gpt-5",
+    });
+  });
+
   it("normalizes the first page and default size out of the URL", () => {
     query = "page=3&page_size=50&search=term";
     const { result } = renderHook(() => usePaginationState(20));

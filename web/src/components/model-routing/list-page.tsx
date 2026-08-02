@@ -34,6 +34,11 @@ import {
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { DateCell } from "@/components/business/date-cell";
 import { ScopeBadge } from "@/components/model-routing/scope-badge";
+import {
+  buildModelRoutingEditHref,
+  modelRoutingOwner,
+  normalizeModelRoutingFilterChange,
+} from "@/components/model-routing/list-page-logic";
 
 import {
   useModelRoutings,
@@ -104,25 +109,39 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
         options: [
           { value: "global", label: t("scope.global") },
           { value: "user", label: t("scope.user") },
+          { value: "token", label: t("scope.token") },
         ],
         placeholder: t("filters.filterByScope"),
       },
-      user_id: { kind: "picker", entity: "user", placeholder: t("filters.filterByUser") },
+      user_id: {
+        kind: "picker",
+        entity: "user",
+        placeholder: t("filters.filterByUser"),
+        visible: (ctx) => ctx.scope === "user",
+      },
+      token_id: {
+        kind: "picker",
+        entity: "token",
+        placeholder: t("filters.filterByToken"),
+        visible: (ctx) => ctx.scope === "token",
+      },
     } : {}),
   } satisfies FilterSpec), [t, isAdmin]);
 
   const [filterValues, setFilterValues] = useFilterState(filterSpec);
 
-  const scopeFilter = filterValues.scope ? String(filterValues.scope) as "global" | "user" : undefined;
+  const scopeFilter = filterValues.scope ? String(filterValues.scope) as "global" | "user" | "token" : undefined;
   const userIdFilter = filterValues.user_id ? String(filterValues.user_id) : "";
+  const tokenIdFilter = filterValues.token_id ? String(filterValues.token_id) : "";
 
   const { data, isLoading } = useModelRoutings(
     {
       page,
       page_size: pageSize,
-      search: filterValues.search ? String(filterValues.search) : undefined,
+      q: filterValues.search ? String(filterValues.search) : undefined,
       ...(scopeFilter ? { scope: scopeFilter } : {}),
-      ...(userIdFilter ? { user_id: Number(userIdFilter) } : {}),
+      ...(scopeFilter === "user" && userIdFilter ? { user_id: Number(userIdFilter) } : {}),
+      ...(scopeFilter === "token" && tokenIdFilter ? { token_id: Number(tokenIdFilter) } : {}),
     },
     apiMode
   );
@@ -139,9 +158,13 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const deleteMut = useDeleteModelRouting(apiMode);
   const [deleteItem, setDeleteItem] = useState<ModelRouting | null>(null);
 
+  const handleFilterChange = (next: Parameters<typeof setFilterValues>[0]) => {
+    setFilterValues(normalizeModelRoutingFilterChange(next));
+  };
+
   const handleToggleEnabled = (row: ModelRouting, newValue: boolean) => {
     updateMut.mutate(
-      { id: row.id, enabled: newValue },
+      { id: row.id, owner: modelRoutingOwner(row), enabled: newValue },
       {
         onError: () => {
           toast.error(tc("error"));
@@ -153,7 +176,10 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const handleDelete = async () => {
     if (!deleteItem) return;
     try {
-      await deleteMut.mutateAsync(deleteItem.id);
+      await deleteMut.mutateAsync({
+        id: deleteItem.id,
+        owner: modelRoutingOwner(deleteItem),
+      });
       toast.success(tc("success"));
       setDeleteItem(null);
     } catch (err) {
@@ -177,7 +203,7 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
         <button
           className="font-medium text-sm hover:underline text-left"
           onClick={() =>
-            router.push(`${baseHref}/edit?id=${row.original.id}`)
+            router.push(buildModelRoutingEditHref(baseHref, row.original))
           }
         >
           {row.original.name}
@@ -193,12 +219,18 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
       ? [{
           accessorKey: "user_id",
           header: t("cols.owner"),
-          cell: ({ row }: { row: { original: ModelRouting } }) =>
-            row.original.user_id ? (
+          cell: ({ row }: { row: { original: ModelRouting } }) => {
+            if (row.original.scope === "token") {
+              return (
+                <EntityLabel entity="token" id={row.original.token_id} className="text-sm" />
+              );
+            }
+            return row.original.scope === "user" ? (
               <EntityLabel entity="user" id={row.original.user_id} className="text-sm" />
             ) : (
-              <span className="text-sm text-muted-foreground">—</span>
-            ),
+              <span className="text-sm text-muted-foreground">-</span>
+            );
+          },
         }] satisfies ColumnDef<ModelRouting>[]
       : []),
     {
@@ -236,7 +268,7 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
           <DropdownMenuContent align="end">
             <DropdownMenuItem
               onClick={() =>
-                router.push(`${baseHref}/edit?id=${row.original.id}`)
+                router.push(buildModelRoutingEditHref(baseHref, row.original))
               }
             >
               <Pencil className="size-4 mr-2" />
@@ -260,7 +292,8 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
     routings.length === 0 &&
     !filterValues.search &&
     !filterValues.scope &&
-    !userIdFilter;
+    !userIdFilter &&
+    !tokenIdFilter;
 
   const pageTitle = apiMode === "admin" ? t("title") : t("myTitle");
   const pageSubtitle = apiMode === "admin" ? t("subtitle") : t("filtersUserHint");
@@ -302,7 +335,8 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
             <FilterableToolbar
               spec={filterSpec}
               value={filterValues}
-              onChange={setFilterValues}
+              onChange={handleFilterChange}
+              context={{ scope: scopeFilter }}
             />
           }
         />

@@ -67,6 +67,102 @@ func TestSystemStatsReportsBothDatabasesAndQueue(t *testing.T) {
 	require.Equal(t, "last write failed", resp.Storage.LogQueue.LastError)
 }
 
+func TestSystemStatsListsAllDatabaseTables(t *testing.T) {
+	t.Run("split databases include every application table", func(t *testing.T) {
+		core := openArtifactTargetDB(t, filepath.Join(t.TempDir(), "master.db"), models.DatabaseRoleCore)
+		logDB := openArtifactTargetDB(t, filepath.Join(t.TempDir(), "log.db"), models.DatabaseRoleLog)
+		require.NoError(t, core.Create(&models.User{Username: "stats-user"}).Error)
+		require.NoError(t, logDB.Create(&models.RequestLog{RequestID: "stats-request"}).Error)
+
+		resp := collectSplitDatabaseStats(t, core, logDB, true)
+		tables := decodeTableStats(t, resp)
+		wantCore := listUserTables(t, core)
+		wantLog := listUserTables(t, logDB)
+
+		require.Len(t, tables, len(wantCore)+len(wantLog))
+		for _, name := range wantCore {
+			require.Contains(t, tables, "core:"+name)
+		}
+		for _, name := range wantLog {
+			require.Contains(t, tables, "log:"+name)
+		}
+		require.Equal(t, int64(1), tables["core:users"])
+		require.Equal(t, int64(1), tables["log:request_logs"])
+	})
+
+	t.Run("same table name remains distinguishable by database", func(t *testing.T) {
+		core := openArtifactTargetDB(t, filepath.Join(t.TempDir(), "master.db"), models.DatabaseRoleCore)
+		logDB := openArtifactTargetDB(t, filepath.Join(t.TempDir(), "log.db"), models.DatabaseRoleLog)
+		require.NoError(t, core.Create(&models.HistoryCursor{Key: "core"}).Error)
+		require.NoError(t, logDB.Create(&models.HistoryCursor{Key: "log"}).Error)
+
+		tables := decodeTableStats(t, collectSplitDatabaseStats(t, core, logDB, true))
+
+		require.Equal(t, int64(1), tables["core:history_cursors"])
+		require.Equal(t, int64(1), tables["log:history_cursors"])
+	})
+
+	t.Run("unavailable log database keeps complete core statistics", func(t *testing.T) {
+		core := openArtifactTargetDB(t, filepath.Join(t.TempDir(), "master.db"), models.DatabaseRoleCore)
+
+		resp := collectSplitDatabaseStats(t, core, nil, false)
+		tables := decodeTableStats(t, resp)
+		wantCore := listUserTables(t, core)
+
+		require.Len(t, tables, len(wantCore))
+		for _, name := range wantCore {
+			require.Contains(t, tables, "core:"+name)
+		}
+		for key := range tables {
+			require.NotContains(t, key, "log:")
+		}
+	})
+}
+
+func collectSplitDatabaseStats(t *testing.T, core, logDB *gorm.DB, logReady bool) StatsResponse {
+	t.Helper()
+	h := &Handler{
+		CoreDatabase:     func() *gorm.DB { return core },
+		LogDatabase:      func() *gorm.DB { return logDB },
+		LogDatabaseReady: func() bool { return logReady },
+	}
+	application := app.NewApplication()
+	application.SetCoreDB(core)
+	application.SetLogDB(logDB)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+
+	resp, err := h.Stats(newSystemOperationContext(t, application, true), StatsRequest{})
+	require.NoError(t, err)
+	return resp
+}
+
+func decodeTableStats(t *testing.T, response StatsResponse) map[string]int64 {
+	t.Helper()
+	payload, err := json.Marshal(response)
+	require.NoError(t, err)
+	var decoded struct {
+		Tables []struct {
+			Database string `json:"database"`
+			Name     string `json:"name"`
+			Count    int64  `json:"count"`
+		} `json:"tables"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &decoded))
+	result := make(map[string]int64, len(decoded.Tables))
+	for _, table := range decoded.Tables {
+		result[table.Database+":"+table.Name] = table.Count
+	}
+	return result
+}
+
+func listUserTables(t *testing.T, db *gorm.DB) []string {
+	t.Helper()
+	var names []string
+	err := db.Raw(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).Scan(&names).Error
+	require.NoError(t, err)
+	return names
+}
+
 func TestSystemStatsReportsUnavailableLogDatabaseWithoutOpeningIt(t *testing.T) {
 	corePath := filepath.Join(t.TempDir(), "master.db")
 	core := openStatusTestDB(t, corePath)

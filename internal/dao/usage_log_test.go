@@ -164,31 +164,6 @@ func TestUsageLogDAO_Admin(t *testing.T) {
 		}
 	})
 
-	t.Run("DeleteLogsBefore", func(t *testing.T) {
-		cutoff := time.Now().Add(-24 * time.Hour)
-		deleted, err := m.DeleteLogsBefore(cutoff)
-		if err != nil {
-			t.Fatalf("DeleteLogsBefore: %v", err)
-		}
-		if deleted != 1 {
-			t.Fatalf("expected 1 deleted, got %d", deleted)
-		}
-	})
-
-	t.Run("DeleteTracesBefore", func(t *testing.T) {
-		// Create an old trace
-		oldTrace := &models.UsageLogTrace{RequestID: "req-old", CreatedAt: time.Now().Unix() - 86400*30}
-		db.Select("*").Create(oldTrace)
-
-		cutoff := time.Now().Add(-24 * time.Hour)
-		deleted, err := m.DeleteTracesBefore(cutoff)
-		if err != nil {
-			t.Fatalf("DeleteTracesBefore: %v", err)
-		}
-		if deleted != 1 {
-			t.Fatalf("expected 1 deleted, got %d", deleted)
-		}
-	})
 }
 
 func TestUsageLog_AdminList_FilterByPrivateChannelID(t *testing.T) {

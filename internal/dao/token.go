@@ -7,6 +7,7 @@ import (
 type AdminTokenQuery interface {
 	GetByID(id uint) (*models.Token, error)
 	GetByKey(key string) (*models.Token, error)
+	FindOwned(id, userID uint) (*models.Token, error)
 	List(opts ListOptions, filter TokenListFilter) ([]models.Token, int64, error)
 	ListByTemplateID(templateID uint) ([]models.Token, error)
 	ListByIDs(ids []uint) ([]models.Token, error)
@@ -33,6 +34,15 @@ func (q *adminTokenQuery) GetByID(id uint) (*models.Token, error) {
 func (q *adminTokenQuery) GetByKey(key string) (*models.Token, error) {
 	var token models.Token
 	err := q.ctx.GetCoreDB().Where("`key` = ?", key).First(&token).Error
+	return &token, err
+}
+
+// FindOwned loads a token only when both its primary key and owner match. This
+// keeps ownership enforcement inside one SQL query so callers cannot disclose
+// the existence of another user's token.
+func (q *adminTokenQuery) FindOwned(id, userID uint) (*models.Token, error) {
+	var token models.Token
+	err := q.ctx.GetCoreDB().Where("id = ? AND user_id = ?", id, userID).First(&token).Error
 	return &token, err
 }
 

@@ -31,7 +31,7 @@ func TestSettleOne_PrivateFreeMode_ZeroCostWritesDaily(t *testing.T) {
 
 	initialQuota := getByokUserQuota(t, db, 1)
 
-	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{{
 		RequestID:        "byok-free-req-1",
 		UserID:           1,
@@ -64,28 +64,14 @@ func TestSettleOne_PrivateFreeMode_ZeroCostWritesDaily(t *testing.T) {
 		t.Fatalf("free mode should set total_cost to 0; got %d", ul.TotalCost)
 	}
 
-	// Daily billing rows MUST be written even in free mode — they carry zero cost
-	// but non-zero request_count / token_count for portal stats.
-	var tokenDaily models.TokenDailyBilling
-	if err := db.Where("user_id = ?", 1).First(&tokenDaily).Error; err != nil {
-		t.Fatalf("free mode must still write token_daily_billings: %v", err)
-	}
-	if tokenDaily.RequestCount != 1 {
-		t.Fatalf("token_daily request_count = %d, want 1", tokenDaily.RequestCount)
-	}
-	if tokenDaily.TotalCost != 0 {
-		t.Fatalf("token_daily total_cost = %d, want 0 in free mode", tokenDaily.TotalCost)
-	}
-
-	var channelDaily models.ChannelDailyBilling
-	if err := db.Where("private_channel_id = ? AND owner_type = ?", 42, "private").First(&channelDaily).Error; err != nil {
-		t.Fatalf("free mode must still write channel_daily_billings for BYOK row: %v", err)
-	}
-	if channelDaily.RequestCount != 1 {
-		t.Fatalf("channel_daily request_count = %d, want 1", channelDaily.RequestCount)
-	}
-	if channelDaily.TotalCost != 0 {
-		t.Fatalf("channel_daily total_cost = %d, want 0 in free mode", channelDaily.TotalCost)
+	for _, table := range []string{"token_daily_billings", "channel_daily_billings"} {
+		var rows int64
+		if err := db.Table(table).Count(&rows).Error; err != nil {
+			t.Fatalf("count legacy table %s: %v", table, err)
+		}
+		if rows != 0 {
+			t.Fatalf("settlement wrote %d rows to retired projection %s", rows, table)
+		}
 	}
 }
 
@@ -99,7 +85,7 @@ func TestSettleOne_PrivateServiceFeeMode_DiscountedCost(t *testing.T) {
 	db.Create(&models.Setting{Key: "byok_billing_mode", Value: "service_fee"})
 	db.Create(&models.Setting{Key: "byok_service_fee_ratio", Value: "0.1"})
 
-	settler := newTestSettlerWithAggregator(appProv, bus, logger, &syncAggregator{app: appProv})
+	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{{
 		RequestID:        "byok-svc-req-1",
 		UserID:           1,
@@ -146,12 +132,6 @@ func TestSettleOne_PrivateServiceFeeMode_DiscountedCost(t *testing.T) {
 		t.Fatalf("service_fee mode should deduct quota; before=100000, after=%d", afterQuota)
 	}
 
-	// Daily billing rows should be written in service_fee mode
-	var tokenDailyCount int64
-	db.Model(&models.TokenDailyBilling{}).Count(&tokenDailyCount)
-	if tokenDailyCount == 0 {
-		t.Fatalf("service_fee mode should write token daily billing")
-	}
 }
 
 func TestSettleOne_AdminPath_Unchanged(t *testing.T) {

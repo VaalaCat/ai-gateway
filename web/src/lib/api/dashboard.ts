@@ -106,7 +106,7 @@ export interface DashboardResponse {
 // ----- Hook -----
 
 export function useDashboard(
-  params: ObsRangeParams & { model?: string; user_id?: number },
+  params: ObsRangeParams & { model?: string; user_id?: number; top_n?: ChartTopN },
   options?: { enabled?: boolean; refetchKey?: number },
 ) {
   return useQuery({
@@ -119,6 +119,7 @@ export function useDashboard(
       });
       if (params.model) qs.set("model", params.model);
       if (params.user_id) qs.set("user_id", String(params.user_id));
+      if (params.top_n) qs.set("top_n", String(params.top_n));
       return api.get<DashboardResponse>(`/stats/dashboard?${qs.toString()}`);
     },
     staleTime: 5 * 60 * 1000,

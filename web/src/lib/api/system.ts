@@ -2,8 +2,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
 import type {
   SystemStatsResponse,
-  CleanupPreviewResponse,
-  CleanupResponse,
+  CleanupBatchRequest,
+  CleanupBatchResponse,
+  CleanupTablePreview,
+  CleanupTableRef,
   RetryLogQueueResponse,
   ClearLogBacklogResponse,
   RetryHistoryBackfillResponse,
@@ -91,31 +93,19 @@ export function useDeleteLegacyArtifact() {
   });
 }
 
-export function useCleanupPreview(
-  target: string,
-  retainDays: number,
-  enabled: boolean
+export function previewCleanupTable(
+  input: CleanupTableRef & { cutoff_date: string },
 ) {
-  return useQuery({
-    queryKey: ["cleanup-preview", target, retainDays],
-    queryFn: () =>
-      api.get<CleanupPreviewResponse>(
-        `/admin/system/cleanup/preview?target=${target}&retain_days=${retainDays}`
-      ),
-    enabled,
+  const query = new URLSearchParams({
+    database: input.database,
+    table: input.table,
+    cutoff_date: input.cutoff_date,
   });
+  return api.get<CleanupTablePreview>(`/admin/system/cleanup/preview?${query}`);
 }
 
-export function useCleanup() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { target: string; retain_days: number; cutoff_unix: number }) =>
-      api.post<CleanupResponse>("/admin/system/cleanup", body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["system-stats"] });
-      qc.invalidateQueries({ queryKey: ["cleanup-preview"] });
-    },
-  });
+export function deleteCleanupTableBatch(input: CleanupBatchRequest) {
+  return api.post<CleanupBatchResponse>("/admin/system/cleanup/batch", input);
 }
 
 export function useSettings() {
@@ -130,7 +120,8 @@ export function useUpdateSettings() {
   return useMutation({
     mutationFn: (body: { settings: Record<string, string> }) =>
       api.put<SettingsResponse>("/admin/system/settings", body),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      qc.setQueryData(["system-settings"], data);
       qc.invalidateQueries({ queryKey: ["system-settings"] });
     },
   });

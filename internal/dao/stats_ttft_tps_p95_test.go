@@ -365,7 +365,7 @@ func TestSpeedCompare_ByModel_TTFTAndTPSP5_Wired(t *testing.T) {
 		MaxTps: 35, H4: 10,
 	}).Error)
 
-	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, ObsFilter{})
+	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, 10, ObsFilter{})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.GreaterOrEqual(t, got[0].TTFTP95Ms, ttfthist.Edges[3])
@@ -387,13 +387,203 @@ func TestSpeedCompare_ByChannel_TTFTAndTPSP5_Wired(t *testing.T) {
 		MaxTps: 35, H4: 10,
 	}).Error)
 
-	got, err := q.Stats().SpeedCompare("channel", todayRangeDay(t), Scope{IsAdmin: true}, ObsFilter{})
+	got, err := q.Stats().SpeedCompare("channel", todayRangeDay(t), Scope{IsAdmin: true}, 10, ObsFilter{})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.GreaterOrEqual(t, got[0].TTFTP95Ms, ttfthist.Edges[3])
 	require.LessOrEqual(t, got[0].TTFTP95Ms, ttfthist.Edges[4])
 	require.GreaterOrEqual(t, got[0].TPSP5, float64(tpshist.Edges[3]))
 	require.LessOrEqual(t, got[0].TPSP5, float64(tpshist.Edges[4]))
+}
+
+func TestSpeedCompare_PreservesIndependentMetricSamples(t *testing.T) {
+	for _, dimension := range []string{"model", "channel"} {
+		t.Run(dimension, func(t *testing.T) {
+			ctx, db := setupAdminContext(t)
+			seedPartialSpeedCandidates(t, db, dimension)
+
+			got, err := NewAdminQuery(ctx).Stats().SpeedCompare(
+				dimension, todayRangeDay(t), Scope{IsAdmin: true}, 5, ObsFilter{},
+			)
+			require.NoError(t, err)
+			require.Len(t, got, 2)
+
+			rows := make(map[string]SpeedRow, len(got))
+			for _, row := range got {
+				rows[row.Name] = row
+			}
+			ttftOnly := rows[partialSpeedName(dimension, "ttft")]
+			require.Equal(t, int64(400), ttftOnly.TTFTMs)
+			require.Zero(t, ttftOnly.TPS)
+			require.Positive(t, ttftOnly.TTFTP95Ms)
+			require.Zero(t, ttftOnly.TPSP5)
+
+			tpsOnly := rows[partialSpeedName(dimension, "tps")]
+			require.Zero(t, tpsOnly.TTFTMs)
+			require.InDelta(t, 10, tpsOnly.TPS, 0.0001)
+			require.Zero(t, tpsOnly.TTFTP95Ms)
+			require.Positive(t, tpsOnly.TPSP5)
+
+			require.NotContains(t, rows, partialSpeedName(dimension, "invalid"))
+		})
+	}
+}
+
+func seedPartialSpeedCandidates(t *testing.T, db *gorm.DB, dimension string) {
+	t.Helper()
+	for index, sample := range []string{"ttft", "tps", "invalid"} {
+		channelID := uint(5)
+		channelName := "shared-channel"
+		modelName := partialSpeedName(dimension, sample)
+		if dimension == "channel" {
+			channelID = uint(index + 5)
+			channelName = partialSpeedName(dimension, sample)
+			modelName = "shared-model"
+		}
+		bucket := models.UsageHourlyBucket{
+			Date: "2026-05-20", Hour: 13, ChannelID: channelID, ChannelName: channelName,
+			ModelName: modelName, AgentID: "cn-1", OwnerType: "admin",
+			RequestCount: 1, SuccessCount: 1,
+		}
+		switch sample {
+		case "ttft":
+			bucket.StreamRequestCount = 1
+			bucket.SumFirstResponseMs = 400
+		case "tps":
+			bucket.SumGenerationMs = 1000
+			bucket.SumStreamCompletionTokens = 10
+		}
+		require.NoError(t, db.Create(&bucket).Error)
+
+		if sample == "ttft" || sample == "invalid" {
+			require.NoError(t, db.Create(&models.UsageTTFTHistogram{
+				Date: "2026-05-20", Hour: 13, ChannelID: channelID,
+				ModelName: modelName, AgentID: "cn-1", MaxFirstResponseMs: 400, H4: 10,
+			}).Error)
+		}
+		if sample == "tps" || sample == "invalid" {
+			require.NoError(t, db.Create(&models.UsageTPSHistogram{
+				Date: "2026-05-20", Hour: 13, ChannelID: channelID,
+				ModelName: modelName, AgentID: "cn-1", MaxTps: 35, H4: 10,
+			}).Error)
+		}
+	}
+}
+
+func partialSpeedName(dimension, sample string) string {
+	return fmt.Sprintf("%s-%s", sample, dimension)
+}
+
+type topNSpeedCompareFinder interface {
+	SpeedCompare(string, ObsRange, Scope, int, ObsFilter) ([]SpeedRow, error)
+}
+
+func TestSpeedCompare_RanksCompleteCandidateSetBeforeLimiting(t *testing.T) {
+	for _, dimension := range []string{"model", "channel"} {
+		t.Run(dimension, func(t *testing.T) {
+			ctx, db := setupAdminContext(t)
+			seedConflictingSpeedCandidates(t, db, dimension)
+
+			finder, ok := any(NewAdminQuery(ctx).Stats()).(topNSpeedCompareFinder)
+			require.True(t, ok, "SpeedCompare must accept the requested top n")
+
+			top5, err := finder.SpeedCompare(dimension, todayRangeDay(t), Scope{IsAdmin: true}, 5, ObsFilter{})
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(top5), 10, "union must stay bounded by two rankings")
+			top5Names := make(map[string]bool, len(top5))
+			for _, row := range top5 {
+				top5Names[row.Name] = true
+			}
+			for i := 15; i < 25; i++ {
+				name := speedCandidateName(dimension, i)
+				require.True(t, top5Names[name], "%s must survive the percentile-ranked union", name)
+			}
+
+			top20, err := finder.SpeedCompare(dimension, todayRangeDay(t), Scope{IsAdmin: true}, 20, ObsFilter{})
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(top20), 40, "union must stay bounded by two rankings")
+			var ttftSamples, tpsSamples int
+			for _, row := range top20 {
+				if row.TTFTP95Ms > 0 {
+					ttftSamples++
+				}
+				if row.TPSP5 > 0 {
+					tpsSamples++
+				}
+			}
+			require.GreaterOrEqual(t, ttftSamples, 20)
+			require.GreaterOrEqual(t, tpsSamples, 20)
+		})
+	}
+}
+
+func TestPickSpeedRankingRows_KeepsMissingSamplesBoundedAndDeterministic(t *testing.T) {
+	rows := []SpeedRow{
+		{Name: "missing-b", TTFTMs: 40},
+		{Name: "tps", TTFTMs: 30, TPSP5: 80},
+		{Name: "ttft", TTFTMs: 20, TTFTP95Ms: 100},
+		{Name: "missing-a", TTFTMs: 10},
+	}
+
+	got := pickSpeedRankingRows(rows, 2)
+	require.Equal(t, []SpeedRow{
+		{Name: "missing-a", TTFTMs: 10},
+		{Name: "ttft", TTFTMs: 20, TTFTP95Ms: 100},
+		{Name: "tps", TTFTMs: 30, TPSP5: 80},
+	}, got)
+	gotAgain := pickSpeedRankingRows(rows, 2)
+	require.Equal(t, got, gotAgain)
+	require.Nil(t, pickSpeedRankingRows(rows, 0))
+}
+
+func seedConflictingSpeedCandidates(t *testing.T, db *gorm.DB, dimension string) {
+	t.Helper()
+	for i := 0; i < 25; i++ {
+		channelID := uint(1)
+		channelName := "shared-channel"
+		modelName := fmt.Sprintf("model-%02d", i)
+		if dimension == "channel" {
+			channelID = uint(i + 1)
+			channelName = fmt.Sprintf("channel-%02d", i)
+			modelName = "shared-model"
+		}
+		require.NoError(t, db.Create(&models.UsageHourlyBucket{
+			Date: "2026-05-20", Hour: 13, ChannelID: channelID, ChannelName: channelName,
+			ModelName: modelName, AgentID: "cn-1", OwnerType: "admin",
+			RequestCount: 1, SuccessCount: 1, StreamRequestCount: 1,
+			SumFirstResponseMs: int64(i + 1), SumGenerationMs: 1000,
+			SumStreamCompletionTokens: int64(i + 1),
+		}).Error)
+
+		ttft := models.UsageTTFTHistogram{
+			Date: "2026-05-20", Hour: 13, ChannelID: channelID,
+			ModelName: modelName, AgentID: "cn-1", MaxFirstResponseMs: 5000,
+		}
+		if i >= 20 {
+			ttft.H1 = 10
+		} else {
+			ttft.H10 = 10
+		}
+		require.NoError(t, db.Create(&ttft).Error)
+
+		tps := models.UsageTPSHistogram{
+			Date: "2026-05-20", Hour: 13, ChannelID: channelID,
+			ModelName: modelName, AgentID: "cn-1", MaxTps: 200,
+		}
+		if i >= 15 && i < 20 {
+			tps.H10 = 10
+		} else {
+			tps.H1 = 10
+		}
+		require.NoError(t, db.Create(&tps).Error)
+	}
+}
+
+func speedCandidateName(dimension string, index int) string {
+	if dimension == "channel" {
+		return fmt.Sprintf("channel-%02d", index)
+	}
+	return fmt.Sprintf("model-%02d", index)
 }
 
 func TestGroupedPercentileMergesHistogramsBeforeEstimating(t *testing.T) {
@@ -528,7 +718,7 @@ func TestMetricHistogramBoundaryRowsPushesMetricEligibilityIntoSQL(t *testing.T)
 	}
 }
 
-func TestGroupedPercentileUsesUserHistogramAndReturnsZeroWithoutSamples(t *testing.T) {
+func TestGroupedPercentileExactUserFilterUsesRequestFacts(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx).Stats()
 	require.NoError(t, db.AutoMigrate(&models.UsageUserTTFTHistogram{}))
@@ -540,7 +730,7 @@ func TestGroupedPercentileUsesUserHistogramAndReturnsZeroWithoutSamples(t *testi
 	}
 	createdAt := time.Date(2026, 5, 20, 10, 5, 0, 0, time.UTC).Unix()
 	for _, log := range []models.UsageLog{
-		{RequestID: "user-cold", UserID: 7, ModelName: "user-model", Status: 1, IsStream: true, FirstResponseMs: 4000, CreatedAt: createdAt},
+		{RequestID: "user-cold", UserID: 7, ModelName: "user-model", Status: 1, IsStream: true, FirstResponseMs: 100, CreatedAt: createdAt},
 		{RequestID: "user-no-sample", UserID: 7, ModelName: "empty-model", Status: 1, IsStream: false, CreatedAt: createdAt},
 		{RequestID: "other-user", UserID: 8, ModelName: "other-user-model", Status: 1, IsStream: true, FirstResponseMs: 40, CreatedAt: createdAt},
 	} {
@@ -559,7 +749,8 @@ func TestGroupedPercentileUsesUserHistogramAndReturnsZeroWithoutSamples(t *testi
 	got, err := q.MetricTrendGrouped("ttft", "p95", "model", r, Scope{IsAdmin: true}, 5, ObsFilter{UserID: 7})
 	require.NoError(t, err)
 	require.Len(t, got.Buckets, 1)
-	require.GreaterOrEqual(t, got.Buckets[0].Series["user-model"], float64(ttfthist.Edges[9]))
+	require.Positive(t, got.Buckets[0].Series["user-model"])
+	require.Less(t, got.Buckets[0].Series["user-model"], float64(500))
 	require.Zero(t, got.Buckets[0].Series["empty-model"])
 	require.NotContains(t, got.SeriesOrder, "global-hot")
 	require.NotContains(t, got.SeriesOrder, "other-user-model")

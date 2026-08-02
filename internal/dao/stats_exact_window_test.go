@@ -23,20 +23,36 @@ func seedExactBillingFacts(t *testing.T, facts []exactBillingFact) (*adminStatsQ
 	for userID := uint(1); userID <= 3; userID++ {
 		require.NoError(t, db.Create(&models.User{ID: userID, Username: fmt.Sprintf("user-%d", userID)}).Error)
 	}
+	type hourlyKey struct {
+		hour  int
+		model string
+	}
+	hourly := make(map[hourlyKey]*models.UsageHourlyBucket)
 	for index, fact := range facts {
 		createdAt := base + fact.offset
 		tokenID := uint(index + 1)
-		require.NoError(t, db.Create(&models.BillingLog{
+		require.NoError(t, db.Select("*").Create(&models.UsageLog{
 			RequestID: fmt.Sprintf("exact-%02d", index), UserID: fact.userID, TokenID: tokenID,
 			ChannelID: 1, ModelName: fact.model, PromptTokens: 10, CompletionTokens: 5,
 			TotalCost: fact.cost, Status: 1, CreatedAt: createdAt,
 		}).Error)
-		bucketTime := time.Unix(createdAt, 0).UTC()
-		seedBillingHourlyBucket(t, db, models.BillingHourlyBucket{
-			Date: bucketTime.Format("2006-01-02"), Hour: bucketTime.Hour(), UserID: fact.userID,
-			TokenID: tokenID, ChannelID: 1, ModelName: fact.model, RequestCount: 1,
-			SuccessCount: 1, PromptTokens: 10, CompletionTokens: 5, TotalCost: fact.cost,
-		})
+		key := hourlyKey{hour: time.Unix(createdAt, 0).UTC().Hour(), model: fact.model}
+		bucket := hourly[key]
+		if bucket == nil {
+			bucket = &models.UsageHourlyBucket{
+				Date: "2026-07-20", Hour: key.hour, ChannelID: 1,
+				ModelName: key.model, AgentID: "fixture", OwnerType: "admin",
+			}
+			hourly[key] = bucket
+		}
+		bucket.RequestCount++
+		bucket.SuccessCount++
+		bucket.PromptTokens += 10
+		bucket.CompletionTokens += 5
+		bucket.TotalCost += fact.cost
+	}
+	for _, bucket := range hourly {
+		require.NoError(t, db.Create(bucket).Error)
 	}
 	return q, base
 }
@@ -92,7 +108,9 @@ func TestBillingHourlyHybridMatchesRawFactsAtExactWindowBoundaries(t *testing.T)
 				}
 			}
 
-			users, err := kpiUsers(q.ctx.GetCoreDB(), r, ObsFilter{})
+			logDB, requestLogModel, modelErr := q.ctx.RequestLogModel()
+			require.NoError(t, modelErr)
+			users, err := kpiUsers(q.ctx.GetCoreDB(), logDB, requestLogModel, r, ObsFilter{})
 			require.NoError(t, err)
 			require.Equal(t, int64(len(activeUsers)), users.Active)
 

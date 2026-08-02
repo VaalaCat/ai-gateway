@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ColumnDef, Row } from "@tanstack/react-table";
@@ -26,6 +26,7 @@ import {
 
 import { StatusBadge } from "@/components/business/status-badge";
 import { ChannelLimitBadge } from "@/components/business/channel-limit-badge";
+import { ChannelAutoBanBadge } from "@/components/business/channel-auto-ban-badge";
 import { ChannelBillingBadge } from "@/components/business/channel-billing-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { ChannelExportDialog, ChannelImportDialog } from "@/components/business/channel-transfer-dialogs";
@@ -37,6 +38,7 @@ import { groupModelsByProvider, PAGE_SIZES } from "@/lib/constants";
 import { useChannels, useChannelTypes, useUpdateChannel, useDeleteChannel, useTestChannel } from "@/lib/api/channels";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { ChannelTestDialog } from "@/components/business/channel-test-dialog";
+import { ChannelBatchEditDialog } from "@/components/channel/channel-batch-edit-dialog";
 import type { Channel } from "@/lib/types";
 import { parseEndpoints } from "@/components/channel/channel-form/utils";
 
@@ -86,9 +88,11 @@ export default function ChannelsPage() {
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [batchEditOpen, setBatchEditOpen] = useState(false);
+  const [quickStatusIDs, setQuickStatusIDs] = useState<ReadonlySet<number>>(() => new Set());
 
   // 用 effect 而非在 onChange 里同步 setPage/setRowSelection：
-  const { data, isLoading, refetch } = useChannels({
+  const { data, isLoading, isFetching, refetch } = useChannels({
     page,
     page_size: pageSize,
     ...(filterValues.search ? { search: String(filterValues.search) } : {}),
@@ -103,6 +107,18 @@ export default function ChannelsPage() {
     .filter(([, selected]) => selected)
     .map(([id]) => Number(id));
 
+  useEffect(() => {
+    if (isLoading || isFetching || !data) return;
+    const currentPageIDs = new Set(data.data.map((channel) => channel.id));
+    setRowSelection((current) => {
+      const selected = Object.entries(current)
+        .filter(([, isSelected]) => isSelected)
+        .map(([id]) => Number(id));
+      if (selected.length === 0 || selected.every((id) => currentPageIDs.has(id))) return current;
+      return {};
+    });
+  }, [data, isFetching, isLoading]);
+
   const handlePaginationChange = (newPage: number, newPageSize: number) => {
     setPagination(newPageSize === pageSize ? newPage : 1, newPageSize);
     setRowSelection({});
@@ -114,6 +130,7 @@ export default function ChannelsPage() {
   };
 
   const updateMutation = useUpdateChannel();
+  const quickStatusMutation = useUpdateChannel();
   const deleteMutation = useDeleteChannel();
   const testMutation = useTestChannel();
 
@@ -151,6 +168,22 @@ export default function ChannelsPage() {
       toast.error(formatErrorToast(e, tc("error")));
     } finally {
       setTestingChannelId(null);
+    }
+  };
+
+  const changeStatus = async (channel: Channel, status: number) => {
+    setQuickStatusIDs((current) => new Set(current).add(channel.id));
+    try {
+      await quickStatusMutation.mutateAsync({ id: channel.id, status });
+      toast.success(tc("success"));
+    } catch (error) {
+      toast.error(formatErrorToast(error, tc("error")));
+    } finally {
+      setQuickStatusIDs((current) => {
+        const next = new Set(current);
+        next.delete(channel.id);
+        return next;
+      });
     }
   };
 
@@ -275,17 +308,22 @@ export default function ChannelsPage() {
       accessorKey: "name",
       header: ({ column }) => <DataTableColumnHeader column={column} title={tc("name")} />,
       cell: ({ row }) => (
-        <div className="flex items-center gap-1.5">
-          <span className="font-medium">{row.original.name}</span>
-          {row.original.use_legacy_adaptor ? (
-            <Badge variant="outline" className="text-2xs px-1 py-0 border-yellow-500/50 text-yellow-600 dark:text-yellow-400">
-              {t("modeLegacy")}
-            </Badge>
-          ) : (
-            <Badge variant="outline" className="text-2xs px-1 py-0 border-blue-500/50 text-blue-600 dark:text-blue-400">
-              {t("modeNative")}
-            </Badge>
-          )}
+        <div className="flex flex-col gap-0.5">
+          <div className="flex items-center gap-1.5">
+            <span className="font-medium">{row.original.name}</span>
+            {row.original.use_legacy_adaptor ? (
+              <Badge variant="outline" className="text-2xs px-1 py-0 border-yellow-500/50 text-yellow-600 dark:text-yellow-400">
+                {t("modeLegacy")}
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-2xs px-1 py-0 border-blue-500/50 text-blue-600 dark:text-blue-400">
+                {t("modeNative")}
+              </Badge>
+            )}
+          </div>
+          {row.original.public_display_name?.trim() ? (
+            <span className="text-meta text-muted-foreground">{row.original.public_display_name}</span>
+          ) : null}
         </div>
       ),
     },
@@ -420,9 +458,10 @@ export default function ChannelsPage() {
       accessorKey: "status",
       header: ({ column }) => <DataTableColumnHeader column={column} title={tc("status")} />,
       cell: ({ row }) => (
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <StatusBadge status={row.original.status} />
           <ChannelLimitBadge channel={row.original} />
+          <ChannelAutoBanBadge channel={row.original} />
         </div>
       ),
     },
@@ -463,7 +502,7 @@ export default function ChannelsPage() {
       cell: ({ row }) => (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-8">
+            <Button variant="ghost" size="icon" className="size-8" aria-label={tc("actions")}>
               <MoreHorizontal className="size-4" />
             </Button>
           </DropdownMenuTrigger>
@@ -473,6 +512,16 @@ export default function ChannelsPage() {
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => router.push(`/channels/new?from=${row.original.id}`)}>
               {tc("copy")}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={quickStatusIDs.has(row.original.id)}
+              onSelect={() => { void changeStatus(row.original, row.original.status === 1 ? 0 : 1); }}
+            >
+              {quickStatusIDs.has(row.original.id)
+                ? t("channelStatusUpdating")
+                : row.original.status === 1
+                  ? t("disableChannel")
+                  : t("enableChannel")}
             </DropdownMenuItem>
             <DropdownMenuItem
               className="text-destructive"
@@ -507,29 +556,44 @@ export default function ChannelsPage() {
         getRowId={(row) => String(row.id)}
         renderExpandedRow={renderExpandedRow}
         toolbar={
-          <FilterableToolbar
-            spec={filterSpec}
-            value={filterValues}
-            onChange={handleFilterChange}
-            secondaryActions={[
-              {
-                label: tt("importAction"),
-                icon: <Upload data-icon="inline-start" />,
-                onClick: () => setImportOpen(true),
-              },
-              {
-                label: tt("exportAction"),
-                icon: <Download data-icon="inline-start" />,
-                onClick: () => setExportOpen(true),
-              },
-            ]}
-            primaryAction={
-              <Button size="sm" onClick={() => router.push("/channels/new")}>
-                <Plus data-icon="inline-start" />
-                {t("createChannel")}
-              </Button>
-            }
-          />
+          <div className="flex flex-col gap-2">
+            <FilterableToolbar
+              spec={filterSpec}
+              value={filterValues}
+              onChange={handleFilterChange}
+              secondaryActions={[
+                {
+                  label: tt("importAction"),
+                  icon: <Upload data-icon="inline-start" />,
+                  onClick: () => setImportOpen(true),
+                },
+                {
+                  label: tt("exportAction"),
+                  icon: <Download data-icon="inline-start" />,
+                  onClick: () => setExportOpen(true),
+                },
+              ]}
+              primaryAction={
+                <Button size="sm" onClick={() => router.push("/channels/new")}>
+                  <Plus data-icon="inline-start" />
+                  {t("createChannel")}
+                </Button>
+              }
+            />
+            {selectedIds.length > 0 ? (
+              <div className="flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2">
+                <span className="text-meta text-muted-foreground">{t("selectedChannels", { count: selectedIds.length })}</span>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setRowSelection({})}>
+                    {t("clearSelection")}
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setBatchEditOpen(true)}>
+                    {t("batchEdit")}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </div>
         }
       />
 
@@ -551,6 +615,18 @@ export default function ChannelsPage() {
           search: filterValues.search ? String(filterValues.search) : undefined,
           type: filterValues.type ? String(filterValues.type) : undefined,
           status: filterValues.status ? String(filterValues.status) : undefined,
+        }}
+      />
+      <ChannelBatchEditDialog
+        ids={selectedIds}
+        open={batchEditOpen}
+        onOpenChange={setBatchEditOpen}
+        onSucceeded={(response) => {
+          setRowSelection((current) => {
+            const next = { ...current };
+            for (const id of response.updated_ids) delete next[String(id)];
+            return next;
+          });
         }}
       />
 

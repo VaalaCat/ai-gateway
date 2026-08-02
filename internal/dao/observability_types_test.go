@@ -23,14 +23,14 @@ func TestObsRange_Validate_HourLimit(t *testing.T) {
 	require.ErrorIs(t, r.Validate(), ErrRangeOutOfBounds)
 }
 
-func TestObsRange_Validate_DayLimit(t *testing.T) {
+func TestObsRange_Validate_DayRangeIsUnlimited(t *testing.T) {
 	now := time.Now().UTC()
 	r := ObsRange{
 		Start: now.Add(-400 * 24 * time.Hour).Unix(),
 		End:   now.Unix(),
 		Gran:  GranDay,
 	}
-	require.ErrorIs(t, r.Validate(), ErrRangeOutOfBounds)
+	require.NoError(t, r.Validate())
 }
 
 func TestObsRange_Validate_Boundary(t *testing.T) {

@@ -651,6 +651,201 @@ agent:
 	}
 }
 
+func TestMetricsRuntimeConfigPropagation(t *testing.T) {
+	want := MetricsConfig{
+		Listen: ":9091",
+		Token:  strings.Repeat("a", 31) + "=",
+	}
+
+	tests := []struct {
+		name string
+		load func() MetricsConfig
+	}{
+		{
+			name: "master runtime config",
+			load: func() MetricsConfig {
+				return (&MasterRuntimeConfig{Metrics: want}).ToMasterRuntimeConfig().Metrics
+			},
+		},
+		{
+			name: "combined config to master",
+			load: func() MetricsConfig {
+				return (&Config{Metrics: want}).ToMasterRuntimeConfig().Metrics
+			},
+		},
+		{
+			name: "agent runtime config",
+			load: func() MetricsConfig {
+				return (&AgentRuntimeConfig{Metrics: want}).ToAgentRuntimeConfig().Metrics
+			},
+		},
+		{
+			name: "combined config to agent",
+			load: func() MetricsConfig {
+				return (&Config{Metrics: want}).ToAgentRuntimeConfig().Metrics
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.load(); got != want {
+				t.Fatalf("metrics = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestLoadMaster_MetricsModes(t *testing.T) {
+	validToken := strings.Repeat("A", 30) + "=="
+	tests := []struct {
+		name        string
+		metricsYAML string
+		want        MetricsConfig
+	}{
+		{name: "disabled", want: MetricsConfig{}},
+		{
+			name:        "shared",
+			metricsYAML: fmt.Sprintf("metrics:\n  token: %q\n", validToken),
+			want:        MetricsConfig{Token: validToken},
+		},
+		{
+			name:        "independent",
+			metricsYAML: fmt.Sprintf("metrics:\n  listen: %q\n  token: %q\n", ":9091", validToken),
+			want:        MetricsConfig{Listen: ":9091", Token: validToken},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempYAML(t, fmt.Sprintf(`
+master:
+  listen: ":8140"
+  jwt_secret: %s
+  admin_password: secure-password-123
+%s`, strings.Repeat("x", 32), tt.metricsYAML))
+
+			cfg, err := LoadMaster(path)
+			if err != nil {
+				t.Fatalf("LoadMaster: %v", err)
+			}
+			if cfg.Metrics != tt.want {
+				t.Fatalf("metrics = %+v, want %+v", cfg.Metrics, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadAgent_MetricsModes(t *testing.T) {
+	validToken := strings.Repeat("z", 32)
+	tests := []struct {
+		name        string
+		metricsYAML string
+		want        MetricsConfig
+	}{
+		{name: "disabled", want: MetricsConfig{}},
+		{
+			name:        "shared",
+			metricsYAML: fmt.Sprintf("metrics:\n  token: %q\n", validToken),
+			want:        MetricsConfig{Token: validToken},
+		},
+		{
+			name:        "independent",
+			metricsYAML: fmt.Sprintf("metrics:\n  listen: %q\n  token: %q\n", "127.0.0.1:9091", validToken),
+			want:        MetricsConfig{Listen: "127.0.0.1:9091", Token: validToken},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempYAML(t, fmt.Sprintf(`
+agent:
+  listen: ":8139"
+  master_url: http://127.0.0.1:8140
+  enrollment_token: test-token
+%s`, tt.metricsYAML))
+
+			cfg, err := LoadAgent(path)
+			if err != nil {
+				t.Fatalf("LoadAgent: %v", err)
+			}
+			if cfg.Metrics != tt.want {
+				t.Fatalf("metrics = %+v, want %+v", cfg.Metrics, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateMetrics(t *testing.T) {
+	validBoundaryToken := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
+	tests := []struct {
+		name           string
+		cfg            MetricsConfig
+		businessListen string
+		wantField      string
+	}{
+		{name: "disabled"},
+		{name: "shared", cfg: MetricsConfig{Token: validBoundaryToken}},
+		{name: "independent", cfg: MetricsConfig{Listen: ":9091", Token: strings.Repeat("a", 30) + "=="}, businessListen: ":8140"},
+		{name: "listen without token", cfg: MetricsConfig{Listen: ":9091"}, wantField: "metrics.token"},
+		{name: "31 characters", cfg: MetricsConfig{Token: strings.Repeat("a", 31)}, wantField: "metrics.token"},
+		{name: "whitespace", cfg: MetricsConfig{Token: strings.Repeat("a", 31) + " "}, wantField: "metrics.token"},
+		{name: "control character", cfg: MetricsConfig{Token: strings.Repeat("a", 31) + "\n"}, wantField: "metrics.token"},
+		{name: "non ASCII", cfg: MetricsConfig{Token: strings.Repeat("a", 31) + "界"}, wantField: "metrics.token"},
+		{name: "padding without body", cfg: MetricsConfig{Token: strings.Repeat("=", 32)}, wantField: "metrics.token"},
+		{name: "invalid padding", cfg: MetricsConfig{Token: strings.Repeat("a", 30) + "=a"}, wantField: "metrics.token"},
+		{name: "invalid symbol", cfg: MetricsConfig{Token: strings.Repeat("a", 31) + "?"}, wantField: "metrics.token"},
+		{name: "same listen", cfg: MetricsConfig{Listen: ":8140", Token: validBoundaryToken}, businessListen: ":8140", wantField: "metrics.listen"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMetrics(tt.cfg, tt.businessListen)
+			if tt.wantField == "" {
+				if err != nil {
+					t.Fatalf("validateMetrics: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantField) {
+				t.Fatalf("validateMetrics error = %v, want field %s", err, tt.wantField)
+			}
+			if tt.cfg.Token != "" && strings.Contains(err.Error(), tt.cfg.Token) {
+				t.Fatalf("validateMetrics error leaked token: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeValidationRejectsMetricsListenConflict(t *testing.T) {
+	validToken := strings.Repeat("a", 32)
+
+	masterErr := validateMaster(&MasterRuntimeConfig{
+		Master: MasterConfig{
+			Listen:         ":8140",
+			JWTSecret:      strings.Repeat("x", 32),
+			AdminPassword:  "secure-password",
+			PublicBaseURLs: []string{"http://localhost:8140"},
+		},
+		Metrics: MetricsConfig{Listen: ":8140", Token: validToken},
+	})
+	if masterErr == nil || !strings.Contains(masterErr.Error(), "metrics.listen") {
+		t.Fatalf("validateMaster error = %v, want metrics.listen", masterErr)
+	}
+
+	agentErr := validateAgent(&AgentRuntimeConfig{
+		Agent: AgentConfig{
+			Listen:          ":8139",
+			MasterURL:       "http://127.0.0.1:8140",
+			EnrollmentToken: "test-token",
+		},
+		Metrics: MetricsConfig{Listen: ":8139", Token: validToken},
+	})
+	if agentErr == nil || !strings.Contains(agentErr.Error(), "metrics.listen") {
+		t.Fatalf("validateAgent error = %v, want metrics.listen", agentErr)
+	}
+}
+
 func TestValidateMaster(t *testing.T) {
 	t.Run("nil", func(t *testing.T) {
 		if err := validateMaster(nil); err == nil {

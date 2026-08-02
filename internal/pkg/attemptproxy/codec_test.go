@@ -231,6 +231,67 @@ func TestResultJSONRejectsInvalidContracts(t *testing.T) {
 	}
 }
 
+func TestAutoDisableTriggerResultRoundTrip(t *testing.T) {
+	for _, trigger := range []ChannelAutoDisableTrigger{
+		{Source: SourceAdmin, ChannelID: 7, Revision: 0, Reason: ChannelAutoDisableReasonConsecutiveErrors},
+		{Source: SourcePrivate, ChannelID: 7, Revision: 4, Reason: ChannelAutoDisableReasonConsecutiveErrors},
+	} {
+		t.Run(string(trigger.Source), func(t *testing.T) {
+			want := validResult()
+			want.AutoDisableTriggers = []ChannelAutoDisableTrigger{trigger}
+
+			raw, err := EncodeResultJSON(want)
+			require.NoError(t, err)
+			got, err := DecodeResultJSON(raw)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
+func TestAutoDisableTriggerRejectsInvalidResultContracts(t *testing.T) {
+	valid := ChannelAutoDisableTrigger{
+		Source: SourceAdmin, ChannelID: 7, Reason: ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	tests := []struct {
+		name     string
+		triggers []ChannelAutoDisableTrigger
+	}{
+		{name: "zero channel ID", triggers: []ChannelAutoDisableTrigger{{Source: SourceAdmin, Reason: ChannelAutoDisableReasonConsecutiveErrors}}},
+		{name: "unknown source", triggers: []ChannelAutoDisableTrigger{{Source: "unknown", ChannelID: 7, Reason: ChannelAutoDisableReasonConsecutiveErrors}}},
+		{name: "unknown reason", triggers: []ChannelAutoDisableTrigger{{Source: SourceAdmin, ChannelID: 7, Reason: "unknown"}}},
+		{name: "more than result maximum", triggers: []ChannelAutoDisableTrigger{valid, valid}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := validResult()
+			result.AutoDisableTriggers = test.triggers
+			_, err := EncodeResultJSON(result)
+			require.ErrorIs(t, err, ErrInvalidContract)
+		})
+	}
+}
+
+func TestAutoDisableTriggerSurvivesResultTraceTrimming(t *testing.T) {
+	trigger := ChannelAutoDisableTrigger{
+		Source: SourcePrivate, ChannelID: 9, Revision: 4, Reason: ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	result := validResult()
+	result.AutoDisableTriggers = []ChannelAutoDisableTrigger{trigger}
+	result.Trace = &AttemptTraceWire{
+		InboundPath: "/v1/responses", InboundBody: strings.Repeat("x", MaxResultWireBytes),
+	}
+
+	raw, err := EncodeResultJSON(result)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(raw), MaxResultWireBytes)
+	got, err := DecodeResultJSON(raw)
+	require.NoError(t, err)
+	require.Equal(t, []ChannelAutoDisableTrigger{trigger}, got.AutoDisableTriggers)
+	require.NotNil(t, got.Trace)
+	require.Empty(t, got.Trace.InboundBody)
+}
+
 func validResult() AttemptProxyResult {
 	return AttemptProxyResult{
 		Kind:                ResultSucceeded,

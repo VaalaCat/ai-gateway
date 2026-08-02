@@ -2,25 +2,35 @@ package resilience
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
 
 func chAttempt(id uint) state.Attempt {
 	c := &models.Channel{}
 	c.ID = id
-	return state.Attempt{Channel: c, SourceID: id}
+	return state.Attempt{Channel: c, Source: state.SourceAdmin, SourceID: id}
 }
 
 func okRes() state.AttemptResult { return state.AttemptResult{} }
 func errRes() state.AttemptResult {
 	return state.AttemptResult{Err: &common.UpstreamError{Status: 503}}
+}
+
+func realDispatch(dispatch func() state.AttemptResult) func() attemptexec.DispatchResult {
+	return func() attemptexec.DispatchResult {
+		return attemptexec.DispatchResult{Outcome: dispatch(), ProviderDispatched: true}
+	}
 }
 
 // stubSettings 满足 SettingsReader,供测试注入全局韧性默认。
@@ -47,7 +57,7 @@ func settingsFromCfg(c Config) stubSettings {
 func TestRunner_SuccessFirstTry(t *testing.T) {
 	r := &Runner{Settings: settingsFromCfg(testCfg()), Breakers: NewRegistry()}
 	n := 0
-	res := r.Run(nil, chAttempt(1), func() state.AttemptResult { n++; return okRes() })
+	res := r.Run(nil, chAttempt(1), realDispatch(func() state.AttemptResult { n++; return okRes() }))
 	if n != 1 || res.Err != nil {
 		t.Fatalf("want 1 dispatch ok, got n=%d err=%v", n, res.Err)
 	}
@@ -56,13 +66,13 @@ func TestRunner_SuccessFirstTry(t *testing.T) {
 func TestRunner_RetryThenSuccess(t *testing.T) {
 	r := &Runner{Settings: settingsFromCfg(testCfg()), Breakers: NewRegistry()} // MaxRetries=2
 	n := 0
-	res := r.Run(nil, chAttempt(2), func() state.AttemptResult {
+	res := r.Run(nil, chAttempt(2), realDispatch(func() state.AttemptResult {
 		n++
 		if n == 1 {
 			return errRes()
 		}
 		return okRes()
-	})
+	}))
 	if n != 2 || res.Err != nil {
 		t.Fatalf("want retry-then-success n=2 err=nil, got n=%d err=%v", n, res.Err)
 	}
@@ -73,7 +83,7 @@ func TestRunner_ExhaustsRetries(t *testing.T) {
 	cfg := Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 10, BreakerCooldownMs: 50, BreakerEnabled: true}
 	r := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry()} // MaxRetries=2 → 共 3 次
 	n := 0
-	res := r.Run(nil, chAttempt(3), func() state.AttemptResult { n++; return errRes() })
+	res := r.Run(nil, chAttempt(3), realDispatch(func() state.AttemptResult { n++; return errRes() }))
 	if n != 3 || res.Err == nil {
 		t.Fatalf("want 3 dispatches and final err, got n=%d err=%v", n, res.Err)
 	}
@@ -82,9 +92,9 @@ func TestRunner_ExhaustsRetries(t *testing.T) {
 func TestRunner_BreakerOpenSkipsDispatch(t *testing.T) {
 	r := &Runner{Settings: settingsFromCfg(testCfg()), Breakers: NewRegistry()} // BreakerThreshold=2
 	// 先打到 open：一次 Run 跑 3 次失败 dispatch(>=2)即触发 open。
-	r.Run(nil, chAttempt(4), func() state.AttemptResult { return errRes() })
+	r.Run(nil, chAttempt(4), realDispatch(errRes))
 	n := 0
-	res := r.Run(nil, chAttempt(4), func() state.AttemptResult { n++; return errRes() })
+	res := r.Run(nil, chAttempt(4), realDispatch(func() state.AttemptResult { n++; return errRes() }))
 	if n != 0 {
 		t.Fatalf("breaker open should skip dispatch, got n=%d", n)
 	}
@@ -100,10 +110,10 @@ func TestRunner_GlobalBreakerDisabled_DoesNotSkipDispatch(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		n := 0
-		res := r.Run(nil, chAttempt(10), func() state.AttemptResult {
+		res := r.Run(nil, chAttempt(10), realDispatch(func() state.AttemptResult {
 			n++
 			return errRes()
-		})
+		}))
 		if n != 1 {
 			t.Fatalf("disabled breaker should dispatch on run %d, got n=%d", i+1, n)
 		}
@@ -126,10 +136,10 @@ func TestRunner_ChannelOverrideDisablesBreaker(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		n := 0
-		res := r.Run(nil, attempt, func() state.AttemptResult {
+		res := r.Run(nil, attempt, realDispatch(func() state.AttemptResult {
 			n++
 			return errRes()
-		})
+		}))
 		if n != 1 {
 			t.Fatalf("channel disabled breaker should dispatch on run %d, got n=%d", i+1, n)
 		}
@@ -149,12 +159,12 @@ func TestRunner_ChannelOverrideEnablesBreaker(t *testing.T) {
 	attempt := chAttempt(12)
 	attempt.Channel.Resilience = datatypes.NewJSONType(models.ChannelResilience{BreakerEnabled: &on})
 
-	r.Run(nil, attempt, func() state.AttemptResult { return errRes() })
+	r.Run(nil, attempt, realDispatch(errRes))
 	n := 0
-	res := r.Run(nil, attempt, func() state.AttemptResult {
+	res := r.Run(nil, attempt, realDispatch(func() state.AttemptResult {
 		n++
 		return errRes()
-	})
+	}))
 	if n != 0 {
 		t.Fatalf("channel enabled breaker should skip open channel, got n=%d", n)
 	}
@@ -167,22 +177,54 @@ func TestRunner_BreakerDisabledStillRetries(t *testing.T) {
 	cfg := Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 1, BreakerCooldownMs: 50, BreakerEnabled: false}
 	r := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry()}
 	n := 0
-	res := r.Run(nil, chAttempt(13), func() state.AttemptResult {
+	res := r.Run(nil, chAttempt(13), realDispatch(func() state.AttemptResult {
 		n++
 		return errRes()
-	})
+	}))
 	if n != 3 || res.Err == nil {
 		t.Fatalf("disabled breaker must preserve retries, got n=%d err=%v", n, res.Err)
 	}
 }
 
+func TestRunner_DisablingBreakerDropsOldOpenStateBeforeReenable(t *testing.T) {
+	cfg := Config{
+		MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2,
+		BreakerThreshold: 1, BreakerCooldownMs: 5000, BreakerEnabled: true,
+	}
+	registry := NewRegistry()
+	runner := &Runner{Settings: settingsFromCfg(cfg), Breakers: registry}
+	attempt := chAttempt(14)
+
+	runner.Run(nil, attempt, realDispatch(errRes))
+	require.Equal(t, 1, registry.Len())
+
+	off := false
+	attempt.Channel.Resilience = datatypes.NewJSONType(models.ChannelResilience{BreakerEnabled: &off})
+	disabledDispatches := 0
+	runner.Run(nil, attempt, realDispatch(func() state.AttemptResult {
+		disabledDispatches++
+		return errRes()
+	}))
+	require.Equal(t, 1, disabledDispatches)
+	require.Zero(t, registry.Len(), "disabled config must discard the old open breaker")
+
+	attempt.Channel.Resilience = datatypes.NewJSONType(models.ChannelResilience{})
+	reenabledDispatches := 0
+	result := runner.Run(nil, attempt, realDispatch(func() state.AttemptResult {
+		reenabledDispatches++
+		return okRes()
+	}))
+	require.NoError(t, result.Err)
+	require.Equal(t, 1, reenabledDispatches, "reenabling before cooldown must not revive the old open breaker")
+}
+
 func TestRunner_WrittenNoReplay(t *testing.T) {
 	r := &Runner{Settings: settingsFromCfg(testCfg()), Breakers: NewRegistry()}
 	n := 0
-	res := r.Run(nil, chAttempt(5), func() state.AttemptResult {
+	res := r.Run(nil, chAttempt(5), realDispatch(func() state.AttemptResult {
 		n++
 		return state.AttemptResult{Written: true, Err: errors.New("mid-stream")}
-	})
+	}))
 	if n != 1 || res.Err == nil {
 		t.Fatalf("written must not retry, got n=%d err=%v", n, res.Err)
 	}
@@ -196,12 +238,12 @@ func TestRunner_WaitsForSlowDispatch_NoPerAttemptTimeout(t *testing.T) {
 	r := &Runner{Settings: settingsFromCfg(testCfg()), Breakers: NewRegistry()}
 	n := 0
 	finished := false
-	res := r.Run(nil, chAttempt(9), func() state.AttemptResult {
+	res := r.Run(nil, chAttempt(9), realDispatch(func() state.AttemptResult {
 		n++
 		time.Sleep(60 * time.Millisecond) // 模拟"长流",远超任何会被重新引入的短超时
 		finished = true
 		return state.AttemptResult{Written: true}
-	})
+	}))
 	if !finished {
 		t.Fatal("Run 必须等 dispatch 完整跑完(不得有超时丢下正在写客户端的 dispatch)")
 	}
@@ -211,4 +253,95 @@ func TestRunner_WaitsForSlowDispatch_NoPerAttemptTimeout(t *testing.T) {
 	if !res.Written || res.Err != nil {
 		t.Fatalf("已完成 dispatch 的结果(含 Written)必须原样返回,got %+v", res)
 	}
+}
+
+func TestRunnerAutoBanTriggersWhenBreakerDisabled(t *testing.T) {
+	cfg := Config{MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 2, BreakerCooldownMs: 50, BreakerEnabled: false}
+	runner := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry(), AutoBan: NewAutoBanTracker()}
+	rctx := &state.RelayContext{State: &state.RelayState{}}
+	attempt := chAttempt(20)
+	attempt.Channel.AutoBan = 1
+	attempt.Channel.AutoBanRevision = 4
+	dispatches := 0
+	dispatch := realDispatch(func() state.AttemptResult {
+		dispatches++
+		return errRes()
+	})
+
+	runner.Run(rctx, attempt, dispatch)
+	require.Empty(t, rctx.State.AutoDisableTriggers)
+	runner.Run(rctx, attempt, dispatch)
+	require.Equal(t, 2, dispatches)
+	require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{{
+		Source: attemptproxy.SourceAdmin, ChannelID: 20, Revision: 4,
+		Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+	}}, rctx.State.AutoDisableTriggers)
+}
+
+func TestRunnerTreatsHistoricalNonBinaryAutoBanAsDisabled(t *testing.T) {
+	cfg := Config{MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 1, BreakerCooldownMs: 50}
+	for _, value := range []int{-1, 0, 2} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			runner := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry(), AutoBan: NewAutoBanTracker()}
+			rctx := &state.RelayContext{State: &state.RelayState{}}
+			attempt := chAttempt(20)
+			attempt.Channel.AutoBan = value
+			runner.Run(rctx, attempt, realDispatch(errRes))
+			require.Empty(t, rctx.State.AutoDisableTriggers)
+			require.Zero(t, runner.AutoBan.Len())
+		})
+	}
+}
+
+func TestRunnerAutoBanCountsRealRetries(t *testing.T) {
+	cfg := Config{MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 3, BreakerCooldownMs: 50, BreakerEnabled: false}
+	runner := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry(), AutoBan: NewAutoBanTracker()}
+	rctx := &state.RelayContext{State: &state.RelayState{}}
+	attempt := chAttempt(21)
+	attempt.Channel.AutoBan = 1
+	dispatches := 0
+
+	runner.Run(rctx, attempt, realDispatch(func() state.AttemptResult {
+		dispatches++
+		return errRes()
+	}))
+
+	require.Equal(t, 3, dispatches)
+	require.Len(t, rctx.State.AutoDisableTriggers, 1)
+}
+
+func TestRunnerDoesNotCountBreakerOpenSyntheticError(t *testing.T) {
+	cfg := Config{MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 1, BreakerCooldownMs: 5000, BreakerEnabled: true}
+	runner := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry(), AutoBan: NewAutoBanTracker()}
+	rctx := &state.RelayContext{State: &state.RelayState{}}
+	attempt := chAttempt(22)
+	attempt.Channel.AutoBan = 1
+	attempt.Channel.AutoBanRevision = 1
+	runner.Run(rctx, attempt, realDispatch(errRes))
+	require.Len(t, rctx.State.AutoDisableTriggers, 1)
+
+	attempt.Channel.AutoBanRevision = 2
+	dispatches := 0
+	result := runner.Run(rctx, attempt, realDispatch(func() state.AttemptResult {
+		dispatches++
+		return errRes()
+	}))
+	require.Zero(t, dispatches)
+	require.ErrorIs(t, result.Err, ErrBreakerOpen)
+	require.Len(t, rctx.State.AutoDisableTriggers, 1, "synthetic breaker-open result must not enter the tracker")
+}
+
+func TestRunnerSuccessResetsAutoBanStreak(t *testing.T) {
+	cfg := Config{MaxRetries: 0, BackoffBaseMs: 1, BackoffMaxMs: 2, BreakerThreshold: 2, BreakerCooldownMs: 50, BreakerEnabled: false}
+	runner := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry(), AutoBan: NewAutoBanTracker()}
+	rctx := &state.RelayContext{State: &state.RelayState{}}
+	attempt := chAttempt(23)
+	attempt.Channel.AutoBan = 1
+
+	runner.Run(rctx, attempt, realDispatch(errRes))
+	runner.Run(rctx, attempt, realDispatch(okRes))
+	runner.Run(rctx, attempt, realDispatch(errRes))
+	require.Empty(t, rctx.State.AutoDisableTriggers)
+	runner.Run(rctx, attempt, realDispatch(errRes))
+	require.Len(t, rctx.State.AutoDisableTriggers, 1)
 }

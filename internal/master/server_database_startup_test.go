@@ -49,7 +49,9 @@ func TestRollingBootstrapIsReadyBeforeHistoryCopy(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("HTTP server did not become ready")
 	}
-	response, err := http.Get("http://" + srv.Listener.Addr().String() + "/ping")
+	listenAddress, ok := srv.ListenAddress()
+	require.True(t, ok)
+	response, err := http.Get("http://" + listenAddress + "/ping")
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
 	require.Equal(t, http.StatusOK, response.StatusCode)

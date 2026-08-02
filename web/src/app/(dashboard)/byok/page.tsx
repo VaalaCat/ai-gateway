@@ -39,6 +39,7 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { StatusBadge } from "@/components/business/status-badge";
+import { ChannelAutoBanBadge } from "@/components/business/channel-auto-ban-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { ChannelExportDialog, ChannelImportDialog } from "@/components/business/channel-transfer-dialogs";
 import { DateCell } from "@/components/business/date-cell";
@@ -347,7 +348,12 @@ function BYOKPageInner() {
     {
       accessorKey: "status",
       header: ({ column }) => <DataTableColumnHeader column={column} title={t("status")} />,
-      cell: ({ row }) => <StatusBadge status={row.original.status} />,
+      cell: ({ row }) => (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusBadge status={row.original.status} />
+          <ChannelAutoBanBadge channel={row.original} />
+        </div>
+      ),
     },
     {
       id: "lb",

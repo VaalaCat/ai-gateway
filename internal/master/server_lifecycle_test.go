@@ -31,6 +31,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
@@ -56,23 +57,128 @@ type blockingEmbeddedStartupBus struct {
 	topics  map[string]int
 }
 
-func TestServerShutdownJoinsAggregatorFlushErrorAndContinuesDatabaseClose(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.Setting{}))
-	require.NoError(t, db.Create(&models.Setting{Key: "version", Value: "0"}).Error)
-	sqlDB, err := db.DB()
-	require.NoError(t, err)
-	flushErr := errors.New("aggregator shutdown flush failed")
-	aggregator := billing.NewAggregator(nil, zap.NewNop(), billing.AggregatorOptions{})
-	aggregator.SetCoreFlushContextFn(func(context.Context, []dao.TokenDailyRow, []dao.ChannelDailyRow, []dao.BillingHourlyRow) error {
-		return flushErr
-	})
-	aggregator.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1})
-	srv := &Server{DB: db, Aggregator: aggregator, Logger: zap.NewNop()}
+func TestMasterIndependentMetricsServesOnlyAuthenticatedGetAndReleasesListeners(t *testing.T) {
+	const token = "abcdefghijklmnopqrstuvwxyz012345"
+	srv := newLifecycleMasterServer(t)
+	srv.Cfg.Metrics = config.MetricsConfig{Listen: "127.0.0.1:0", Token: token}
+	srv.RelayMetrics.IncRouteTelemetryDropped()
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run() }()
 
-	require.ErrorIs(t, srv.Shutdown(t.Context()), flushErr)
-	require.Error(t, sqlDB.Ping())
+	businessAddr, metricsAddr := waitForMasterListeners(t, srv)
+	assertHTTPStatus(t, http.MethodGet, "http://"+businessAddr+"/metrics", "", http.StatusNotFound)
+	assertHTTPStatus(t, http.MethodGet, "http://"+metricsAddr+"/anything", token, http.StatusNotFound)
+	assertHTTPStatus(t, http.MethodPost, "http://"+metricsAddr+"/metrics", token, http.StatusNotFound)
+	assertHTTPStatus(t, http.MethodGet, "http://"+metricsAddr+"/metrics", "", http.StatusUnauthorized)
+	request, err := http.NewRequest(http.MethodGet, "http://"+metricsAddr+"/metrics", nil)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Contains(t, string(body), "agent_route_telemetry_dropped_total")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(shutdownCtx))
+	require.Error(t, <-runDone)
+	for _, address := range []string{businessAddr, metricsAddr} {
+		listener, err := net.Listen("tcp", address)
+		require.NoError(t, err)
+		require.NoError(t, listener.Close())
+	}
+}
+
+func TestMasterIndependentMetricsBindFailureRollsBackBusinessListener(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupied.Close()
+	srv := newLifecycleMasterServer(t)
+	srv.Cfg.Metrics = config.MetricsConfig{Listen: occupied.Addr().String(), Token: "abcdefghijklmnopqrstuvwxyz012345"}
+	require.ErrorContains(t, srv.Run(), "listen metrics")
+	require.Nil(t, srv.Listener)
+	require.Nil(t, srv.MetricsListener)
+	require.Nil(t, srv.httpSrv)
+	require.Nil(t, srv.metricsHTTPServer)
+	require.NoError(t, srv.Shutdown(t.Context()))
+}
+
+func waitForMasterListeners(t *testing.T, srv *Server) (string, string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.lifecycleMu.Lock()
+		business, metrics := srv.Listener, srv.MetricsListener
+		srv.lifecycleMu.Unlock()
+		if business != nil && metrics != nil {
+			return business.Addr().String(), metrics.Addr().String()
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("master listeners were not published")
+	return "", ""
+}
+
+func assertHTTPStatus(t *testing.T, method, target, token string, want int) {
+	t.Helper()
+	request, err := http.NewRequest(method, target, nil)
+	require.NoError(t, err)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, want, response.StatusCode)
+}
+
+func TestListenAddressSnapshotsPublishedListener(t *testing.T) {
+	t.Run("not published", func(t *testing.T) {
+		srv := &Server{}
+
+		address, ok := srv.ListenAddress()
+
+		require.False(t, ok)
+		require.Empty(t, address)
+	})
+
+	t.Run("published", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, listener.Close()) })
+		srv := &Server{}
+		require.True(t, srv.registerListener(listener))
+
+		address, ok := srv.ListenAddress()
+
+		require.True(t, ok)
+		require.Equal(t, listener.Addr().String(), address)
+	})
+
+	t.Run("concurrent publication", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, listener.Close()) })
+		srv := &Server{}
+		published := make(chan bool, 1)
+		go func() { published <- srv.registerListener(listener) }()
+
+		deadline := time.Now().Add(time.Second)
+		for {
+			address, ok := srv.ListenAddress()
+			if ok {
+				require.Equal(t, listener.Addr().String(), address)
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("listener was not published")
+			}
+		}
+		require.True(t, <-published)
+	})
 }
 
 type masterIgnoringDirectDialer struct {
@@ -175,6 +281,137 @@ func TestNewActivatesSplitLayoutBeforeLogDeliveryAdmission(t *testing.T) {
 	require.NotNil(t, srv.LogDeliveryWorker)
 	result := srv.LogDeliveryWorker.Enqueue(masterlogqueue.LogBatch{})
 	require.True(t, result.Accepted)
+}
+
+func TestServerLifecycleStartsAndStopsDailyBillingBackfill(t *testing.T) {
+	srv := newLifecycleMasterServer(t)
+	require.NotNil(t, srv.DailyBillingBackfill)
+	srv.startBillingRebuildWorkers(srv.lifecycleContext())
+	require.Eventually(t, func() bool {
+		var marker models.DailyBillingBackfill
+		return srv.App.GetLogDB().First(&marker, "version = ?", models.DailyBillingBackfillVersion).Error == nil &&
+			marker.State == models.DailyBillingBackfillCompleted
+	}, 3*time.Second, 5*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(ctx))
+	select {
+	case <-srv.DailyBillingBackfill.Done():
+	case <-time.After(time.Second):
+		t.Fatal("daily billing backfill coordinator did not stop")
+	}
+}
+
+func TestServerLifecycleStartsAndStopsBillingLogRetention(t *testing.T) {
+	srv := newLifecycleMasterServer(t)
+	require.NotNil(t, srv.BillingLogRetention)
+	require.NoError(t, srv.DB.Create(&models.BillingLog{
+		RequestID: "lifecycle-old-billing-log",
+		CreatedAt: time.Now().UTC().Add(-6 * 24 * time.Hour).Unix(),
+	}).Error)
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run() }()
+
+	require.Eventually(t, func() bool {
+		var count int64
+		return srv.DB.Model(&models.BillingLog{}).
+			Where("request_id = ?", "lifecycle-old-billing-log").
+			Count(&count).Error == nil && count == 0
+	}, 3*time.Second, 5*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(ctx))
+	requireServerLifecycleDone(t, srv.BillingLogRetention.Done())
+	require.Error(t, <-runDone)
+}
+
+type contextIgnoringDailyRebuilder struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *contextIgnoringDailyRebuilder) FindRequestLogDateBounds(context.Context) (dao.RequestLogDateBounds, error) {
+	close(r.entered)
+	<-r.release
+	return dao.RequestLogDateBounds{Empty: true}, nil
+}
+
+func (*contextIgnoringDailyRebuilder) FindNextRequestLogDate(context.Context, string, string) (string, bool, error) {
+	return "", false, nil
+}
+
+func (*contextIgnoringDailyRebuilder) RebuildLogDailyDate(context.Context, string, uint, dao.DailyBillingRebuildTargets) (*dao.BillingRebuildResult, error) {
+	return nil, errors.New("unexpected rebuild")
+}
+
+func TestServerShutdownDeadlineDoesNotWaitForContextIgnoringDailyBackfill(t *testing.T) {
+	srv := newLifecycleMasterServer(t)
+	blocking := &contextIgnoringDailyRebuilder{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(blocking.release)
+	srv.DailyBillingBackfill.SetRebuilder(blocking)
+	srv.startBillingRebuildWorkers(srv.lifecycleContext())
+	requireServerLifecycleDone(t, blocking.entered)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- srv.Shutdown(ctx) }()
+	select {
+	case err := <-shutdownDone:
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("Shutdown waited for a daily backfill that ignored its context")
+	}
+	select {
+	case <-srv.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("shutdown finalization remained blocked after the daily backfill close deadline")
+	}
+}
+
+type contextIgnoringSubmittedDailyRebuilder struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*contextIgnoringSubmittedDailyRebuilder) FindRequestLogDateBounds(context.Context) (dao.RequestLogDateBounds, error) {
+	return dao.RequestLogDateBounds{StartDate: "2026-01-01", EndDate: "2026-01-01"}, nil
+}
+
+func (*contextIgnoringSubmittedDailyRebuilder) FindNextRequestLogDate(_ context.Context, after, end string) (string, bool, error) {
+	if after < end {
+		return end, true, nil
+	}
+	return "", false, nil
+}
+
+func (r *contextIgnoringSubmittedDailyRebuilder) RebuildLogDailyDate(context.Context, string, uint, dao.DailyBillingRebuildTargets) (*dao.BillingRebuildResult, error) {
+	close(r.entered)
+	<-r.release
+	return &dao.BillingRebuildResult{}, nil
+}
+
+func TestServerLifecycleShutdownDeadlineDoesNotWaitForContextIgnoringDailyRebuild(t *testing.T) {
+	srv := newLifecycleMasterServer(t)
+	blocking := &contextIgnoringSubmittedDailyRebuilder{entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() {
+		close(blocking.release)
+		requireServerLifecycleDone(t, srv.RebuildRunner.Done())
+	})
+	srv.DailyBillingBackfill.SetRebuilder(blocking)
+	srv.startBillingRebuildWorkers(srv.lifecycleContext())
+	requireServerLifecycleDone(t, blocking.entered)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, srv.Shutdown(ctx), context.DeadlineExceeded)
+	select {
+	case <-srv.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("shutdown finalization remained blocked after the rebuild runner close deadline")
+	}
 }
 
 func TestShutdownDeadlineDoesNotWaitForEmbeddedBlockedDirectPoolDialer(t *testing.T) {
@@ -853,7 +1090,7 @@ func TestRunDoesNotServeBeforeEmbeddedSyncSubscriptionsReady(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("embedded Syncer did not reach subscription barrier")
 	}
-	if srv.Listener != nil || srv.httpSrv != nil || srv.embeddedAgent != nil {
+	if _, listenerPublished := srv.ListenAddress(); listenerPublished || srv.httpSrv != nil || srv.embeddedAgent != nil {
 		t.Error("Master published startup resources before embedded subscriptions became ready")
 	}
 	if got := srv.Hub.ConnectedAgents(); got != 0 {
@@ -861,11 +1098,11 @@ func TestRunDoesNotServeBeforeEmbeddedSyncSubscriptionsReady(t *testing.T) {
 	}
 
 	servedBeforeReady := false
-	if srv.Listener != nil {
+	if listenAddress, listenerPublished := srv.ListenAddress(); listenerPublished {
 		client := &http.Client{Timeout: 200 * time.Millisecond}
 		deadline := time.Now().Add(time.Second)
 		for time.Now().Before(deadline) {
-			resp, requestErr := client.Get("http://" + srv.Listener.Addr().String() + "/api/system/public-config")
+			resp, requestErr := client.Get("http://" + listenAddress + "/api/system/public-config")
 			if resp != nil {
 				_ = resp.Body.Close()
 			}
@@ -1005,7 +1242,7 @@ func TestRunDoesNotServeBeforeEmbeddedReporterSubscriptionReady(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("embedded Reporter did not reach usage subscription barrier")
 	}
-	if srv.Listener != nil || srv.httpSrv != nil || srv.embeddedAgent != nil {
+	if _, listenerPublished := srv.ListenAddress(); listenerPublished || srv.httpSrv != nil || srv.embeddedAgent != nil {
 		t.Error("Master published startup resources before embedded Reporter subscription became ready")
 	}
 	if got := srv.Hub.ConnectedAgents(); got != 0 {
@@ -1018,7 +1255,7 @@ func TestRunDoesNotServeBeforeEmbeddedReporterSubscriptionReady(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Master did not commit after Reporter became ready")
 	}
-	if srv.Listener == nil {
+	if _, listenerPublished := srv.ListenAddress(); !listenerPublished {
 		t.Fatal("Master did not publish listener after Reporter became ready")
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -1138,6 +1375,9 @@ func TestRunEmbeddedCommitFailureLeavesRouterAndHandlerUnchanged(t *testing.T) {
 	if srv.channelHandler.AgentStore != agentStoreBefore {
 		t.Fatal("failed embedded commit replaced channel handler agent store")
 	}
+	if srv.ModelMarketplaceHandler.ModelOfferPlanningReady() {
+		t.Fatal("failed embedded commit published marketplace planner")
+	}
 	if srv.Listener != nil || srv.httpSrv != nil || srv.embeddedAgent != nil {
 		t.Fatal("failed embedded commit published startup resources")
 	}
@@ -1209,6 +1449,9 @@ func TestRunStartupCommitIsAtomicAgainstShutdown(t *testing.T) {
 	if srv.channelHandler.AgentStore != agentStoreBefore {
 		t.Error("failed startup changed channel handler AgentStore")
 	}
+	if srv.ModelMarketplaceHandler.ModelOfferPlanningReady() {
+		t.Error("failed startup published marketplace planner")
+	}
 	if got := srv.ResourceCountsForTest(); got != (app.ResourceCounts{}) {
 		t.Errorf("resources after failed startup = %+v", got)
 	}
@@ -1245,6 +1488,9 @@ func TestRunStartupCommitCancellationBeforeWorkerReleaseConverges(t *testing.T) 
 	case <-commitPublished:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not publish atomic startup commit")
+	}
+	if !srv.ModelMarketplaceHandler.ModelOfferPlanningReady() {
+		t.Fatal("Run commit did not publish marketplace planner")
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -1308,35 +1554,23 @@ func TestLifecycleShutdownDeadlineCancelsMasterWorkersBeforeClosingDB(t *testing
 		t.Fatal(err)
 	}
 
-	aggregatorCanceled := make(chan error, 1)
-	aggregator := billing.NewAggregator(nil, zap.NewNop(), billing.AggregatorOptions{FlushEvery: time.Hour})
-	aggregator.SetFlushContextFns(func(ctx context.Context, _ []dao.TokenDailyRow) error {
+	heartbeatCanceled := make(chan error, 1)
+	heartbeatEntered := make(chan struct{}, 1)
+	heartbeat := msync.NewHeartbeatTracker(nil, zap.NewNop(), time.Nanosecond)
+	heartbeat.SetLastSeenPersistContextFn(func(ctx context.Context, _ map[string]int64) error {
+		select {
+		case heartbeatEntered <- struct{}{}:
+		default:
+		}
 		<-ctx.Done()
 		cause := context.Cause(ctx)
-		aggregatorCanceled <- cause
-		return cause
-	}, nil, nil)
-	aggregator.SubmitBilling(&models.BillingLog{UserID: 1, TokenID: 1, OwnerType: "admin", Status: 1, CreatedAt: 1})
-
-	heartbeatCanceled := make(chan error, 1)
-	heartbeat := msync.NewHeartbeatTracker(nil, zap.NewNop(), time.Hour)
-	heartbeat.SetLastSeenPersistContextFn(func(ctx context.Context, _ map[string]int64) error {
-		cause := context.Cause(ctx)
-		heartbeatCanceled <- cause
+		select {
+		case heartbeatCanceled <- cause:
+		default:
+		}
 		return cause
 	})
 	heartbeat.Touch("agent-a", 1)
-
-	rebuildEntered := make(chan struct{})
-	rebuildCanceled := make(chan error, 1)
-	rebuild := billing.NewRebuildRunner(nil, zap.NewNop(), time.Hour)
-	rebuild.SetSliceContextFn(func(ctx context.Context, _ string, _ int, _ []string, _ bool) (*dao.BillingRebuildResult, error) {
-		close(rebuildEntered)
-		<-ctx.Done()
-		cause := context.Cause(ctx)
-		rebuildCanceled <- cause
-		return nil, cause
-	})
 
 	limitEntered := make(chan struct{}, 1)
 	limitCanceled := make(chan error, 1)
@@ -1365,23 +1599,15 @@ func TestLifecycleShutdownDeadlineCancelsMasterWorkersBeforeClosingDB(t *testing
 	application.SetCoreDB(db)
 	limit := billing.NewLimitEvaluator(application, nil, zap.NewNop(), time.Nanosecond)
 
-	srv := &Server{
-		DB: db, Logger: zap.NewNop(), Heartbeat: heartbeat, Aggregator: aggregator,
-		RebuildRunner: rebuild, LimitEvaluator: limit,
-	}
+	srv := &Server{DB: db, Logger: zap.NewNop(), Heartbeat: heartbeat, LimitEvaluator: limit}
 	root := srv.lifecycleContext()
 	srv.Version.Store(1)
 	if !srv.startVersionPersistence(root) {
 		t.Fatal("startVersionPersistence rejected before shutdown")
 	}
 	heartbeat.Start(root)
-	aggregator.Start(root)
-	rebuild.Start(root)
-	if _, err := rebuild.Submit(dao.BillingRebuildFilter{StartDate: "2026-01-01", EndDate: "2026-01-01"}); err != nil {
-		t.Fatal(err)
-	}
 	limit.Start()
-	<-rebuildEntered
+	<-heartbeatEntered
 	<-limitEntered
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -1390,11 +1616,9 @@ func TestLifecycleShutdownDeadlineCancelsMasterWorkersBeforeClosingDB(t *testing
 		t.Fatalf("Shutdown = %v, want deadline exceeded", err)
 	}
 	for name, canceled := range map[string]<-chan error{
-		"aggregator": aggregatorCanceled,
-		"heartbeat":  heartbeatCanceled,
-		"rebuild":    rebuildCanceled,
-		"limit":      limitCanceled,
-		"version":    versionCanceled,
+		"heartbeat": heartbeatCanceled,
+		"limit":     limitCanceled,
+		"version":   versionCanceled,
 	} {
 		select {
 		case cause := <-canceled:
@@ -1417,6 +1641,124 @@ func TestLifecycleShutdownDeadlineCancelsMasterWorkersBeforeClosingDB(t *testing
 	default:
 		t.Fatal("final version update was not attempted before DB close")
 	}
+}
+
+func TestLifecycleGracefulShutdownFlushesDirtyHeartbeat(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "heartbeat-shutdown.db")
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&models.Agent{}))
+	require.NoError(t, db.Create(&models.Agent{AgentID: "agent-a", Name: "agent-a"}).Error)
+	application := app.NewApplication()
+	application.SetCoreDB(db)
+	heartbeat := msync.NewHeartbeatTracker(application, zap.NewNop(), time.Millisecond)
+	periodicFlushEntered := make(chan struct{})
+	periodicFlushCanceled := make(chan error, 1)
+	var persistenceCalls atomic.Int64
+	heartbeat.SetLastSeenPersistContextFn(func(ctx context.Context, updates map[string]int64) error {
+		if persistenceCalls.Add(1) == 1 {
+			close(periodicFlushEntered)
+			<-ctx.Done()
+			cause := context.Cause(ctx)
+			periodicFlushCanceled <- cause
+			return cause
+		}
+		return dao.NewAdminMutation(dao.NewContextWithContext(application, ctx)).Agent().BatchUpdateLastSeen(updates)
+	})
+	heartbeat.Touch("agent-a", 1234)
+	srv := &Server{DB: db, Logger: zap.NewNop(), Heartbeat: heartbeat}
+	root := srv.lifecycleContext()
+	heartbeat.Start(root)
+	select {
+	case <-periodicFlushEntered:
+	case <-time.After(time.Second):
+		t.Fatal("periodic heartbeat flush did not take the dirty snapshot")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(shutdownCtx))
+	requireServerLifecycleDone(t, srv.Done())
+	require.Error(t, <-periodicFlushCanceled)
+	require.GreaterOrEqual(t, persistenceCalls.Load(), int64(2), "final flush must retry the canceled periodic snapshot")
+
+	reopened, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	require.NoError(t, err)
+	reopenedSQL, err := reopened.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopenedSQL.Close()) })
+	var stored models.Agent
+	require.NoError(t, reopened.Where("agent_id = ?", "agent-a").First(&stored).Error)
+	require.Equal(t, int64(1234), stored.LastSeen)
+}
+
+func TestLifecycleShutdownReturnsHeartbeatFinalFlushError(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	finalErr := errors.New("final heartbeat flush failed")
+	heartbeat := msync.NewHeartbeatTracker(nil, zap.NewNop(), 0)
+	heartbeat.SetLastSeenPersistContextFn(func(context.Context, map[string]int64) error {
+		return finalErr
+	})
+	heartbeat.Touch("agent-a", 1)
+	srv := &Server{DB: db, Logger: zap.NewNop(), Heartbeat: heartbeat}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	shutdownErr := srv.Shutdown(ctx)
+
+	require.ErrorIs(t, shutdownErr, finalErr)
+	requireServerLifecycleDone(t, srv.Done())
+	require.Error(t, sqlDB.Ping(), "database remained open after failed final heartbeat flush")
+}
+
+func TestLifecycleShutdownBoundsHeartbeatPersistThatIgnoresContext(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	persistEntered := make(chan struct{})
+	releasePersist := make(chan struct{})
+	heartbeat := msync.NewHeartbeatTracker(nil, zap.NewNop(), 0)
+	heartbeat.SetLastSeenPersistContextFn(func(ctx context.Context, _ map[string]int64) error {
+		close(persistEntered)
+		<-releasePersist // deliberately ignores ctx while blocked
+		return context.Cause(ctx)
+	})
+	heartbeat.Touch("agent-a", 1)
+	srv := &Server{DB: db, Logger: zap.NewNop(), Heartbeat: heartbeat}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	shutdownErr := srv.Shutdown(ctx)
+	require.ErrorIs(t, shutdownErr, context.DeadlineExceeded)
+	<-persistEntered
+
+	serverStoppedBeforeRelease := false
+	select {
+	case <-srv.Done():
+		serverStoppedBeforeRelease = true
+	case <-time.After(300 * time.Millisecond):
+	}
+	if serverStoppedBeforeRelease {
+		require.Error(t, sqlDB.Ping(), "database remained open after Server.Done")
+		close(releasePersist)
+		requireServerLifecycleDone(t, heartbeat.Done())
+		return
+	}
+
+	// Release the intentionally broken dependency before failing so the test
+	// never leaves a goroutine behind on the RED implementation.
+	close(releasePersist)
+	requireServerLifecycleDone(t, heartbeat.Done())
+	requireServerLifecycleDone(t, srv.Done())
+	t.Fatal("Server.Done waited for a heartbeat persist call that ignored shutdown context")
 }
 
 func TestLifecycleShutdownClosesControlSocketBeforeJoiningHTTPHandlers(t *testing.T) {
@@ -1688,6 +2030,32 @@ func newLifecycleMasterServer(t *testing.T) *Server {
 		t.Fatalf("New: %v", err)
 	}
 	return srv
+}
+
+func TestServerWiresChannelAutoDisablerIntoUsageSettlement(t *testing.T) {
+	srv := newLifecycleMasterServer(t)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		require.NoError(t, srv.Shutdown(ctx))
+	})
+	channel := &models.Channel{ChannelCore: models.ChannelCore{
+		Name: "auto-disable wiring", Type: 1, Status: 1, AutoBan: 1, AutoBanRevision: 3,
+	}}
+	require.NoError(t, srv.DB.Create(channel).Error)
+
+	require.NoError(t, srv.Hub.SettleUsage(t.Context(), "agent", []protocol.UsageLogEntry{{
+		RequestID: "server-auto-disable-wiring", Status: 1,
+		AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{{
+			Source: attemptproxy.SourceAdmin, ChannelID: channel.ID, Revision: 3,
+			Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+		}},
+	}}))
+
+	var got models.Channel
+	require.NoError(t, srv.DB.First(&got, channel.ID).Error)
+	require.Zero(t, got.Status)
+	require.True(t, got.AutoBanState.Data().Tripped)
 }
 
 func requireServerLifecycleDone(t *testing.T, done <-chan struct{}) {

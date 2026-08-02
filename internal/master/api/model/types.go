@@ -4,7 +4,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 )
 
-type Handler struct{}
+type Handler struct {
+	FetchModelsDev func(targetURL, proxyURL string) ([]byte, error)
+}
 
 type ListRequest struct {
 	api.PaginationQuery
@@ -28,8 +30,10 @@ func (r *UpdateRequest) SetBodyMap(fields map[string]any) {
 }
 
 type SyncResponse struct {
-	Created int `json:"created"`
-	Removed int `json:"removed"`
+	Created             int    `json:"created"`
+	Removed             int    `json:"removed"`
+	MetadataUpdated     int    `json:"metadata_updated"`
+	MetadataSourceError string `json:"metadata_source_error,omitempty"`
 }
 
 // --- Pricing types ---

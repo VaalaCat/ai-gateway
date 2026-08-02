@@ -8,12 +8,14 @@ import {
   useCreateModelRouting,
   useDeleteModelRouting,
   useModelRoutings,
+  useUpdateModelRouting,
 } from "./model-routings";
 
-const { apiDelete, apiGet, apiPost } = vi.hoisted(() => ({
+const { apiDelete, apiGet, apiPost, apiPut } = vi.hoisted(() => ({
   apiDelete: vi.fn(),
   apiGet: vi.fn(),
   apiPost: vi.fn(),
+  apiPut: vi.fn(),
 }));
 
 vi.mock("./client", async (importOriginal) => {
@@ -24,7 +26,7 @@ vi.mock("./client", async (importOriginal) => {
       delete: apiDelete,
       get: apiGet,
       post: apiPost,
-      put: vi.fn(),
+      put: apiPut,
     },
   };
 });
@@ -42,6 +44,7 @@ describe("token model routing API hooks", () => {
     apiDelete.mockReset();
     apiGet.mockReset();
     apiPost.mockReset();
+    apiPut.mockReset();
   });
 
   it("loads an admin token subresource with token-scoped query identity", async () => {
@@ -58,6 +61,22 @@ describe("token model routing API hooks", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiGet).toHaveBeenCalledWith(
       "/admin/tokens/17/model-routings?page=2&page_size=10",
+    );
+  });
+
+  it("passes token scope, owner, search and pagination to the admin list", async () => {
+    apiGet.mockResolvedValueOnce({ data: [], total: 0, page: 3, page_size: 20 });
+    const { result } = renderHook(
+      () => useModelRoutings(
+        { page: 3, page_size: 20, q: "smart", scope: "token", token_id: 17 },
+        "admin",
+      ),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiGet).toHaveBeenCalledWith(
+      "/admin/model-routings?page=3&page_size=20&q=smart&scope=token&token_id=17",
     );
   });
 
@@ -99,5 +118,38 @@ describe("token model routing API hooks", () => {
     await expect(result.current.mutateAsync(6)).rejects.toThrow("network");
     expect(apiDelete).toHaveBeenCalledWith("/admin/tokens/5/model-routings/6");
     await waitFor(() => expect(result.current.isError).toBe(true));
+  });
+
+  it("updates a token row through its owner endpoint without owner fields in the body", async () => {
+    apiPut.mockResolvedValueOnce({ id: 6 });
+    const { result } = renderHook(() => useUpdateModelRouting("admin"), { wrapper });
+
+    await result.current.mutateAsync({
+      id: 6,
+      owner: { kind: "token", tokenId: 5 },
+      scope: "token",
+      user_id: 99,
+      token_id: 5,
+      enabled: false,
+    });
+
+    expect(apiPut).toHaveBeenCalledWith(
+      "/admin/tokens/5/model-routings/6",
+      { enabled: false },
+    );
+  });
+
+  it("deletes a token row through its owner endpoint while retaining numeric id calls", async () => {
+    apiDelete.mockResolvedValue(undefined);
+    const { result } = renderHook(() => useDeleteModelRouting("admin"), { wrapper });
+
+    await result.current.mutateAsync({
+      id: 6,
+      owner: { kind: "token", tokenId: 5 },
+    });
+    await result.current.mutateAsync(7);
+
+    expect(apiDelete).toHaveBeenNthCalledWith(1, "/admin/tokens/5/model-routings/6");
+    expect(apiDelete).toHaveBeenNthCalledWith(2, "/admin/model-routings/7");
   });
 });

@@ -2,17 +2,23 @@ package relay
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/ginutil"
 )
 
 // NewContext constructs the request-scoped relay state shared by the ordinary
 // relay pipeline and the bound-attempt proxy pipeline.
 func NewContext(c *gin.Context, agent app.AgentApplication) *state.RelayContext {
+	startedAt, ok := ginutil.FindRequestStart(c)
+	if !ok {
+		startedAt = time.Now()
+	}
 	maxBody := 0
 	if agent != nil {
 		if cache := agent.GetCache(); cache != nil {
@@ -22,8 +28,11 @@ func NewContext(c *gin.Context, agent app.AgentApplication) *state.RelayContext 
 	return &state.RelayContext{
 		Context: c,
 		Agent:   agent,
+		Input: state.RelayInput{
+			StartTime: startedAt,
+		},
 		State: &state.RelayState{
-			Recorder: trace.NewRecorder(trace.CaptureModeFromContext(c), maxBody),
+			Recorder: trace.NewRecorderAt(trace.CaptureModeFromContext(c), maxBody, startedAt),
 		},
 	}
 }

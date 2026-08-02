@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 
 import { MetricTrendChart } from "./metric-trend-chart";
-import { chartColorForSeries, chartDashForSeries } from "@/lib/chart-colors";
+import { chartColorForSeries } from "@/lib/chart-colors";
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
@@ -16,7 +17,11 @@ vi.mock("@/components/ui/chart", () => ({
 vi.mock("recharts", () => ({
   CartesianGrid: () => null,
   Line: ({ dataKey, stroke, strokeDasharray }: { dataKey: string; stroke?: string; strokeDasharray?: string }) => (
-    <span data-testid={`line-${dataKey}`} data-stroke={stroke} data-dash={strokeDasharray ?? "solid"} />
+    <span
+      data-testid={`line-${dataKey}`}
+      data-stroke={stroke}
+      data-has-dash={String(strokeDasharray !== undefined)}
+    />
   ),
   LineChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   XAxis: () => null,
@@ -172,11 +177,11 @@ it("keeps core sum metrics rendered while log storage is unavailable", () => {
       title="tokens"
     />,
   );
-  expect(screen.getByTestId("line-tokens")).toBeInTheDocument();
+  expect(screen.getByTestId("line-tokens")).toHaveAttribute("data-has-dash", "false");
   expect(screen.queryByText("trend.logUnavailable")).not.toBeInTheDocument();
 });
 
-it("uses the same stable identity color and dash for grouped lines and their legend", () => {
+it("uses the same color-hash identity color for grouped lines and their legend", () => {
   render(<MetricTrendChart
     buckets={[]}
     grouped={{ metric: "tokens", stat: "sum", unit: "tokens", estimated: false, buckets: [{ ts: 1, label: "x", series: { alpha: 1 } }], series_order: ["alpha"] }}
@@ -188,7 +193,57 @@ it("uses the same stable identity color and dash for grouped lines and their leg
   />);
   const line = screen.getByTestId("line-alpha");
   expect(line).toHaveAttribute("data-stroke", chartColorForSeries("alpha"));
-  expect(line).toHaveAttribute("data-dash", chartDashForSeries("alpha") ?? "solid");
+  expect(line).toHaveAttribute("data-has-dash", "false");
   const button = screen.getByRole("button", { name: "alpha" });
-  expect(button.querySelector("span")?.style.backgroundColor).toBe(chartColorForSeries("alpha"));
+  const expectedSwatch = document.createElement("span");
+  expectedSwatch.style.backgroundColor = chartColorForSeries("alpha");
+  expect(button.querySelector("span")?.style.backgroundColor).toBe(expectedSwatch.style.backgroundColor);
+});
+
+it("separates scope controls from built-in and extra display controls", () => {
+  const { container } = render(
+    <MetricTrendChart
+      buckets={[]}
+      title="Usage"
+      scopeControls={<button type="button">Model scope</button>}
+      displayExtra={<button type="button">Statistic</button>}
+    />,
+  );
+
+  const rail = container.querySelector<HTMLElement>('[data-slot="chart-control-rail"]');
+  const scope = container.querySelector<HTMLElement>('[data-slot="chart-scope-controls"]');
+  const display = container.querySelector<HTMLElement>('[data-slot="chart-display-controls"]');
+  expect(rail).toContainElement(scope);
+  expect(rail).toContainElement(display);
+  expect(scope).toContainElement(screen.getByRole("button", { name: "Model scope" }));
+  expect(display).toContainElement(screen.getByRole("button", { name: "Statistic" }));
+  expect(within(display as HTMLElement).getByRole("combobox", { name: "prefix.metric" })).toBeInTheDocument();
+});
+
+it("does not render an empty scope group when no scope controls are provided", () => {
+  const { container } = render(<MetricTrendChart buckets={[]} title="Usage" />);
+
+  expect(container.querySelector('[data-slot="chart-scope-controls"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-slot="chart-display-controls"]')).toBeInTheDocument();
+});
+
+it("shows only the active scope count on the mobile scope trigger", async () => {
+  const user = userEvent.setup();
+  render(
+    <MetricTrendChart
+      buckets={[]}
+      title="Usage"
+      scopeControls={<button type="button">Scoped model</button>}
+      scopeActiveCount={2}
+      displayExtra={<button type="button">Statistic</button>}
+    />,
+  );
+
+  const trigger = screen.getByRole("button", { name: "trend.scopeFilters" });
+  expect(within(trigger).getByText("2")).toBeInTheDocument();
+  await user.click(trigger);
+  expect(within(await screen.findByRole("dialog")).getByRole("button", { name: "Scoped model" })).toBeInTheDocument();
+  expect(document.querySelector('[data-slot="chart-scope-popover-controls"]')).toHaveClass(
+    "[&_button[role=combobox]]:h-9",
+  );
 });

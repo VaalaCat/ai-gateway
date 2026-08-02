@@ -10,8 +10,18 @@ import (
 type AdminUserGroupQuery interface {
 	GetByID(id uint) (*models.UserGroup, error)
 	GetByName(name string) (*models.UserGroup, error)
+	FindIdentityAndAuthorizationForUser(userID uint) (*UserGroupIdentityAndAuthorization, error)
 	List(opts ListOptions, filter UserGroupListFilter) ([]models.UserGroup, int64, error)
 	CountUsers(id uint) (int64, error)
+}
+
+// UserGroupIdentityAndAuthorization separates the persisted group identity
+// from the group row whose authorization policy is applied. A dangling
+// non-default identity borrows the default group's policy without becoming the
+// default group.
+type UserGroupIdentityAndAuthorization struct {
+	IdentityGroupID    uint
+	AuthorizationGroup models.UserGroup
 }
 
 type AdminUserGroupMutation interface {
@@ -33,6 +43,35 @@ func (q *adminUserGroupQuery) GetByName(name string) (*models.UserGroup, error) 
 	var g models.UserGroup
 	err := q.ctx.GetCoreDB().Where("name = ?", name).First(&g).Error
 	return &g, err
+}
+
+// FindIdentityAndAuthorizationForUser follows users.group_id in one query.
+// Zero IDs, missing users, and system tokens use the default identity and
+// policy. A dangling non-default ID retains its identity while borrowing the
+// default policy.
+func (q *adminUserGroupQuery) FindIdentityAndAuthorizationForUser(
+	userID uint,
+) (*UserGroupIdentityAndAuthorization, error) {
+	type row struct {
+		models.UserGroup `gorm:"embedded"`
+		IdentityGroupID  uint `gorm:"column:identity_group_id"`
+	}
+	var found row
+	err := q.ctx.GetCoreDB().
+		Table("user_groups AS authorization_group").
+		Select(`authorization_group.*,
+			COALESCE(NULLIF(owner.group_id, 0), ?) AS identity_group_id`, models.DefaultUserGroupID).
+		Joins("LEFT JOIN users AS owner ON owner.id = ?", userID).
+		Joins("LEFT JOIN user_groups AS assigned_group ON assigned_group.id = owner.group_id").
+		Where(`authorization_group.id = CASE
+			WHEN assigned_group.id IS NULL THEN ?
+			ELSE assigned_group.id
+		END`, models.DefaultUserGroupID).
+		Take(&found).Error
+	return &UserGroupIdentityAndAuthorization{
+		IdentityGroupID:    found.IdentityGroupID,
+		AuthorizationGroup: found.UserGroup,
+	}, err
 }
 
 func (q *adminUserGroupQuery) List(opts ListOptions, filter UserGroupListFilter) ([]models.UserGroup, int64, error) {

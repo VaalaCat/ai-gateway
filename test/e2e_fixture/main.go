@@ -310,7 +310,6 @@ func seed(core, logs *gorm.DB) error {
 		return err
 	}
 
-	billingBuckets := make([]models.BillingHourlyBucket, 0, 7*24*24)
 	usageBuckets := make([]models.UsageHourlyBucket, 0, 7*24*24)
 	ttftHistograms := make([]models.UsageTTFTHistogram, 0, 7*24*24)
 	tpsHistograms := make([]models.UsageTPSHistogram, 0, 7*24*24)
@@ -320,19 +319,7 @@ func seed(core, logs *gorm.DB) error {
 			for series := 0; series < 24; series++ {
 				model := fmt.Sprintf("provider/production-model-%02d-with-an-extremely-long-series-name", series+1)
 				channelID := uint(series%len(channels) + 1)
-				userID := uint(series%2 + 2)
-				tokenID := uint(3)
-				if userID == 2 {
-					tokenID = uint((series/2)%2 + 1)
-				}
 				requests := int64(series + 1)
-				billing := models.BillingHourlyBucket{
-					Date: at.Format("2006-01-02"), Hour: at.Hour(), UserID: userID, TokenID: tokenID, ChannelID: channelID,
-					OwnerType: "admin", ModelName: model, TokenName: tokens[tokenID-1].Name, ChannelName: channels[channelID-1].Name,
-					RequestCount: requests, SuccessCount: requests, PromptTokens: requests * 200, CompletionTokens: requests * 80,
-					CacheReadTokens: requests * 40, CacheWriteTokens: requests * 10, TotalCost: requests * 1000, LastUsedAt: at.Unix(),
-				}
-				billingBuckets = append(billingBuckets, billing)
 				usage := models.UsageHourlyBucket{
 					Date: at.Format("2006-01-02"), Hour: at.Hour(), ChannelID: channelID, ModelName: model, AgentID: agents[0].AgentID,
 					OwnerType: "admin", ChannelName: channels[channelID-1].Name, RequestCount: requests, SuccessCount: requests,
@@ -345,9 +332,6 @@ func seed(core, logs *gorm.DB) error {
 				tpsHistograms = append(tpsHistograms, models.UsageTPSHistogram{Date: usage.Date, Hour: usage.Hour, ChannelID: channelID, ModelName: model, AgentID: agents[0].AgentID, MaxTps: 100, H9: requests})
 			}
 		}
-	}
-	if err := core.CreateInBatches(&billingBuckets, 500).Error; err != nil {
-		return err
 	}
 	tokenDaily := make([]models.TokenDailyBilling, 0, 7*len(tokens))
 	channelDaily := make([]models.ChannelDailyBilling, 0, 7*len(channels))
@@ -376,10 +360,10 @@ func seed(core, logs *gorm.DB) error {
 			})
 		}
 	}
-	if err := core.CreateInBatches(&tokenDaily, 100).Error; err != nil {
+	if err := logs.CreateInBatches(&tokenDaily, 100).Error; err != nil {
 		return err
 	}
-	if err := core.CreateInBatches(&channelDaily, 100).Error; err != nil {
+	if err := logs.CreateInBatches(&channelDaily, 100).Error; err != nil {
 		return err
 	}
 	requestLogs := make([]models.RequestLog, 0, 12)

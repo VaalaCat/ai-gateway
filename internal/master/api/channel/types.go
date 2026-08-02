@@ -2,12 +2,16 @@ package channel
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/pricing"
 )
 
 // TokenSetter is the subset of app.Store needed for system-test token warm-up.
@@ -43,6 +47,7 @@ type ListRequest struct {
 
 type CreateRequest struct {
 	Name                string                    `json:"name" binding:"required"`
+	PublicDisplayName   string                    `json:"public_display_name"`
 	Type                int                       `json:"type"`
 	Key                 string                    `json:"key"`
 	BaseURL             string                    `json:"base_url"`
@@ -80,6 +85,16 @@ type CreateRequest struct {
 type UpdateRequest struct {
 	ID     string         `uri:"id" binding:"required"`
 	Fields map[string]any `json:"-"`
+}
+
+type BatchEditRequest struct {
+	IDs    []int64        `json:"ids" binding:"required"`
+	Fields map[string]any `json:"fields" binding:"required"`
+}
+
+type BatchEditResponse struct {
+	UpdatedCount int    `json:"updated_count"`
+	UpdatedIDs   []uint `json:"updated_ids"`
 }
 
 func (r *UpdateRequest) SetBodyMap(fields map[string]any) {
@@ -126,14 +141,19 @@ type TypeMeta struct {
 // PriceRatioMin / PriceRatioMax 是公共 channel 计费倍率的合法区间。
 // 0 合法(settler 归一到原价 1.0);上界 1000 防止误填把成本放大到离谱。
 const (
-	PriceRatioMin = 0.0
-	PriceRatioMax = 1000.0
+	PriceRatioMin = pricing.PlatformPriceRatioMin
+	PriceRatioMax = pricing.PlatformPriceRatioMax
 )
 
 // validatePriceRatio 校验 price_ratio 落在 [PriceRatioMin, PriceRatioMax]。
 func validatePriceRatio(v float64) error {
-	if v < PriceRatioMin || v > PriceRatioMax {
-		return fmt.Errorf("price_ratio must be between %g and %g, got %g", PriceRatioMin, PriceRatioMax, v)
+	return pricing.ValidatePlatformPriceRatio(v)
+}
+
+func validatePublicDisplayName(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if utf8.RuneCountInString(value) > 64 || strings.ContainsFunc(value, unicode.IsControl) {
+		return "", errors.New("invalid public_display_name")
 	}
-	return nil
+	return value, nil
 }

@@ -302,3 +302,57 @@ func TestStatsCacheEvictsLeastRecentlyUsedEntryAtCapacity(t *testing.T) {
 	}
 	require.Equal(t, 4, calls, "a is refreshed before c is inserted, so b must be evicted")
 }
+
+func TestStatsCacheClearPreventsOldInflightLoadFromRefillingNewGeneration(t *testing.T) {
+	cache := newStatsCache(16, time.Minute, time.Now)
+	key := QueryKey{Name: "clear-generation"}
+	oldStarted := make(chan struct{})
+	oldRelease := make(chan struct{})
+	oldDone := make(chan error, 1)
+	go func() {
+		_, err := cache.Get(t.Context(), key, func(context.Context) (any, error) {
+			close(oldStarted)
+			<-oldRelease // Deliberately ignores cancellation.
+			return "old", nil
+		})
+		oldDone <- err
+	}()
+	<-oldStarted
+
+	cache.Clear()
+	var freshCalls int
+	fresh, err := cache.Get(t.Context(), key, func(context.Context) (any, error) {
+		freshCalls++
+		return "new", nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "new", fresh)
+	close(oldRelease)
+	require.ErrorIs(t, <-oldDone, context.Canceled)
+
+	cached, err := cache.Get(t.Context(), key, func(context.Context) (any, error) {
+		t.Fatal("old flight refilled cache or new generation cache was purged")
+		return nil, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "new", cached)
+	require.Equal(t, 1, freshCalls)
+}
+
+func TestStatsCacheClearRemovesCompletedEntries(t *testing.T) {
+	cache := newStatsCache(16, time.Minute, time.Now)
+	key := QueryKey{Name: "clear-completed"}
+	first, err := cache.Get(t.Context(), key, func(context.Context) (any, error) { return "old", nil })
+	require.NoError(t, err)
+	require.Equal(t, "old", first)
+
+	cache.Clear()
+	calls := 0
+	second, err := cache.Get(t.Context(), key, func(context.Context) (any, error) {
+		calls++
+		return "new", nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "new", second)
+	require.Equal(t, 1, calls)
+}

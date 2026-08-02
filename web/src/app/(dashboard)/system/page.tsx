@@ -15,44 +15,13 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
   useSystemStats,
-  useCleanupPreview,
-  useCleanup,
   useSettings,
   useUpdateSettings,
 } from "@/lib/api/system";
-import { isCleanupPreviewExpired } from "@/lib/utils/cleanup-preview";
 import {
   RefreshCw,
-  Trash2,
-  Database,
   Server,
-  Activity,
   Settings,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -60,17 +29,14 @@ import { BYOKSettingsCard } from "@/components/system/byok-settings";
 import { AgentRelaySettings } from "@/components/system/agent-relay-settings";
 import { SettingNumberInput } from "@/components/system/setting-number-input";
 import { LogStorageStatus } from "@/components/system/log-storage-status";
+import { DataCleanupStats } from "@/components/system/data-cleanup-stats";
 import { SystemMaintenanceTabs } from "@/components/system/system-maintenance-tabs";
 import { formatFileSize, formatUptime } from "@/lib/utils/format";
 import {
   humanizeSettingNumber,
   type SettingNumberKind,
 } from "@/lib/utils/system-setting-number";
-import type {
-  CleanupPreviewResponse,
-  SystemInfo,
-  TableStats,
-} from "@/lib/types";
+import type { SystemInfo } from "@/lib/types";
 
 // SettingsGroup 是设置卡内的一个语义小节:小标题 + 内容。
 function SettingsGroup({
@@ -521,7 +487,10 @@ interface PolicyBillingSettingsDraft {
   minQuotaReserve: TextSettingInput;
   pricingPriority: TextSettingInput;
   pricingThreshold: TextSettingInput;
+  modelMarketplaceEnabled: BooleanSettingInput;
+  modelMarketplaceMinSamples: TextSettingInput;
   rebuildSliceSleep: TextSettingInput;
+  billingLogRetentionDays: TextSettingInput;
   traceMaxBodyKB: { value: number; change: (value: number) => void };
   registrationEnabled: BooleanSettingInput;
   oauthAutoCreate: BooleanSettingInput;
@@ -585,6 +554,24 @@ function PolicyBillingSettingsContent({
         />
       </SettingsGroup>
       <Separator />
+      <SettingsGroup title={t("modelMarketplaceSettings")}>
+        <SwitchRow
+          label={t("modelMarketplaceEnabled")}
+          desc={t("modelMarketplaceEnabledDesc")}
+          checked={draft.modelMarketplaceEnabled.value}
+          onChange={draft.modelMarketplaceEnabled.change}
+        />
+        <NumField
+          label={t("modelMarketplaceMinSamples")}
+          desc={t("modelMarketplaceMinSamplesDesc")}
+          value={draft.modelMarketplaceMinSamples.value}
+          min={1}
+          max={100000}
+          step={1}
+          onChange={draft.modelMarketplaceMinSamples.change}
+        />
+      </SettingsGroup>
+      <Separator />
       <SettingsGroup title={t("secBillingRebuild")}>
         <NumField
           label={t("rebuildSliceSleep")}
@@ -595,6 +582,15 @@ function PolicyBillingSettingsContent({
           unit="ms"
           humanizeAs="milliseconds"
           onChange={draft.rebuildSliceSleep.change}
+        />
+        <NumField
+          label={t("billingLogRetentionDays")}
+          desc={t("billingLogRetentionDaysDesc")}
+          value={draft.billingLogRetentionDays.value}
+          min={1}
+          max={365}
+          step={1}
+          onChange={draft.billingLogRetentionDays.change}
         />
       </SettingsGroup>
       <Separator />
@@ -672,147 +668,9 @@ function PolicyBillingSettingsContent({
   );
 }
 
-function DatabaseStatsCard({
-  tables,
-  t,
-}: {
-  tables?: TableStats[];
-  t: SystemTranslator;
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Database className="size-5" />
-          {t("databaseStats")}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>{t("tableName")}</TableHead>
-              <TableHead className="text-right">{t("rowCount")}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {tables?.map((table) => (
-              <TableRow key={table.name}>
-                <TableCell className="font-mono">{table.name}</TableCell>
-                <TableCell className="text-right font-mono">
-                  {table.count.toLocaleString()}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
-  );
-}
-
-interface DataCleanupAction {
-  target: string;
-  retainDays: number;
-  preview?: CleanupPreviewResponse;
-  previewVisible: boolean;
-  previewRefreshing: boolean;
-  changeTarget: (value: string) => void;
-  changeRetainDays: (value: number) => void;
-  showPreview: () => void;
-  requestConfirmation: () => void;
-}
-
-function DataCleanupCard({
-  action,
-  t,
-}: {
-  action: DataCleanupAction;
-  t: SystemTranslator;
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Trash2 className="size-5" />
-          {t("dataCleanup")}
-        </CardTitle>
-        <CardDescription>{t("dataCleanupDesc")}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="space-y-2">
-            <Label>{t("cleanupTarget")}</Label>
-            <Select value={action.target} onValueChange={action.changeTarget}>
-              <SelectTrigger className="w-[180px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="traces">{t("traceData")}</SelectItem>
-                <SelectItem value="logs">{t("logData")}</SelectItem>
-                <SelectItem value="hourly_buckets">
-                  {t("hourlyBucketData")}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label>{t("retainDays")}</Label>
-            <Input
-              type="number"
-              min={1}
-              value={action.retainDays}
-              onChange={(event) =>
-                action.changeRetainDays(Number(event.target.value))
-              }
-              className="w-[120px]"
-            />
-          </div>
-          <Button variant="outline" onClick={action.showPreview}>
-            <Activity data-icon="inline-start" />
-            {t("preview")}
-          </Button>
-        </div>
-        {action.target === "hourly_buckets" && (
-          <p className="text-xs text-muted-foreground">
-            {t("cleanupHourlyHint")}
-          </p>
-        )}
-        {action.preview && action.previewVisible && (
-          <div className="space-y-2 rounded-md border p-4">
-            <p>
-              {t("totalRecords")}:{" "}
-              <span className="font-mono">
-                {action.preview.total.toLocaleString()}
-              </span>
-            </p>
-            <p>
-              {t("toDelete")}:{" "}
-              <span className="font-mono text-destructive">
-                {action.preview.to_delete.toLocaleString()}
-              </span>
-            </p>
-            <Button
-              variant="destructive"
-              disabled={
-                action.preview.to_delete === 0 || action.previewRefreshing
-              }
-              onClick={action.requestConfirmation}
-            >
-              <Trash2 data-icon="inline-start" />
-              {t("executeCleanup")}
-            </Button>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 export default function SystemMaintenancePage() {
   const t = useTranslations("system");
   const { data: stats, refetch, isLoading } = useSystemStats();
-  const cleanup = useCleanup();
   const { data: settings } = useSettings();
   const updateSettings = useUpdateSettings();
 
@@ -856,17 +714,6 @@ export default function SystemMaintenancePage() {
     tokenModelWhitelistSelfServiceInput,
     setTokenModelWhitelistSelfServiceInput,
   ] = useState<boolean | null>(null);
-  const [cleanupTarget, setCleanupTarget] = useState("traces");
-  const [retainDays, setRetainDays] = useState(30);
-  const [showPreview, setShowPreview] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const {
-    data: preview,
-    dataUpdatedAt: previewFetchedAt,
-    isFetching: previewRefreshing,
-    refetch: refetchCleanupPreview,
-  } = useCleanupPreview(cleanupTarget, retainDays, showPreview);
 
   const currentTraceKB = settings?.settings?.trace_max_body_size
     ? Math.round(Number(settings.settings.trace_max_body_size) / 1024)
@@ -887,6 +734,12 @@ export default function SystemMaintenancePage() {
   const [rebuildSliceSleepInput, setRebuildSliceSleepInput] = useState<
     string | null
   >(null);
+  const [billingLogRetentionDaysInput, setBillingLogRetentionDaysInput] =
+    useState<string | null>(null);
+  const [modelMarketplaceEnabledInput, setModelMarketplaceEnabledInput] =
+    useState<boolean | null>(null);
+  const [modelMarketplaceMinSamplesInput, setModelMarketplaceMinSamplesInput] =
+    useState<string | null>(null);
   const currentPricingPriority =
     settings?.settings?.pricing_source_priority ?? "models.dev,basellm";
   const currentPricingThreshold =
@@ -899,6 +752,19 @@ export default function SystemMaintenancePage() {
   const pricingThresholdHasChanges =
     displayPricingThreshold !== currentPricingThreshold;
 
+  const currentModelMarketplaceEnabled =
+    settings?.settings?.model_marketplace_enabled === "true";
+  const displayModelMarketplaceEnabled =
+    modelMarketplaceEnabledInput ?? currentModelMarketplaceEnabled;
+  const modelMarketplaceEnabledHasChanges =
+    displayModelMarketplaceEnabled !== currentModelMarketplaceEnabled;
+  const currentModelMarketplaceMinSamples =
+    settings?.settings?.model_marketplace_min_samples ?? "20";
+  const displayModelMarketplaceMinSamples =
+    modelMarketplaceMinSamplesInput ?? currentModelMarketplaceMinSamples;
+  const modelMarketplaceMinSamplesHasChanges =
+    displayModelMarketplaceMinSamples !== currentModelMarketplaceMinSamples;
+
   const currentRebuildSliceSleep = settings?.settings?.[
     "billing.rebuild_slice_sleep_ms"
   ]
@@ -908,6 +774,13 @@ export default function SystemMaintenancePage() {
     rebuildSliceSleepInput ?? String(currentRebuildSliceSleep);
   const rebuildSliceSleepHasChanges =
     displayRebuildSliceSleep !== String(currentRebuildSliceSleep);
+
+  const currentBillingLogRetentionDays =
+    settings?.settings?.["billing.log_retention_days"] ?? "5";
+  const displayBillingLogRetentionDays =
+    billingLogRetentionDaysInput ?? currentBillingLogRetentionDays;
+  const billingLogRetentionDaysHasChanges =
+    displayBillingLogRetentionDays !== currentBillingLogRetentionDays;
 
   const currentRegistrationEnabled =
     settings?.settings?.registration_enabled === "true";
@@ -1139,7 +1012,10 @@ export default function SystemMaintenancePage() {
     tokenModelWhitelistSelfServiceHasChanges ||
     pricingPriorityHasChanges ||
     pricingThresholdHasChanges ||
+    modelMarketplaceEnabledHasChanges ||
+    modelMarketplaceMinSamplesHasChanges ||
     rebuildSliceSleepHasChanges ||
+    billingLogRetentionDaysHasChanges ||
     imageInlineFetchTimeoutSecHasChanges ||
     imageInlineMaxBytesHasChanges ||
     imageInlineConcurrencyHasChanges ||
@@ -1277,6 +1153,19 @@ export default function SystemMaintenancePage() {
     if (pricingThresholdHasChanges) {
       updates.pricing_disagreement_threshold = displayPricingThreshold;
     }
+    if (modelMarketplaceEnabledHasChanges) {
+      updates.model_marketplace_enabled = String(
+        displayModelMarketplaceEnabled,
+      );
+    }
+    if (modelMarketplaceMinSamplesHasChanges) {
+      const n = Number(displayModelMarketplaceMinSamples);
+      if (!Number.isInteger(n) || n < 1 || n > 100000) {
+        toast.error(t("modelMarketplaceMinSamplesRangeError"));
+        return;
+      }
+      updates.model_marketplace_min_samples = String(n);
+    }
     if (rebuildSliceSleepHasChanges) {
       const n = Number(rebuildSliceSleepInput);
       if (!Number.isFinite(n) || n < 0 || n > 60000) {
@@ -1284,6 +1173,14 @@ export default function SystemMaintenancePage() {
         return;
       }
       updates["billing.rebuild_slice_sleep_ms"] = String(n);
+    }
+    if (billingLogRetentionDaysHasChanges) {
+      const n = Number(displayBillingLogRetentionDays);
+      if (!Number.isInteger(n) || n < 1 || n > 365) {
+        toast.error(t("billingLogRetentionDaysRangeError"));
+        return;
+      }
+      updates["billing.log_retention_days"] = String(n);
     }
     if (imageInlineFetchTimeoutSecHasChanges) {
       updates.image_inline_fetch_timeout_sec = String(
@@ -1333,7 +1230,10 @@ export default function SystemMaintenancePage() {
           setTokenModelWhitelistSelfServiceInput(null);
           setPricingPriorityInput(null);
           setPricingThresholdInput(null);
+          setModelMarketplaceEnabledInput(null);
+          setModelMarketplaceMinSamplesInput(null);
           setRebuildSliceSleepInput(null);
+          setBillingLogRetentionDaysInput(null);
           setImageInlineFetchTimeoutSecInput(null);
           setImageInlineMaxBytesInput(null);
           setImageInlineConcurrencyInput(null);
@@ -1342,40 +1242,6 @@ export default function SystemMaintenancePage() {
         },
         onError: () => {
           toast.error(t("settingsSaveFailed"));
-        },
-      },
-    );
-  };
-
-  const handlePreview = () => {
-    setShowPreview(true);
-  };
-
-  const handleCleanup = () => {
-    if (!preview) return;
-    if (
-      isCleanupPreviewExpired(preview.cutoff_unix, retainDays, previewFetchedAt)
-    ) {
-      setConfirmOpen(false);
-      toast.error(t("cleanupPreviewExpired"));
-      void refetchCleanupPreview();
-      return;
-    }
-    cleanup.mutate(
-      {
-        target: cleanupTarget,
-        retain_days: retainDays,
-        cutoff_unix: preview.cutoff_unix,
-      },
-      {
-        onSuccess: (data) => {
-          toast.success(t("cleanupSuccess", { count: data.deleted }));
-          setConfirmOpen(false);
-          setShowPreview(false);
-          refetch();
-        },
-        onError: () => {
-          toast.error(t("cleanupFailed"));
         },
       },
     );
@@ -1464,9 +1330,21 @@ export default function SystemMaintenancePage() {
       value: displayPricingThreshold,
       change: setPricingThresholdInput,
     },
+    modelMarketplaceEnabled: {
+      value: displayModelMarketplaceEnabled,
+      change: setModelMarketplaceEnabledInput,
+    },
+    modelMarketplaceMinSamples: {
+      value: displayModelMarketplaceMinSamples,
+      change: setModelMarketplaceMinSamplesInput,
+    },
     rebuildSliceSleep: {
       value: displayRebuildSliceSleep,
       change: setRebuildSliceSleepInput,
+    },
+    billingLogRetentionDays: {
+      value: displayBillingLogRetentionDays,
+      change: setBillingLogRetentionDaysInput,
     },
     traceMaxBodyKB: { value: displayKB, change: setTraceMaxBodyKB },
     registrationEnabled: {
@@ -1491,24 +1369,6 @@ export default function SystemMaintenancePage() {
       change: setInviteMaxUsesInput,
     },
   };
-  const cleanupAction: DataCleanupAction = {
-    target: cleanupTarget,
-    retainDays,
-    preview,
-    previewVisible: showPreview,
-    previewRefreshing,
-    changeTarget: (value) => {
-      setCleanupTarget(value);
-      setShowPreview(false);
-    },
-    changeRetainDays: (value) => {
-      setRetainDays(value);
-      setShowPreview(false);
-    },
-    showPreview: handlePreview,
-    requestConfirmation: () => setConfirmOpen(true),
-  };
-
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1542,37 +1402,10 @@ export default function SystemMaintenancePage() {
         dataMaintenance={
           <div className="flex min-w-0 flex-col gap-6">
             <LogStorageStatus storage={stats?.storage} />
-            <DatabaseStatsCard tables={stats?.tables} t={t} />
-            <DataCleanupCard action={cleanupAction} t={t} />
+            <DataCleanupStats tables={stats?.tables ?? []} />
           </div>
         }
       />
-
-      {/* Confirm Dialog */}
-      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("confirmCleanup")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("confirmCleanupDesc", {
-                count: preview?.to_delete ?? 0,
-                target:
-                  cleanupTarget === "traces"
-                    ? t("traceData")
-                    : cleanupTarget === "logs"
-                      ? t("logData")
-                      : t("hourlyBucketData"),
-              })}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t("cancel")}</AlertDialogCancel>
-            <AlertDialogAction onClick={handleCleanup}>
-              {t("confirm")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }

@@ -72,14 +72,21 @@ type Recorder struct {
 // NewRecorder 创建一个 request-scoped Recorder。mode 控制成功 attempt 的 trace
 // 捕获范围；业务所需的 response buffer 始终累积。
 func NewRecorder(mode CaptureMode, maxBodySize int) *Recorder {
-	now := time.Now()
+	return NewRecorderAt(mode, maxBodySize, time.Now())
+}
+
+// NewRecorderAt creates a recorder whose elapsed timings share the request's ingress start.
+func NewRecorderAt(mode CaptureMode, maxBodySize int, startedAt time.Time) *Recorder {
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
 	bufferLimit := traceBufferHardLimit(maxBodySize)
 	return &Recorder{
 		mode:         mode,
 		maxBodySize:  maxBodySize,
 		bodyMask:     maskText,
-		startedAt:    now,
-		stageBegin:   now,
+		startedAt:    startedAt,
+		stageBegin:   startedAt,
 		currStage:    StageNone,
 		timings:      make(map[Stage]time.Duration),
 		upstreamBody: backendcommon.NewMaskingTail(bufferLimit),

@@ -12,27 +12,49 @@ import (
 	"go.uber.org/zap"
 )
 
+type rebuildHandlerDailyRebuilder struct{}
+
+func (rebuildHandlerDailyRebuilder) FindRequestLogDateBounds(context.Context) (dao.RequestLogDateBounds, error) {
+	return dao.RequestLogDateBounds{StartDate: "2026-05-01", EndDate: "2026-05-01"}, nil
+}
+
+func (rebuildHandlerDailyRebuilder) FindNextRequestLogDate(_ context.Context, after, end string) (string, bool, error) {
+	const date = "2026-05-01"
+	if after < date && date <= end {
+		return date, true, nil
+	}
+	return "", false, nil
+}
+
+func (rebuildHandlerDailyRebuilder) RebuildLogDailyDate(context.Context, string, uint, dao.DailyBillingRebuildTargets) (*dao.BillingRebuildResult, error) {
+	return &dao.BillingRebuildResult{ReplayedLogs: 1}, nil
+}
+
 func TestRebuildHandler_SubmitAndGet(t *testing.T) {
 	r := mbilling.NewRebuildRunner(nil, zap.NewNop(), time.Minute)
 	r.Start(context.Background())
 	defer r.Stop(context.Background())
-	r.SetSliceFn(func(date string, hour int, targets []string, reset bool) (*dao.BillingRebuildResult, error) {
-		return &dao.BillingRebuildResult{ReplayedLogs: 1}, nil
-	})
+	r.SetDailyRebuilder(rebuildHandlerDailyRebuilder{})
 	h := &Handler{Runner: r}
 
-	// success: Submit 返回 job_id 和 24 个 slice
+	// Submit returns a job ID; daily rebuild creates one slice per date with requests.
 	resp, err := h.Rebuild(nil, RebuildRequest{StartDate: "2026-05-01", EndDate: "2026-05-01"})
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.JobID)
-	require.Equal(t, int64(24), resp.TotalSlices)
+	require.Equal(t, int64(1), resp.TotalSlices)
 
 	// success: GET 能拿到刚提交的 job
 	got, err := h.GetRebuildJob(nil, GetRebuildJobRequest{ID: resp.JobID})
 	require.NoError(t, err)
 	require.Equal(t, resp.JobID, got.ID)
 	require.Contains(t, []string{"running", "succeeded"}, got.Status)
-	require.Equal(t, int64(24), got.TotalSlices)
+	require.Eventually(t, func() bool {
+		job, ok := r.Get(resp.JobID)
+		return ok && job.Snapshot().Status == mbilling.JobStatusSucceeded
+	}, time.Second, 5*time.Millisecond)
+	got, err = h.GetRebuildJob(nil, GetRebuildJobRequest{ID: resp.JobID})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.TotalSlices)
 
 	// failure: 未知 ID → 404
 	_, err = h.GetRebuildJob(nil, GetRebuildJobRequest{ID: "no-such-job"})

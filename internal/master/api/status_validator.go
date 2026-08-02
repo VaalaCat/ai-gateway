@@ -21,6 +21,19 @@ func ValidateStatusValue(v any) error {
 	return nil
 }
 
+// ValidateAutoBanValue 保证 auto_ban 与渠道 status 使用相同的严格 0/1 契约。
+// map JSON 解码后的数字可以是 float64，但仍必须是精确的二态整数。
+func ValidateAutoBanValue(v any) error {
+	n, ok := toIntStrict(v)
+	if !ok {
+		return fmt.Errorf("auto_ban must be an integer, got %T", v)
+	}
+	if n != 0 && n != 1 {
+		return fmt.Errorf("auto_ban must be 0 (disabled) or 1 (enabled), got %d", n)
+	}
+	return nil
+}
+
 func toIntStrict(v any) (int, bool) {
 	switch n := v.(type) {
 	case int:

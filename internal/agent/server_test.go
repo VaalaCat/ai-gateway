@@ -25,6 +25,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	appkg "github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/ginutil"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	pkgws "github.com/VaalaCat/ai-gateway/internal/pkg/ws"
@@ -131,18 +132,39 @@ func TestNormalizeTunnelManagerShutdownErrorOnlyIgnoresClosed(t *testing.T) {
 	}
 }
 
-func TestAgentMetricEndpointUsesInjectedRegistry(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	relayMetrics := pkgmetrics.NewAgentRelayMetrics(registry, registry)
-	server := &Server{Router: gin.New(), RelayMetrics: relayMetrics}
-	server.setupMetricsRoute()
-	relayMetrics.IncDirectProbe(pkgmetrics.ProbeVerified)
+func TestAgentMetricEndpointModes(t *testing.T) {
+	const token = "abcdefghijklmnopqrstuvwxyz012345"
+	for _, test := range []struct {
+		name       string
+		metrics    config.MetricsConfig
+		authorize  bool
+		wantStatus int
+	}{
+		{name: "disabled", wantStatus: http.StatusNotFound},
+		{name: "shared rejects anonymous", metrics: config.MetricsConfig{Token: token}, wantStatus: http.StatusUnauthorized},
+		{name: "shared accepts bearer", metrics: config.MetricsConfig{Token: token}, authorize: true, wantStatus: http.StatusOK},
+		{name: "independent absent from business router", metrics: config.MetricsConfig{Token: token, Listen: "127.0.0.1:9091"}, authorize: true, wantStatus: http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			relayMetrics := pkgmetrics.NewAgentRelayMetrics(registry, registry)
+			server := &Server{Cfg: &config.AgentRuntimeConfig{Metrics: test.metrics}, Router: gin.New(), MetricsRegistry: registry, RelayMetrics: relayMetrics}
+			server.setupMetricsRoute()
+			relayMetrics.IncDirectProbe(pkgmetrics.ProbeVerified)
 
-	response := httptest.NewRecorder()
-	server.Router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	require.Equal(t, http.StatusOK, response.Code)
-	require.Contains(t, response.Body.String(), "agent_direct_probe_total")
-	require.Contains(t, response.Body.String(), `result="verified"`)
+			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			if test.authorize {
+				request.Header.Set("Authorization", "Bearer "+token)
+			}
+			response := httptest.NewRecorder()
+			server.Router.ServeHTTP(response, request)
+			require.Equal(t, test.wantStatus, response.Code)
+			if test.wantStatus == http.StatusOK {
+				require.Contains(t, response.Body.String(), "agent_direct_probe_total")
+				require.Contains(t, response.Body.String(), `result="verified"`)
+			}
+		})
+	}
 }
 
 func TestAgentAuthCacheSlotUsesPointerMatchedReplacementAndCleanup(t *testing.T) {
@@ -672,7 +694,7 @@ func TestNewEmbeddedReusesOwnerMetricsInsteadOfCreatingUnservedRegistry(t *testi
 	metrics := pkgmetrics.NewAgentRelayMetrics(registry, registry)
 	cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
 		MasterURL: "http://localhost:9999", CredentialsFile: filepath.Join(t.TempDir(), "credentials.json"),
-	}}
+	}, Metrics: config.MetricsConfig{Listen: "127.0.0.1:9091", Token: "abcdefghijklmnopqrstuvwxyz012345"}}
 
 	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "embedded", Secret: "secret"}, EmbeddedOptions{
 		MetricsRegistry: registry, RelayMetrics: metrics,
@@ -681,6 +703,8 @@ func TestNewEmbeddedReusesOwnerMetricsInsteadOfCreatingUnservedRegistry(t *testi
 	t.Cleanup(func() { require.NoError(t, server.Shutdown(context.Background())) })
 	require.Same(t, registry, server.MetricsRegistry)
 	require.Same(t, metrics, server.RelayMetrics)
+	require.Nil(t, server.MetricsListener)
+	require.Nil(t, server.metricsHTTPServer)
 
 	unowned, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "unowned", Secret: "secret"})
 	require.NoError(t, err)
@@ -878,6 +902,31 @@ func TestMountRoutes(t *testing.T) {
 	}
 	if !found {
 		t.Error("/v1/chat/completions route not found")
+	}
+}
+
+func TestMountRoutesRecordsRequestStartBeforeRelayIngress(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+		CredentialsFile: filepath.Join(t.TempDir(), "credentials.json"),
+	}}
+	server, err := NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "request-start", Secret: "secret"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Shutdown(context.Background())) })
+
+	starts := make(map[string]time.Time)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Next()
+		starts[c.Request.URL.Path], _ = ginutil.FindRequestStart(c)
+	})
+	server.MountRoutes(router)
+
+	for _, path := range []string{"/v1/chat/completions", attemptwire.EndpointPath} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"gpt-4o"}`))
+		router.ServeHTTP(response, request)
+		require.False(t, starts[path].IsZero(), "request start missing for %s", path)
 	}
 }
 

@@ -27,7 +27,10 @@ import {
   formatTokensExact,
 } from "@/lib/utils/format";
 import type { TimeBucket } from "@/lib/types/observability";
-import { chartColorForSeries } from "@/lib/chart-colors";
+import {
+  CHART_LINE_ACTIVE_DOT,
+  chartColorForSeries,
+} from "@/lib/chart-colors";
 
 export type { TimeBucket };
 export type TrendMetric = "cost" | "requests" | "tokens";
@@ -87,9 +90,6 @@ export function TrendChart({
 
   const isEmpty = empty ?? buckets.length === 0;
   const fmt = METRIC_FORMATTERS[metric];
-  // behavior change: keep a one-bucket trend visible when no line path can be drawn.
-  const showSinglePoint = buckets.length === 1;
-
   const action = (
     <ChartOptionSelect
       value={metric}
@@ -138,7 +138,8 @@ export function TrendChart({
             dataKey={metric}
             stroke={`var(--color-${metric})`}
             strokeWidth={2}
-            dot={showSinglePoint}
+            dot={false}
+            activeDot={CHART_LINE_ACTIVE_DOT}
           />
         </LineChart>
       </ChartContainer>

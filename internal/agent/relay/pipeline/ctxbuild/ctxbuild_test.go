@@ -308,6 +308,24 @@ func TestBuildSuccessNoStream(t *testing.T) {
 	}
 }
 
+func TestBuildPreservesExistingStartTime(t *testing.T) {
+	body := []byte(`{"model":"gpt-4"}`)
+	c := newGinCtxForTest(func(c *gin.Context) {
+		c.Request = httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+	})
+	rctx := newTestRelayCtx(t, c)
+	want := time.Now().Add(-time.Second)
+	rctx.Input.StartTime = want
+
+	if err := Build(rctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if !rctx.Input.StartTime.Equal(want) {
+		t.Fatalf("StartTime = %v, want %v", rctx.Input.StartTime, want)
+	}
+}
+
 func TestBuildReadBodyFail(t *testing.T) {
 	c := newGinCtxForTest(func(c *gin.Context) {
 		c.Request = httptest.NewRequest("POST", "/v1/x", nil)

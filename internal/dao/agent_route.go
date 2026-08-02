@@ -32,10 +32,25 @@ type AgentRouteListFilter struct {
 	SourceID   *uint
 }
 
+type AgentRouteOverviewFilter struct {
+	Query      string
+	SourceType string
+	SourceID   *uint
+	Model      string
+	AgentID    string
+}
+
+type AgentRouteOverview struct {
+	models.AgentRoute
+	SourceName string
+	AgentName  string
+}
+
 // AdminAgentRouteQuery 定义查询接口。
 type AdminAgentRouteQuery interface {
 	GetByID(id uint) (*models.AgentRoute, error)
 	List(opts ListOptions, filter AgentRouteListFilter) ([]models.AgentRoute, int64, error)
+	ListOverview(opts ListOptions, filter AgentRouteOverviewFilter) ([]AgentRouteOverview, int64, error)
 	ListAll() ([]models.AgentRoute, error)
 	MaxID() (uint, error)
 	ListKeyset(afterID uint, snapshotMaxID uint, limit int) ([]models.AgentRoute, error)
@@ -77,6 +92,49 @@ func (q *adminAgentRouteQuery) List(opts ListOptions, filter AgentRouteListFilte
 		Offset(opts.Offset()).Limit(opts.PageSize).
 		Find(&routes).Error
 	return routes, total, err
+}
+
+func (q *adminAgentRouteQuery) ListOverview(opts ListOptions, filter AgentRouteOverviewFilter) ([]AgentRouteOverview, int64, error) {
+	db := buildAgentRouteOverviewQuery(q.ctx.GetCoreDB(), filter)
+
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	rows := make([]AgentRouteOverview, 0)
+	err := db.Select(`ar.*,
+		CASE ar.source_type WHEN 'token' THEN tokens.name WHEN 'channel' THEN channels.name ELSE '' END AS source_name,
+		COALESCE(agents.name, '') AS agent_name`).
+		Order("ar.priority DESC, ar.id DESC").
+		Offset(opts.Offset()).Limit(opts.PageSize).
+		Find(&rows).Error
+	return rows, total, err
+}
+
+func buildAgentRouteOverviewQuery(db *gorm.DB, filter AgentRouteOverviewFilter) *gorm.DB {
+	db = db.Table("agent_routes AS ar").
+		Joins("LEFT JOIN tokens ON ar.source_type = ? AND tokens.id = ar.source_id", "token").
+		Joins("LEFT JOIN channels ON ar.source_type = ? AND channels.id = ar.source_id", "channel").
+		Joins("LEFT JOIN agents ON agents.agent_id = ar.agent_id")
+	if filter.SourceType != "" {
+		db = db.Where("ar.source_type = ?", filter.SourceType)
+	}
+	if filter.SourceID != nil {
+		db = db.Where("ar.source_id = ?", *filter.SourceID)
+	}
+	if filter.Model != "" {
+		db = db.Where("ar.model = ?", filter.Model)
+	}
+	if filter.AgentID != "" {
+		db = db.Where("ar.agent_id = ?", filter.AgentID)
+	}
+	if filter.Query != "" {
+		like := "%" + filter.Query + "%"
+		db = db.Where(`tokens.name LIKE ? OR channels.name LIKE ? OR ar.model LIKE ?
+			OR agents.name LIKE ? OR ar.agent_id LIKE ? OR ar.agent_tag LIKE ?`, like, like, like, like, like, like)
+	}
+	return db
 }
 
 func (q *adminAgentRouteQuery) ListAll() ([]models.AgentRoute, error) {

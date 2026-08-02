@@ -1,34 +1,67 @@
+import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { FilterableToolbar } from "./filterable-toolbar";
+import { tsToDateStr } from "@/lib/utils/date-range";
+
+type PickerProps = {
+  value: { startDate: string; endDate: string };
+  onValueChange: (value: { startDate: string; endDate: string }) => void;
+  placeholder?: string;
+  maxDays?: number;
+  size?: string;
+  className?: string;
+};
+
+const mocks = vi.hoisted(() => ({
+  pickerProps: undefined as PickerProps | undefined,
+  entityPickerInstance: 0,
+}));
 
 vi.mock("next-intl", () => ({ useTranslations: () => (key: string) => key }));
 vi.mock("@/lib/auth", () => ({ useAuth: () => ({ isAdmin: true }) }));
+vi.mock("@/components/business/date-picker/date-range-picker", () => ({
+  DateRangePicker: (props: PickerProps) => {
+    mocks.pickerProps = props;
+    return <div data-testid="date-range-picker" data-placeholder={props.placeholder} />;
+  },
+}));
 vi.mock("@/components/business/entity-picker/entity-picker", () => ({
   EntityPicker: ({
+    entity,
     placeholder,
     value,
     onChange,
   }: {
+    entity: string;
     placeholder?: string;
     value?: string;
     onChange: (value: string) => void;
-  }) => (
-    <button
-      type="button"
-      role="combobox"
-      aria-controls="entity-options"
-      aria-expanded="false"
-      data-value={value}
-      onClick={() => onChange("picked")}
-    >
-      {placeholder}
-    </button>
-  ),
+  }) => {
+    const [instance] = useState(() => ++mocks.entityPickerInstance);
+    return (
+      <button
+        type="button"
+        role="combobox"
+        aria-controls="entity-options"
+        aria-expanded="false"
+        data-entity={entity}
+        data-instance={instance}
+        data-value={value}
+        onClick={() => onChange("picked")}
+      >
+        {placeholder}
+      </button>
+    );
+  },
 }));
 
-beforeEach(() => vi.useFakeTimers());
+beforeEach(() => {
+  vi.useFakeTimers();
+  mocks.pickerProps = undefined;
+  mocks.entityPickerInstance = 0;
+});
 afterEach(() => vi.useRealTimers());
 
 it("resets a text draft immediately and never emits the old debounce value", () => {
@@ -58,6 +91,30 @@ it("does not emit a stale baseline when typing after an authoritative reset", ()
   expect(onChange).toHaveBeenCalledWith({ search: "fresh" });
 });
 
+it("emits a debounced text value once when the parent callback changes after every render", () => {
+  const spec = { search: { kind: "text" as const, placeholder: "search", debounceMs: 100 } };
+  let commits = 0;
+  function UnstableParent() {
+    const [, rerender] = useState(0);
+    return (
+      <FilterableToolbar
+        spec={spec}
+        value={{}}
+        onChange={() => {
+          commits += 1;
+          if (commits < 5) rerender((value) => value + 1);
+        }}
+      />
+    );
+  }
+
+  render(<UnstableParent />);
+  fireEvent.change(screen.getByPlaceholderText("search"), { target: { value: "gpt-4.1" } });
+  act(() => vi.advanceTimersByTime(100));
+
+  expect(commits).toBe(1);
+});
+
 it("wraps each filter in a labeled FilterField, label falls back to placeholder", () => {
   const spec = {
     search: { kind: "text" as const, placeholder: "searchPh" },
@@ -83,11 +140,31 @@ it("renders compact sm controls in the toolbar", () => {
   expect(screen.getByPlaceholderText("searchPh").className).toContain("h-8");
 });
 
-it("splits time kind into two labeled date fields", () => {
-  const spec = { time: { kind: "time" as const } };
-  render(<FilterableToolbar spec={spec} value={{}} onChange={() => {}} />);
-  expect(screen.getByText("startDate")).toBeInTheDocument();
-  expect(screen.getByText("endDate")).toBeInTheDocument();
+it("renders one compact date range field and emits one atomic update", () => {
+  const onChange = vi.fn();
+  const spec = { time: { kind: "time" as const, maxHourDays: 7 } };
+  render(<FilterableToolbar spec={spec} value={{}} onChange={onChange} />);
+
+  expect(screen.getByText("dateRange")).toBeInTheDocument();
+  expect(screen.queryByText("startDate")).not.toBeInTheDocument();
+  expect(screen.queryByText("endDate")).not.toBeInTheDocument();
+  expect(mocks.pickerProps).toMatchObject({
+    value: { startDate: "", endDate: "" },
+    placeholder: "dateRange",
+    maxDays: 7,
+    size: "sm",
+  });
+
+  mocks.pickerProps?.onValueChange({
+    startDate: "2026-07-14",
+    endDate: "2026-07-20",
+  });
+  expect(onChange).toHaveBeenCalledOnce();
+  expect(onChange).toHaveBeenCalledWith({
+    start: expect.any(Number),
+    end: expect.any(Number),
+  });
+  expect(onChange.mock.calls[0][0].end).toBeGreaterThan(onChange.mock.calls[0][0].start);
 });
 
 it("does not duplicate enum placeholder text between label and trigger", () => {
@@ -104,6 +181,28 @@ it("picker label falls back to entity noun and trigger shows the all placeholder
   render(<FilterableToolbar spec={spec} value={{}} onChange={() => {}} />);
   expect(screen.getByText("label.token")).toBeInTheDocument(); // 名词标签 key 回显
   expect(screen.getByRole("combobox")).toHaveTextContent("all");
+});
+
+it("remounts a picker when the entity type changes for the same filter field", () => {
+  const { rerender } = render(
+    <FilterableToolbar
+      spec={{ source_id: { kind: "picker", entity: "token" } }}
+      value={{}}
+      onChange={() => {}}
+    />,
+  );
+  const tokenInstance = screen.getByRole("combobox").getAttribute("data-instance");
+
+  rerender(
+    <FilterableToolbar
+      spec={{ source_id: { kind: "picker", entity: "channel" } }}
+      value={{}}
+      onChange={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("combobox")).toHaveAttribute("data-entity", "channel");
+  expect(screen.getByRole("combobox")).not.toHaveAttribute("data-instance", tokenInstance);
 });
 
 it("collapses advanced filters into a popover, opened on click", () => {
@@ -153,24 +252,44 @@ it("renders an advanced picker in the outer popover and wires its value change",
   expect(onChange).toHaveBeenCalledWith({ token_id: "picked" });
 });
 
-it("makes both advanced time fields and date pickers full width", () => {
+it("makes the single advanced date range field full width", () => {
   const spec = { time: { kind: "time" as const, advanced: true } };
   render(<FilterableToolbar spec={spec} value={{}} onChange={() => {}} />);
 
   fireEvent.click(screen.getByRole("button", { name: /filters/ }));
 
-  for (const label of ["startDate", "endDate"]) {
-    const field = screen.getByText(label).parentElement;
-    expect(field).toHaveClass("w-full");
-    const datePicker = field?.querySelector(":scope > div");
-    expect(datePicker).toHaveClass("w-full");
-    expect(datePicker).toHaveClass("sm:[&_[data-slot=popover-trigger]]:w-full");
-  }
+  expect(screen.getByText("dateRange").parentElement).toHaveClass("w-full");
+  expect(mocks.pickerProps?.className).toContain("w-full sm:w-full");
+  expect(mocks.pickerProps?.className).toContain("[&_[data-slot=date-range-trigger]]:h-9");
   expect(document.querySelector('[data-slot="popover-content"]')).toHaveClass(
     "flex",
     "flex-col",
     "gap-3",
   );
+});
+
+it.each([
+  [{ start: 1_768_867_200 }, 1_768_867_200],
+  [{ end: 1_768_953_599 }, 1_768_953_599],
+] as const)("completes controlled legacy time value %#", (value, timestamp) => {
+  const spec = { time: { kind: "time" as const, maxHourDays: 7 } };
+  render(<FilterableToolbar spec={spec} value={value} onChange={() => {}} />);
+
+  const date = tsToDateStr(timestamp);
+  expect(mocks.pickerProps?.value).toEqual({ startDate: date, endDate: date });
+});
+
+it("shows an empty controlled range for invalid numeric bounds", () => {
+  const spec = { time: { kind: "time" as const, maxHourDays: 7 } };
+  render(
+    <FilterableToolbar
+      spec={spec}
+      value={{ start: Number.NaN, end: Number.POSITIVE_INFINITY }}
+      onChange={() => {}}
+    />,
+  );
+
+  expect(mocks.pickerProps?.value).toEqual({ startDate: "", endDate: "" });
 });
 
 it("shows active advanced filter count as a badge, hidden at zero", () => {
@@ -189,7 +308,15 @@ it("shows active advanced filter count as a badge, hidden at zero", () => {
   const trigger = screen.getByRole("button", { name: /filters/ });
   expect(trigger.textContent).not.toMatch(/\d/); // 0 激活无 Badge
   rerender(<FilterableToolbar spec={spec} value={{ a: "x", b: "1" }} onChange={() => {}} />);
-  expect(screen.getByRole("button", { name: /filters/ }).textContent).toContain("2");
+  const activeTrigger = screen.getByRole("button", { name: /filters/ });
+  expect(activeTrigger.textContent).toContain("2");
+  expect(activeTrigger).toHaveClass("relative", "overflow-visible", "size-9");
+  expect(activeTrigger.querySelector('[data-slot="badge"]')).toHaveClass(
+    "absolute",
+    "-right-1",
+    "-top-1",
+    "sm:static",
+  );
 });
 
 it.each([
@@ -272,10 +399,60 @@ it("keeps the default desktop layout on one shared row", () => {
 
   expect(container.querySelector('[data-slot="toolbar-filters"]')).toHaveClass(
     "sm:gap-3",
-    "md:flex-1",
+    "flex-1",
   );
   expect(container.querySelector('[data-slot="toolbar-filters"]')).not.toHaveClass("md:basis-full");
   expect(container.querySelector('[data-slot="toolbar-actions"]')).not.toHaveClass("md:ml-auto");
+});
+
+it("lets filters consume available width while keeping the action group stable", () => {
+  const spec = { search: { kind: "text" as const, placeholder: "searchPh" } };
+  const { container } = render(
+    <FilterableToolbar
+      spec={spec}
+      value={{}}
+      onChange={() => {}}
+      secondaryContent={<span>refreshControl</span>}
+    />,
+  );
+
+  expect(container.querySelector('[data-slot="toolbar-filters"]')).toHaveClass("min-w-0", "flex-1");
+  expect(container.querySelector('[data-slot="toolbar-actions"]')).toHaveClass("shrink-0");
+});
+
+it("packs three primary filters and compact actions into two mobile rows", () => {
+  const spec = {
+    model: { kind: "picker" as const, entity: "model" as const },
+    request: { kind: "text" as const, placeholder: "request" },
+    status: {
+      kind: "enum" as const,
+      options: [{ value: "ok", label: "ok" }],
+      placeholder: "status",
+    },
+    advanced: { kind: "text" as const, advanced: true, placeholder: "advanced" },
+  };
+  const { container } = render(
+    <FilterableToolbar
+      spec={spec}
+      value={{}}
+      onChange={() => {}}
+      secondaryContent={<button type="button">auto</button>}
+      primaryAction={<button type="button">columns</button>}
+    />,
+  );
+
+  expect(container.firstElementChild).toHaveClass("grid", "grid-cols-2", "sm:flex");
+  expect(container.querySelector('[data-slot="toolbar-filters"]')).toHaveClass("contents", "sm:flex");
+  expect(container.querySelector('[data-slot="toolbar-actions"]')).toHaveClass(
+    "col-start-2",
+    "row-start-2",
+    "self-end",
+    "sm:col-auto",
+    "sm:row-auto",
+  );
+  expect(screen.getByRole("button", { name: /filters/ })).toHaveClass("size-9", "sm:h-8");
+  expect(screen.getByPlaceholderText("request")).toHaveClass("h-9", "sm:h-8");
+  expect(container.querySelector('[data-slot="select-trigger"]')).toHaveClass("!h-9", "sm:!h-8");
 });
 
 it("omits the empty filters container and keeps actions as the only root child", () => {

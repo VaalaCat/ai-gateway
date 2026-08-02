@@ -37,20 +37,12 @@ func TestPrepareDegradedCreatesClosedRecoveryDatabaseAndBacklog(t *testing.T) {
 	require.Len(t, snapshot.Items, 2)
 	core, err := masterdatabase.NewConnector().OpenExistingCorePath(filepath.Join(root, "core.db"))
 	require.NoError(t, err)
-	var ownershipMismatches int64
-	require.NoError(t, core.Table("billing_hourly_buckets AS bhb").
-		Joins("JOIN tokens t ON t.id = bhb.token_id").
-		Where("t.user_id <> bhb.user_id").Count(&ownershipMismatches).Error)
-	require.Zero(t, ownershipMismatches)
-	var tokenDailyCount, channelDailyCount int64
-	require.NoError(t, core.Table("token_daily_billings").Count(&tokenDailyCount).Error)
-	require.NoError(t, core.Table("channel_daily_billings").Count(&channelDailyCount).Error)
-	require.Equal(t, int64(21), tokenDailyCount)
-	require.Equal(t, int64(56), channelDailyCount)
-	require.NoError(t, core.Table("token_daily_billings AS tdb").
-		Joins("JOIN tokens t ON t.id = tdb.token_id").
-		Where("t.user_id <> tdb.user_id").Count(&ownershipMismatches).Error)
-	require.Zero(t, ownershipMismatches)
+	var tokens []models.Token
+	require.NoError(t, core.Find(&tokens).Error)
+	tokenOwners := make(map[uint]uint, len(tokens))
+	for _, token := range tokens {
+		tokenOwners[token.ID] = token.UserID
+	}
 	coreSQL, err := core.DB()
 	require.NoError(t, err)
 	require.NoError(t, coreSQL.Close())
@@ -61,10 +53,25 @@ func TestPrepareDegradedCreatesClosedRecoveryDatabaseAndBacklog(t *testing.T) {
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
+	var tokenDailyCount, channelDailyCount int64
+	require.NoError(t, db.Table("token_daily_billings").Count(&tokenDailyCount).Error)
+	require.NoError(t, db.Table("channel_daily_billings").Count(&channelDailyCount).Error)
+	require.Equal(t, int64(21), tokenDailyCount)
+	require.Equal(t, int64(56), channelDailyCount)
+	var tokenDailyRows []models.TokenDailyBilling
+	require.NoError(t, db.Find(&tokenDailyRows).Error)
+	for _, row := range tokenDailyRows {
+		require.Equal(t, tokenOwners[row.TokenID], row.UserID)
+	}
 	var requestLogCount int64
 	require.NoError(t, db.Table("request_logs").
 		Where("agent_id = ? AND status = 0", "fixture-agent-1").Count(&requestLogCount).Error)
 	require.Equal(t, int64(12), requestLogCount)
+	var requestLogs []models.RequestLog
+	require.NoError(t, db.Where("agent_id = ?", "fixture-agent-1").Find(&requestLogs).Error)
+	for _, row := range requestLogs {
+		require.Equal(t, tokenOwners[row.TokenID], row.UserID)
+	}
 	batches := make([]masterlogqueue.LogBatch, 0, len(snapshot.Items))
 	for _, item := range snapshot.Items {
 		batches = append(batches, item.Item.Value)

@@ -5,6 +5,13 @@ export interface DataStatus {
   log_db: "available" | "unavailable";
 }
 
+export interface ChannelDisableState {
+  tripped?: boolean;
+  reason?: string;
+  auto_recover?: boolean;
+  tripped_at?: number;
+}
+
 export interface User {
   id: number;
   username: string;
@@ -43,6 +50,7 @@ export interface Token {
 export interface Channel {
   id: number;
   name: string;
+  public_display_name?: string;
   type: number;
   key: string;
   base_url: string;
@@ -95,14 +103,61 @@ export interface Channel {
       cost_basis?: "raw" | "billed";
     }>;
   };
-  limit_state?: {
-    tripped?: boolean;
-    reason?: string;
-    auto_recover?: boolean;
-    tripped_at?: number;
-  };
+  limit_state?: ChannelDisableState;
+  auto_ban_state?: ChannelDisableState;
   created_at: number;
   updated_at: number;
+}
+
+export interface BatchEditableChannelFields {
+  status: number;
+  public_display_name: string;
+  type: number;
+  key: string;
+  base_url: string;
+  models: string;
+  model_mapping: string;
+  weight: number;
+  priority: number;
+  use_legacy_adaptor: boolean;
+  supported_api_types: string;
+  endpoints: string;
+  passthrough_enabled: boolean;
+  system_prompt: string;
+  system_prompt_in_input: boolean;
+  role_mapping: string;
+  proxy_url: string;
+  param_override: string;
+  header_override: string;
+  tag: string;
+  remark: string;
+  setting: string;
+  organization: string;
+  api_version: string;
+  test_model: string;
+  auto_ban: number;
+  status_code_mapping: string;
+  other_settings: string;
+  resilience: NonNullable<Channel["resilience"]>;
+  price_ratio: number;
+  free: boolean;
+  limit: NonNullable<Channel["limit"]>;
+  affinity: NonNullable<Channel["affinity"]>;
+  disable_keepalive: boolean;
+}
+
+export type NonEmptyPartial<T extends object> = {
+  [K in keyof T]-?: Pick<Required<T>, K> & Partial<Omit<T, K>>;
+}[keyof T];
+
+export interface BatchEditChannelRequest {
+  ids: number[];
+  fields: NonEmptyPartial<BatchEditableChannelFields>;
+}
+
+export interface BatchEditChannelResponse {
+  updated_count: number;
+  updated_ids: number[];
 }
 
 export interface ChannelTypeMeta {
@@ -153,6 +208,23 @@ export interface ChannelOtherSettings {
   }>;
 }
 
+export interface ModelMetadata {
+  display_name: string;
+  description: string;
+  provider: string;
+  input_modalities: string[];
+  output_modalities: string[];
+  context_length: number;
+  max_output_tokens: number;
+  supported_parameters: string[];
+  tool_calling: boolean;
+  structured_output: boolean;
+  reasoning: boolean;
+  prompt_cache: boolean;
+}
+
+export type ModelMetadataOverride = Partial<ModelMetadata>;
+
 export interface ModelConfig {
   id: number;
   model_name: string;
@@ -161,6 +233,8 @@ export interface ModelConfig {
   cache_read_price: number;
   cache_write_price: number;
   status: number;
+  synced_metadata: ModelMetadata;
+  metadata_override: ModelMetadataOverride;
   created_at: number;
   updated_at: number;
 }
@@ -920,6 +994,7 @@ export interface AuthPayload {
 }
 
 export interface TableStats {
+  database: "core" | "log";
   name: string;
   count: number;
 }
@@ -1029,18 +1104,40 @@ export interface DeleteLegacyFileResponse {
   deleted: boolean;
 }
 
-export interface CleanupPreviewResponse {
-  target: string;
-  retain_days: number;
-  total: number;
-  to_delete: number;
-  cutoff_unix: number;
-  cutoff_date: string;
-  tables: Array<{ name: string; total: number; to_delete: number }>;
+export type CleanupDatabase = "core" | "log";
+export type CleanupTableName =
+  | "request_logs"
+  | "request_traces"
+  | "usage_hourly_buckets"
+  | "usage_duration_histograms"
+  | "usage_ttft_histograms"
+  | "usage_tps_histograms"
+  | "usage_user_ttft_histograms"
+  | "usage_user_tps_histograms"
+  | "billing_logs"
+  | "token_daily_billings"
+  | "channel_daily_billings";
+
+export interface CleanupTableRef {
+  database: CleanupDatabase;
+  table: CleanupTableName;
 }
 
-export interface CleanupResponse {
+export interface CleanupTablePreview extends CleanupTableRef {
+  cutoff_date: string;
+  total: number;
+  to_delete: number;
+  snapshot_max_key: string;
+}
+
+export interface CleanupBatchRequest extends CleanupTableRef {
+  cutoff_date: string;
+  snapshot_max_key: string;
+}
+
+export interface CleanupBatchResponse {
   deleted: number;
+  has_more: boolean;
 }
 
 export interface AgentRoute {

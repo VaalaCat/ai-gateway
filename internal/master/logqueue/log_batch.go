@@ -10,14 +10,16 @@ import (
 // request_id unique key makes replay safe; aggregate deltas are applied only
 // when the request row is new.
 type LogBatch struct {
-	Request  models.RequestLog               `json:"request"`
-	Traces   []models.RequestTrace           `json:"traces,omitempty"`
-	Hourly   []models.UsageHourlyBucket      `json:"hourly,omitempty"`
-	Duration []models.UsageDurationHistogram `json:"duration,omitempty"`
-	TTFT     []models.UsageTTFTHistogram     `json:"ttft,omitempty"`
-	TPS      []models.UsageTPSHistogram      `json:"tps,omitempty"`
-	UserTTFT []models.UsageUserTTFTHistogram `json:"user_ttft,omitempty"`
-	UserTPS  []models.UsageUserTPSHistogram  `json:"user_tps,omitempty"`
+	Request      models.RequestLog               `json:"request"`
+	Traces       []models.RequestTrace           `json:"traces,omitempty"`
+	TokenDaily   []models.TokenDailyBilling      `json:"token_daily,omitempty"`
+	ChannelDaily []models.ChannelDailyBilling    `json:"channel_daily,omitempty"`
+	Hourly       []models.UsageHourlyBucket      `json:"hourly,omitempty"`
+	Duration     []models.UsageDurationHistogram `json:"duration,omitempty"`
+	TTFT         []models.UsageTTFTHistogram     `json:"ttft,omitempty"`
+	TPS          []models.UsageTPSHistogram      `json:"tps,omitempty"`
+	UserTTFT     []models.UsageUserTTFTHistogram `json:"user_ttft,omitempty"`
+	UserTPS      []models.UsageUserTPSHistogram  `json:"user_tps,omitempty"`
 }
 
 func BatchSize(batch LogBatch) int64 {

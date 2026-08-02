@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 
@@ -39,13 +39,17 @@ function DebouncedSearchDraft({
   className,
 }: Omit<DebouncedSearchInputProps, "value"> & { initialValue: string }) {
   const [local, setLocal] = useState(initialValue);
+  const onCommitRef = useRef(onCommit);
+  useEffect(() => {
+    onCommitRef.current = onCommit;
+  }, [onCommit]);
 
   useEffect(() => {
     const id = setTimeout(() => {
-      if (local !== initialValue) onCommit(local);
+      if (local !== initialValue) onCommitRef.current(local);
     }, 300);
     return () => clearTimeout(id);
-  }, [initialValue, local, onCommit]);
+  }, [initialValue, local]);
 
   return (
     <Input

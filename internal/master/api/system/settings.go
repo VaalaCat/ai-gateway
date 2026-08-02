@@ -3,6 +3,7 @@ package system
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/url"
 	"sort"
@@ -38,6 +39,19 @@ var settingDefs = map[string]struct {
 		Default: "false",
 		Validate: func(v string) bool {
 			return v == "true" || v == "false"
+		},
+	},
+	consts.SettingKeyModelMarketplaceEnabled: {
+		Default: strconv.FormatBool(consts.ModelMarketplaceDefaultEnabled),
+		Validate: func(v string) bool {
+			return v == "true" || v == "false"
+		},
+	},
+	consts.SettingKeyModelMarketplaceMinSamples: {
+		Default: strconv.Itoa(consts.ModelMarketplaceDefaultMinSamples),
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= consts.ModelMarketplaceMinimumSamples && n <= consts.ModelMarketplaceMaximumSamples
 		},
 	},
 	"proxy_url": {
@@ -165,6 +179,13 @@ var settingDefs = map[string]struct {
 			return err == nil && n >= 0 && n <= 60000
 		},
 	},
+	consts.SettingKeyBillingLogRetentionDays: {
+		Default: strconv.Itoa(consts.DefaultBillingLogRetentionDays),
+		Validate: func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= consts.MinimumBillingLogRetentionDays && n <= consts.MaximumBillingLogRetentionDays
+		},
+	},
 }
 
 func init() {
@@ -188,6 +209,43 @@ type SettingsResponse struct {
 }
 
 type GetSettingsRequest struct{}
+
+// SeedMasterSettingsSnapshot loads the master-only settings registry once at
+// startup. AgentSettings are intentionally excluded from this snapshot.
+func SeedMasterSettingsSnapshot(application app.Application) error {
+	if application == nil || application.GetCoreDB() == nil {
+		return errors.New("master settings snapshot requires core database")
+	}
+	var records []models.Setting
+	if err := application.GetCoreDB().Find(&records).Error; err != nil {
+		return fmt.Errorf("load master settings: %w", err)
+	}
+	application.GetMasterSettings().Replace(masterSettingsSnapshotValues(records))
+	return nil
+}
+
+func masterSettingsSnapshotValues(records []models.Setting) map[string]string {
+	values := make(map[string]string, len(settingDefs))
+	for key, definition := range settingDefs {
+		values[key] = definition.Default
+	}
+	for _, record := range records {
+		if _, ok := settingDefs[record.Key]; ok {
+			values[record.Key] = record.Value
+		}
+	}
+	return values
+}
+
+func masterSettingsSnapshotUpdates(values map[string]string) map[string]string {
+	masterValues := make(map[string]string)
+	for key, value := range values {
+		if _, ok := settingDefs[key]; ok {
+			masterValues[key] = value
+		}
+	}
+	return masterValues
+}
 
 func (h *Handler) GetSettings(c *app.Context, _ GetSettingsRequest) (SettingsResponse, error) {
 	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
@@ -289,6 +347,7 @@ func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (Set
 	}); err != nil {
 		return SettingsResponse{}, api.InternalError("save setting failed", err)
 	}
+	c.App.GetMasterSettings().Update(masterSettingsSnapshotUpdates(req.Settings))
 
 	if h.RefreshProbeTimings != nil && containsProbeTimingSetting(req.Settings) {
 		h.RefreshProbeTimings(requestContext)

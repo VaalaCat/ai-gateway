@@ -1,7 +1,8 @@
 "use client";
 
 import { CalendarIcon, X } from "lucide-react";
-import { format, parse } from "date-fns";
+import { format, isValid, parse } from "date-fns";
+import { useTranslations } from "next-intl";
 import { type DateAfter, type DateBefore } from "react-day-picker";
 
 import { Button } from "@/components/ui/button";
@@ -13,7 +14,8 @@ const FMT = "yyyy-MM-dd";
 
 export function parseDateStr(value: string): Date | undefined {
   if (!value) return undefined;
-  return parse(value, FMT, new Date());
+  const parsed = parse(value, FMT, new Date());
+  return isValid(parsed) && format(parsed, FMT) === value ? parsed : undefined;
 }
 export function formatDateStr(date: Date): string {
   return format(date, FMT);
@@ -39,22 +41,32 @@ export function DatePicker({
   className,
   size = "default",
 }: DatePickerProps) {
+  const t = useTranslations("common");
   const selected = parseDateStr(value);
   return (
-    <div className={cn("flex items-center gap-1", className)}>
+    <div
+      className={cn(
+        "relative w-full sm:w-[160px]",
+        size === "sm" && "sm:w-[150px]",
+        className,
+      )}
+    >
       <Popover>
         <PopoverTrigger asChild>
           <Button
             variant="outline"
             disabled={disabled}
             className={cn(
-              "w-full sm:w-[160px] justify-start text-left font-normal text-body",
-              size === "sm" && "h-8 sm:w-[150px]",
+              "w-full justify-start text-left font-normal text-body",
+              size === "sm" && "h-8",
+              selected && "pr-9",
               !selected && "text-muted-foreground",
             )}
           >
             <CalendarIcon className="mr-2 size-4" />
-            {selected ? format(selected, FMT) : (placeholder ?? "")}
+            <span className="truncate">
+              {selected ? formatDateStr(selected) : (placeholder ?? "")}
+            </span>
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-0" align="start">
@@ -69,10 +81,16 @@ export function DatePicker({
       </Popover>
       {selected && !disabled && (
         <Button
+          type="button"
           variant="ghost"
           size="icon-xs"
-          onClick={() => onChange("")}
-          className="text-muted-foreground"
+          aria-label={t("clearDate")}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onChange("");
+          }}
+          className="absolute top-1/2 right-1 -translate-y-1/2 text-muted-foreground"
         >
           <X />
         </Button>

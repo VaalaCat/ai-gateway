@@ -82,11 +82,11 @@ describe("MarketShareChart", () => {
     }
   });
 
-  it("bounds bar width and keeps category spacing", () => {
+  it("uses dense, readable market-share columns", () => {
     renderChart(["alpha", "beta"]);
 
-    expect(screen.getByTestId("bar-chart")).toHaveAttribute("data-max-bar-size", "48");
-    expect(screen.getByTestId("bar-chart")).toHaveAttribute("data-bar-category-gap", "20%");
+    expect(screen.getByTestId("bar-chart")).toHaveAttribute("data-max-bar-size", "64");
+    expect(screen.getByTestId("bar-chart")).toHaveAttribute("data-bar-category-gap", "8%");
   });
 
   it("keeps a single-series bar square", () => {

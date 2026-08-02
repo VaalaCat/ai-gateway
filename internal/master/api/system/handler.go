@@ -12,6 +12,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	masterdatabase "github.com/VaalaCat/ai-gateway/internal/master/database"
 	masterhistorybackfill "github.com/VaalaCat/ai-gateway/internal/master/historybackfill"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"gorm.io/gorm"
 )
@@ -19,6 +20,7 @@ import (
 var startTime = time.Now()
 
 type Handler struct {
+	StatsCache                    *dao.StatsCache
 	ConnectedCount                func() int
 	RefreshProbeTimings           func(context.Context)
 	CoreDatabasePath              string
@@ -63,8 +65,9 @@ func (h *Handler) acquireSettingsUpdate(ctx context.Context) (func(), error) {
 }
 
 type TableStats struct {
-	Name  string `json:"name"`
-	Count int64  `json:"count"`
+	Database string `json:"database"`
+	Name     string `json:"name"`
+	Count    int64  `json:"count"`
 }
 
 type SystemInfo struct {
@@ -88,23 +91,32 @@ type StatsResponse struct {
 type StatsRequest struct{}
 
 func (h *Handler) Stats(c *app.Context, _ StatsRequest) (StatsResponse, error) {
-	tables := []string{"users", "tokens", "channels", "model_configs", "agents", "usage_logs", "usage_log_traces", "settings"}
-	var tableStats []TableStats
+	coreDB := c.App.GetCoreDB()
+	if h.CoreDatabase != nil {
+		coreDB = h.CoreDatabase()
+	}
+	var logDB *gorm.DB
+	if h.LogDatabase != nil {
+		logDB = h.LogDatabase()
+	}
+	logReady := logDB != nil
+	if h.LogDatabaseReady != nil {
+		logReady = h.LogDatabaseReady()
+	}
 
-	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
-	stats := q.Stats()
-	for _, name := range tables {
-		if (name == "usage_logs" || name == "usage_log_traces") && h.LogDatabaseReady != nil && !h.LogDatabaseReady() {
-			continue
-		}
-		count, err := stats.GetTableCount(dao.KnownTable(name))
-		if err != nil {
-			if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
-				continue
+	tableStats, err := listDatabaseTableStats(c.RequestContext(), models.DatabaseRoleCore, coreDB)
+	if err != nil {
+		return StatsResponse{}, err
+	}
+	if c.App.GetDatabaseLayoutMode() == app.DatabaseLayoutSplit && logReady {
+		logTableStats, logErr := listDatabaseTableStats(c.RequestContext(), models.DatabaseRoleLog, logDB)
+		if logErr != nil {
+			if !errors.Is(dao.WrapLogDatabaseError(logErr), dao.ErrLogDatabaseUnavailable) {
+				return StatsResponse{}, logErr
 			}
-			return StatsResponse{}, err
+		} else {
+			tableStats = append(tableStats, logTableStats...)
 		}
-		tableStats = append(tableStats, TableStats{Name: name, Count: count})
 	}
 
 	var m runtime.MemStats
@@ -127,18 +139,6 @@ func (h *Handler) Stats(c *app.Context, _ StatsRequest) (StatsResponse, error) {
 		OnlineAgents: onlineAgents,
 	}
 
-	coreDB := c.App.GetCoreDB()
-	if h.CoreDatabase != nil {
-		coreDB = h.CoreDatabase()
-	}
-	var logDB *gorm.DB
-	if h.LogDatabase != nil {
-		logDB = h.LogDatabase()
-	}
-	logReady := logDB != nil
-	if h.LogDatabaseReady != nil {
-		logReady = h.LogDatabaseReady()
-	}
 	var logError string
 	if h.LogDatabaseError != nil {
 		logError = h.LogDatabaseError()
@@ -171,6 +171,33 @@ func (h *Handler) Stats(c *app.Context, _ StatsRequest) (StatsResponse, error) {
 	return StatsResponse{Tables: tableStats, System: info, Storage: storage}, nil
 }
 
+func listDatabaseTableStats(ctx context.Context, database string, db *gorm.DB) ([]TableStats, error) {
+	if db == nil {
+		return nil, errors.New("database is unavailable")
+	}
+	scoped := db.WithContext(ctx)
+	var tableNames []string
+	if err := scoped.Raw(`
+		SELECT name
+		FROM sqlite_master
+		WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+		ORDER BY name
+	`).Scan(&tableNames).Error; err != nil {
+		return nil, err
+	}
+
+	tables := make([]TableStats, 0, len(tableNames))
+	for _, name := range tableNames {
+		var count int64
+		quotedName := (&gorm.Statement{DB: scoped}).Quote(name)
+		if err := scoped.Raw("SELECT COUNT(*) FROM " + quotedName).Scan(&count).Error; err != nil {
+			return nil, err
+		}
+		tables = append(tables, TableStats{Database: database, Name: name, Count: count})
+	}
+	return tables, nil
+}
+
 func ActiveLegacyDatabaseSources(configuredPath string, status masterhistorybackfill.Status) []string {
 	if status.SourceKind == string(masterdatabase.LegacyLayoutNone) || status.State == masterhistorybackfill.StateSourceDeleted {
 		return nil
@@ -188,122 +215,6 @@ func ActiveLegacyDatabaseSources(configuredPath string, status masterhistoryback
 		}
 	}
 	return append(sources, status.SourcePath)
-}
-
-type CleanupPreviewRequest struct {
-	Target     string `form:"target" binding:"required,oneof=traces logs hourly_buckets"`
-	RetainDays int    `form:"retain_days" binding:"required,min=1"`
-}
-
-type CleanupPreviewResponse struct {
-	Target     string                `json:"target"`
-	RetainDays int                   `json:"retain_days"`
-	Total      int64                 `json:"total"`
-	ToDelete   int64                 `json:"to_delete"`
-	Tables     []CleanupTablePreview `json:"tables,omitempty"`
-	CutoffUnix int64                 `json:"cutoff_unix"`
-	CutoffDate string                `json:"cutoff_date"`
-}
-
-type CleanupTablePreview struct {
-	Name     string `json:"name"`
-	Total    int64  `json:"total"`
-	ToDelete int64  `json:"to_delete"`
-}
-
-func (h *Handler) CleanupPreview(c *app.Context, req CleanupPreviewRequest) (CleanupPreviewResponse, error) {
-	cutoffTime := time.Now().UTC().AddDate(0, 0, -req.RetainDays)
-	cutoff := cutoffTime.Unix()
-	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
-	db, err := daoCtx.LogDB()
-	if err != nil {
-		return CleanupPreviewResponse{}, mapLogDatabaseError(err)
-	}
-	mode, err := daoCtx.DatabaseLayoutMode()
-	if err != nil {
-		return CleanupPreviewResponse{}, err
-	}
-	tables := dao.LogCleanupTables(req.Target, mode)
-	previews := make([]CleanupTablePreview, 0, len(tables))
-	var total, toDelete int64
-	for _, table := range tables {
-		var tableTotal, tableDelete int64
-		if err := db.Table(table.Name).Count(&tableTotal).Error; err != nil {
-			return CleanupPreviewResponse{}, mapLogDatabaseError(dao.WrapLogDatabaseError(err))
-		}
-		query := db.Table(table.Name)
-		if table.TimeColumn == dao.LogCleanupDate {
-			query = query.Where("date < ?", cutoffTime.Format("2006-01-02"))
-		} else {
-			query = query.Where("created_at < ?", cutoff)
-		}
-		if err := query.Count(&tableDelete).Error; err != nil {
-			return CleanupPreviewResponse{}, mapLogDatabaseError(dao.WrapLogDatabaseError(err))
-		}
-		total += tableTotal
-		toDelete += tableDelete
-		previews = append(previews, CleanupTablePreview{Name: table.Name, Total: tableTotal, ToDelete: tableDelete})
-	}
-
-	return CleanupPreviewResponse{
-		Target:     req.Target,
-		RetainDays: req.RetainDays,
-		Total:      total,
-		ToDelete:   toDelete,
-		Tables:     previews,
-		CutoffUnix: cutoff,
-		CutoffDate: cutoffTime.Format("2006-01-02"),
-	}, nil
-}
-
-type CleanupRequest struct {
-	Target     string `json:"target" binding:"required,oneof=traces logs hourly_buckets"`
-	RetainDays int    `json:"retain_days" binding:"required,min=1"`
-	CutoffUnix int64  `json:"cutoff_unix" binding:"required,min=1"`
-}
-
-type CleanupResponse struct {
-	Deleted int64 `json:"deleted"`
-}
-
-func (h *Handler) Cleanup(c *app.Context, req CleanupRequest) (CleanupResponse, error) {
-	cutoff, err := validateCleanupCutoff(time.Now().UTC(), req.RetainDays, req.CutoffUnix)
-	if err != nil {
-		return CleanupResponse{}, api.BadRequestError("invalid cleanup cutoff", err)
-	}
-
-	mut := dao.NewAdminMutation(dao.NewContextWithContext(c.App, c.RequestContext()))
-	var deleted int64
-	var cleanupErr error
-	switch req.Target {
-	case "logs":
-		deleted, cleanupErr = mut.UsageLog().DeleteLogsBefore(cutoff)
-	case "traces":
-		deleted, cleanupErr = mut.UsageLog().DeleteTracesBefore(cutoff)
-	case "hourly_buckets":
-		deleted, cleanupErr = mut.Billing().DeleteHourlyBucketsBefore(cutoff)
-	}
-	if cleanupErr != nil {
-		return CleanupResponse{}, mapLogDatabaseError(cleanupErr)
-	}
-
-	return CleanupResponse{Deleted: deleted}, nil
-}
-
-func validateCleanupCutoff(now time.Time, retainDays int, cutoffUnix int64) (time.Time, error) {
-	if retainDays < 1 || cutoffUnix < 1 {
-		return time.Time{}, errors.New("cleanup cutoff is required")
-	}
-	cutoff := time.Unix(cutoffUnix, 0).UTC()
-	if cutoff.After(now) {
-		return time.Time{}, errors.New("cleanup cutoff cannot be in the future")
-	}
-	expected := now.AddDate(0, 0, -retainDays)
-	delta := cutoff.Sub(expected)
-	if delta < -5*time.Minute || delta > 5*time.Minute {
-		return time.Time{}, errors.New("cleanup cutoff does not match retain_days")
-	}
-	return cutoff, nil
 }
 
 func mapLogDatabaseError(err error) error {

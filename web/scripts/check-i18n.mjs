@@ -25,7 +25,10 @@ export function checkRequiredRuntimeKeys(messages, keys) {
   return missing;
 }
 
-const TASK_15_RUNTIME_KEYS = [
+const REQUIRED_RUNTIME_KEYS = [
+  "channels.autoBanBadge",
+  "channels.autoBanTrippedDescription",
+  "channels.autoBanTrippedAt",
   "charts.trend.logUnavailable",
   "system.logStorage.title",
   "system.logStorage.description",
@@ -266,8 +269,8 @@ export async function main() {
     ...checkKeysAligned(zhKeys, enKeys),
     ...checkPlaceholderValues(zhObj, enObj),
     ...checkCodeReferencesExist(codeRefs, zhKeys),
-    ...checkRequiredRuntimeKeys(zhObj, TASK_15_RUNTIME_KEYS).map((key) => ({ type: "missing-runtime", side: "zh", key })),
-    ...checkRequiredRuntimeKeys(enObj, TASK_15_RUNTIME_KEYS).map((key) => ({ type: "missing-runtime", side: "en", key })),
+    ...checkRequiredRuntimeKeys(zhObj, REQUIRED_RUNTIME_KEYS).map((key) => ({ type: "missing-runtime", side: "zh", key })),
+    ...checkRequiredRuntimeKeys(enObj, REQUIRED_RUNTIME_KEYS).map((key) => ({ type: "missing-runtime", side: "en", key })),
   ];
 
   if (violations.length === 0) {

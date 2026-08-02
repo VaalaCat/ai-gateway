@@ -11,7 +11,8 @@ import (
 type Handler struct{}
 
 type Response struct {
-	Token TokenCapabilities `json:"token"`
+	Token            TokenCapabilities `json:"token"`
+	ModelMarketplace *bool             `json:"model_marketplace,omitempty"`
 }
 
 type TokenCapabilities struct {
@@ -23,10 +24,24 @@ func (h *Handler) Get(c *app.Context, _ api.EmptyRequest) (Response, error) {
 	if scope == nil {
 		return Response{}, api.UnauthorizedError("not authenticated")
 	}
-	canEdit := scope.IsAdmin
-	if !canEdit {
-		q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
-		canEdit = q.Setting().LookupBool(consts.SettingKeyTokenModelWhitelistSelfService, false)
+	if scope.IsAdmin {
+		return Response{
+			Token:            TokenCapabilities{CanEditModelWhitelist: true},
+			ModelMarketplace: truePointer(),
+		}, nil
 	}
-	return Response{Token: TokenCapabilities{CanEditModelWhitelist: canEdit}}, nil
+
+	settings := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Setting()
+	response := Response{Token: TokenCapabilities{
+		CanEditModelWhitelist: settings.LookupBool(consts.SettingKeyTokenModelWhitelistSelfService, false),
+	}}
+	if settings.LookupBool(consts.SettingKeyModelMarketplaceEnabled, consts.ModelMarketplaceDefaultEnabled) {
+		response.ModelMarketplace = truePointer()
+	}
+	return response, nil
+}
+
+func truePointer() *bool {
+	value := true
+	return &value
 }

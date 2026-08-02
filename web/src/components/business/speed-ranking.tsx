@@ -13,12 +13,11 @@ import { ModelName } from "@/components/business/model-name";
 import { formatDuration } from "@/lib/utils/format";
 import type { SpeedRow } from "@/lib/api/dashboard";
 
-export interface RankedSpeedRow extends SpeedRow {
-  entity?: "model" | "channel";
-}
+export type SpeedRankingEntity = "model" | "channel";
 
 export interface SpeedRankingProps {
-  rows: RankedSpeedRow[];
+  rows: SpeedRow[];
+  entity: SpeedRankingEntity;
   /** ttft: 按 ttft_p95_ms 升序(越低越快); tps: 按 tps_p5 降序(越高越快) */
   metric: "ttft" | "tps";
   title: string;
@@ -27,7 +26,7 @@ export interface SpeedRankingProps {
   nameLabel: string;
   valueLabel: string;
   emptyText: string;
-  topN?: number;
+  topN: number;
   className?: string;
 }
 
@@ -38,16 +37,17 @@ export interface SpeedRankingProps {
  */
 export function SpeedRanking({
   rows,
+  entity,
   metric,
   title,
   rankLabel,
   nameLabel,
   valueLabel,
   emptyText,
-  topN = 5,
+  topN,
   className,
 }: SpeedRankingProps) {
-  const hasSample = (row: RankedSpeedRow) =>
+  const hasSample = (row: SpeedRow) =>
     metric === "ttft" ? (row.ttft_p95_ms ?? 0) > 0 : (row.tps_p5 ?? 0) > 0;
   const ranked = rows
     .slice()
@@ -84,7 +84,7 @@ export function SpeedRanking({
                 <TableRow key={`${r.id ?? ""}-${r.name}-${i}`}>
                   <TableCell className="text-muted-foreground tabular-nums">{hasSample(r) ? i + 1 : "—"}</TableCell>
                   <TableCell>
-                    {r.entity === "model" ? <ModelName name={r.name} /> : r.name}
+                    {entity === "model" ? <ModelName name={r.name} /> : r.name}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {!hasSample(r) ? "—" : metric === "ttft"

@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
-import type { Channel, ChannelTypeMeta, ChannelTestResponse, ChannelTestParams, PaginatedResponse, PaginatedParams, ChannelDataFlowResponse } from "@/lib/types";
+import type { BatchEditChannelRequest, BatchEditChannelResponse, Channel, ChannelTypeMeta, ChannelTestResponse, ChannelTestParams, PaginatedResponse, PaginatedParams, ChannelDataFlowResponse } from "@/lib/types";
 
 interface QueryOptions {
   enabled?: boolean;
@@ -46,6 +46,15 @@ export function useUpdateChannel() {
   return useMutation({
     mutationFn: ({ id, ...body }: { id: number } & Partial<Channel>) =>
       api.put<Channel>(`/admin/channels/${id}`, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+  });
+}
+
+export function useBatchEditChannels() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: BatchEditChannelRequest) =>
+      api.post<BatchEditChannelResponse>("/admin/channels/batch-edit", body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["channels"] });
     },

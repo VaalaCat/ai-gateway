@@ -33,7 +33,10 @@ import {
 
 import { formatMoneyCompact, formatMoneyExact } from "@/lib/utils/format";
 import type { BillingDailySeriesItem } from "@/lib/api/byok-stats";
-import { chartColorForSeries, chartDashForSeries } from "@/lib/chart-colors";
+import {
+  CHART_LINE_ACTIVE_DOT,
+  chartColorForSeries,
+} from "@/lib/chart-colors";
 
 interface ChartProps {
   items: BillingDailySeriesItem[];
@@ -64,10 +67,10 @@ function RequestsChart({ items, loading }: ChartProps) {
           <Line
             type="monotone"
             dataKey="request_count"
-            stroke="var(--color-request_count)"
+            stroke={chartColorForSeries("request_count")}
             strokeWidth={2}
-            strokeDasharray={chartDashForSeries("request_count")}
             dot={false}
+            activeDot={CHART_LINE_ACTIVE_DOT}
           />
         </LineChart>
       </ChartContainer>
@@ -130,10 +133,10 @@ export function TokensChart({ items, loading }: ChartProps) {
               key={k}
               type="monotone"
               dataKey={k}
-              stroke={`var(--color-${k})`}
+              stroke={chartColorForSeries(k)}
               strokeWidth={2}
-              strokeDasharray={chartDashForSeries(k)}
               dot={false}
+              activeDot={CHART_LINE_ACTIVE_DOT}
               hide={hidden.has(k)}
             />
           ))}
@@ -193,10 +196,10 @@ function CostChart({ items, loading }: ChartProps) {
               key={k}
               type="monotone"
               dataKey={k}
-              stroke={`var(--color-${k})`}
+              stroke={chartColorForSeries(k)}
               strokeWidth={2}
-              strokeDasharray={chartDashForSeries(k)}
               dot={false}
+              activeDot={CHART_LINE_ACTIVE_DOT}
               hide={hidden.has(k)}
             />
           ))}

@@ -16,6 +16,7 @@ import (
 
 type AdminChannelCreateInput struct {
 	Name                string
+	PublicDisplayName   string
 	Status              int
 	Type                int
 	Key                 string
@@ -60,7 +61,7 @@ func buildAdminChannelCreateInput(req CreateRequest) (AdminChannelCreateInput, e
 		}
 	}
 	input := AdminChannelCreateInput{
-		Name: req.Name, Status: 1, Type: req.Type, Key: req.Key, BaseURL: req.BaseURL,
+		Name: req.Name, PublicDisplayName: req.PublicDisplayName, Status: 1, Type: req.Type, Key: req.Key, BaseURL: req.BaseURL,
 		Models: modelsList, ModelMapping: mapping, Weight: req.Weight, Priority: req.Priority,
 		UseLegacyAdaptor: req.UseLegacyAdaptor, SupportedAPITypes: req.SupportedAPITypes,
 		Endpoints: req.Endpoints, PassthroughEnabled: req.PassthroughEnabled,
@@ -118,8 +119,15 @@ func buildAdminChannel(input AdminChannelCreateInput) (models.Channel, error) {
 	if len(input.Name) > 64 {
 		return models.Channel{}, fmt.Errorf("name exceeds 64 bytes")
 	}
+	publicDisplayName, err := validatePublicDisplayName(input.PublicDisplayName)
+	if err != nil {
+		return models.Channel{}, err
+	}
 	if input.Status != 0 && input.Status != 1 {
 		return models.Channel{}, fmt.Errorf("status must be 0 or 1")
+	}
+	if err := api.ValidateAutoBanValue(input.AutoBan); err != nil {
+		return models.Channel{}, err
 	}
 	if err := input.Resilience.Validate(); err != nil {
 		return models.Channel{}, err
@@ -154,7 +162,8 @@ func buildAdminChannel(input AdminChannelCreateInput) (models.Channel, error) {
 			StatusCodeMapping: input.StatusCodeMapping, OtherSettings: input.OtherSettings,
 			Affinity: datatypes.NewJSONType(input.Affinity),
 		},
-		Key: input.Key, Models: strings.Join(input.Models, ","), ModelMapping: string(mapping),
+		PublicDisplayName: publicDisplayName,
+		Key:               input.Key, Models: strings.Join(input.Models, ","), ModelMapping: string(mapping),
 		ProxyURL: input.ProxyURL, HeaderOverride: input.HeaderOverride,
 		DisableKeepalive: input.DisableKeepalive,
 		Resilience:       datatypes.NewJSONType(input.Resilience), PriceRatio: input.PriceRatio,

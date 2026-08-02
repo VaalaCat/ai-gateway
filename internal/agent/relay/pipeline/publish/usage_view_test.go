@@ -1,13 +1,41 @@
 package publish
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProjectInflightEntryOmitsAutoDisableTriggersFromSnapshotJSON(t *testing.T) {
+	trigger := attemptproxy.ChannelAutoDisableTrigger{
+		Source: attemptproxy.SourceAdmin, ChannelID: 7, Revision: 4,
+		Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	rctx := &state.RelayContext{
+		Input: state.RelayInput{RequestID: "req-inflight", StartTime: time.Now()},
+		State: &state.RelayState{
+			FailPhase:           state.PhaseCtxBuild,
+			AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
+		},
+	}
+
+	finalJSON, err := json.Marshal(ProjectUsageEntry(rctx))
+	require.NoError(t, err)
+	require.Contains(t, string(finalJSON), `"auto_disable_triggers"`)
+
+	inflightJSON, err := json.Marshal(inflight.Snapshot{
+		ID: 1, ReqID: rctx.Input.RequestID, View: ProjectInflightEntry(rctx),
+	})
+	require.NoError(t, err)
+	require.NotContains(t, string(inflightJSON), `"auto_disable_triggers"`)
+}
 
 func TestProjectUsageEntry_BaseIdentity(t *testing.T) {
 	rctx := &state.RelayContext{
@@ -21,6 +49,47 @@ func TestProjectUsageEntry_BaseIdentity(t *testing.T) {
 	e := ProjectUsageEntry(rctx)
 	if e.RequestID != "req-1" || e.UserID != 7 || e.TokenID != 3 || e.ModelName != "gpt-4o" || !e.IsStream {
 		t.Fatalf("base projection wrong: %+v", e)
+	}
+}
+
+func TestProjectUsageEntryAutoDisableTriggersDeduplicatesByIdentity(t *testing.T) {
+	first := attemptproxy.ChannelAutoDisableTrigger{
+		Source: attemptproxy.SourceAdmin, ChannelID: 7, Revision: 4,
+		Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	want := []attemptproxy.ChannelAutoDisableTrigger{
+		first,
+		{Source: attemptproxy.SourcePrivate, ChannelID: 7, Revision: 4, Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors},
+		{Source: attemptproxy.SourceAdmin, ChannelID: 7, Revision: 5, Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors},
+		{Source: attemptproxy.SourceAdmin, ChannelID: 8, Revision: 4, Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors},
+	}
+	triggers := []attemptproxy.ChannelAutoDisableTrigger{first, first, want[1], want[2], want[1], want[3]}
+	for _, test := range []struct {
+		name          string
+		source        state.ChannelSource
+		wantAdminID   uint
+		wantPrivateID uint
+	}{
+		{name: "admin channel projection", source: state.SourceAdmin, wantAdminID: 11},
+		{name: "private channel projection", source: state.SourcePrivate, wantPrivateID: 11},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rctx := &state.RelayContext{
+				Input: state.RelayInput{StartTime: time.Now()},
+				State: &state.RelayState{
+					AutoDisableTriggers: triggers,
+					Execution: state.ExecutionResult{Used: state.Attempt{
+						Channel: &models.Channel{}, Source: test.source, SourceID: 11,
+					}},
+				},
+			}
+
+			got := ProjectUsageEntry(rctx)
+
+			require.Equal(t, want, got.AutoDisableTriggers)
+			require.Equal(t, test.wantAdminID, got.ChannelID)
+			require.Equal(t, test.wantPrivateID, got.PrivateChannelID)
+		})
 	}
 }
 

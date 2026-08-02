@@ -307,6 +307,8 @@ func TestBootstrapTableCopiersCrossReadBatchBoundary(t *testing.T) {
 			users[i] = models.User{ID: uint(i + 1), Username: fmt.Sprintf("user-%04d", i+1)}
 		}
 		require.NoError(t, source.CreateInBatches(users, 500).Error)
+		require.NoError(t, source.Exec(`UPDATE users SET status = 0, group_id = 0, created_at = 0, updated_at = 0 WHERE id = 2000`).Error)
+		require.NoError(t, source.Exec(`UPDATE users SET status = 9, group_id = 8, created_at = 7, updated_at = 6 WHERE id = 2001`).Error)
 		target := openBootstrapTarget(t)
 
 		result, err := BootstrapCore(t.Context(), source, target, LegacyLayoutInfo{Kind: LegacyLayoutMonolith, Path: sourcePath}, BootstrapOptions{})
@@ -317,6 +319,24 @@ func TestBootstrapTableCopiersCrossReadBatchBoundary(t *testing.T) {
 		require.NoError(t, target.Model(&models.User{}).Distinct("id").Count(&distinct).Error)
 		require.EqualValues(t, len(users), count)
 		require.Equal(t, count, distinct)
+		var boundary []struct {
+			ID        int
+			Status    int
+			GroupID   int `gorm:"column:group_id"`
+			CreatedAt int `gorm:"column:created_at"`
+			UpdatedAt int `gorm:"column:updated_at"`
+		}
+		require.NoError(t, target.Raw(`SELECT id, status, group_id, created_at, updated_at FROM users WHERE id IN (2000, 2001) ORDER BY id`).Scan(&boundary).Error)
+		require.Equal(t, []struct {
+			ID        int
+			Status    int
+			GroupID   int `gorm:"column:group_id"`
+			CreatedAt int `gorm:"column:created_at"`
+			UpdatedAt int `gorm:"column:updated_at"`
+		}{
+			{ID: 2000},
+			{ID: 2001, Status: 9, GroupID: 8, CreatedAt: 7, UpdatedAt: 6},
+		}, boundary)
 	})
 
 	t.Run("string primary key", func(t *testing.T) {
@@ -328,6 +348,8 @@ func TestBootstrapTableCopiersCrossReadBatchBoundary(t *testing.T) {
 			settings[i] = models.Setting{Key: fmt.Sprintf("setting-%04d", i+1), Value: "value"}
 		}
 		require.NoError(t, source.CreateInBatches(settings, 500).Error)
+		require.NoError(t, source.Exec(`UPDATE settings SET value = '' WHERE key = 'setting-2000'`).Error)
+		require.NoError(t, source.Exec(`UPDATE settings SET value = 'after-boundary' WHERE key = 'setting-2001'`).Error)
 		target := openBootstrapTarget(t)
 
 		result, err := BootstrapCore(t.Context(), source, target, LegacyLayoutInfo{Kind: LegacyLayoutMonolith, Path: sourcePath}, BootstrapOptions{})
@@ -338,6 +360,9 @@ func TestBootstrapTableCopiersCrossReadBatchBoundary(t *testing.T) {
 		require.NoError(t, target.Model(&models.Setting{}).Distinct("key").Count(&distinct).Error)
 		require.EqualValues(t, len(settings), count)
 		require.Equal(t, count, distinct)
+		var boundary []models.Setting
+		require.NoError(t, target.Where("key IN ?", []string{"setting-2000", "setting-2001"}).Order("key").Find(&boundary).Error)
+		require.Equal(t, []models.Setting{{Key: "setting-2000", Value: ""}, {Key: "setting-2001", Value: "after-boundary"}}, boundary)
 	})
 }
 

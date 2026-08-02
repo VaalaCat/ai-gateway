@@ -11,16 +11,53 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/publish"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestGetAllInflight_OmitsAutoDisableTriggersFromMergedResponse(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, db.Create(&models.Agent{AgentID: "uid-a", Name: "edge-a", Status: 1}).Error)
+	ctx := newTestContext(t, db)
+	rctx := &state.RelayContext{
+		Input: state.RelayInput{RequestID: "triggered", StartTime: time.Now()},
+		State: &state.RelayState{
+			FailPhase: state.PhaseCtxBuild,
+			AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{{
+				Source: attemptproxy.SourceAdmin, ChannelID: 7, Revision: 4,
+				Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+			}},
+		},
+	}
+	h := &Handler{
+		Connections: connectivity.NewService("epoch-clean-inflight", connectivity.Sources{Control: &apiControlSource{facts: map[string]connectivity.ControlSessionFact{
+			"uid-a": {Generation: 11, ConnectedAt: 900, HeartbeatAt: 990},
+		}}}, connectivity.Options{}),
+		GetOnlineAgentIDs: func() []string { return []string{"uid-a"} },
+		HubCallSession: func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			return json.Marshal([]inflight.Snapshot{{
+				ID: 1, ReqID: rctx.Input.RequestID, View: publish.ProjectInflightEntry(rctx),
+			}})
+		},
+	}
+
+	response, err := h.GetAllInflight(ctx, api.EmptyRequest{})
+	require.NoError(t, err)
+	payload, err := json.Marshal(response)
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"triggered"`)
+	require.NotContains(t, string(payload), `"auto_disable_triggers"`)
+}
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()

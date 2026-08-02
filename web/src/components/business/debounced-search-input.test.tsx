@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -51,5 +52,29 @@ describe("DebouncedSearchInput", () => {
     act(() => vi.advanceTimersByTime(300));
 
     expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("commits once when the parent recreates onCommit without accepting the value immediately", () => {
+    let commits = 0;
+    function UnstableParent() {
+      const [, rerender] = useState(0);
+      return (
+        <DebouncedSearchInput
+          value=""
+          onCommit={() => {
+            commits += 1;
+            if (commits < 5) rerender((value) => value + 1);
+          }}
+          placeholder="Search"
+        />
+      );
+    }
+
+    render(<UnstableParent />);
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "channel" } });
+    act(() => vi.advanceTimersByTime(300));
+    act(() => vi.advanceTimersByTime(300));
+
+    expect(commits).toBe(1);
   });
 });

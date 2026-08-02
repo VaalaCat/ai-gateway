@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"time"
 
-	masterbilling "github.com/VaalaCat/ai-gateway/internal/master/billing"
 	masterdatabase "github.com/VaalaCat/ai-gateway/internal/master/database"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"gorm.io/gorm"
@@ -69,18 +68,9 @@ func (w *BillingBatchWriter) writeHistoryWithHook(
 			if err := tx.Model(&models.BillingLog{}).Where("request_id IN ?", requestIDs).Pluck("request_id", &existing).Error; err != nil {
 				return fmt.Errorf("find existing historical billing: %w", err)
 			}
-			var receipts []string
-			if err := tx.Model(&models.BillingProjectionReceipt{}).Where("request_id IN ?", requestIDs).Pluck("request_id", &receipts).Error; err != nil {
-				return fmt.Errorf("find existing billing projection receipts: %w", err)
-			}
 			existingSet := make(map[string]struct{}, len(existing))
 			for _, requestID := range existing {
 				existingSet[requestID] = struct{}{}
-			}
-			for _, requestID := range receipts {
-				if _, exists := existingSet[requestID]; !exists {
-					return fmt.Errorf("billing projection receipt %q has no committed fact", requestID)
-				}
 			}
 			if len(existing) > 0 {
 				novel = make([]models.BillingLog, 0, len(unique)-len(existingSet))
@@ -101,14 +91,6 @@ func (w *BillingBatchWriter) writeHistoryWithHook(
 			if inserted != int64(len(novel)) {
 				return fmt.Errorf("insert historical billing: inserted %d of %d new facts", inserted, len(novel))
 			}
-			for i := range novel {
-				if err := masterbilling.RegisterPendingBillingProjectionInTx(ctx, tx, &novel[i]); err != nil {
-					return fmt.Errorf("register historical billing projection: %w", err)
-				}
-			}
-		}
-		if err := masterbilling.ProjectCommittedBillingFactsInTx(ctx, tx, unique); err != nil {
-			return fmt.Errorf("project historical billing: %w", err)
 		}
 		if beforeCursor != nil {
 			if err := beforeCursor(); err != nil {

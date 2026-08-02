@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -35,6 +36,42 @@ type indexColumn struct {
 	desc bool
 }
 
+type legacyModelConfigWithoutMetadata struct {
+	ID              uint   `gorm:"primaryKey"`
+	ModelName       string `gorm:"uniqueIndex;size:128"`
+	InputPrice      float64
+	OutputPrice     float64
+	CacheReadPrice  float64
+	CacheWritePrice float64
+	Status          int
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
+type legacyChannelWithoutAutoBanRuntime struct {
+	ID         uint `gorm:"primaryKey"`
+	Name       string
+	Type       int
+	Status     int
+	AutoBan    int
+	LimitState string `gorm:"type:text"`
+}
+
+func (legacyChannelWithoutAutoBanRuntime) TableName() string { return "channels" }
+
+type legacyPrivateChannelWithoutAutoBanRuntime struct {
+	ID      uint `gorm:"primaryKey"`
+	OwnerID uint
+	Name    string
+	Type    int
+	Status  int
+	AutoBan int
+}
+
+func (legacyPrivateChannelWithoutAutoBanRuntime) TableName() string { return "private_channels" }
+
+func (legacyModelConfigWithoutMetadata) TableName() string { return "model_configs" }
+
 func TestAutoMigrate(t *testing.T) {
 	db := setupTestDB(t)
 	sqlDB, _ := db.DB()
@@ -45,6 +82,191 @@ func TestAutoMigrate(t *testing.T) {
 		if !db.Migrator().HasTable(table) {
 			t.Errorf("table %s not created", table)
 		}
+	}
+}
+
+func TestAutoMigrateAddsAutoBanRuntimeColumns(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	for _, model := range []any{&Channel{}, &PrivateChannel{}} {
+		for _, column := range []string{"auto_ban_state", "auto_ban_revision"} {
+			if !db.Migrator().HasColumn(model, column) {
+				t.Fatalf("%T missing %s", model, column)
+			}
+		}
+	}
+}
+
+func TestAutoMigrateBackfillsLegacyAutoBanRuntimeState(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	require.NoError(t, db.AutoMigrate(&legacyChannelWithoutAutoBanRuntime{}, &legacyPrivateChannelWithoutAutoBanRuntime{}))
+	require.NoError(t, db.Create(&legacyChannelWithoutAutoBanRuntime{ID: 1, Name: "legacy", Type: 1, Status: 1, LimitState: "{}"}).Error)
+	require.NoError(t, db.Create(&legacyPrivateChannelWithoutAutoBanRuntime{ID: 1, OwnerID: 7, Name: "legacy-private", Type: 1, Status: 1}).Error)
+
+	require.NoError(t, AutoMigrate(db))
+	for _, model := range []any{&Channel{}, &PrivateChannel{}} {
+		for _, column := range []string{"auto_ban_state", "auto_ban_revision"} {
+			require.True(t, db.Migrator().HasColumn(model, column))
+		}
+	}
+	for _, table := range []string{"channels", "private_channels"} {
+		var nullRuntimeValues int64
+		require.NoError(t, db.Raw("SELECT COUNT(*) FROM "+table+" WHERE auto_ban_state IS NULL OR auto_ban_revision IS NULL").Scan(&nullRuntimeValues).Error)
+		require.Zerof(t, nullRuntimeValues, "%s legacy rows retain NULL runtime values", table)
+	}
+
+	var channel Channel
+	require.NoError(t, db.First(&channel, 1).Error)
+	require.Equal(t, ChannelDisableState{}, channel.AutoBanState.Data())
+	require.Zero(t, channel.AutoBanRevision)
+	var privateChannel PrivateChannel
+	require.NoError(t, db.First(&privateChannel, 1).Error)
+	require.Equal(t, ChannelDisableState{}, privateChannel.AutoBanState.Data())
+	require.Zero(t, privateChannel.AutoBanRevision)
+
+	require.NoError(t, db.Model(&Channel{}).Where("id = ?", channel.ID).Update("auto_ban_revision", gorm.Expr("auto_ban_revision + ?", 1)).Error)
+	require.NoError(t, db.First(&channel, channel.ID).Error)
+	require.Equal(t, uint64(1), channel.AutoBanRevision)
+}
+
+func TestMigrationsPreBackfillNullableAutoBanRuntimeColumns(t *testing.T) {
+	tests := []struct {
+		name    string
+		migrate func(*gorm.DB) error
+		prepare func(*gorm.DB) error
+	}{
+		{
+			name:    "legacy",
+			migrate: AutoMigrate,
+			prepare: func(db *gorm.DB) error { return nil },
+		},
+		{
+			name:    "split core",
+			migrate: MigrateCoreDB,
+			prepare: func(db *gorm.DB) error {
+				if err := db.AutoMigrate(&DatabaseLayout{}); err != nil {
+					return err
+				}
+				return db.Create(&DatabaseLayout{ID: DatabaseLayoutID, Role: DatabaseRoleCore, Version: DatabaseLayoutVersion}).Error
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+			require.NoError(t, err)
+			if tt.prepare != nil {
+				require.NoError(t, tt.prepare(db))
+			}
+			require.NoError(t, db.Exec(`CREATE TABLE channels (id integer primary key, name text, type integer, status integer, auto_ban integer, limit_state text, auto_ban_state text NULL, auto_ban_revision integer NULL); INSERT INTO channels VALUES (1, 'legacy', 1, 1, 0, '{}', NULL, NULL)`).Error)
+			require.NoError(t, db.Exec(`CREATE TABLE private_channels (id integer primary key, owner_id integer, name text, type integer, status integer, auto_ban integer, auto_ban_state text NULL, auto_ban_revision integer NULL); INSERT INTO private_channels VALUES (1, 7, 'legacy-private', 1, 1, 0, NULL, NULL)`).Error)
+
+			require.NoError(t, tt.migrate(db))
+			require.NoError(t, tt.migrate(db))
+			for _, table := range []string{"channels", "private_channels"} {
+				var nulls int64
+				require.NoError(t, db.Raw("SELECT COUNT(*) FROM "+table+" WHERE auto_ban_state IS NULL OR auto_ban_revision IS NULL").Scan(&nulls).Error)
+				require.Zero(t, nulls)
+			}
+			var channel Channel
+			require.NoError(t, db.First(&channel, 1).Error)
+			require.Equal(t, ChannelDisableState{}, channel.AutoBanState.Data())
+			require.Zero(t, channel.AutoBanRevision)
+			var privateChannel PrivateChannel
+			require.NoError(t, db.First(&privateChannel, 1).Error)
+			require.Equal(t, ChannelDisableState{}, privateChannel.AutoBanState.Data())
+			require.Zero(t, privateChannel.AutoBanRevision)
+			require.NoError(t, db.Model(&Channel{}).Where("id = 1").Update("auto_ban_revision", gorm.Expr("auto_ban_revision + ?", 1)).Error)
+			require.NoError(t, db.First(&channel, 1).Error)
+			require.Equal(t, uint64(1), channel.AutoBanRevision)
+		})
+	}
+}
+
+func TestMigrateCoreDBDoesNotPreBackfillBeforeLayoutValidation(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(`CREATE TABLE channels (id integer primary key, auto_ban_state text NULL, auto_ban_revision integer NULL); INSERT INTO channels VALUES (1, NULL, NULL)`).Error)
+	require.Error(t, MigrateCoreDB(db))
+	var nulls int64
+	require.NoError(t, db.Raw(`SELECT COUNT(*) FROM channels WHERE auto_ban_state IS NULL OR auto_ban_revision IS NULL`).Scan(&nulls).Error)
+	require.Equal(t, int64(1), nulls)
+}
+
+func TestChannelPublicDisplayNameSchema(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	if !db.Migrator().HasColumn(&Channel{}, "public_display_name") {
+		t.Fatal("channels is missing public_display_name")
+	}
+	if db.Migrator().HasColumn(&PrivateChannel{}, "public_display_name") {
+		t.Fatal("private_channels must not have public_display_name")
+	}
+}
+
+func TestModelMetadataSchema(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	for _, column := range []string{"synced_metadata", "metadata_override"} {
+		if !db.Migrator().HasColumn(&ModelConfig{}, column) {
+			t.Fatalf("model_configs is missing %s", column)
+		}
+	}
+}
+
+func TestModelMetadataSchemaMigratesExistingRowsToEmptyJSON(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	defer sqlDB.Close()
+
+	if err := db.AutoMigrate(&legacyModelConfigWithoutMetadata{}); err != nil {
+		t.Fatalf("create legacy model_configs: %v", err)
+	}
+	legacy := legacyModelConfigWithoutMetadata{ModelName: "legacy-model", Status: 1}
+	if err := db.Create(&legacy).Error; err != nil {
+		t.Fatalf("create legacy model row: %v", err)
+	}
+
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("migrate legacy model_configs: %v", err)
+	}
+	var nullMetadataCount int64
+	if err := db.Raw(`SELECT COUNT(*) FROM model_configs WHERE synced_metadata IS NULL OR metadata_override IS NULL`).Scan(&nullMetadataCount).Error; err != nil {
+		t.Fatalf("count NULL metadata columns: %v", err)
+	}
+	if nullMetadataCount != 0 {
+		t.Fatalf("migrated model rows retain %d NULL metadata values", nullMetadataCount)
+	}
+	var migrated ModelConfig
+	if err := db.First(&migrated, legacy.ID).Error; err != nil {
+		t.Fatalf("read migrated model row: %v", err)
+	}
+	if got := migrated.SyncedMetadata.Data(); !reflect.DeepEqual(got, ModelMetadata{}) {
+		t.Fatalf("synced metadata = %+v, want empty object", got)
+	}
+	if got := migrated.MetadataOverride.Data(); !reflect.DeepEqual(got, ModelMetadataOverride{}) {
+		t.Fatalf("metadata override = %+v, want empty object", got)
+	}
+	if err := db.Exec(`UPDATE model_configs SET synced_metadata = NULL WHERE id = ?`, legacy.ID).Error; err == nil {
+		t.Fatal("synced_metadata must reject NULL after migration")
 	}
 }
 
@@ -262,7 +484,7 @@ func usageLogIndexColumns(t *testing.T, sqlDB interface {
 	return columns
 }
 
-func TestAutoMigrate_BillingTables(t *testing.T) {
+func TestAutoMigrate_KeepsLogOwnedDailyTablesForLegacyLayout(t *testing.T) {
 	db := setupTestDB(t)
 	sqlDB, _ := db.DB()
 	defer sqlDB.Close()
@@ -271,7 +493,7 @@ func TestAutoMigrate_BillingTables(t *testing.T) {
 		table := table
 		t.Run(table, func(t *testing.T) {
 			if !db.Migrator().HasTable(table) {
-				t.Fatalf("expected table %s to be created", table)
+				t.Fatalf("legacy log-owned table %s must be created", table)
 			}
 		})
 	}

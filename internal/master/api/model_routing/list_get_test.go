@@ -103,54 +103,108 @@ func listRoutings(t *testing.T, srv *master.Server, jwt, query string) []models.
 	return resp.Data
 }
 
-func TestList_DefaultFilter(t *testing.T) {
+func seedListedRouting(t *testing.T, srv *master.Server, routing models.ModelRouting) models.ModelRouting {
+	t.Helper()
+	if err := srv.App.GetCoreDB().Create(&routing).Error; err != nil {
+		t.Fatalf("seed listed routing: %v", err)
+	}
+	return routing
+}
+
+func TestModelRoutingList_DefaultFilterReturnsEveryScope(t *testing.T) {
 	srv := setupTestMaster(t)
 	jwt := loginAdmin(t, srv)
-	seedChannel(t, srv, jwt, "gpt-4o")
+	seedListedRouting(t, srv, models.ModelRouting{Name: "g1", Scope: models.RoutingScopeGlobal})
+	seedListedRouting(t, srv, models.ModelRouting{Name: "u-other", Scope: models.RoutingScopeUser, UserID: 42})
+	seedListedRouting(t, srv, models.ModelRouting{Name: "t-other", Scope: models.RoutingScopeToken, TokenID: 88})
 
-	// 创建：global + admin 自己的 user-scope(user_id=1) + 别人 user_id=42 的 user-scope
-	createRouting(t, srv, jwt, map[string]any{
-		"name": "g1", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
-	})
-	createRouting(t, srv, jwt, map[string]any{
-		"name": "u-self", "scope": "user", "user_id": 1, "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
-	})
-	createRouting(t, srv, jwt, map[string]any{
-		"name": "u-other", "scope": "user", "user_id": 42, "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
-	})
-
-	// 默认筛选：应该看到 g1 + u-self，不看到 u-other
 	list := listRoutings(t, srv, jwt, "")
 	names := make(map[string]bool)
 	for _, r := range list {
 		names[r.Name] = true
 	}
-	if !names["g1"] || !names["u-self"] {
-		t.Errorf("default filter should include g1 + u-self, got %v", names)
-	}
-	if names["u-other"] {
-		t.Errorf("default filter should NOT include other user's routings")
+	for _, name := range []string{"g1", "u-other", "t-other"} {
+		if !names[name] {
+			t.Errorf("default admin filter should include %q, got %v", name, names)
+		}
 	}
 }
 
-func TestList_ExplicitUserID(t *testing.T) {
+func TestModelRoutingList_ExplicitOwnerFilters(t *testing.T) {
 	srv := setupTestMaster(t)
 	jwt := loginAdmin(t, srv)
-	seedChannel(t, srv, jwt, "gpt-4o")
-	createRouting(t, srv, jwt, map[string]any{
-		"name": "u42", "scope": "user", "user_id": 42, "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
-	})
-	list := listRoutings(t, srv, jwt, "?user_id=42")
-	if len(list) != 1 || list[0].Name != "u42" {
-		t.Errorf("explicit user_id=42 should return only u42, got %d items", len(list))
+	seedListedRouting(t, srv, models.ModelRouting{Name: "u42", Scope: models.RoutingScopeUser, UserID: 42})
+	seedListedRouting(t, srv, models.ModelRouting{Name: "u43", Scope: models.RoutingScopeUser, UserID: 43})
+	seedListedRouting(t, srv, models.ModelRouting{Name: "t7", Scope: models.RoutingScopeToken, TokenID: 7})
+	seedListedRouting(t, srv, models.ModelRouting{Name: "t8", Scope: models.RoutingScopeToken, TokenID: 8})
+
+	userList := listRoutings(t, srv, jwt, "?scope=user&user_id=42")
+	if len(userList) != 1 || userList[0].Name != "u42" {
+		t.Errorf("scope=user&user_id=42 should return only u42, got %v", userList)
+	}
+	tokenList := listRoutings(t, srv, jwt, "?scope=token&token_id=7")
+	if len(tokenList) != 1 || tokenList[0].Name != "t7" {
+		t.Errorf("scope=token&token_id=7 should return only t7, got %v", tokenList)
 	}
 }
 
-func TestList_ScopeGlobalOnly(t *testing.T) {
+func TestModelRoutingList_PaginatesAcrossEveryScope(t *testing.T) {
+	srv := setupTestMaster(t)
+	jwt := loginAdmin(t, srv)
+	seedListedRouting(t, srv, models.ModelRouting{Name: "g1", Scope: models.RoutingScopeGlobal})
+	seedListedRouting(t, srv, models.ModelRouting{Name: "u1", Scope: models.RoutingScopeUser, UserID: 1})
+	seedListedRouting(t, srv, models.ModelRouting{Name: "t1", Scope: models.RoutingScopeToken, TokenID: 1})
+
+	w := routingRequest(t, srv, jwt, http.MethodGet, "/api/admin/model-routings?page=2&page_size=2", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Data     []models.ModelRouting `json:"data"`
+		Total    int64                 `json:"total"`
+		Page     int                   `json:"page"`
+		PageSize int                   `json:"page_size"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if response.Total != 3 || response.Page != 2 || response.PageSize != 2 || len(response.Data) != 1 {
+		t.Fatalf("unexpected page: %+v", response)
+	}
+}
+
+func TestModelRoutingList_RejectsInvalidScopeOwnerCombinations(t *testing.T) {
+	srv := setupTestMaster(t)
+	jwt := loginAdmin(t, srv)
+
+	for _, query := range []string{
+		"?scope=invalid",
+		"?user_id=1",
+		"?token_id=1",
+		"?scope=global&user_id=1",
+		"?scope=global&token_id=1",
+		"?scope=user&token_id=1",
+		"?scope=token&user_id=1",
+		"?scope=user&user_id=1&token_id=1",
+	} {
+		t.Run(query, func(t *testing.T) {
+			w := routingRequest(t, srv, jwt, http.MethodGet, "/api/admin/model-routings"+query, nil)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestModelRoutingList_EmptyTokenFilter(t *testing.T) {
+	srv := setupTestMaster(t)
+	jwt := loginAdmin(t, srv)
+	if got := listRoutings(t, srv, jwt, "?scope=token&token_id=999"); len(got) != 0 {
+		t.Fatalf("empty token filter = %v, want no rows", got)
+	}
+}
+
+func TestModelRoutingList_ScopeGlobalOnly(t *testing.T) {
 	srv := setupTestMaster(t)
 	jwt := loginAdmin(t, srv)
 	seedChannel(t, srv, jwt, "gpt-4o")
@@ -168,7 +222,7 @@ func TestList_ScopeGlobalOnly(t *testing.T) {
 	}
 }
 
-func TestList_QSearch(t *testing.T) {
+func TestModelRoutingList_QSearch(t *testing.T) {
 	srv := setupTestMaster(t)
 	jwt := loginAdmin(t, srv)
 	seedChannel(t, srv, jwt, "gpt-4o")

@@ -2,6 +2,7 @@ package dao
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,33 +12,85 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestBillingQueryReadsOnlyCoreDatabase(t *testing.T) {
+func TestBillingQueryReadsOnlyLogDatabase(t *testing.T) {
 	core := setupTestDB(t)
 	logDB := setupTestDB(t)
+	forbidCoreBillingFactQueries(t, core)
 	date := time.Now().UTC().Format("2006-01-02")
 	require.NoError(t, core.Create(&models.TokenDailyBilling{Date: date, UserID: 1, TokenID: 1, TotalCost: 11}).Error)
 	require.NoError(t, logDB.Create(&models.TokenDailyBilling{Date: date, UserID: 1, TokenID: 1, TotalCost: 99}).Error)
 	a := &testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit}
 	overview, err := NewAdminQuery(NewContext(a)).Billing().GetBillingOverview(TokenBillingListFilter{StartDate: date, EndDate: date})
 	require.NoError(t, err)
-	require.Equal(t, int64(11), overview.TotalCost)
+	require.Equal(t, int64(99), overview.TotalCost)
 }
 
-func TestPrivateChannelByModelSplitReadsCoreBillingFacts(t *testing.T) {
+func forbidCoreBillingFactQueries(t *testing.T, core *gorm.DB) {
+	t.Helper()
+	forbidden := map[string]bool{
+		"billing_logs": true, "billing_hourly_buckets": true,
+		"token_daily_billings": true, "channel_daily_billings": true,
+	}
+	require.NoError(t, core.Callback().Query().After("gorm:query").Register("test:forbid-core-billing-facts", func(tx *gorm.DB) {
+		sql := strings.ToLower(tx.Statement.SQL.String())
+		for table := range forbidden {
+			if tx.Statement.Table == table || strings.Contains(sql, table) {
+				t.Errorf("core database queried forbidden table %s: %s", table, sql)
+			}
+		}
+	}))
+}
+
+func TestBillingQueryReturnsLogDatabaseUnavailable(t *testing.T) {
+	core, _ := setupStrictSplitDBs(t)
+	q := NewAdminQuery(NewContext(&testApp{db: core, layoutMode: app.DatabaseLayoutSplit})).Billing()
+
+	_, err := q.GetBillingOverview(TokenBillingListFilter{})
+	require.ErrorIs(t, err, ErrLogDatabaseUnavailable)
+}
+
+func TestPrivateChannelDailySplitEmptyOwnerReturnsLogDatabaseUnavailable(t *testing.T) {
+	core, _ := setupStrictSplitDBs(t)
+	q := NewAdminQuery(NewContext(&testApp{db: core, layoutMode: app.DatabaseLayoutSplit})).Billing()
+
+	_, err := q.ListPrivateChannelDailyByOwner(7, ChannelBillingListFilter{})
+
+	require.ErrorIs(t, err, ErrLogDatabaseUnavailable)
+}
+
+func TestPrivateChannelByModelSplitEmptyOwnerReturnsLogDatabaseUnavailable(t *testing.T) {
+	core, _ := setupStrictSplitDBs(t)
+	q := NewAdminQuery(NewContext(&testApp{db: core, layoutMode: app.DatabaseLayoutSplit})).Billing()
+
+	_, err := q.ListPrivateChannelByModelByOwner(7, ChannelBillingListFilter{})
+
+	require.ErrorIs(t, err, ErrLogDatabaseUnavailable)
+}
+
+func TestPrivateChannelByModelSplitReadsOnlyLogRequestFacts(t *testing.T) {
 	core, logDB := setupStrictSplitDBs(t)
 	require.NoError(t, core.Exec("INSERT INTO private_channels (id, owner_id, name, type) VALUES (9, 7, 'byok', 1)").Error)
 	inside := time.Date(2026, 7, 23, 23, 59, 59, 0, time.UTC).Unix()
-	for _, row := range []models.BillingLog{
-		{RequestID: "inside", PrivateChannelID: 9, OwnerType: "private", ModelName: "core-model", Status: 1, PromptTokens: 10, TotalCost: 20, CreatedAt: inside},
+	for _, row := range []models.RequestLog{
+		{RequestID: "inside", PrivateChannelID: 9, OwnerType: "private", ModelName: "log-model", Status: 1, PromptTokens: 10, TotalCost: 20, CreatedAt: inside},
+		{RequestID: "partial", PrivateChannelID: 9, OwnerType: "private", ModelName: "partial-model", Status: 1, TotalCost: 10, RawInputCost: int64TestPointer(8), CreatedAt: inside},
+		{RequestID: "mixed-known", PrivateChannelID: 9, OwnerType: "private", ModelName: "mixed-model", Status: 1, TotalCost: 5, RawInputCost: int64TestPointer(7), CreatedAt: inside},
+		{RequestID: "mixed-unknown", PrivateChannelID: 9, OwnerType: "private", ModelName: "mixed-model", Status: 1, TotalCost: 6, CreatedAt: inside},
 		{RequestID: "outside", PrivateChannelID: 9, OwnerType: "private", ModelName: "outside", Status: 0, TotalCost: 99, CreatedAt: inside + 1},
 		{RequestID: "admin", PrivateChannelID: 9, OwnerType: "admin", ModelName: "admin", Status: 1, TotalCost: 99, CreatedAt: inside},
 	} {
-		require.NoError(t, core.Create(&row).Error)
+		require.NoError(t, logDB.Create(&row).Error)
 	}
 	q := NewAdminQuery(NewContext(&testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit})).Billing()
 	got, err := q.ListPrivateChannelByModelByOwner(7, ChannelBillingListFilter{StartDate: "2026-07-23", EndDate: "2026-07-23"})
 	require.NoError(t, err)
-	require.Equal(t, []PrivateChannelByModelItem{{ModelName: "core-model", RequestCount: 1, SuccessCount: 1, PromptTokens: 10, TotalCost: 20}}, got)
+	byModel := make(map[string]PrivateChannelByModelItem, len(got))
+	for _, row := range got {
+		byModel[row.ModelName] = row
+	}
+	require.Nil(t, byModel["log-model"].ReferenceCost, "all-null legacy BYOK raw cost is unknown")
+	require.Equal(t, int64TestPointer(8), byModel["partial-model"].ReferenceCost)
+	require.Nil(t, byModel["mixed-model"].ReferenceCost, "known and unknown rows must not produce a partial total")
 
 	empty, err := q.ListPrivateChannelByModelByOwner(8, ChannelBillingListFilter{})
 	require.NoError(t, err)
@@ -55,144 +108,73 @@ func TestPrivateChannelByModelLegacyKeepsReadingUsageLogs(t *testing.T) {
 	got, err := q.ListPrivateChannelByModelByOwner(7, ChannelBillingListFilter{})
 	require.NoError(t, err)
 	require.Equal(t, "legacy-model", got[0].ModelName)
+	require.Nil(t, got[0].ReferenceCost)
+}
+
+func TestPrivateChannelDailyReferenceCompletenessUsesOneGroupedFactQuery(t *testing.T) {
+	core, logDB := setupStrictSplitDBs(t)
+	require.NoError(t, core.Create([]models.PrivateChannel{
+		{ChannelCore: models.ChannelCore{ID: 9}, OwnerID: 7, Name: "one"},
+		{ChannelCore: models.ChannelCore{ID: 10}, OwnerID: 7, Name: "two"},
+	}).Error)
+	days := []string{"2026-07-22", "2026-07-23"}
+	require.NoError(t, logDB.Create([]models.ChannelDailyBilling{
+		{Date: days[0], PrivateChannelID: 9, OwnerType: "private", RequestCount: 1, RawCost: 999},
+		{Date: days[1], PrivateChannelID: 9, OwnerType: "private", RequestCount: 1, RawCost: 999},
+		{Date: days[0], PrivateChannelID: 10, OwnerType: "private", RequestCount: 1, RawCost: 999},
+		{Date: days[1], PrivateChannelID: 10, OwnerType: "private", RequestCount: 1, RawCost: 999},
+	}).Error)
+	dayOne := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC).Unix()
+	dayTwo := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC).Unix()
+	require.NoError(t, logDB.Create([]models.RequestLog{
+		{RequestID: "known", PrivateChannelID: 9, OwnerType: "private", RawInputCost: int64TestPointer(10), CreatedAt: dayOne},
+		{RequestID: "unknown", PrivateChannelID: 9, OwnerType: "private", TotalCost: 7, CreatedAt: dayTwo},
+		{RequestID: "partial", PrivateChannelID: 10, OwnerType: "private", RawOutputCost: int64TestPointer(20), CreatedAt: dayOne},
+	}).Error)
+	queryCount := 0
+	countQuery := func(*gorm.DB) { queryCount++ }
+	require.NoError(t, logDB.Callback().Query().After("gorm:query").Register("test:private_daily_reference_queries", countQuery))
+	require.NoError(t, logDB.Callback().Row().After("gorm:row").Register("test:private_daily_reference_queries", countQuery))
+	q := NewAdminQuery(NewContext(&testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit})).Billing()
+
+	got, err := q.ListPrivateChannelDailyByOwner(7, ChannelBillingListFilter{StartDate: days[0], EndDate: days[1]})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, queryCount, "daily rows plus one grouped completeness query, independent of row count")
+	references := make(map[string]*int64, len(got))
+	for _, row := range got {
+		references[fmt.Sprintf("%s/%d", row.Date, row.PrivateChannelID)] = row.ReferenceCost
+	}
+	require.Equal(t, int64TestPointer(10), references[days[0]+"/9"])
+	require.Nil(t, references[days[1]+"/9"], "legacy all-null facts stay unknown despite nonzero daily raw_cost")
+	require.Equal(t, int64TestPointer(20), references[days[0]+"/10"])
+	require.Nil(t, references[days[1]+"/10"], "missing request facts cannot prove daily reference completeness")
 }
 
 func TestUsageAggregateMutationWritesOnlyLogDatabase(t *testing.T) {
-	core := setupTestDB(t)
-	logDB := setupTestDB(t)
+	core, logDB := setupStrictSplitDBs(t)
 	a := &testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit}
 	m := NewAdminMutation(NewContext(a)).Billing()
 	require.NoError(t, m.BatchUpsertHourlyBucket([]HourlyBucketRow{{Date: "2026-07-23", Hour: 1, ModelName: "log-only", RequestCount: 1}}))
 
-	var coreCount, logCount int64
-	require.NoError(t, core.Model(&models.UsageHourlyBucket{}).Where("model_name = ?", "log-only").Count(&coreCount).Error)
+	var logCount int64
+	require.False(t, core.Migrator().HasTable(&models.UsageHourlyBucket{}))
 	require.NoError(t, logDB.Model(&models.UsageHourlyBucket{}).Where("model_name = ?", "log-only").Count(&logCount).Error)
-	require.Zero(t, coreCount)
 	require.Equal(t, int64(1), logCount)
 
 	usage := &models.UsageLog{UserID: 1, TokenID: 2, ChannelID: 3, ModelName: "direct", Status: 1, IsStream: true, Duration: 1000, FirstResponseMs: 100, CompletionTokens: 10, CreatedAt: time.Now().Unix()}
-	require.NoError(t, m.UpsertTokenDaily(usage))
-	require.NoError(t, m.UpsertChannelDaily(usage))
 	require.NoError(t, m.UpsertHourlyBucket(usage))
 	require.NoError(t, m.UpsertDurationHistogram(usage))
 	require.NoError(t, m.UpsertTTFTHistogram(usage))
 	require.NoError(t, m.UpsertTPSHistogram(usage))
 	for _, model := range []any{&models.UsageHourlyBucket{}, &models.UsageDurationHistogram{}, &models.UsageTTFTHistogram{}, &models.UsageTPSHistogram{}} {
-		require.NoError(t, core.Model(model).Where("model_name = ?", "direct").Count(&coreCount).Error)
-		require.Zero(t, coreCount)
+		require.False(t, core.Migrator().HasTable(model))
+		logCount = 0
 		require.NoError(t, logDB.Model(model).Where("model_name = ?", "direct").Count(&logCount).Error)
 		require.Equal(t, int64(1), logCount)
 	}
-	for _, model := range []any{&models.TokenDailyBilling{}, &models.ChannelDailyBilling{}} {
-		require.NoError(t, core.Model(model).Count(&coreCount).Error)
-		require.Equal(t, int64(1), coreCount)
-		require.NoError(t, logDB.Model(model).Count(&logCount).Error)
-		require.Zero(t, logCount)
-	}
-}
-
-func TestAdminBillingMutationUpsert(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-
-	m := NewAdminMutation(ctx)
-	first := &models.UsageLog{
-		UserID:           1,
-		TokenID:          2,
-		TokenName:        "primary-key",
-		ChannelID:        3,
-		ChannelName:      "openai-primary",
-		ChannelType:      1,
-		PromptTokens:     100,
-		CompletionTokens: 50,
-		InputCost:        10,
-		OutputCost:       20,
-		TotalCost:        30,
-		Status:           1,
-		CreatedAt:        time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC).Unix(),
-	}
-	second := &models.UsageLog{
-		UserID:           1,
-		TokenID:          2,
-		TokenName:        "primary-key",
-		ChannelID:        3,
-		ChannelName:      "openai-primary",
-		ChannelType:      1,
-		PromptTokens:     200,
-		CompletionTokens: 75,
-		InputCost:        15,
-		OutputCost:       35,
-		TotalCost:        50,
-		Status:           0,
-		CreatedAt:        time.Date(2026, 4, 1, 13, 0, 0, 0, time.UTC).Unix(),
-	}
-
-	if err := m.Billing().UpsertTokenDaily(first); err != nil {
-		t.Fatalf("upsert first token daily billing: %v", err)
-	}
-	if err := m.Billing().UpsertTokenDaily(second); err != nil {
-		t.Fatalf("upsert second token daily billing: %v", err)
-	}
-	if err := m.Billing().UpsertChannelDaily(first); err != nil {
-		t.Fatalf("upsert first channel daily billing: %v", err)
-	}
-	if err := m.Billing().UpsertChannelDaily(second); err != nil {
-		t.Fatalf("upsert second channel daily billing: %v", err)
-	}
-
-	var tokenCount int64
-	if err := db.Model(&models.TokenDailyBilling{}).Count(&tokenCount).Error; err != nil {
-		t.Fatalf("count token daily billing rows: %v", err)
-	}
-	if tokenCount != 1 {
-		t.Fatalf("token daily billing rows = %d, want 1", tokenCount)
-	}
-
-	var tokenDaily models.TokenDailyBilling
-	if err := db.First(&tokenDaily).Error; err != nil {
-		t.Fatalf("query token daily billing: %v", err)
-	}
-	if tokenDaily.RequestCount != 2 {
-		t.Fatalf("request_count = %d, want 2", tokenDaily.RequestCount)
-	}
-	if tokenDaily.SuccessCount != 1 {
-		t.Fatalf("success_count = %d, want 1", tokenDaily.SuccessCount)
-	}
-	if tokenDaily.FailedCount != 1 {
-		t.Fatalf("failed_count = %d, want 1", tokenDaily.FailedCount)
-	}
-	if tokenDaily.TotalCost != 80 {
-		t.Fatalf("total_cost = %d, want 80", tokenDaily.TotalCost)
-	}
-	if tokenDaily.LastUsedAt != second.CreatedAt {
-		t.Fatalf("last_used_at = %d, want %d", tokenDaily.LastUsedAt, second.CreatedAt)
-	}
-
-	var channelCount int64
-	if err := db.Model(&models.ChannelDailyBilling{}).Count(&channelCount).Error; err != nil {
-		t.Fatalf("count channel daily billing rows: %v", err)
-	}
-	if channelCount != 1 {
-		t.Fatalf("channel daily billing rows = %d, want 1", channelCount)
-	}
-
-	var channelDaily models.ChannelDailyBilling
-	if err := db.First(&channelDaily).Error; err != nil {
-		t.Fatalf("query channel daily billing: %v", err)
-	}
-	if channelDaily.RequestCount != 2 {
-		t.Fatalf("request_count = %d, want 2", channelDaily.RequestCount)
-	}
-	if channelDaily.SuccessCount != 1 {
-		t.Fatalf("success_count = %d, want 1", channelDaily.SuccessCount)
-	}
-	if channelDaily.FailedCount != 1 {
-		t.Fatalf("failed_count = %d, want 1", channelDaily.FailedCount)
-	}
-	if channelDaily.TotalCost != 80 {
-		t.Fatalf("total_cost = %d, want 80", channelDaily.TotalCost)
-	}
-	if channelDaily.LastUsedAt != second.CreatedAt {
-		t.Fatalf("last_used_at = %d, want %d", channelDaily.LastUsedAt, second.CreatedAt)
+	for _, table := range []string{"token_daily_billings", "channel_daily_billings", "billing_projection_receipts", "billing_projection_baselines"} {
+		require.Falsef(t, core.Migrator().HasTable(table), "retired core table %s must stay absent", table)
 	}
 }
 
@@ -262,127 +244,8 @@ func TestAdminBillingQuery_ListTokenBilling_IgnoresTokenRenames(t *testing.T) {
 	}
 }
 
-// TestUpsertChannelDaily_BYOKRow verifies that BYOK usage logs (ChannelID=0,
-// PrivateChannelID>0, OwnerType="private") are aggregated into a daily row
-// keyed by private_channel_id rather than collapsing onto channel_id=0.
-func TestUpsertChannelDaily_BYOKRow(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-
-	m := NewAdminMutation(ctx)
-	log := &models.UsageLog{
-		UserID:           5,
-		ChannelID:        0,
-		PrivateChannelID: 7,
-		OwnerType:        "private",
-		ChannelName:      "my-byok",
-		Status:           1,
-		TotalCost:        100,
-		CreatedAt:        time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC).Unix(),
-	}
-	if err := m.Billing().UpsertChannelDaily(log); err != nil {
-		t.Fatalf("upsert BYOK channel daily: %v", err)
-	}
-
-	var rows []models.ChannelDailyBilling
-	if err := db.Find(&rows).Error; err != nil {
-		t.Fatalf("list channel_daily_billings: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(rows))
-	}
-	if rows[0].PrivateChannelID != 7 {
-		t.Fatalf("private_channel_id = %d, want 7", rows[0].PrivateChannelID)
-	}
-	if rows[0].ChannelID != 0 {
-		t.Fatalf("admin channel_id should be 0 for BYOK row, got %d", rows[0].ChannelID)
-	}
-	if rows[0].OwnerType != "private" {
-		t.Fatalf("owner_type = %q, want \"private\"", rows[0].OwnerType)
-	}
-	if rows[0].TotalCost != 100 {
-		t.Fatalf("total_cost = %d, want 100", rows[0].TotalCost)
-	}
-}
-
-// TestUpsertChannelDaily_BYOKAccumulates verifies repeated BYOK logs accumulate
-// into one row per (date, private_channel_id) rather than fanning out.
-func TestUpsertChannelDaily_BYOKAccumulates(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-
-	m := NewAdminMutation(ctx)
-	ts := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC).Unix()
-	for i := 0; i < 3; i++ {
-		log := &models.UsageLog{
-			UserID:           5,
-			PrivateChannelID: 7,
-			OwnerType:        "private",
-			Status:           1,
-			TotalCost:        10,
-			CreatedAt:        ts,
-		}
-		if err := m.Billing().UpsertChannelDaily(log); err != nil {
-			t.Fatalf("upsert %d: %v", i, err)
-		}
-	}
-
-	var rows []models.ChannelDailyBilling
-	if err := db.Find(&rows).Error; err != nil {
-		t.Fatalf("list channel_daily_billings: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(rows))
-	}
-	if rows[0].RequestCount != 3 {
-		t.Fatalf("request_count = %d, want 3", rows[0].RequestCount)
-	}
-	if rows[0].TotalCost != 30 {
-		t.Fatalf("total_cost = %d, want 30", rows[0].TotalCost)
-	}
-}
-
-// TestUpsertChannelDaily_AdminAndBYOKCoexist verifies admin and BYOK logs on
-// the same day yield TWO separate rows (one keyed by channel_id, one by
-// private_channel_id) and don't collide via the old (date, channel_id) unique
-// key where both would conflict at channel_id=0.
-func TestUpsertChannelDaily_AdminAndBYOKCoexist(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-
-	m := NewAdminMutation(ctx)
-	ts := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC).Unix()
-
-	if err := m.Billing().UpsertChannelDaily(&models.UsageLog{
-		ChannelID:   5,
-		ChannelName: "admin-ch",
-		ChannelType: 1,
-		Status:      1,
-		TotalCost:   50,
-		CreatedAt:   ts,
-	}); err != nil {
-		t.Fatalf("upsert admin row: %v", err)
-	}
-	if err := m.Billing().UpsertChannelDaily(&models.UsageLog{
-		UserID:           1,
-		PrivateChannelID: 7,
-		OwnerType:        "private",
-		Status:           1,
-		TotalCost:        100,
-		CreatedAt:        ts,
-	}); err != nil {
-		t.Fatalf("upsert BYOK row: %v", err)
-	}
-
-	var count int64
-	if err := db.Model(&models.ChannelDailyBilling{}).Count(&count).Error; err != nil {
-		t.Fatalf("count rows: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 rows (admin + BYOK), got %d", count)
-	}
-}
-
-// TestListPrivateChannelDailyByOwner verifies the BYOK-stats list method scopes
-// rows to a specific owner (via private_channels.owner_id join) and excludes
-// other owners' BYOK rows + all admin rows.
+// TestListPrivateChannelDailyByOwner verifies that BYOK daily rows remain keyed
+// by private_channel_id rather than collapsing onto channel_id=0.
 func TestListPrivateChannelDailyByOwner(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 
@@ -397,16 +260,15 @@ func TestListPrivateChannelDailyByOwner(t *testing.T) {
 		t.Fatalf("seed private_channels: %v", err)
 	}
 
-	m := NewAdminMutation(ctx)
 	ts := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC).Unix()
 
 	// owner=1's BYOK rows
-	mustUpsert(t, m, &models.UsageLog{UserID: 1, PrivateChannelID: 1, OwnerType: "private", Status: 1, TotalCost: 100, CreatedAt: ts})
-	mustUpsert(t, m, &models.UsageLog{UserID: 1, PrivateChannelID: 2, OwnerType: "private", Status: 1, TotalCost: 200, CreatedAt: ts})
+	mustSeedChannelDaily(t, db, &models.UsageLog{UserID: 1, PrivateChannelID: 1, OwnerType: "private", Status: 1, TotalCost: 100, CreatedAt: ts})
+	mustSeedChannelDaily(t, db, &models.UsageLog{UserID: 1, PrivateChannelID: 2, OwnerType: "private", Status: 1, TotalCost: 200, CreatedAt: ts})
 	// owner=2's BYOK row
-	mustUpsert(t, m, &models.UsageLog{UserID: 2, PrivateChannelID: 3, OwnerType: "private", Status: 1, TotalCost: 999, CreatedAt: ts})
+	mustSeedChannelDaily(t, db, &models.UsageLog{UserID: 2, PrivateChannelID: 3, OwnerType: "private", Status: 1, TotalCost: 999, CreatedAt: ts})
 	// admin row — must be excluded
-	mustUpsert(t, m, &models.UsageLog{ChannelID: 5, Status: 1, TotalCost: 50, CreatedAt: ts})
+	mustSeedChannelDaily(t, db, &models.UsageLog{ChannelID: 5, Status: 1, TotalCost: 50, CreatedAt: ts})
 
 	q := NewAdminQuery(ctx)
 	items, err := q.Billing().ListPrivateChannelDailyByOwner(1, ChannelBillingListFilter{})
@@ -427,11 +289,14 @@ func TestListPrivateChannelDailyByOwner(t *testing.T) {
 	}
 }
 
-func mustUpsert(t *testing.T, m AdminMutation, log *models.UsageLog) {
+func mustSeedChannelDaily(t *testing.T, db *gorm.DB, log *models.UsageLog) {
 	t.Helper()
-	if err := m.Billing().UpsertChannelDaily(log); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
+	success, failed := successFailureCounts(log.Status)
+	require.NoError(t, db.Create(&models.ChannelDailyBilling{
+		Date: billingDate(log), ChannelID: log.ChannelID, PrivateChannelID: log.PrivateChannelID,
+		OwnerType: log.OwnerType, RequestCount: 1, SuccessCount: success, FailedCount: failed,
+		TotalCost: log.TotalCost, LastUsedAt: log.CreatedAt,
+	}).Error)
 }
 
 func TestAdminBillingQuery_ListChannelBilling_IgnoresChannelRenames(t *testing.T) {
@@ -597,197 +462,6 @@ func TestUpsertHourlyBucket_TTFTAndTPSEligibilityAreIndependent(t *testing.T) {
 	require.Equal(t, int64(20), row.SumStreamCompletionTokens)
 }
 
-func TestLegacyRebuildsKeepGlobalAndUserSpeedStatisticsInSync(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx).Billing()
-	ts := time.Date(2026, 5, 20, 13, 5, 0, 0, time.UTC).Unix()
-	logs := make([]models.UsageLog, 0, 102)
-	for i := 0; i < 100; i++ {
-		logs = append(logs, models.UsageLog{RequestID: fmt.Sprintf("mixed-%03d", i), UserID: uint(i%2 + 1), ChannelID: 5, ModelName: "mixed", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 200, CompletionTokens: 20, Duration: 1200, CreatedAt: ts})
-	}
-	logs = append(logs,
-		models.UsageLog{RequestID: "anonymous", UserID: 0, ChannelID: 5, ModelName: "mixed", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 300, CompletionTokens: 30, Duration: 1300, CreatedAt: ts},
-		models.UsageLog{RequestID: "ttft-only", UserID: 1, ChannelID: 5, ModelName: "mixed", AgentID: "a", IsStream: true, Status: 1, FirstResponseMs: 400, Duration: 400, CreatedAt: ts},
-	)
-	require.NoError(t, db.Create(&logs).Error)
-	targets := []string{RebuildTargetHourlyBucket, RebuildTargetTTFTHistogram, RebuildTargetTPSHistogram}
-	_, err := m.RebuildDailyRollups(BillingRebuildFilter{StartDate: "2026-05-20", EndDate: "2026-05-20", Targets: targets})
-	require.NoError(t, err)
-	var hourly models.UsageHourlyBucket
-	require.NoError(t, db.First(&hourly).Error)
-	require.Equal(t, int64(102), hourly.RequestCount)
-	require.Equal(t, int64(102), hourly.StreamRequestCount)
-	require.Equal(t, int64(20700), hourly.SumFirstResponseMs)
-	require.Equal(t, int64(101000), hourly.SumGenerationMs)
-	require.Equal(t, int64(2030), hourly.SumStreamCompletionTokens)
-	var globalTTFT, globalTPS, userTTFT, userTPS int64
-	require.NoError(t, db.Model(&models.UsageTTFTHistogram{}).Count(&globalTTFT).Error)
-	require.NoError(t, db.Model(&models.UsageTPSHistogram{}).Count(&globalTPS).Error)
-	require.NoError(t, db.Model(&models.UsageUserTTFTHistogram{}).Count(&userTTFT).Error)
-	require.NoError(t, db.Model(&models.UsageUserTPSHistogram{}).Count(&userTPS).Error)
-	require.Equal(t, int64(1), globalTTFT)
-	require.Equal(t, int64(1), globalTPS)
-	require.Equal(t, int64(2), userTTFT, "anonymous samples must not create user rows")
-	require.Equal(t, int64(2), userTPS)
-	require.NoError(t, db.Model(&models.UsageUserTTFTHistogram{}).Where("user_id = ?", 1).Update("h16", 999).Error)
-	_, err = m.RebuildHourSlice("2026-05-20", 13, targets, false)
-	require.NoError(t, err)
-	var rebuilt models.UsageUserTTFTHistogram
-	require.NoError(t, db.Where("user_id = ?", 1).First(&rebuilt).Error)
-	require.Zero(t, rebuilt.H16, "hour-slice rebuild must remove stale user histogram slots")
-}
-
-// TestRebuild_DefaultTargetsRebuildsAllThreeTables 验证默认（空 Targets）会重建全部三张表。
-func TestRebuild_DefaultTargetsRebuildsAllThreeTables(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-
-	seedRebuildLog(t, db, "2026-05-20")
-
-	result, err := m.Billing().RebuildDailyRollups(BillingRebuildFilter{
-		StartDate: "2026-05-20", EndDate: "2026-05-20",
-	})
-	require.NoError(t, err)
-	require.Greater(t, result.ReplayedLogs, int64(0))
-
-	var tc int64
-	require.NoError(t, db.Model(&models.TokenDailyBilling{}).Count(&tc).Error)
-	var cc int64
-	require.NoError(t, db.Model(&models.ChannelDailyBilling{}).Count(&cc).Error)
-	var hc int64
-	require.NoError(t, db.Model(&models.UsageHourlyBucket{}).Count(&hc).Error)
-	require.Greater(t, tc, int64(0), "token_daily rebuilt")
-	require.Greater(t, cc, int64(0), "channel_daily rebuilt")
-	require.Greater(t, hc, int64(0), "hourly_bucket rebuilt")
-}
-
-// TestRebuild_TargetsHourlyOnly_DoesNotTouchDaily 验证指定 hourly_bucket 时
-// 不会删除/重建任何 daily 表行。
-func TestRebuild_TargetsHourlyOnly_DoesNotTouchDaily(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-	seedRebuildLog(t, db, "2026-05-20")
-
-	// First: full rebuild to populate all 3 tables.
-	_, err := m.Billing().RebuildDailyRollups(BillingRebuildFilter{
-		StartDate: "2026-05-20", EndDate: "2026-05-20",
-	})
-	require.NoError(t, err)
-
-	// Mark daily rows as "manually edited" to detect untouched-ness.
-	require.NoError(t, db.Model(&models.TokenDailyBilling{}).
-		Where("1 = 1").Update("token_name", "manually-edited").Error)
-	require.NoError(t, db.Model(&models.ChannelDailyBilling{}).
-		Where("1 = 1").Update("channel_name", "manually-edited").Error)
-
-	// Targeted hourly-only rebuild.
-	_, err = m.Billing().RebuildDailyRollups(BillingRebuildFilter{
-		StartDate: "2026-05-20", EndDate: "2026-05-20",
-		Targets: []string{RebuildTargetHourlyBucket},
-	})
-	require.NoError(t, err)
-
-	// Daily tables retain manual edits.
-	var tdb models.TokenDailyBilling
-	require.NoError(t, db.First(&tdb).Error)
-	require.Equal(t, "manually-edited", tdb.TokenName, "token_daily must NOT be touched")
-	var cdb models.ChannelDailyBilling
-	require.NoError(t, db.First(&cdb).Error)
-	require.Equal(t, "manually-edited", cdb.ChannelName, "channel_daily must NOT be touched")
-
-	// Hourly was rebuilt.
-	var hc int64
-	require.NoError(t, db.Model(&models.UsageHourlyBucket{}).Count(&hc).Error)
-	require.Greater(t, hc, int64(0))
-}
-
-// TestRebuild_UnknownTargetReturnsError 验证未知 target 名称会得到 error，
-// 且 error message 包含被拒绝的 target 名以便调用方排查。
-func TestRebuild_UnknownTargetReturnsError(t *testing.T) {
-	ctx, _ := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-	_, err := m.Billing().RebuildDailyRollups(BillingRebuildFilter{
-		StartDate: "2026-05-20", EndDate: "2026-05-20",
-		Targets: []string{"nonexistent_table"},
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "nonexistent_table")
-}
-
-// seedRebuildLog 写入一条 UsageLog（不经过 settler），用来驱动 rebuild 测试。
-func TestBatchUpsertTokenDaily(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-	now := time.Now().Unix()
-
-	rows := []TokenDailyRow{
-		{Date: "2026-05-01", UserID: 1, TokenID: 2, TokenName: "k",
-			RequestCount: 5, SuccessCount: 4, FailedCount: 1,
-			PromptTokens: 100, CompletionTokens: 50, InputCost: 10, OutputCost: 20, TotalCost: 30,
-			LastUsedAt: now, UpdatedAt: now},
-		{Date: "2026-05-01", UserID: 1, TokenID: 3, TokenName: "k2",
-			RequestCount: 1, SuccessCount: 1, PromptTokens: 10, LastUsedAt: now, UpdatedAt: now},
-	}
-
-	// success: insert two new rows
-	require.NoError(t, m.Billing().BatchUpsertTokenDaily(rows))
-
-	var got1 models.TokenDailyBilling
-	require.NoError(t, db.Where("date=? AND user_id=? AND token_id=?", "2026-05-01", uint(1), uint(2)).First(&got1).Error)
-	require.Equal(t, int64(5), got1.RequestCount)
-	require.Equal(t, int64(30), got1.TotalCost)
-
-	// success: accumulate on existing key
-	require.NoError(t, m.Billing().BatchUpsertTokenDaily([]TokenDailyRow{
-		{Date: "2026-05-01", UserID: 1, TokenID: 2, TokenName: "k",
-			RequestCount: 3, SuccessCount: 3,
-			PromptTokens: 50, TotalCost: 15, LastUsedAt: now + 100, UpdatedAt: now + 100},
-	}))
-	require.NoError(t, db.Where("date=? AND user_id=? AND token_id=?", "2026-05-01", uint(1), uint(2)).First(&got1).Error)
-	require.Equal(t, int64(8), got1.RequestCount, "5+3")
-	require.Equal(t, int64(150), got1.PromptTokens, "100+50")
-	require.Equal(t, int64(45), got1.TotalCost, "30+15")
-	require.Equal(t, now+100, got1.LastUsedAt, "max")
-
-	// boundary: empty slice → no SQL
-	require.NoError(t, m.Billing().BatchUpsertTokenDaily(nil))
-}
-
-func TestBatchUpsertChannelDaily(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-	now := time.Now().Unix()
-
-	// success: admin 行 (PrivateChannelID=0) + BYOK 行 (ChannelID=0) 同 date 共存
-	rows := []ChannelDailyRow{
-		{Date: "2026-05-01", ChannelID: 1, PrivateChannelID: 0, OwnerType: "admin",
-			ChannelName: "openai", ChannelType: 1,
-			RequestCount: 5, TotalCost: 30, LastUsedAt: now, UpdatedAt: now},
-		{Date: "2026-05-01", ChannelID: 0, PrivateChannelID: 7, OwnerType: "private",
-			ChannelName: "byok-alice", ChannelType: 1,
-			RequestCount: 2, TotalCost: 0, LastUsedAt: now, UpdatedAt: now},
-	}
-	require.NoError(t, m.Billing().BatchUpsertChannelDaily(rows))
-
-	var adminRow, byokRow models.ChannelDailyBilling
-	require.NoError(t, db.Where("date=? AND channel_id=? AND private_channel_id=?",
-		"2026-05-01", uint(1), uint(0)).First(&adminRow).Error)
-	require.NoError(t, db.Where("date=? AND channel_id=? AND private_channel_id=?",
-		"2026-05-01", uint(0), uint(7)).First(&byokRow).Error)
-	require.Equal(t, int64(5), adminRow.RequestCount)
-	require.Equal(t, int64(2), byokRow.RequestCount)
-	require.Equal(t, "private", byokRow.OwnerType)
-
-	// success: accumulate on repeat
-	require.NoError(t, m.Billing().BatchUpsertChannelDaily(rows))
-	require.NoError(t, db.Where("date=? AND channel_id=? AND private_channel_id=?",
-		"2026-05-01", uint(1), uint(0)).First(&adminRow).Error)
-	require.Equal(t, int64(10), adminRow.RequestCount)
-
-	// boundary: nil
-	require.NoError(t, m.Billing().BatchUpsertChannelDaily(nil))
-}
-
 func TestBatchUpsertHourlyBucket(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	m := NewAdminMutation(ctx)
@@ -865,264 +539,6 @@ func TestHourRangeUnix(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestRebuildHourSlice(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-
-	t10 := time.Date(2026, 5, 1, 10, 30, 0, 0, time.UTC).Unix()
-	t11 := time.Date(2026, 5, 1, 11, 0, 0, 0, time.UTC).Unix()
-	logs := []models.UsageLog{
-		{RequestID: "r1", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "m", AgentID: "x",
-			Status: 1, PromptTokens: 100, TotalCost: 10, CreatedAt: t10},
-		{RequestID: "r2", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "m", AgentID: "x",
-			Status: 1, PromptTokens: 50, TotalCost: 5, CreatedAt: t10 + 60},
-		{RequestID: "r3", UserID: 1, TokenID: 1, ChannelID: 1, ModelName: "m", AgentID: "x",
-			Status: 1, PromptTokens: 30, TotalCost: 3, CreatedAt: t11},
-	}
-	for i := range logs {
-		require.NoError(t, db.Create(&logs[i]).Error)
-	}
-
-	// success: hour=10 + resetDaily=true → 清空 + replay 该小时（2 条）
-	res, err := m.Billing().RebuildHourSlice("2026-05-01", 10, nil, true)
-	require.NoError(t, err)
-	require.Equal(t, int64(2), res.ReplayedLogs)
-
-	var td models.TokenDailyBilling
-	require.NoError(t, db.Where("date=?", "2026-05-01").First(&td).Error)
-	require.Equal(t, int64(2), td.RequestCount)
-	require.Equal(t, int64(150), td.PromptTokens)
-
-	var hb models.UsageHourlyBucket
-	require.NoError(t, db.Where("date=? AND hour=?", "2026-05-01", 10).First(&hb).Error)
-	require.Equal(t, int64(2), hb.RequestCount)
-
-	// success: hour=11 + resetDaily=false → 不清 daily，累加到 3 条
-	res, err = m.Billing().RebuildHourSlice("2026-05-01", 11, nil, false)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), res.ReplayedLogs)
-	require.NoError(t, db.Where("date=?", "2026-05-01").First(&td).Error)
-	require.Equal(t, int64(3), td.RequestCount)
-	require.Equal(t, int64(180), td.PromptTokens)
-
-	// boundary: 该小时无日志 → replayed=0
-	res, err = m.Billing().RebuildHourSlice("2026-05-01", 5, nil, false)
-	require.NoError(t, err)
-	require.Equal(t, int64(0), res.ReplayedLogs)
-
-	// failure: invalid target
-	_, err = m.Billing().RebuildHourSlice("2026-05-01", 10, []string{"bogus"}, true)
-	require.ErrorIs(t, err, ErrInvalidRebuildTarget)
-}
-
-// Behavior equivalence: 24 hourly slices (hour=0 reset=true; rest reset=false)
-// over the same day must equal RebuildDailyRollups for that day, row-by-row.
-func TestRebuildHourSlice_EquivalentToRebuildDailyRollups(t *testing.T) {
-	// helper: scatter 24 logs across hours
-	makeDay := func(date string) []models.UsageLog {
-		dayT, _ := time.Parse("2006-01-02", date)
-		out := make([]models.UsageLog, 0, 24)
-		for h := 0; h < 24; h++ {
-			ts := dayT.UTC().Add(time.Duration(h)*time.Hour + 30*time.Minute).Unix()
-			out = append(out, models.UsageLog{
-				RequestID: fmt.Sprintf("r-%d-%d", h, h*100),
-				UserID:    1, TokenID: 1, ChannelID: 1, ModelName: "m", AgentID: "x",
-				Status:           1,
-				PromptTokens:     10 * (h + 1),
-				CompletionTokens: 5 * (h + 1),
-				TotalCost:        int64(h + 1),
-				IsStream:         h%2 == 0,
-				FirstResponseMs:  100,
-				Duration:         500,
-				InboundDecodeMs:  3,
-				CreatedAt:        ts,
-			})
-		}
-		return out
-	}
-
-	logs := makeDay("2026-05-01")
-
-	// path 1: 24 hourly slices
-	ctxA, dbA := setupAdminContext(t)
-	for _, l := range logs {
-		ll := l
-		ll.RequestID = "a-" + l.RequestID
-		require.NoError(t, dbA.Create(&ll).Error)
-	}
-	mA := NewAdminMutation(ctxA)
-	for h := 0; h < 24; h++ {
-		_, err := mA.Billing().RebuildHourSlice("2026-05-01", h, nil, h == 0)
-		require.NoError(t, err)
-	}
-
-	// path 2: legacy RebuildDailyRollups
-	ctxB, dbB := setupAdminContext(t)
-	for _, l := range logs {
-		ll := l
-		ll.RequestID = "b-" + l.RequestID
-		require.NoError(t, dbB.Create(&ll).Error)
-	}
-	mB := NewAdminMutation(ctxB)
-	_, err := mB.Billing().RebuildDailyRollups(BillingRebuildFilter{
-		StartDate: "2026-05-01", EndDate: "2026-05-01",
-	})
-	require.NoError(t, err)
-
-	// compare: token_daily
-	var tA, tB []models.TokenDailyBilling
-	require.NoError(t, dbA.Order("user_id, token_id").Find(&tA).Error)
-	require.NoError(t, dbB.Order("user_id, token_id").Find(&tB).Error)
-	require.Equal(t, len(tB), len(tA))
-	for i := range tB {
-		tA[i].ID = 0
-		tA[i].CreatedAt = 0
-		tA[i].UpdatedAt = 0
-		tB[i].ID = 0
-		tB[i].CreatedAt = 0
-		tB[i].UpdatedAt = 0
-		require.Equal(t, tB[i], tA[i], "token_daily row %d", i)
-	}
-
-	// compare: channel_daily
-	var cA, cB []models.ChannelDailyBilling
-	require.NoError(t, dbA.Order("channel_id, private_channel_id").Find(&cA).Error)
-	require.NoError(t, dbB.Order("channel_id, private_channel_id").Find(&cB).Error)
-	require.Equal(t, len(cB), len(cA))
-	for i := range cB {
-		cA[i].ID = 0
-		cA[i].CreatedAt = 0
-		cA[i].UpdatedAt = 0
-		cB[i].ID = 0
-		cB[i].CreatedAt = 0
-		cB[i].UpdatedAt = 0
-		require.Equal(t, cB[i], cA[i], "channel_daily row %d", i)
-	}
-
-	// compare: usage_hourly_bucket
-	var hA, hB []models.UsageHourlyBucket
-	require.NoError(t, dbA.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&hA).Error)
-	require.NoError(t, dbB.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&hB).Error)
-	require.Equal(t, len(hB), len(hA))
-	for i := range hB {
-		hA[i].ID = 0
-		hA[i].CreatedAt = 0
-		hA[i].UpdatedAt = 0
-		hB[i].ID = 0
-		hB[i].CreatedAt = 0
-		hB[i].UpdatedAt = 0
-		require.Equal(t, hB[i], hA[i], "hourly row %d", i)
-	}
-
-	// compare: ttft_histogram — must be non-empty (odd h%2==0 hours are
-	// streaming with completion_tokens>0 and positive generation time), else
-	// an empty-vs-empty compare would falsely pass.
-	var ttA, ttB []models.UsageTTFTHistogram
-	require.NoError(t, dbA.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&ttA).Error)
-	require.NoError(t, dbB.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&ttB).Error)
-	require.Greater(t, len(ttB), 0, "ttft_histogram should have rows for streaming requests")
-	require.Equal(t, len(ttB), len(ttA))
-	for i := range ttB {
-		ttA[i].ID = 0
-		ttA[i].CreatedAt = 0
-		ttA[i].UpdatedAt = 0
-		ttB[i].ID = 0
-		ttB[i].CreatedAt = 0
-		ttB[i].UpdatedAt = 0
-		require.Equal(t, ttB[i], ttA[i], "ttft_histogram row %d", i)
-	}
-
-	// compare: tps_histogram — same non-empty requirement as ttft_histogram.
-	var tpA, tpB []models.UsageTPSHistogram
-	require.NoError(t, dbA.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&tpA).Error)
-	require.NoError(t, dbB.Order("hour, channel_id, private_channel_id, model_name, agent_id").Find(&tpB).Error)
-	require.Greater(t, len(tpB), 0, "tps_histogram should have rows for streaming requests")
-	require.Equal(t, len(tpB), len(tpA))
-	for i := range tpB {
-		tpA[i].ID = 0
-		tpA[i].CreatedAt = 0
-		tpA[i].UpdatedAt = 0
-		tpB[i].ID = 0
-		tpB[i].CreatedAt = 0
-		tpB[i].UpdatedAt = 0
-		require.Equal(t, tpB[i], tpA[i], "tps_histogram row %d", i)
-	}
-}
-
-func TestDeleteHourlyBucketsBefore_DeletesRowsBeforeCutoff(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-	now := time.Now().Unix()
-
-	// 5 old rows (date=2026-05-01), 5 new rows (date=2026-05-23)
-	for i := 0; i < 5; i++ {
-		require.NoError(t, db.Create(&models.UsageHourlyBucket{
-			Date: "2026-05-01", Hour: i, ChannelID: 1, ModelName: "gpt-4o", AgentID: "x",
-			RequestCount: 1, LastUsedAt: now,
-		}).Error)
-	}
-	for i := 0; i < 5; i++ {
-		require.NoError(t, db.Create(&models.UsageHourlyBucket{
-			Date: "2026-05-23", Hour: i, ChannelID: 1, ModelName: "gpt-4o", AgentID: "x",
-			RequestCount: 1, LastUsedAt: now,
-		}).Error)
-	}
-
-	// cutoff = 2026-05-10 → delete 5 old rows, keep 5 new
-	cutoff := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
-	deleted, err := m.Billing().DeleteHourlyBucketsBefore(cutoff)
-	require.NoError(t, err)
-	require.Equal(t, int64(5), deleted)
-
-	var remaining int64
-	require.NoError(t, db.Model(&models.UsageHourlyBucket{}).Count(&remaining).Error)
-	require.Equal(t, int64(5), remaining)
-}
-
-func TestDeleteHourlyBucketsBefore_NoRowsToDelete(t *testing.T) {
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-	now := time.Now().Unix()
-
-	// all rows date=2026-05-23
-	for i := 0; i < 3; i++ {
-		require.NoError(t, db.Create(&models.UsageHourlyBucket{
-			Date: "2026-05-23", Hour: i, ChannelID: 1, ModelName: "gpt-4o", AgentID: "x",
-			RequestCount: 1, LastUsedAt: now,
-		}).Error)
-	}
-
-	cutoff := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
-	deleted, err := m.Billing().DeleteHourlyBucketsBefore(cutoff)
-	require.NoError(t, err)
-	require.Equal(t, int64(0), deleted)
-
-	var remaining int64
-	require.NoError(t, db.Model(&models.UsageHourlyBucket{}).Count(&remaining).Error)
-	require.Equal(t, int64(3), remaining)
-}
-
-func TestDeleteHourlyBucketsBefore_BoundaryDateNotDeleted(t *testing.T) {
-	// date 恰好 = cutoffDate 时,因 < 严格小于,不删
-	ctx, db := setupAdminContext(t)
-	m := NewAdminMutation(ctx)
-	now := time.Now().Unix()
-
-	require.NoError(t, db.Create(&models.UsageHourlyBucket{
-		Date: "2026-05-10", Hour: 0, ChannelID: 1, ModelName: "gpt-4o", AgentID: "x",
-		RequestCount: 1, LastUsedAt: now,
-	}).Error)
-
-	cutoff := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
-	deleted, err := m.Billing().DeleteHourlyBucketsBefore(cutoff)
-	require.NoError(t, err)
-	require.Equal(t, int64(0), deleted)
-
-	var remaining int64
-	require.NoError(t, db.Model(&models.UsageHourlyBucket{}).Count(&remaining).Error)
-	require.Equal(t, int64(1), remaining)
-}
-
 func TestGetBillingOverview_TotalTokensIncludeCache(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
@@ -1138,6 +554,25 @@ func TestGetBillingOverview_TotalTokensIncludeCache(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, int64(370), overview.TotalTokens, "100+200+30+40 含 cache")
+}
+
+func TestGetDailyBillingKeepsRawCostOnChannelRowsOnly(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+	require.NoError(t, db.Create(&models.TokenDailyBilling{
+		Date: "2026-05-20", UserID: 1, TokenID: 7, TotalCost: 11,
+	}).Error)
+	require.NoError(t, db.Create(&models.ChannelDailyBilling{
+		Date: "2026-05-20", ChannelID: 9, TotalCost: 13, RawCost: 17,
+	}).Error)
+
+	tokenRows, err := q.Billing().GetTokenDaily(7, TokenBillingListFilter{})
+	require.NoError(t, err)
+	require.Equal(t, []TokenBillingDailyItem{{Date: "2026-05-20", TotalCost: 11}}, tokenRows)
+
+	channelRows, err := q.Billing().GetChannelDaily(9, ChannelBillingListFilter{})
+	require.NoError(t, err)
+	require.Equal(t, []ChannelBillingDailyItem{{Date: "2026-05-20", TotalCost: 13, RawCost: 17}}, channelRows)
 }
 
 func TestListTokenBilling_SortByTotalTokensAndFilters(t *testing.T) {

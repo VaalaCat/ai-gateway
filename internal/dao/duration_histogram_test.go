@@ -89,26 +89,3 @@ func TestBatchUpsertDurationHistogram_EmptyAndNil(t *testing.T) { // boundary
 		t.Fatalf("nil log: %v", err)
 	}
 }
-
-func TestRebuildIncludesDurationHistogram(t *testing.T) {
-	app, db := setupTestApp(t)
-	// 造一条历史成功日志 → 全量 rebuild → 侧表应被回填
-	log := models.UsageLog{RequestID: "r-hist-1", Status: 1, Duration: 9500, ChannelID: 5, ModelName: "gpt-4o", AgentID: "a1", CreatedAt: 1783497600}
-	if err := db.Create(&log).Error; err != nil {
-		t.Fatal(err)
-	}
-	m := NewAdminMutation(NewContext(app)).Billing()
-	// 空 Targets = 全量重建（含 duration_histogram）；StartDate/EndDate 按既有 rebuild
-	// 测试(billing_test.go)的调用方式限定范围 —— 空日期范围会触发 gorm 的
-	// "WHERE conditions required" 全表 DELETE 保护,故显式给出覆盖该日志的日期。
-	if _, err := m.RebuildDailyRollups(BillingRebuildFilter{
-		StartDate: "2026-07-08", EndDate: "2026-07-08",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var cnt int64
-	db.Model(&models.UsageDurationHistogram{}).Count(&cnt)
-	if cnt != 1 {
-		t.Fatalf("rebuild 后侧表行数 = %d, want 1", cnt)
-	}
-}

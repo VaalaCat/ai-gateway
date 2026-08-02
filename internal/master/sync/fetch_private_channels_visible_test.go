@@ -109,6 +109,29 @@ func TestPrivateChannelsVisibleFetch_NoUser(t *testing.T) {
 	}
 }
 
+func TestPrivateChannelProjectionCarriesAutoBanRuntimeState(t *testing.T) {
+	cipher := newTestCipher(t)
+	ciphertext, err := cipher.Seal("sk-private", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := models.ChannelDisableState{Tripped: true, Reason: "consecutive_errors", TrippedAt: 123}
+	pc := &models.PrivateChannel{
+		ChannelCore: models.ChannelCore{
+			ID: 9, AutoBanState: datatypes.NewJSONType(state), AutoBanRevision: 11,
+		},
+		OwnerID: 7, KeyCipher: ciphertext,
+	}
+
+	got, err := (&privateChannelsVisibleFetchHandler{cipher: cipher}).project(pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AutoBanState.Data() != state || got.AutoBanRevision != 11 {
+		t.Fatalf("projection lost auto-ban runtime state: %+v", got.ChannelCore)
+	}
+}
+
 func TestPrivateChannelsVisibleFetch_SkipUndecryptable(t *testing.T) {
 	cipherB := newTestCipher(t)
 	// cipherA uses a completely different KEK — cipherB cannot open its ciphertext

@@ -7,6 +7,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/safeint"
 )
 
 // BillingRangeRequest 是三个 byok billing endpoint 共用的查询参数。
@@ -26,24 +27,28 @@ type DailySeriesItem struct {
 	CompletionTokens int64  `json:"completion_tokens"`
 	CacheReadTokens  int64  `json:"cache_read_tokens"`
 	CacheWriteTokens int64  `json:"cache_write_tokens"`
+	TotalTokenUnits  int64  `json:"total_token_units"`
 	InputCost        int64  `json:"input_cost"`
 	OutputCost       int64  `json:"output_cost"`
 	TotalCost        int64  `json:"total_cost"`
+	ReferenceCost    *int64 `json:"reference_cost"`
 }
 
 // BillingOverviewResponse 聚合当前 user 名下所有 BYOK channel 的 KPI + 时间序列。
 type BillingOverviewResponse struct {
-	TotalRequests int64             `json:"total_requests"`
-	TotalSuccess  int64             `json:"total_success"`
-	TotalFailed   int64             `json:"total_failed"`
-	TotalCost     int64             `json:"total_cost"`
+	TotalRequests         int64             `json:"total_requests"`
+	TotalSuccess          int64             `json:"total_success"`
+	TotalFailed           int64             `json:"total_failed"`
+	TotalCost             int64             `json:"total_cost"`
 	TotalTokens           int64             `json:"total_tokens"`
+	TotalTokenUnits       int64             `json:"total_token_units"`
+	ReferenceCost         *int64            `json:"reference_cost"`
 	TotalPromptTokens     int64             `json:"total_prompt_tokens"`
 	TotalCompletionTokens int64             `json:"total_completion_tokens"`
 	TotalCacheReadTokens  int64             `json:"total_cache_read_tokens"`
 	TotalCacheWriteTokens int64             `json:"total_cache_write_tokens"`
 	SuccessRate           float64           `json:"success_rate"`
-	DailySeries   []DailySeriesItem `json:"daily_series"`
+	DailySeries           []DailySeriesItem `json:"daily_series"`
 }
 
 // ByChannelItem 是 by-channel breakdown 的单行。
@@ -56,7 +61,9 @@ type ByChannelItem struct {
 	FailedCount      int64   `json:"failed_count"`
 	SuccessRate      float64 `json:"success_rate"`
 	TotalTokens      int64   `json:"total_tokens"`
+	TotalTokenUnits  int64   `json:"total_token_units"`
 	TotalCost        int64   `json:"total_cost"`
+	ReferenceCost    *int64  `json:"reference_cost"`
 	PromptTokens     int64   `json:"prompt_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
 	CacheReadTokens  int64   `json:"cache_read_tokens"`
@@ -72,12 +79,13 @@ type ByChannelResponse struct {
 
 // ByModelItem 是 by-model breakdown 的单行。
 type ByModelItem struct {
-	ModelName    string  `json:"model_name"`
-	RequestCount int64   `json:"request_count"`
-	SuccessCount int64   `json:"success_count"`
-	FailedCount  int64   `json:"failed_count"`
+	ModelName        string  `json:"model_name"`
+	RequestCount     int64   `json:"request_count"`
+	SuccessCount     int64   `json:"success_count"`
+	FailedCount      int64   `json:"failed_count"`
 	SuccessRate      float64 `json:"success_rate"`
 	TotalTokens      int64   `json:"total_tokens"`
+	TotalTokenUnits  int64   `json:"total_token_units"`
 	PromptTokens     int64   `json:"prompt_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
 	CacheReadTokens  int64   `json:"cache_read_tokens"`
@@ -85,6 +93,7 @@ type ByModelItem struct {
 	InputCost        int64   `json:"input_cost"`
 	OutputCost       int64   `json:"output_cost"`
 	TotalCost        int64   `json:"total_cost"`
+	ReferenceCost    *int64  `json:"reference_cost"`
 }
 
 // ByModelResponse 列表载荷。
@@ -114,14 +123,31 @@ func (h *Handler) BillingOverview(c *app.Context, req BillingRangeRequest) (Bill
 	// 时间序列按 date 折叠（同一天可能跨多个 private_channel）。
 	bucket := make(map[string]*DailySeriesItem, len(rows))
 	order := make([]string, 0, len(rows))
-	var resp BillingOverviewResponse
+	resp := BillingOverviewResponse{ReferenceCost: int64Pointer(0)}
 	for i := range rows {
 		r := &rows[i]
+		totalTokens, totalTokenUnits, err := billingTokenTotals(
+			r.PromptTokens,
+			r.CompletionTokens,
+			r.CacheReadTokens,
+			r.CacheWriteTokens,
+		)
+		if err != nil {
+			return BillingOverviewResponse{}, fmt.Errorf("sum BYOK overview token units: %w", err)
+		}
 		resp.TotalRequests += r.RequestCount
 		resp.TotalSuccess += r.SuccessCount
 		resp.TotalFailed += r.FailedCount
 		resp.TotalCost += r.TotalCost
-		resp.TotalTokens += r.PromptTokens + r.CompletionTokens
+		if resp.TotalTokens, err = safeint.AddNonNegativeInt64(resp.TotalTokens, totalTokens); err != nil {
+			return BillingOverviewResponse{}, fmt.Errorf("sum BYOK overview total tokens: %w", err)
+		}
+		if resp.TotalTokenUnits, err = safeint.AddNonNegativeInt64(resp.TotalTokenUnits, totalTokenUnits); err != nil {
+			return BillingOverviewResponse{}, fmt.Errorf("sum BYOK overview total token units: %w", err)
+		}
+		if resp.ReferenceCost, err = addOptionalNonNegative(resp.ReferenceCost, r.ReferenceCost); err != nil {
+			return BillingOverviewResponse{}, fmt.Errorf("sum BYOK overview reference cost: %w", err)
+		}
 		resp.TotalPromptTokens += r.PromptTokens
 		resp.TotalCompletionTokens += r.CompletionTokens
 		resp.TotalCacheReadTokens += r.CacheReadTokens
@@ -129,7 +155,7 @@ func (h *Handler) BillingOverview(c *app.Context, req BillingRangeRequest) (Bill
 
 		day, ok := bucket[r.Date]
 		if !ok {
-			day = &DailySeriesItem{Date: r.Date}
+			day = &DailySeriesItem{Date: r.Date, ReferenceCost: int64Pointer(0)}
 			bucket[r.Date] = day
 			order = append(order, r.Date)
 		}
@@ -140,9 +166,15 @@ func (h *Handler) BillingOverview(c *app.Context, req BillingRangeRequest) (Bill
 		day.CompletionTokens += r.CompletionTokens
 		day.CacheReadTokens += r.CacheReadTokens
 		day.CacheWriteTokens += r.CacheWriteTokens
+		if day.TotalTokenUnits, err = safeint.AddNonNegativeInt64(day.TotalTokenUnits, totalTokenUnits); err != nil {
+			return BillingOverviewResponse{}, fmt.Errorf("sum BYOK daily token units: %w", err)
+		}
 		day.InputCost += r.InputCost
 		day.OutputCost += r.OutputCost
 		day.TotalCost += r.TotalCost
+		if day.ReferenceCost, err = addOptionalNonNegative(day.ReferenceCost, r.ReferenceCost); err != nil {
+			return BillingOverviewResponse{}, fmt.Errorf("sum BYOK daily reference cost: %w", err)
+		}
 	}
 	resp.SuccessRate = safeSuccessRate(resp.TotalSuccess, resp.TotalRequests)
 	resp.DailySeries = make([]DailySeriesItem, 0, len(order))
@@ -171,12 +203,22 @@ func (h *Handler) BillingByChannel(c *app.Context, req BillingRangeRequest) (ByC
 	order := make([]uint, 0, len(rows))
 	for i := range rows {
 		r := &rows[i]
+		totalTokens, totalTokenUnits, err := billingTokenTotals(
+			r.PromptTokens,
+			r.CompletionTokens,
+			r.CacheReadTokens,
+			r.CacheWriteTokens,
+		)
+		if err != nil {
+			return ByChannelResponse{}, fmt.Errorf("sum BYOK channel token units: %w", err)
+		}
 		item, ok := bucket[r.PrivateChannelID]
 		if !ok {
 			item = &ByChannelItem{
 				PrivateChannelID: r.PrivateChannelID,
 				ChannelName:      r.ChannelName,
 				ChannelType:      r.ChannelType,
+				ReferenceCost:    int64Pointer(0),
 			}
 			bucket[r.PrivateChannelID] = item
 			order = append(order, r.PrivateChannelID)
@@ -184,8 +226,16 @@ func (h *Handler) BillingByChannel(c *app.Context, req BillingRangeRequest) (ByC
 		item.RequestCount += r.RequestCount
 		item.SuccessCount += r.SuccessCount
 		item.FailedCount += r.FailedCount
-		item.TotalTokens += r.PromptTokens + r.CompletionTokens
+		if item.TotalTokens, err = safeint.AddNonNegativeInt64(item.TotalTokens, totalTokens); err != nil {
+			return ByChannelResponse{}, fmt.Errorf("sum BYOK channel total tokens: %w", err)
+		}
+		if item.TotalTokenUnits, err = safeint.AddNonNegativeInt64(item.TotalTokenUnits, totalTokenUnits); err != nil {
+			return ByChannelResponse{}, fmt.Errorf("sum BYOK channel total token units: %w", err)
+		}
 		item.TotalCost += r.TotalCost
+		if item.ReferenceCost, err = addOptionalNonNegative(item.ReferenceCost, r.ReferenceCost); err != nil {
+			return ByChannelResponse{}, fmt.Errorf("sum BYOK channel reference cost: %w", err)
+		}
 		item.PromptTokens += r.PromptTokens
 		item.CompletionTokens += r.CompletionTokens
 		item.CacheReadTokens += r.CacheReadTokens
@@ -225,13 +275,27 @@ func (h *Handler) BillingByModel(c *app.Context, req BillingRangeRequest) (ByMod
 
 	items := make([]ByModelItem, 0, len(rows))
 	for _, r := range rows {
+		totalTokens, totalTokenUnits, err := billingTokenTotals(
+			r.PromptTokens,
+			r.CompletionTokens,
+			r.CacheReadTokens,
+			r.CacheWriteTokens,
+		)
+		if err != nil {
+			return ByModelResponse{}, fmt.Errorf("sum BYOK model token units: %w", err)
+		}
+		referenceCost, err := addOptionalNonNegative(int64Pointer(0), r.ReferenceCost)
+		if err != nil {
+			return ByModelResponse{}, fmt.Errorf("validate BYOK model reference cost: %w", err)
+		}
 		items = append(items, ByModelItem{
 			ModelName:        r.ModelName,
 			RequestCount:     r.RequestCount,
 			SuccessCount:     r.SuccessCount,
 			FailedCount:      r.FailedCount,
 			SuccessRate:      safeSuccessRate(r.SuccessCount, r.RequestCount),
-			TotalTokens:      r.PromptTokens + r.CompletionTokens,
+			TotalTokens:      totalTokens,
+			TotalTokenUnits:  totalTokenUnits,
 			PromptTokens:     r.PromptTokens,
 			CompletionTokens: r.CompletionTokens,
 			CacheReadTokens:  r.CacheReadTokens,
@@ -239,10 +303,36 @@ func (h *Handler) BillingByModel(c *app.Context, req BillingRangeRequest) (ByMod
 			InputCost:        r.InputCost,
 			OutputCost:       r.OutputCost,
 			TotalCost:        r.TotalCost,
+			ReferenceCost:    referenceCost,
 		})
 	}
 	return ByModelResponse{Items: items}, nil
 }
+
+func billingTokenTotals(prompt, completion, cacheRead, cacheWrite int64) (int64, int64, error) {
+	totalTokens, err := safeint.AddNonNegativeInt64(prompt, completion)
+	if err != nil {
+		return 0, 0, err
+	}
+	totalTokenUnits, err := safeint.AddNonNegativeInt64(prompt, completion, cacheRead, cacheWrite)
+	if err != nil {
+		return 0, 0, err
+	}
+	return totalTokens, totalTokenUnits, nil
+}
+
+func addOptionalNonNegative(current, next *int64) (*int64, error) {
+	if current == nil || next == nil {
+		return nil, nil
+	}
+	value, err := safeint.AddNonNegativeInt64(*current, *next)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 // byokDailyRows 是 overview / by-channel 复用的取数封装。
 func byokDailyRows(c *app.Context, ownerID uint, from, to string) ([]dao.ChannelBillingDailyItem, error) {

@@ -1,10 +1,14 @@
 package dao
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
+	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // PrivateChannelFilter is the optional filter passed to list operations.
@@ -257,6 +261,7 @@ type AdminPrivateChannelMutation interface {
 	Delete(id, ownerID uint) error
 	// AdminDisable is the admin-only kill switch; does not check owner_id.
 	AdminDisable(id uint) error
+	AutoDisable(id uint, revision uint64, state models.ChannelDisableState) (AutoDisableResult, error)
 	// DeleteByOwner removes every private_channel row owned by ownerID.
 	// Used by the user-delete cascade to purge BYOK ciphertext when a user
 	// account is removed (GDPR/SOC2 right-to-erasure).
@@ -282,6 +287,7 @@ type adminPrivateChannelShareMutation struct{ ctx *baseContext }
 // via Update (key changes go through UpdateKey; owner/id/timestamps are immutable).
 var privateChannelReservedPatchKeys = []string{
 	"id", "owner_id", "key_cipher", "key_last4", "created_at",
+	"auto_ban_state", "auto_ban_revision",
 }
 
 func (m *adminPrivateChannelMutation) Create(pc *models.PrivateChannel) error {
@@ -293,8 +299,14 @@ func (m *adminPrivateChannelMutation) Create(pc *models.PrivateChannel) error {
 }
 
 func (m *adminPrivateChannelMutation) Update(id, ownerID uint, patch map[string]any) error {
+	_, statusDirty := patch["status"]
+	_, autoBanDirty := patch["auto_ban"]
 	for _, k := range privateChannelReservedPatchKeys {
 		delete(patch, k)
+	}
+	if statusDirty || autoBanDirty {
+		patch["auto_ban_state"] = datatypes.NewJSONType(models.ChannelDisableState{})
+		patch["auto_ban_revision"] = gorm.Expr("auto_ban_revision + ?", 1)
 	}
 	return m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("id = ? AND owner_id = ?", id, ownerID).
@@ -323,7 +335,38 @@ func (m *adminPrivateChannelMutation) Delete(id, ownerID uint) error {
 func (m *adminPrivateChannelMutation) AdminDisable(id uint) error {
 	return m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
 		Where("id = ?", id).
-		Update("status", 0).Error
+		Updates(map[string]any{
+			"status":            0,
+			"auto_ban_state":    datatypes.NewJSONType(models.ChannelDisableState{}),
+			"auto_ban_revision": gorm.Expr("auto_ban_revision + ?", 1),
+		}).Error
+}
+
+func (m *adminPrivateChannelMutation) AutoDisable(id uint, revision uint64, state models.ChannelDisableState) (AutoDisableResult, error) {
+	var row struct{ OwnerID uint }
+	if err := m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
+		Select("owner_id").Where("id = ?", id).Take(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return AutoDisableResult{}, nil
+		}
+		return AutoDisableResult{}, err
+	}
+	result := m.ctx.GetCoreDB().Model(&models.PrivateChannel{}).
+		Where("id = ? AND status = ? AND auto_ban = ? AND auto_ban_revision = ?", id, 1, 1, revision).
+		Updates(map[string]any{
+			"status":         0,
+			"auto_ban_state": datatypes.NewJSONType(state),
+		})
+	if result.Error != nil {
+		return AutoDisableResult{}, result.Error
+	}
+	if result.RowsAffected > 1 {
+		return AutoDisableResult{}, fmt.Errorf("auto-disable private channel %d affected %d rows", id, result.RowsAffected)
+	}
+	if result.RowsAffected == 0 {
+		return AutoDisableResult{}, nil
+	}
+	return AutoDisableResult{Updated: true, OwnerID: row.OwnerID}, nil
 }
 
 func (m *adminPrivateChannelMutation) DeleteByOwner(ownerID uint) error {

@@ -6,24 +6,27 @@ import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import {
   Tabs,
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs";
-import { DateRangeInputs } from "@/components/business/date-range-inputs";
+import {
+  DateRangePicker,
+  type DateRangeValue,
+} from "@/components/business/date-picker/date-range-picker";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { ObsGranularity, ObsRange } from "@/lib/types/observability";
 import { tsToDateStr, dateStrToTs } from "@/lib/utils/date-range";
+import { switchLongRangeToDay } from "@/lib/utils/observability-range";
 
 export type { ObsGranularity, ObsRange };
-
-const HOUR_MAX_WINDOW = 7 * 86_400;
-
-function clampForHour(r: ObsRange): { range: ObsRange; clamped: boolean } {
-  if (r.gran !== "hour") return { range: r, clamped: false };
-  if (r.end - r.start <= HOUR_MAX_WINDOW) return { range: r, clamped: false };
-  return { range: { ...r, start: r.end - HOUR_MAX_WINDOW }, clamped: true };
-}
 
 interface ObservabilityHeaderProps {
   title: string;
@@ -33,7 +36,10 @@ interface ObservabilityHeaderProps {
   onRefresh: () => void;
   refreshing?: boolean;
   showGranularity?: boolean;
-  extraFilters?: ReactNode;
+  maxDays?: number;
+  scopeLabel?: string;
+  scopeControls?: ReactNode;
+  headerActions?: ReactNode;
 }
 
 export function ObservabilityHeader({
@@ -44,70 +50,103 @@ export function ObservabilityHeader({
   onRefresh,
   refreshing = false,
   showGranularity = true,
-  extraFilters,
+  maxDays,
+  scopeLabel,
+  scopeControls,
+  headerActions,
 }: ObservabilityHeaderProps) {
   const tRange = useTranslations("monitoring.range");
+  const tb = useTranslations("billing");
   const startStr = tsToDateStr(range.start);
   const endStr = tsToDateStr(range.end);
 
-  const emitClampToast = () => toast.info(tRange("hourWindowClamped"));
+  const emitAutoDayToast = () => toast.info(tRange("longRangeUsesDay"));
 
-  const handleStartChange = (s: string) => {
-    const next: ObsRange = { ...range, start: dateStrToTs(s, false) };
-    const result = clampForHour(next);
-    if (result.clamped) emitClampToast();
-    onRangeChange(result.range);
-  };
-  const handleEndChange = (s: string) => {
-    const next: ObsRange = { ...range, end: dateStrToTs(s, true) };
-    const result = clampForHour(next);
-    if (result.clamped) emitClampToast();
+  const handleDateRangeChange = ({ startDate, endDate }: DateRangeValue) => {
+    const next: ObsRange = {
+      ...range,
+      start: dateStrToTs(startDate, false),
+      end: dateStrToTs(endDate, true),
+    };
+    const result = switchLongRangeToDay(next);
+    if (result.adjusted) emitAutoDayToast();
     onRangeChange(result.range);
   };
   const handleGranChange = (v: string) => {
     if (v !== "day" && v !== "hour") return;
     const next: ObsRange = { ...range, gran: v };
-    const result = clampForHour(next);
-    if (result.clamped) emitClampToast();
+    const result = switchLongRangeToDay(next);
+    if (result.adjusted) emitAutoDayToast();
     onRangeChange(result.range);
   };
 
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1">
+        <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-bold">{title}</h1>
           {subtitle && <p className="text-muted-foreground">{subtitle}</p>}
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          {showGranularity && (
+        <div className="grid w-full grid-cols-[1fr_auto] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
+          {showGranularity ? (
             <Tabs value={range.gran} onValueChange={handleGranChange}>
-              <TabsList>
+              <TabsList className="!h-9 sm:!h-8">
                 <TabsTrigger value="day">{tRange("day")}</TabsTrigger>
                 <TabsTrigger value="hour">{tRange("hour")}</TabsTrigger>
               </TabsList>
             </Tabs>
-          )}
-          <DateRangeInputs
-            compact
-            startDate={startStr}
-            endDate={endStr}
-            onStartDateChange={handleStartChange}
-            onEndDateChange={handleEndChange}
-          />
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onRefresh}
-            disabled={refreshing}
-            aria-label="Refresh"
+          ) : null}
+          <div
+            data-slot="header-actions"
+            className={showGranularity
+              ? "flex items-center gap-2 sm:order-last"
+              : "col-start-2 row-start-1 flex items-center gap-2 sm:order-last"
+            }
           >
-            <RefreshCw className={refreshing ? "animate-spin" : ""} />
-          </Button>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    className="size-9 sm:size-8"
+                    onClick={onRefresh}
+                    disabled={refreshing}
+                    aria-label="Refresh"
+                  >
+                    <RefreshCw className={refreshing ? "animate-spin" : ""} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{tb("refresh")}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            {headerActions}
+          </div>
+          <DateRangePicker
+            value={{ startDate: startStr, endDate: endStr }}
+            onValueChange={handleDateRangeChange}
+            placeholder={tb("dateRange")}
+            size="sm"
+            maxDays={maxDays}
+            className={showGranularity
+              ? "col-span-2 w-full [&_[data-slot=date-range-trigger]]:h-9 sm:w-auto sm:[&_[data-slot=date-range-trigger]]:h-8"
+              : "col-start-1 row-start-1 min-w-0 w-full [&_[data-slot=date-range-trigger]]:h-9 sm:w-auto sm:[&_[data-slot=date-range-trigger]]:h-8"
+            }
+          />
         </div>
       </div>
-      {extraFilters && (
-        <div className="flex flex-wrap items-center gap-3">{extraFilters}</div>
+      {scopeControls && (
+        <div data-slot="page-scope-rail" className="flex flex-col gap-2">
+          <Separator />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            {scopeLabel && (
+              <span className="shrink-0 text-sm text-muted-foreground">{scopeLabel}</span>
+            )}
+            <div className="grid min-w-0 grid-cols-2 gap-2 [&>*]:min-w-0 [&>*:last-child:nth-child(odd)]:col-span-2 [&_button[role=combobox]]:h-9 [&_[data-slot=select-trigger]]:h-9 sm:flex sm:flex-wrap sm:items-center sm:[&_button[role=combobox]]:h-8 sm:[&_[data-slot=select-trigger]]:h-8">
+              {scopeControls}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

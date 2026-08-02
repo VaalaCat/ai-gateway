@@ -27,9 +27,9 @@ type PreviewNode struct {
 
 // PreviewResponse 是 preview 接口的响应结构。
 type PreviewResponse struct {
-	Root             PreviewNode     `json:"root"`
+	Root             PreviewNode       `json:"root"`
 	EffectiveWeights []EffectiveWeight `json:"effective_weights"`
-	Warnings         []string        `json:"warnings"`
+	Warnings         []string          `json:"warnings"`
 }
 
 // EffectiveWeight 表示某个真实 model 的最终权重百分比。
@@ -37,8 +37,6 @@ type EffectiveWeight struct {
 	Ref     string  `json:"ref"`
 	Percent float64 `json:"percent"`
 }
-
-const previewMaxDepth = 5
 
 func (h *Handler) Preview(c *app.Context, req PreviewRequest) (PreviewResponse, error) {
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
@@ -77,12 +75,6 @@ func (h *Handler) Preview(c *app.Context, req PreviewRequest) (PreviewResponse, 
 		}
 	}
 
-	// visited 用于环检测；若在编辑已存在的 routing，先把自己加入
-	visited := map[string]bool{}
-	if req.SelfName != "" {
-		visited[req.SelfName] = true
-	}
-
 	// root 是虚拟的"当前正在编辑的 routing"节点
 	root := PreviewNode{
 		Ref:          req.SelfName,
@@ -92,7 +84,22 @@ func (h *Handler) Preview(c *app.Context, req PreviewRequest) (PreviewResponse, 
 		Weight:       1,
 		EffectivePct: 100,
 	}
-	root.Children = buildChildren(req.Members, rIdx, disabledRIdx, modelSet, visited, 1, 100.0)
+	rootMembers := make([]models.RoutingMember, len(req.Members))
+	for i, member := range req.Members {
+		rootMembers[i] = models.RoutingMember{Ref: member.Ref, Priority: member.Priority, Weight: member.Weight}
+	}
+	rootRouteKey := ""
+	if existing := rIdx[req.SelfName]; existing != nil {
+		rootRouteKey = RoutingWalkKey(existing)
+	}
+	walked, err := WalkRoutingDestinations(RoutingWalkRequest{
+		RootRouteKey: rootRouteKey,
+		Members:      rootMembers,
+	}, previewRoutingTargetFinder{enabled: rIdx, disabled: disabledRIdx, realModels: modelSet})
+	if err != nil {
+		return PreviewResponse{}, api.InternalError("walk routing preview", err)
+	}
+	root.Children = previewNodes(walked)
 
 	// 将叶子节点（真实 model）的 effective_pct 汇总
 	weightMap := map[string]float64{}
@@ -117,148 +124,56 @@ func csvSplit(s string) []string {
 	return out
 }
 
-// buildChildren 按 spec §3.1 构建子节点列表：
-//   - 找出最高 priority 组，按 weight 加权分配 parentPct
-//   - 低 priority 组也加入 children，但 effective_pct=0（作为 backup 展示）
-func buildChildren(members []MemberInput, rIdx map[string]*models.ModelRouting,
-	disabledRIdx map[string]*models.ModelRouting, modelSet map[string]bool,
-	visited map[string]bool, depth int, parentPct float64) []PreviewNode {
-
-	if depth > previewMaxDepth {
-		return []PreviewNode{{Kind: "invalid", Error: "max_depth"}}
-	}
-	if len(members) == 0 {
-		return nil
-	}
-
-	// 找最高 priority
-	maxPriority := members[0].Priority
-	for _, m := range members[1:] {
-		if m.Priority > maxPriority {
-			maxPriority = m.Priority
-		}
-	}
-
-	// 顶组：最高 priority 成员
-	var topGroup []MemberInput
-	for _, m := range members {
-		if m.Priority == maxPriority {
-			topGroup = append(topGroup, m)
-		}
-	}
-
-	// 顶组总权重
-	totalW := 0
-	for _, m := range topGroup {
-		w := m.Weight
-		if w <= 0 {
-			w = 1
-		}
-		totalW += w
-	}
-
-	var children []PreviewNode
-
-	// 顶组成员：按 weight 分配 effective_pct
-	for _, m := range topGroup {
-		w := m.Weight
-		if w <= 0 {
-			w = 1
-		}
-		share := parentPct * float64(w) / float64(totalW)
-		node := PreviewNode{
-			Ref:          m.Ref,
-			Priority:     m.Priority,
-			Weight:       m.Weight,
-			EffectivePct: share,
-		}
-		if r, isRouting := rIdx[m.Ref]; isRouting {
-			if visited[m.Ref] {
-				// 重遇路径上的路由：存在同名真实模型则当 model 叶子终结，否则才是真环。
-				if modelSet[m.Ref] {
-					node.Kind = "model"
-				} else {
-					node.Kind = "routing"
-					node.Error = "cycle"
-				}
-			} else {
-				node.Kind = "routing"
-				node.Scope = r.Scope
-				visited[m.Ref] = true
-				subMembers := parseRoutingMembers(r.Members)
-				inputs := make([]MemberInput, len(subMembers))
-				for i, sm := range subMembers {
-					inputs[i] = MemberInput{Ref: sm.Ref, Priority: sm.Priority, Weight: sm.Weight}
-				}
-				node.Children = buildChildren(inputs, rIdx, disabledRIdx, modelSet, visited, depth+1, share)
-				delete(visited, m.Ref)
-			}
-		} else if dr, disabled := disabledRIdx[m.Ref]; disabled {
-			node.Kind = "routing"
-			node.Scope = dr.Scope
-			node.Error = "disabled"
-		} else if modelSet[m.Ref] {
-			node.Kind = "model"
-		} else {
-			node.Kind = "invalid"
-			node.Error = "not_found"
-		}
-		children = append(children, node)
-	}
-
-	// 低 priority 成员：effective_pct=0，递归展开 routing children（parentPct=0 保证子树权重为 0）
-	for _, m := range members {
-		if m.Priority == maxPriority {
-			continue
-		}
-		node := PreviewNode{
-			Ref:          m.Ref,
-			Priority:     m.Priority,
-			Weight:       m.Weight,
-			EffectivePct: 0,
-		}
-		if r, isRouting := rIdx[m.Ref]; isRouting {
-			if visited[m.Ref] {
-				// 重遇路径上的路由：存在同名真实模型则当 model 叶子终结，否则才是真环。
-				if modelSet[m.Ref] {
-					node.Kind = "model"
-				} else {
-					node.Kind = "routing"
-					node.Error = "cycle"
-				}
-			} else {
-				node.Kind = "routing"
-				node.Scope = r.Scope
-				visited[m.Ref] = true
-				var subMembers []MemberInput
-				for _, sm := range parseRoutingMembers(r.Members) {
-					subMembers = append(subMembers, MemberInput{Ref: sm.Ref, Priority: sm.Priority, Weight: sm.Weight})
-				}
-				// parentPct=0：整棵子树 effective_pct 为 0，不影响累加结果
-				node.Children = buildChildren(subMembers, rIdx, disabledRIdx, modelSet, visited, depth+1, 0)
-				delete(visited, m.Ref)
-			}
-		} else if dr, disabled := disabledRIdx[m.Ref]; disabled {
-			node.Kind = "routing"
-			node.Scope = dr.Scope
-			node.Error = "disabled"
-		} else if modelSet[m.Ref] {
-			node.Kind = "model"
-		} else {
-			node.Kind = "invalid"
-			node.Error = "not_found"
-		}
-		children = append(children, node)
-	}
-
-	return children
+type previewRoutingTargetFinder struct {
+	enabled    map[string]*models.ModelRouting
+	disabled   map[string]*models.ModelRouting
+	realModels map[string]bool
 }
 
-// parseRoutingMembers 解析 routing.Members JSON 字段。
-func parseRoutingMembers(jsonStr string) []models.RoutingMember {
-	var ms []models.RoutingMember
-	_ = json.Unmarshal([]byte(jsonStr), &ms)
-	return ms
+func (f previewRoutingTargetFinder) FindEnabledRouting(ref string) (RoutingWalkRoute, bool, error) {
+	route, ok := f.enabled[ref]
+	if !ok {
+		return RoutingWalkRoute{}, false, nil
+	}
+	return previewWalkRoute(route), true, nil
+}
+
+func (f previewRoutingTargetFinder) FindDisabledRouting(ref string) (RoutingWalkRoute, bool, error) {
+	route, ok := f.disabled[ref]
+	if !ok {
+		return RoutingWalkRoute{}, false, nil
+	}
+	return previewWalkRoute(route), true, nil
+}
+
+func (f previewRoutingTargetFinder) HasRealModel(ref string) bool { return f.realModels[ref] }
+
+func previewWalkRoute(route *models.ModelRouting) RoutingWalkRoute {
+	var members []models.RoutingMember
+	// Existing administrator preview behavior is intentionally best-effort for
+	// malformed legacy rows. Marketplace uses a separate strict parser.
+	_ = json.Unmarshal([]byte(route.Members), &members)
+	return RoutingWalkRoute{Key: RoutingWalkKey(route), Scope: route.Scope, Members: members}
+}
+
+func previewNodes(nodes []RoutingWalkNode) []PreviewNode {
+	if len(nodes) == 0 {
+		return nil
+	}
+	result := make([]PreviewNode, 0, len(nodes))
+	for _, node := range nodes {
+		result = append(result, PreviewNode{
+			Ref:          node.Ref,
+			Kind:         string(node.Kind),
+			Scope:        node.Scope,
+			Priority:     node.Priority,
+			Weight:       node.Weight,
+			EffectivePct: node.EffectivePercent,
+			Children:     previewNodes(node.Children),
+			Error:        string(node.Issue),
+		})
+	}
+	return result
 }
 
 // flattenWeights 递归收集所有叶子（kind=model）节点的 effective_pct。

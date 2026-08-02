@@ -2,7 +2,6 @@ package stats
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -19,6 +18,10 @@ import (
 //
 // 窗口超过 ObsRange.Validate() 上限时返回 400 RangeOutOfBounds (结构化 code，前端 i18n 用)。
 func (h *Handler) Dashboard(c *app.Context, req DashboardRequest) (DashboardResponse, error) {
+	topN, err := parseDashboardTopN(req.TopN)
+	if err != nil {
+		return DashboardResponse{}, err
+	}
 	r := parseObsRange(req.Start, req.End, req.Gran)
 	if err := r.Validate(); err != nil {
 		return DashboardResponse{}, api.ErrorWithCode(400, "RangeOutOfBounds",
@@ -33,10 +36,16 @@ func (h *Handler) Dashboard(c *app.Context, req DashboardRequest) (DashboardResp
 	if !s.IsAdmin {
 		filter.UserID = 0
 	}
-	load := func(ctx context.Context) (any, error) {
-		return h.loadDashboard(ctx, c, r, s, filter)
+	if h.LogDatabaseReady != nil && !h.LogDatabaseReady() {
+		return DashboardResponse{}, api.InternalError("dashboard log database", dao.ErrLogDatabaseUnavailable)
 	}
-	if h.Cache == nil || (h.LogDatabaseReady != nil && !h.LogDatabaseReady()) {
+	if _, err := dao.NewContextWithContext(c.App, c.RequestContext()).LogDB(); err != nil {
+		return DashboardResponse{}, api.InternalError("dashboard log database", err)
+	}
+	load := func(ctx context.Context) (any, error) {
+		return h.loadDashboard(ctx, c, r, s, topN, filter)
+	}
+	if h.Cache == nil {
 		value, err := load(c.RequestContext())
 		return value.(DashboardResponse), err
 	}
@@ -46,7 +55,7 @@ func (h *Handler) Dashboard(c *app.Context, req DashboardRequest) (DashboardResp
 	}
 	value, err := h.Cache.Get(c.RequestContext(), dao.QueryKey{
 		Name: "stats.dashboard", From: r.Start, To: r.End, Gran: string(r.Gran),
-		Scope: scopeName, UserID: filter.EffectiveUserID(s), Model: filter.ModelName,
+		Scope: scopeName, UserID: filter.EffectiveUserID(s), Model: filter.ModelName, TopN: topN,
 	}, load)
 	if err != nil {
 		return DashboardResponse{}, err
@@ -58,47 +67,30 @@ func (h *Handler) Dashboard(c *app.Context, req DashboardRequest) (DashboardResp
 	return response, nil
 }
 
-func (h *Handler) loadDashboard(ctx context.Context, c *app.Context, r dao.ObsRange, s dao.Scope, filter dao.ObsFilter) (DashboardResponse, error) {
-	daoCtx := dao.NewContextWithContext(c.App, ctx)
+func parseDashboardTopN(raw int) (int, error) {
+	if raw == 0 {
+		return 10, nil
+	}
+	return api.ParseTopN(raw)
+}
+
+func (h *Handler) loadDashboard(ctx context.Context, c *app.Context, r dao.ObsRange, s dao.Scope, topN int, filter dao.ObsFilter) (DashboardResponse, error) {
 	finder := h.dashboardDataFinder(c.App, ctx)
-	mode, err := daoCtx.DatabaseLayoutMode()
-	if err != nil {
-		return DashboardResponse{}, api.InternalError("dashboard database layout", err)
-	}
-	var kpis dao.KpiBundle
-	if mode == app.DatabaseLayoutSplit {
-		kpis, err = finder.CoreDashboardKpis(r, s, filter)
-	} else {
-		kpis, err = dao.NewAdminQuery(daoCtx).Stats().DashboardKpis(r, s, filter)
-	}
+	kpis, err := finder.DashboardKpis(r, s, filter)
 	if err != nil {
 		return DashboardResponse{}, api.InternalError("dashboard kpis", err)
 	}
-	coreTrend, err := dashboardCoreTrend(finder, mode, r, s, filter)
+	requestTrend, err := dashboardTrendFromRequestFacts(finder, r, s, filter)
 	if err != nil {
-		return DashboardResponse{}, api.InternalError("dashboard core trend", err)
+		return DashboardResponse{}, api.InternalError("dashboard request trend", err)
 	}
 	resp := DashboardResponse{
 		Kpis:       kpis,
-		Trend:      billingTrendBlock(coreTrend),
+		Trend:      billingTrendBlock(requestTrend),
 		DataStatus: DataStatus{LogDB: "available"},
 	}
-	if h.LogDatabaseReady != nil && !h.LogDatabaseReady() {
-		resp.DataStatus.LogDB = "unavailable"
-		return resp, nil
-	}
-	if _, err := daoCtx.LogDB(); errors.Is(err, dao.ErrLogDatabaseUnavailable) {
-		resp.DataStatus.LogDB = "unavailable"
-		return resp, nil
-	} else if err != nil {
-		return DashboardResponse{}, api.InternalError("dashboard log database", err)
-	}
-
-	logMetrics, successRate, err := loadDashboardLogMetrics(finder, r, s, filter)
+	logMetrics, successRate, err := loadDashboardLogMetrics(finder, r, s, topN, filter)
 	if err != nil {
-		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
-			return degradeDashboardLogMetrics(resp), nil
-		}
 		return DashboardResponse{}, api.InternalError("dashboard log metrics", err)
 	}
 	resp.Kpis.SuccessRate = successRate
@@ -106,11 +98,8 @@ func (h *Handler) loadDashboard(ctx context.Context, c *app.Context, r dao.ObsRa
 	return resp, nil
 }
 
-func dashboardCoreTrend(finder DashboardDataFinder, mode app.DatabaseLayoutMode, r dao.ObsRange, s dao.Scope, filter dao.ObsFilter) ([]dao.TimeBucket, error) {
-	if mode == app.DatabaseLayoutSplit {
-		return finder.CoreDashboardTrend(r, s, filter)
-	}
-	return finder.HourlyTrend(r, s, filter)
+func dashboardTrendFromRequestFacts(finder DashboardDataFinder, r dao.ObsRange, s dao.Scope, filter dao.ObsFilter) ([]dao.TimeBucket, error) {
+	return finder.DashboardTrend(r, s, filter)
 }
 
 func billingTrendBlock(buckets []dao.TimeBucket) TrendBlock {
@@ -124,7 +113,7 @@ func billingTrendBlock(buckets []dao.TimeBucket) TrendBlock {
 	return TrendBlock{Buckets: billing, Metrics: []string{"cost", "requests", "tokens"}}
 }
 
-func loadDashboardLogMetrics(finder DashboardDataFinder, r dao.ObsRange, s dao.Scope, filter dao.ObsFilter) (*LogMetrics, *dao.KpiMetric, error) {
+func loadDashboardLogMetrics(finder DashboardDataFinder, r dao.ObsRange, s dao.Scope, topN int, filter dao.ObsFilter) (*LogMetrics, *dao.KpiMetric, error) {
 	var successRate *dao.KpiMetric
 	if s.IsAdmin {
 		metric, err := finder.DashboardSuccessRate(r, s, filter)
@@ -141,36 +130,42 @@ func loadDashboardLogMetrics(finder DashboardDataFinder, r dao.ObsRange, s dao.S
 	if !s.IsAdmin {
 		return metrics, nil, nil
 	}
-	if err := loadDashboardRankings(finder, metrics, r, s, filter); err != nil {
+	if err := loadDashboardRankings(finder, metrics, r, s, topN, filter); err != nil {
 		return nil, nil, err
 	}
 	return metrics, successRate, nil
 }
 
-func loadDashboardRankings(finder DashboardDataFinder, metrics *LogMetrics, r dao.ObsRange, s dao.Scope, filter dao.ObsFilter) error {
+func loadDashboardRankings(finder DashboardDataFinder, metrics *LogMetrics, r dao.ObsRange, s dao.Scope, topN int, filter dao.ObsFilter) error {
 	users, err := finder.Leaderboard("user", "tokens", 10, r, s, filter)
-	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+	if err != nil {
 		return err
 	}
 	models, err := finder.Leaderboard("model", "tokens", 10, r, s, filter)
-	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+	if err != nil {
 		return err
 	}
 	channels, err := finder.Leaderboard("channel", "tokens", 10, r, s, filter)
-	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+	if err != nil {
 		return err
 	}
 	metrics.Leaderboard = &LeaderboardBlock{
 		Users: users, Models: models, Channels: channels,
 		AvailableMetrics: []string{"cost", "requests", "tokens", "tps", "ttft"},
 	}
-	byModel, err := finder.SpeedCompare("model", r, s, filter)
-	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+	byModel, err := finder.SpeedCompare("model", r, s, topN, filter)
+	if err != nil {
 		return err
 	}
-	byChannel, err := finder.SpeedCompare("channel", r, s, filter)
-	if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+	byChannel, err := finder.SpeedCompare("channel", r, s, topN, filter)
+	if err != nil {
 		return err
+	}
+	if byModel == nil {
+		byModel = []dao.SpeedRow{}
+	}
+	if byChannel == nil {
+		byChannel = []dao.SpeedRow{}
 	}
 	metrics.SpeedCompare = &SpeedCompareBlock{ByModel: byModel, ByChannel: byChannel}
 	return nil
@@ -192,11 +187,4 @@ func performanceTrendBlock(buckets []dao.TimeBucket) PerformanceTrendBlock {
 		})
 	}
 	return PerformanceTrendBlock{Buckets: performance, Metrics: []string{"ttft", "tps", "cache_hit_rate"}}
-}
-
-func degradeDashboardLogMetrics(resp DashboardResponse) DashboardResponse {
-	resp.DataStatus.LogDB = "unavailable"
-	resp.Kpis.SuccessRate = nil
-	resp.LogMetrics = nil
-	return resp
 }

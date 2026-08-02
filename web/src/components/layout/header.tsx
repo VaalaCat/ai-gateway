@@ -20,6 +20,7 @@ const pageKeys: Record<string, string> = {
   tokens: "tokens",
   channels: "channels",
   models: "models",
+  "model-marketplace": "modelMarketplace",
   agents: "agents",
   logs: "logs",
   playground: "playground",

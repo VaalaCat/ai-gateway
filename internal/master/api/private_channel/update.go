@@ -3,6 +3,7 @@ package private_channel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -12,12 +13,18 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"go.uber.org/zap"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // updateClientReservedKeys are fields a portal client CAN NEVER set via Update:
 // id/owner/timestamps are immutable; key changes go through UpdateKey only.
 var updateClientReservedKeys = []string{
 	"id", "owner_id", "key", "key_cipher", "key_last4", "created_at", "updated_at",
+}
+
+var updateClientRuntimeKeys = map[string]struct{}{
+	"auto_ban_state":    {},
+	"auto_ban_revision": {},
 }
 
 // jsonColumnNormalizers maps PATCH field name → in-place type adapter.
@@ -47,6 +54,24 @@ func normalizeJSONColumns(fields map[string]any) {
 	}
 }
 
+func rejectPrivateChannelRuntimeFields(fields map[string]any) error {
+	for field := range fields {
+		if _, found := updateClientRuntimeKeys[field]; found {
+			return fmt.Errorf("private channel field %q is read-only", field)
+		}
+	}
+	return nil
+}
+
+func applyPrivateChannelLifecycle(fields map[string]any) {
+	_, statusDirty := fields["status"]
+	_, autoBanDirty := fields["auto_ban"]
+	if statusDirty || autoBanDirty {
+		fields["auto_ban_state"] = datatypes.NewJSONType(models.ChannelDisableState{})
+		fields["auto_ban_revision"] = gorm.Expr("auto_ban_revision + ?", 1)
+	}
+}
+
 func (h *Handler) PortalUpdate(c *app.Context, req UpdateRequest) (DetailResponse, error) {
 	if c.UserInfo == nil {
 		return DetailResponse{}, api.UnauthorizedError("not authenticated")
@@ -61,6 +86,9 @@ func (h *Handler) PortalUpdate(c *app.Context, req UpdateRequest) (DetailRespons
 	pc, err := q.PrivateChannel().GetByID(uint(id))
 	if err != nil || pc == nil || pc.OwnerID != c.UserInfo.UserID {
 		return DetailResponse{}, api.NotFoundError("private channel not found")
+	}
+	if err := rejectPrivateChannelRuntimeFields(req.Fields); err != nil {
+		return DetailResponse{}, api.BadRequestError(err.Error(), err)
 	}
 
 	// Strip reserved keys at portal layer (DAO will also strip defensively).
@@ -101,6 +129,7 @@ func (h *Handler) PortalUpdate(c *app.Context, req UpdateRequest) (DetailRespons
 	// 里的 stringSliceFromAny / mappingFromAny 期望 wire 形态（[]any /
 	// map[string]any），先 normalize 会破坏 validator 的类型 switch。
 	normalizeJSONColumns(req.Fields)
+	applyPrivateChannelLifecycle(req.Fields)
 
 	m := dao.NewAdminMutation(daoCtx)
 	if err := m.PrivateChannel().Update(uint(id), c.UserInfo.UserID, req.Fields); err != nil {

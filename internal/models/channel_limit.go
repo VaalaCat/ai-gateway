@@ -73,8 +73,8 @@ func (l ChannelLimit) Validate() error {
 	return nil
 }
 
-// ChannelLimitState 是限额评估器写入的运行态(为何被自动禁/能否自动恢复)。API 只读不写。
-type ChannelLimitState struct {
+// ChannelDisableState 是限额/连续错误自动禁用写入的运行态。API 只读不写。
+type ChannelDisableState struct {
 	Tripped     bool   `json:"tripped"`
 	Reason      string `json:"reason"`
 	AutoRecover bool   `json:"auto_recover"`

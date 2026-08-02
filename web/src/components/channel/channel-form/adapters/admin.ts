@@ -7,7 +7,7 @@ import {
 } from "@/lib/api/channels";
 import type { Channel } from "@/lib/types";
 import type { ChannelFormAdapter } from "../adapter";
-import { mapChannelToForm, sanitizeOtherSettingsForSubmit, parseResilience, parseLimit, parseAffinity } from "../utils";
+import { mapChannelToForm, sanitizeOtherSettingsForSubmit, parseResilience, serializeChannelLimitForPayload, parseAffinity } from "../utils";
 import type { ChannelForm } from "../types";
 
 function buildPayload(
@@ -22,17 +22,10 @@ function buildPayload(
   const hasResilience = Object.keys(resilienceRaw).length > 0;
   const affinityRaw = parseAffinity(form.affinity);
   const hasAffinity = Object.keys(affinityRaw).length > 0;
-  const limitRaw = parseLimit(form.limit);
-  const cleanRules = (limitRaw.rules ?? []).filter((r) => r.threshold > 0);
-  const hasCutoff = typeof limitRaw.disable_at === "number" && limitRaw.disable_at > 0;
-  // 始终发送 limit:空对象表示清空(后端 partial update 才能真正清掉旧配置);
-  // 同时丢弃 threshold<=0 的半成品规则,避免误存 "0 即永久禁用" 的规则。
-  const limit = {
-    ...(hasCutoff ? { disable_at: limitRaw.disable_at } : {}),
-    ...(cleanRules.length > 0 ? { rules: cleanRules } : {}),
-  };
+  const limit = serializeChannelLimitForPayload(form.limit);
   return {
     name: form.name,
+    public_display_name: form.public_display_name,
     type: Number(form.type),
     key: form.key,
     base_url: form.base_url,
@@ -69,6 +62,21 @@ function buildPayload(
   } as Partial<Channel>;
 }
 
+export function buildAdminCreatePayload(form: ChannelForm): Partial<Channel> {
+  return buildPayload(form);
+}
+
+export function buildAdminUpdatePayload(
+  form: ChannelForm,
+  initial: ChannelForm,
+): { fields: Record<string, unknown> } {
+  const { name: _name, ...fields } = buildPayload(form, {
+    includeEmptyResilience: form.resilience !== initial.resilience,
+    includeEmptyAffinity: form.affinity !== initial.affinity,
+  });
+  return { fields };
+}
+
 export const adminChannelAdapter: ChannelFormAdapter<Channel> = {
   listPath: "/channels",
   scriptsHref: "/scripts",
@@ -78,13 +86,8 @@ export const adminChannelAdapter: ChannelFormAdapter<Channel> = {
     name: `${c.name ?? ""}-copy`,
     key: c.key ?? "",
   }),
-  buildCreatePayload: (form) => buildPayload(form),
-  buildUpdatePayload: (form, initial) => ({
-    fields: buildPayload(form, {
-      includeEmptyResilience: form.resilience !== initial.resilience,
-      includeEmptyAffinity: form.affinity !== initial.affinity,
-    }) as Record<string, unknown>,
-  }),
+  buildCreatePayload: buildAdminCreatePayload,
+  buildUpdatePayload: buildAdminUpdatePayload,
   useEntity: (id) => {
     const q = useChannel(id);
     return { data: q.data, isLoading: q.isLoading, isError: q.isError };

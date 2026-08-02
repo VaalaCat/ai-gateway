@@ -18,14 +18,14 @@ func TestMarketShare_Admin_ByModel_ReturnsStackedSeries(t *testing.T) {
 	start = mustUnixDate(t, date)
 	end = start + 86400
 
-	if err := db.Create(&models.BillingHourlyBucket{
+	if err := db.Create(&models.UsageHourlyBucket{
 		Date: date, Hour: 10, ChannelID: 5, ModelName: "gpt-4o",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 100, CompletionTokens: 50,
 	}).Error; err != nil {
 		t.Fatalf("seed hourly bucket: %v", err)
 	}
-	if err := db.Create(&models.BillingHourlyBucket{
+	if err := db.Create(&models.UsageHourlyBucket{
 		Date: date, Hour: 10, ChannelID: 5, ModelName: "claude-3",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 10, CompletionTokens: 5,
@@ -58,7 +58,7 @@ func TestMarketShare_Admin_ByChannel_UsesChannelName(t *testing.T) {
 	start := mustUnixDate(t, date)
 	end := start + 86400
 
-	if err := db.Create(&models.BillingHourlyBucket{
+	if err := db.Create(&models.UsageHourlyBucket{
 		Date: date, Hour: 10, ChannelID: 5, ChannelName: "openai-shared", ModelName: "gpt-4o",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 60, CompletionTokens: 40,
@@ -132,7 +132,7 @@ func TestMarketShareTopNRanksByWindowTokensAndFoldsExactOthers(t *testing.T) {
 	date := "2026-05-20"
 	start := mustUnixDate(t, date)
 	for i := 0; i < 7; i++ {
-		if err := db.Create(&models.BillingHourlyBucket{
+		if err := db.Create(&models.UsageHourlyBucket{
 			Date: date, Hour: 10, ChannelID: uint(i + 1), ModelName: fmt.Sprintf("model-%02d", i),
 			OwnerType: "admin", RequestCount: 100, PromptTokens: int64(70 - i),
 		}).Error; err != nil {

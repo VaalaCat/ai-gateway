@@ -17,7 +17,7 @@ func TestModelDistributionRanksByWindowRequestCountAndFoldsOthers(t *testing.T) 
 	date := "2026-05-20"
 	start := mustUnixDate(t, date)
 	for i := 0; i < 7; i++ {
-		if err := db.Create(&models.BillingHourlyBucket{
+		if err := db.Create(&models.UsageHourlyBucket{
 			Date: date, Hour: 10, ChannelID: uint(i + 1), ModelName: fmt.Sprintf("model-%02d", i),
 			OwnerType: "admin", RequestCount: int64(70 - i), TotalCost: int64(i+1) * 10000,
 		}).Error; err != nil {
@@ -69,7 +69,7 @@ func TestModelDistributionDefaultTopNIsFive(t *testing.T) {
 	date := "2026-05-20"
 	start := mustUnixDate(t, date)
 	for i := 0; i < 6; i++ {
-		if err := db.Create(&models.BillingHourlyBucket{Date: date, Hour: i, ChannelID: uint(i + 1), ModelName: fmt.Sprintf("m%d", i), OwnerType: "admin", RequestCount: int64(i + 1)}).Error; err != nil {
+		if err := db.Create(&models.UsageHourlyBucket{Date: date, Hour: i, ChannelID: uint(i + 1), ModelName: fmt.Sprintf("m%d", i), OwnerType: "admin", RequestCount: int64(i + 1)}).Error; err != nil {
 			t.Fatal(err)
 		}
 	}

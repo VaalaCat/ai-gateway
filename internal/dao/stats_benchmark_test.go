@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -16,112 +17,79 @@ import (
 
 const productionStatsBudget = 200 * time.Millisecond
 
-type billingHourlyStatsFixture struct {
-	db       *gorm.DB
+type statsRoutingFixture struct {
+	query    AdminStatsQuery
 	rangeArg ObsRange
 	rowCount int
 }
 
-func newBillingHourlyStatsFixture(tb testing.TB) billingHourlyStatsFixture {
+func newStatsRoutingFixture(tb testing.TB) statsRoutingFixture {
 	tb.Helper()
-	dsn := fmt.Sprintf("file:stats-benchmark-%d?mode=memory&cache=shared", time.Now().UnixNano())
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
-	require.NoError(tb, err)
-	sqlDB, err := db.DB()
-	require.NoError(tb, err)
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
-	tb.Cleanup(func() { _ = sqlDB.Close() })
-	require.NoError(tb, models.MigrateCoreDB(db))
+	open := func(role string, migrate func(*gorm.DB) error) *gorm.DB {
+		dsn := fmt.Sprintf("file:stats-routing-%s-%d?mode=memory&cache=shared", role, time.Now().UnixNano())
+		db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+		require.NoError(tb, err)
+		sqlDB, err := db.DB()
+		require.NoError(tb, err)
+		sqlDB.SetMaxOpenConns(1)
+		sqlDB.SetMaxIdleConns(1)
+		tb.Cleanup(func() { _ = sqlDB.Close() })
+		require.NoError(tb, migrate(db))
+		return db
+	}
+	core := open("core", models.MigrateCoreDB)
+	logs := open("log", models.MigrateLogDB)
+	require.NoError(tb, core.Create(&models.User{ID: 7, Username: "fixture-user"}).Error)
 
-	users := make([]models.User, 0, 100)
-	for userID := 1; userID <= 100; userID++ {
-		users = append(users, models.User{ID: uint(userID), Username: fmt.Sprintf("user-%03d", userID)})
+	start := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+	hourly := []models.UsageHourlyBucket{
+		{Date: "2026-07-16", Hour: 10, ChannelID: 1, ModelName: "wanted", AgentID: "a", RequestCount: 2, SuccessCount: 2, PromptTokens: 20, TotalCost: 4},
+		{Date: "2026-07-16", Hour: 11, ChannelID: 1, ModelName: "wanted", AgentID: "a", RequestCount: 3, SuccessCount: 3, PromptTokens: 30, TotalCost: 6},
+		{Date: "2026-07-16", Hour: 11, ChannelID: 2, ModelName: "other", AgentID: "a", RequestCount: 1, SuccessCount: 1, PromptTokens: 10, TotalCost: 2},
 	}
-	require.NoError(tb, db.CreateInBatches(users, 100).Error)
+	require.NoError(tb, logs.Create(&hourly).Error)
+	requests := []models.RequestLog{
+		models.RequestLog(models.UsageLog{RequestID: "left", UserID: 7, ModelName: "wanted", Status: 1, PromptTokens: 2, TotalCost: 1, CreatedAt: start.Unix() + 10}),
+		models.RequestLog(models.UsageLog{RequestID: "full-1", UserID: 7, ModelName: "wanted", Status: 1, PromptTokens: 3, TotalCost: 2, CreatedAt: start.Unix() + 3600}),
+		models.RequestLog(models.UsageLog{RequestID: "full-2", UserID: 8, ModelName: "other", Status: 1, PromptTokens: 4, TotalCost: 3, CreatedAt: start.Unix() + 3601}),
+		models.RequestLog(models.UsageLog{RequestID: "right", UserID: 7, ModelName: "wanted", Status: 1, PromptTokens: 5, TotalCost: 4, CreatedAt: start.Unix() + 7200}),
+	}
+	require.NoError(tb, logs.Create(&requests).Error)
 
-	start := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
-	modelsUsed := []string{"gpt-5", "gpt-5-mini", "claude-4"}
-	rows := make([]models.BillingHourlyBucket, 0, 1008)
-	rowCount := 0
-	flush := func() {
-		tb.Helper()
-		if len(rows) == 0 {
-			return
-		}
-		require.NoError(tb, db.CreateInBatches(rows, 1000).Error)
-		rows = rows[:0]
+	provider := &testApp{db: core, logDB: logs, layoutMode: app.DatabaseLayoutSplit}
+	return statsRoutingFixture{
+		query:    NewAdminQuery(NewContext(provider)).Stats(),
+		rangeArg: ObsRange{Start: start.Unix() + 10, End: start.Unix() + 7210, Gran: GranHour},
+		rowCount: len(hourly) + len(requests),
 	}
-	for hourOffset := 0; hourOffset < 7*24; hourOffset++ {
-		bucketTime := start.Add(time.Duration(hourOffset) * time.Hour)
-		for userID := 1; userID <= 100; userID++ {
-			for modelIndex, modelName := range modelsUsed {
-				for channelID := 1; channelID <= 2; channelID++ {
-					requestCount := int64(1 + (userID+hourOffset+modelIndex+channelID)%5)
-					rows = append(rows, models.BillingHourlyBucket{
-						Date: bucketTime.Format("2006-01-02"), Hour: bucketTime.Hour(),
-						UserID: uint(userID), TokenID: uint(userID*10 + modelIndex), ChannelID: uint(channelID),
-						OwnerType: "admin", ModelName: modelName, RequestCount: requestCount,
-						SuccessCount: requestCount, PromptTokens: requestCount * 100,
-						CompletionTokens: requestCount * 50, TotalCost: requestCount * 25,
-					})
-					rowCount++
-					if len(rows) == cap(rows) {
-						flush()
-					}
-				}
-			}
-		}
-	}
-	// Add six months of history for the benchmarked user outside the 7-day
-	// window. The user-window index must keep the query bounded by date/hour,
-	// rather than scanning this user's entire history.
-	for hourOffset := 180 * 24; hourOffset > 0; hourOffset-- {
-		bucketTime := start.Add(-time.Duration(hourOffset) * time.Hour)
-		for modelIndex, modelName := range modelsUsed {
-			for channelID := 1; channelID <= 2; channelID++ {
-				rows = append(rows, models.BillingHourlyBucket{
-					Date: bucketTime.Format("2006-01-02"), Hour: bucketTime.Hour(),
-					UserID: 50, TokenID: uint(500 + modelIndex), ChannelID: uint(channelID),
-					OwnerType: "admin", ModelName: modelName, RequestCount: 3,
-					SuccessCount: 3, PromptTokens: 300, CompletionTokens: 150, TotalCost: 75,
-				})
-				rowCount++
-				if len(rows) == cap(rows) {
-					flush()
-				}
-			}
-		}
-	}
-	flush()
+}
 
-	return billingHourlyStatsFixture{
-		db: db, rowCount: rowCount,
-		rangeArg: ObsRange{Start: start.Unix(), End: start.Add(7 * 24 * time.Hour).Unix(), Gran: GranHour},
+func statsRoutingMeasurements(fixture statsRoutingFixture) []struct {
+	name string
+	run  func() error
+} {
+	return []struct {
+		name string
+		run  func() error
+	}{
+		{name: "dashboard kpis", run: func() error {
+			_, err := fixture.query.DashboardKpis(fixture.rangeArg, Scope{IsAdmin: true}, ObsFilter{})
+			return err
+		}},
+		{name: "global cost trend", run: func() error {
+			_, err := fixture.query.CostTrendStackedByModel(fixture.rangeArg, Scope{IsAdmin: true}, 5, ObsFilter{})
+			return err
+		}},
+		{name: "model user leaderboard", run: func() error {
+			_, err := fixture.query.Leaderboard("user", "cost", 5, fixture.rangeArg, Scope{IsAdmin: true}, ObsFilter{ModelName: "wanted"})
+			return err
+		}},
 	}
 }
 
 func TestProductionScaleStatsUnderBudget(t *testing.T) {
-	fixture := newBillingHourlyStatsFixture(t)
-	type measurement struct {
-		name string
-		run  func() error
-	}
-	measurements := []measurement{
-		{name: "active users", run: func() error {
-			_, err := kpiUsers(fixture.db, fixture.rangeArg, ObsFilter{})
-			return err
-		}},
-		{name: "cost trend", run: func() error {
-			_, err := costStackRowsFromBillingHourly(fixture.db, fixture.rangeArg, 50, 0, "")
-			return err
-		}},
-		{name: "model user leaderboard", run: func() error {
-			_, err := leaderboardByUserFromBillingHourly(fixture.db, "cost", 20, fixture.rangeArg, "gpt-5")
-			return err
-		}},
-	}
-	for _, measurement := range measurements {
+	fixture := newStatsRoutingFixture(t)
+	for _, measurement := range statsRoutingMeasurements(fixture) {
 		started := time.Now()
 		err := measurement.run()
 		elapsed := time.Since(started)
@@ -131,36 +99,19 @@ func TestProductionScaleStatsUnderBudget(t *testing.T) {
 	}
 }
 
-var billingHourlyStatsBenchmarkSink any
+var statsRoutingBenchmarkSink any
 
-func BenchmarkBillingHourlyStats(b *testing.B) {
-	fixture := newBillingHourlyStatsFixture(b)
+func BenchmarkStatsRouting(b *testing.B) {
+	fixture := newStatsRoutingFixture(b)
 	b.Logf("rows=%d", fixture.rowCount)
-	b.Run("ActiveUsers", func(b *testing.B) {
-		for range b.N {
-			var err error
-			billingHourlyStatsBenchmarkSink, err = kpiUsers(fixture.db, fixture.rangeArg, ObsFilter{})
-			if err != nil {
-				b.Fatal(err)
+	for _, measurement := range statsRoutingMeasurements(fixture) {
+		b.Run(measurement.name, func(b *testing.B) {
+			for range b.N {
+				if err := measurement.run(); err != nil {
+					b.Fatal(err)
+				}
+				statsRoutingBenchmarkSink = measurement.name
 			}
-		}
-	})
-	b.Run("CostTrend", func(b *testing.B) {
-		for range b.N {
-			var err error
-			billingHourlyStatsBenchmarkSink, err = costStackRowsFromBillingHourly(fixture.db, fixture.rangeArg, 50, 0, "")
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.Run("ModelUserLeaderboard", func(b *testing.B) {
-		for range b.N {
-			var err error
-			billingHourlyStatsBenchmarkSink, err = leaderboardByUserFromBillingHourly(fixture.db, "cost", 20, fixture.rangeArg, "gpt-5")
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
+		})
+	}
 }

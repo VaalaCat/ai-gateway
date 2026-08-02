@@ -98,6 +98,8 @@ type deltaWriter struct {
 
 func applyLogDeltas(tx *gorm.DB, batch *LogBatch) error {
 	writers := []deltaWriter{
+		{name: "token daily billing", run: func(db *gorm.DB) error { return upsertTokenDaily(db, batch.TokenDaily) }},
+		{name: "channel daily billing", run: func(db *gorm.DB) error { return upsertChannelDaily(db, batch.ChannelDaily) }},
 		{name: "hourly buckets", run: func(db *gorm.DB) error { return upsertHourly(db, batch.Hourly) }},
 		{name: "duration histograms", run: func(db *gorm.DB) error { return upsertDuration(db, batch.Duration) }},
 		{name: "TTFT histograms", run: func(db *gorm.DB) error { return upsertTTFT(db, batch.TTFT) }},
@@ -120,6 +122,14 @@ var logDimensions = []clause.Column{
 
 var userDimensions = []clause.Column{
 	{Name: "date"}, {Name: "hour"}, {Name: "user_id"}, {Name: "model_name"},
+}
+
+var tokenDailyDimensions = []clause.Column{
+	{Name: "date"}, {Name: "user_id"}, {Name: "token_id"},
+}
+
+var channelDailyDimensions = []clause.Column{
+	{Name: "date"}, {Name: "channel_id"}, {Name: "private_channel_id"},
 }
 
 var histogramColumns = []string{
@@ -169,6 +179,57 @@ var hourlyCounterColumns = []string{
 	"sum_outbound_encode_ms", "sum_client_encode_ms",
 }
 
+var dailyCounterColumns = []string{
+	"request_count", "success_count", "failed_count", "prompt_tokens", "completion_tokens",
+	"cache_read_tokens", "cache_write_tokens", "input_cost", "output_cost", "total_cost",
+}
+
+func upsertTokenDaily(tx *gorm.DB, rows []models.TokenDailyBilling) error {
+	return upsertRows(tx, rows, tokenDailyDimensions, func(row models.TokenDailyBilling) map[string]any {
+		values := dailyValues(
+			row.RequestCount, row.SuccessCount, row.FailedCount,
+			row.PromptTokens, row.CompletionTokens, row.CacheReadTokens, row.CacheWriteTokens,
+			row.InputCost, row.OutputCost, row.TotalCost,
+		)
+		assignments := accumulatingAssignments(values, dailyCounterColumns)
+		assignments["token_name"] = row.TokenName
+		assignments["last_used_at"] = maxTimestampAssignment(row.LastUsedAt)
+		assignments["updated_at"] = row.UpdatedAt
+		return assignments
+	})
+}
+
+func upsertChannelDaily(tx *gorm.DB, rows []models.ChannelDailyBilling) error {
+	return upsertRows(tx, rows, channelDailyDimensions, func(row models.ChannelDailyBilling) map[string]any {
+		values := dailyValues(
+			row.RequestCount, row.SuccessCount, row.FailedCount,
+			row.PromptTokens, row.CompletionTokens, row.CacheReadTokens, row.CacheWriteTokens,
+			row.InputCost, row.OutputCost, row.TotalCost,
+		)
+		values["raw_cost"] = row.RawCost
+		assignments := accumulatingAssignments(values, append(dailyCounterColumns, "raw_cost"))
+		assignments["owner_type"] = row.OwnerType
+		assignments["channel_name"] = row.ChannelName
+		assignments["channel_type"] = row.ChannelType
+		assignments["last_used_at"] = maxTimestampAssignment(row.LastUsedAt)
+		assignments["updated_at"] = row.UpdatedAt
+		return assignments
+	})
+}
+
+func dailyValues(requestCount, successCount, failedCount, promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, inputCost, outputCost, totalCost int64) map[string]any {
+	return map[string]any{
+		"request_count": requestCount, "success_count": successCount, "failed_count": failedCount,
+		"prompt_tokens": promptTokens, "completion_tokens": completionTokens,
+		"cache_read_tokens": cacheReadTokens, "cache_write_tokens": cacheWriteTokens,
+		"input_cost": inputCost, "output_cost": outputCost, "total_cost": totalCost,
+	}
+}
+
+func maxTimestampAssignment(timestamp int64) any {
+	return gorm.Expr("CASE WHEN last_used_at >= ? THEN last_used_at ELSE ? END", timestamp, timestamp)
+}
+
 func upsertHourly(tx *gorm.DB, rows []models.UsageHourlyBucket) error {
 	return upsertRows(tx, rows, logDimensions, func(row models.UsageHourlyBucket) map[string]any {
 		values := map[string]any{
@@ -186,7 +247,7 @@ func upsertHourly(tx *gorm.DB, rows []models.UsageHourlyBucket) error {
 		assignments["owner_type"] = row.OwnerType
 		assignments["channel_name"] = row.ChannelName
 		assignments["channel_type"] = row.ChannelType
-		assignments["last_used_at"] = gorm.Expr("CASE WHEN last_used_at >= ? THEN last_used_at ELSE ? END", row.LastUsedAt, row.LastUsedAt)
+		assignments["last_used_at"] = maxTimestampAssignment(row.LastUsedAt)
 		assignments["updated_at"] = row.UpdatedAt
 		return assignments
 	})

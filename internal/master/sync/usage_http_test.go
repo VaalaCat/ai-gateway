@@ -12,15 +12,56 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/master/billing"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
+
+type retryingUsageAutoDisabler struct {
+	calls int
+}
+
+func (d *retryingUsageAutoDisabler) DisableFromTriggers(context.Context, []attemptproxy.ChannelAutoDisableTrigger) error {
+	d.calls++
+	if d.calls == 1 {
+		return errors.New("temporary auto-disable database failure")
+	}
+	return nil
+}
+
+func TestUsageHTTPRetriesTriggerAfterBillingDedup(t *testing.T) {
+	h, r, agent := newUsageTestFixture(t)
+	disabler := &retryingUsageAutoDisabler{}
+	settler := billing.NewSettler(h.App, h.Bus, zap.NewNop())
+	settler.AutoDisabler = disabler
+	h.SettleUsage = settler.SettleBatch
+	report := protocol.UsageReport{Logs: []protocol.UsageLogEntry{{
+		RequestID: "usage-http-trigger-retry", Status: 1,
+		AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{{
+			Source: attemptproxy.SourceAdmin, ChannelID: 7, Revision: 1,
+			Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+		}},
+	}}}
+
+	first := postUsage(t, r, agent.AgentID, agent.Secret, report)
+	require.Equal(t, http.StatusInternalServerError, first.Code)
+	second := postUsage(t, r, agent.AgentID, agent.Secret, report)
+	require.Equal(t, http.StatusOK, second.Code)
+	require.Equal(t, 2, disabler.calls)
+
+	var count int64
+	require.NoError(t, h.App.GetCoreDB().Model(&models.UsageLog{}).
+		Where("request_id = ?", "usage-http-trigger-retry").Count(&count).Error)
+	require.Equal(t, int64(1), count)
+}
 
 // newUsageTestFixture 组装一个最小 master.sync 环境:
 // 内存 sqlite + AutoMigrate + 一条已启用 agent + Hub(内存 event bus) +

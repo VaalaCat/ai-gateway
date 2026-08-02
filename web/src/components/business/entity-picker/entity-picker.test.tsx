@@ -42,6 +42,13 @@ it("renders sm size with h-8 trigger", () => {
   expect(btn.className).not.toContain("h-full");
 });
 
+it("renders xs size with h-7 trigger", () => {
+  render(<EntityPicker entity="token" value="" onChange={() => {}} size="xs" />);
+  const btn = screen.getByRole("combobox");
+  expect(btn.className).toContain("h-7");
+  expect(btn.className).not.toContain("h-full");
+});
+
 it("shows placeholder fallback text when no value selected", () => {
   render(<EntityPicker entity="token" value="" onChange={() => {}} placeholder="pick token" size="sm" />);
   expect(screen.getByRole("combobox")).toHaveTextContent("pick token");

@@ -42,6 +42,7 @@ func NewEnvelope[T any](kind Kind, now time.Time, channels []T) Envelope[T] {
 
 type AdminChannel struct {
 	Name                string                   `json:"name"`
+	PublicDisplayName   string                   `json:"public_display_name"`
 	Status              int                      `json:"status"`
 	Type                int                      `json:"type"`
 	Key                 string                   `json:"key"`

@@ -182,6 +182,7 @@ export function AgentRouteEditor({ sourceType, sourceId }: AgentRouteEditorProps
             {newForm.targetType === "agent_id" ? (
               <EntityPicker
                 entity="agent"
+                size="xs"
                 value={newForm.targetValue}
                 onChange={(v) => setNewForm({ ...newForm, targetValue: v })}
                 placeholder={t("selectAgent")}

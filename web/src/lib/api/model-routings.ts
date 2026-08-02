@@ -26,6 +26,18 @@ export type ModelRoutingOwner =
   | { kind: "scope" }
   | { kind: "token"; tokenId: number };
 
+type ModelRoutingListParams = PaginatedParams & {
+  q?: string;
+  scope?: "global" | "user" | "token";
+  user_id?: number;
+  token_id?: number;
+};
+
+type ModelRoutingMutationTarget = {
+  id: number;
+  owner?: ModelRoutingOwner;
+};
+
 const scopeOwner: ModelRoutingOwner = { kind: "scope" };
 
 function routingBase(apiMode: ModelRoutingApiMode, owner: ModelRoutingOwner): string {
@@ -53,7 +65,7 @@ function routingBody<T extends Record<string, unknown>>(
 }
 
 export function useModelRoutings(
-  params: PaginatedParams & { scope?: 'global' | 'user'; user_id?: number } = {},
+  params: ModelRoutingListParams = {},
   apiMode: ModelRoutingApiMode = "admin",
   owner: ModelRoutingOwner = scopeOwner,
 ) {
@@ -105,11 +117,13 @@ export function useUpdateModelRouting(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: number } & Partial<ModelRouting>) =>
-      api.put<ModelRouting>(
-        `${routingBase(apiMode, owner)}/${id}`,
-        routingBody(body, owner),
-      ),
+    mutationFn: ({ id, owner: ownerOverride, ...body }: ModelRoutingMutationTarget & Partial<ModelRouting>) => {
+      const effectiveOwner = ownerOverride ?? owner;
+      return api.put<ModelRouting>(
+        `${routingBase(apiMode, effectiveOwner)}/${id}`,
+        routingBody(body, effectiveOwner),
+      );
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-routings"] });
     },
@@ -122,7 +136,11 @@ export function useDeleteModelRouting(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => api.delete<void>(`${routingBase(apiMode, owner)}/${id}`),
+    mutationFn: (target: number | ModelRoutingMutationTarget) => {
+      const id = typeof target === "number" ? target : target.id;
+      const effectiveOwner = typeof target === "number" ? owner : target.owner ?? owner;
+      return api.delete<void>(`${routingBase(apiMode, effectiveOwner)}/${id}`);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["model-routings"] });
     },

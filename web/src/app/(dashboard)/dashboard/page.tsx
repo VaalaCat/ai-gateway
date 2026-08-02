@@ -19,6 +19,7 @@ import { useObsRange } from "@/lib/hooks/use-obs-range";
 import { useChartTopN } from "@/lib/hooks/use-chart-top-n";
 import { useAuth } from "@/lib/auth";
 import type { TimeBucket } from "@/lib/types/observability";
+import { applySevenDayDefaultRange } from "@/lib/utils/observability-range";
 
 import { ObservabilityHeader } from "@/components/business/observability-header";
 import { MetricTrendChart, type TrendDim } from "@/components/business/metric-trend-chart";
@@ -27,9 +28,13 @@ import { Leaderboard } from "@/components/business/leaderboard";
 import { KpiGrid, type KpiItem } from "@/components/business/kpi-grid";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { ModelName } from "@/components/business/model-name";
-import { SpeedRanking } from "@/components/business/speed-ranking";
+import {
+  SpeedRanking,
+  type SpeedRankingEntity,
+} from "@/components/business/speed-ranking";
 import { MarketShareChart, type MarketShareMode } from "@/components/business/market-share-chart";
 import { ChartOptionSelect } from "@/components/business/chart-option-select";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   formatAvgPercentile,
   formatDuration,
@@ -54,6 +59,7 @@ export default function DashboardPage() {
 
 function DashboardPageContent() {
   const t = useTranslations("dashboard");
+  const tc = useTranslations("common");
   const { user, isAdmin } = useAuth();
   const tcf = useTranslations("charts");
   const searchParams = useSearchParams();
@@ -74,16 +80,15 @@ function DashboardPageContent() {
   const { range: rawRange, setRange, refresh, refreshKey } = useObsRange({
     gran: "day",
   });
+  const hasExplicitStart = searchParams.has("start");
   const range = useMemo(
-    () =>
-      rawRange.end - rawRange.start <= 86400
-        ? { ...rawRange, start: rawRange.end - 7 * 86400 }
-        : rawRange,
-    [rawRange],
+    () => applySevenDayDefaultRange(rawRange, hasExplicitStart),
+    [rawRange, hasExplicitStart],
   );
   const { data, isFetching, refetch } = useDashboard(
     {
       ...range,
+      top_n: topN,
       ...(model ? { model } : {}),
       ...(selectedUserId ? { user_id: selectedUserId } : {}),
     },
@@ -95,6 +100,8 @@ function DashboardPageContent() {
 
   const [marketShareDim, setMarketShareDim] = useState<MarketShareDim>("model");
   const [marketShareMode, setMarketShareMode] = useState<MarketShareMode>("percent");
+  const [speedRankingDimension, setSpeedRankingDimension] =
+    useState<SpeedRankingEntity>("model");
   const marketShare = useMarketShare(marketShareDim, range.start, range.end, {
     gran: range.gran,
     ...(model ? { model } : {}),
@@ -163,6 +170,9 @@ function DashboardPageContent() {
   ];
   const leaderboard = data?.log_metrics?.leaderboard;
   const speedCompare = data?.log_metrics?.speed_compare;
+  const speedRankingRows = speedRankingDimension === "model"
+    ? speedCompare?.by_model ?? []
+    : speedCompare?.by_channel ?? [];
   const expectedTrendStat = trendMetric === "ttft" || trendMetric === "tps"
     ? trendStat
     : trendMetric === "cache_hit_rate" ? "ratio" : "sum";
@@ -189,14 +199,16 @@ function DashboardPageContent() {
         onRefresh={handleRefresh}
         refreshing={isFetching}
         showGranularity
-        extraFilters={
+        scopeLabel={tc("filters")}
+        scopeControls={
           <>
             <EntityPicker
               entity="model"
               value={model}
               onChange={setModel}
               placeholder={tcf("filter.model")}
-              className="w-44"
+              className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
+              size="sm"
             />
             {isAdmin && (
               <EntityPicker
@@ -204,7 +216,8 @@ function DashboardPageContent() {
                 value={userId}
                 onChange={setUserId}
                 placeholder={tcf("filter.user")}
-                className="w-44"
+                className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
+                size="sm"
               />
             )}
             <ChartOptionSelect
@@ -216,6 +229,7 @@ function DashboardPageContent() {
                 { value: "10", label: "10" },
                 { value: "20", label: "20" },
               ]}
+              className="h-9 w-full sm:h-8 sm:w-auto"
             />
           </>
         }
@@ -305,7 +319,7 @@ function DashboardPageContent() {
             logUnavailable={logUnavailable}
             loading={groupedOnly && metricTrend.isLoading}
             title={t("trendCard.title")}
-            headerExtra={
+            displayExtra={
               trendMetric === "ttft" || trendMetric === "tps" ? (
                 <ChartOptionSelect
                   value={trendStat}
@@ -353,30 +367,50 @@ function DashboardPageContent() {
 
       {isAdmin && speedCompare && !userId && (
         <>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm text-muted-foreground">
+              {t("speedRanking.dimension")}
+            </span>
+            <Tabs
+              value={speedRankingDimension}
+              onValueChange={(value) => {
+                if (value === "model" || value === "channel") {
+                  setSpeedRankingDimension(value);
+                }
+              }}
+            >
+              <TabsList className="!h-8" aria-label={t("speedRanking.dimension")}>
+                <TabsTrigger value="model">{t("speedRanking.model")}</TabsTrigger>
+                <TabsTrigger value="channel">{t("speedRanking.channel")}</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <SpeedRanking
-              rows={[
-                ...speedCompare.by_model.map((row) => ({ ...row, entity: "model" as const })),
-                ...speedCompare.by_channel.map((row) => ({ ...row, entity: "channel" as const })),
-              ]}
+              rows={speedRankingRows}
+              entity={speedRankingDimension}
               metric="ttft"
-              title={t("speedRanking.ttftTitle")}
+              title={t(speedRankingDimension === "model"
+                ? "speedRanking.ttftModelTitle"
+                : "speedRanking.ttftChannelTitle")}
               rankLabel={t("speedRanking.rank")}
-              nameLabel={t("speedRanking.name")}
+              nameLabel={t(`speedRanking.${speedRankingDimension}`)}
               valueLabel={t("speedRanking.ttftP95")}
               emptyText={t("speedRanking.empty")}
+              topN={topN}
             />
             <SpeedRanking
-              rows={[
-                ...speedCompare.by_model.map((row) => ({ ...row, entity: "model" as const })),
-                ...speedCompare.by_channel.map((row) => ({ ...row, entity: "channel" as const })),
-              ]}
+              rows={speedRankingRows}
+              entity={speedRankingDimension}
               metric="tps"
-              title={t("speedRanking.tpsTitle")}
+              title={t(speedRankingDimension === "model"
+                ? "speedRanking.tpsModelTitle"
+                : "speedRanking.tpsChannelTitle")}
               rankLabel={t("speedRanking.rank")}
-              nameLabel={t("speedRanking.name")}
+              nameLabel={t(`speedRanking.${speedRankingDimension}`)}
               valueLabel={t("speedRanking.tpsP5")}
               emptyText={t("speedRanking.empty")}
+              topN={topN}
             />
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

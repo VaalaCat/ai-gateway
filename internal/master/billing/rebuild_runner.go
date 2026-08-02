@@ -25,6 +25,8 @@ const (
 	JobStatusCanceled  JobStatus = "canceled"
 )
 
+var ErrDailyBillingRebuildRunning = errors.New("daily billing rebuild already running")
+
 // RebuildJob is an in-memory record of one async rebuild request.
 // Terminal jobs (succeeded/failed/canceled) are GC'd after retain duration.
 type RebuildJob struct {
@@ -38,11 +40,16 @@ type RebuildJob struct {
 	FinishedAt   int64
 	Error        string
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
+	mu                     sync.Mutex
+	cancel                 context.CancelFunc
+	dailyBackfillVersion   uint
+	dailyTargets           dao.DailyBillingRebuildTargets
+	dailyDates             []string
+	dailyRebuilder         dao.LogDailyBillingRebuilder
+	dailyBackfillCompleted func(context.Context) error
 }
 
-// Snapshot returns a lock-free copy of the job's mutable fields. Callers
+// Snapshot returns a synchronized copy of the job's mutable fields. Callers
 // outside RebuildRunner must use this rather than reading j.Status directly
 // (race-detector flags direct reads, since run() updates Status under j.mu
 // and counters via sync/atomic).
@@ -62,17 +69,7 @@ func (j *RebuildJob) Snapshot() RebuildJob {
 	}
 }
 
-// SliceFn is the per-slice dao call. Injectable for tests and used by the
-// transitional legacy production path before strict split activation.
-type SliceFn func(date string, hour int, targets []string, resetDailyForDate bool) (*dao.BillingRebuildResult, error)
-type SliceContextFn func(context.Context, string, int, []string, bool) (*dao.BillingRebuildResult, error)
-
-type CoreRebuildAdmission interface {
-	RunCoreDateRebuild(context.Context, string, bool, func() error, func(maxBillingLogID uint) error) error
-	RunCoreHourRebuildSlice(context.Context, string, int, func(maxBillingLogID uint) error) error
-}
-
-// RebuildRunner schedules per-(date,hour) rebuild calls in the background.
+// RebuildRunner schedules log-owned daily billing rebuilds in the background.
 // Status lives in memory only — master restart drops all jobs (clients re-poll
 // → 404 → retrigger). Terminal jobs are retained for `retain` duration
 // before gc removes them.
@@ -83,28 +80,26 @@ type RebuildRunner struct {
 	logger *zap.Logger
 	retain time.Duration
 
-	sliceFn       SliceContextFn
-	coreAdmission CoreRebuildAdmission
-	sliceSleep    time.Duration
-	stopCh        chan struct{}
-	closeOnce     sync.Once
-	rootCtx       context.Context
-	cancel        context.CancelCauseFunc
-	started       bool
-	closing       bool
-	workers       conc.WaitGroup
-	done          chan struct{}
-	activeWorkers atomic.Int64
-	activeTimers  atomic.Int64
-	inflight      atomic.Int64
+	dailyRebuilder dao.LogDailyBillingRebuilder
+	sliceSleep     time.Duration
+	stopCh         chan struct{}
+	closeOnce      sync.Once
+	rootCtx        context.Context
+	cancel         context.CancelCauseFunc
+	started        bool
+	closing        bool
+	workers        conc.WaitGroup
+	done           chan struct{}
+	activeWorkers  atomic.Int64
+	activeTimers   atomic.Int64
+	inflight       atomic.Int64
 }
 
 // NewRebuildRunner constructs the runner and spawns a gc goroutine for
-// terminal-job cleanup. app may be nil for pure-memory tests (in which case
-// SetSliceFn must be called before any Submit that should actually persist).
+// terminal-job cleanup. Tests with a nil app must inject a daily rebuilder.
 // retain controls how long terminal jobs stay visible via Get/List.
 func NewRebuildRunner(app dao.AppProvider, logger *zap.Logger, retain time.Duration) *RebuildRunner {
-	return &RebuildRunner{
+	runner := &RebuildRunner{
 		jobs:   make(map[string]*RebuildJob),
 		app:    app,
 		logger: logger,
@@ -112,34 +107,20 @@ func NewRebuildRunner(app dao.AppProvider, logger *zap.Logger, retain time.Durat
 		stopCh: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
-}
-
-// SetSliceFn overrides the per-slice executor. Used by tests; production
-// passes nil and lets run() fall back to dao.RebuildHourSlice (see T3.4).
-func (r *RebuildRunner) SetSliceFn(fn SliceFn) {
-	if fn == nil {
-		r.SetSliceContextFn(nil)
-		return
+	if app != nil {
+		runner.dailyRebuilder = dao.NewLogDailyBillingRebuilder(app)
 	}
-	r.SetSliceContextFn(func(_ context.Context, date string, hour int, targets []string, reset bool) (*dao.BillingRebuildResult, error) {
-		return fn(date, hour, targets, reset)
-	})
+	return runner
 }
 
-func (r *RebuildRunner) SetSliceContextFn(fn SliceContextFn) {
+func (r *RebuildRunner) SetDailyRebuilder(rebuilder dao.LogDailyBillingRebuilder) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sliceFn = fn
-}
-
-func (r *RebuildRunner) SetCoreRebuildAdmission(admission CoreRebuildAdmission) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.coreAdmission = admission
+	r.dailyRebuilder = rebuilder
 }
 
 // SetSliceSleep configures an inter-slice pause applied after each successful
-// (date,hour) slice inside run(). Zero (the default) disables sleeping, so
+// date slice inside run(). Zero (the default) disables sleeping, so
 // existing tests that don't call this keep running at full speed. Production
 // wiring sets this from the admin-configurable rebuild_slice_sleep_ms setting
 // so background rebuild replay trickles rather than competing with peak DB
@@ -168,10 +149,29 @@ func (r *RebuildRunner) Start(ctx context.Context) {
 	})
 }
 
-// Submit registers a new job and starts its goroutine. Returns immediately
-// with the job's initial state (Status=running, TotalSlices set).
-// Validates date range; returns error for empty / inverted / unparseable.
+// Submit discovers the actual request-log dates, fixes TotalSlices, then
+// registers the job and starts its worker. It validates the date range and
+// returns an error for empty, inverted, or unparseable input.
 func (r *RebuildRunner) Submit(filter dao.BillingRebuildFilter) (*RebuildJob, error) {
+	return r.submit(filter, 0, nil)
+}
+
+func (r *RebuildRunner) submitAutomaticDaily(
+	filter dao.BillingRebuildFilter,
+	version uint,
+	onCompleted func(context.Context) error,
+) (*RebuildJob, error) {
+	if version == 0 {
+		return nil, errors.New("automatic daily rebuild requires a marker version")
+	}
+	return r.submit(filter, version, onCompleted)
+}
+
+func (r *RebuildRunner) submit(
+	filter dao.BillingRebuildFilter,
+	dailyBackfillVersion uint,
+	dailyBackfillCompleted func(context.Context) error,
+) (*RebuildJob, error) {
 	if filter.StartDate == "" && filter.EndDate == "" {
 		return nil, fmt.Errorf("at least one of start_date or end_date is required")
 	}
@@ -181,7 +181,24 @@ func (r *RebuildRunner) Submit(filter dao.BillingRebuildFilter) (*RebuildJob, er
 	}
 	filter.StartDate = startDate
 	filter.EndDate = endDate
-	days, err := enumerateDays(startDate, endDate)
+	dailyTargets, err := dao.NormalizeDailyBillingRebuildTargets(filter.Targets)
+	if err != nil {
+		return nil, err
+	}
+
+	r.mu.RLock()
+	if r.closing || !r.started {
+		r.mu.RUnlock()
+		return nil, fmt.Errorf("rebuild runner not accepting jobs")
+	}
+	if r.hasRunningDailyJobLocked() {
+		r.mu.RUnlock()
+		return nil, ErrDailyBillingRebuildRunning
+	}
+	rootCtx := r.rootCtx
+	dailyRebuilder := r.dailyRebuilder
+	r.mu.RUnlock()
+	dailyDates, err := findDailyRebuildDates(rootCtx, dailyRebuilder, filter.StartDate, filter.EndDate)
 	if err != nil {
 		return nil, err
 	}
@@ -191,23 +208,44 @@ func (r *RebuildRunner) Submit(filter dao.BillingRebuildFilter) (*RebuildJob, er
 		r.mu.Unlock()
 		return nil, fmt.Errorf("rebuild runner not accepting jobs")
 	}
+	if r.hasRunningDailyJobLocked() {
+		r.mu.Unlock()
+		return nil, ErrDailyBillingRebuildRunning
+	}
 	ctx, cancel := context.WithCancel(r.rootCtx)
 	job := &RebuildJob{
-		ID:          uuid.NewString(),
-		Filter:      filter,
-		Status:      JobStatusRunning,
-		TotalSlices: int64(len(days) * 24),
-		StartedAt:   time.Now().Unix(),
-		cancel:      cancel,
+		ID:                     uuid.NewString(),
+		Filter:                 filter,
+		Status:                 JobStatusRunning,
+		TotalSlices:            int64(len(dailyDates)),
+		StartedAt:              time.Now().Unix(),
+		cancel:                 cancel,
+		dailyBackfillVersion:   dailyBackfillVersion,
+		dailyTargets:           dailyTargets,
+		dailyDates:             dailyDates,
+		dailyRebuilder:         dailyRebuilder,
+		dailyBackfillCompleted: dailyBackfillCompleted,
 	}
 	r.jobs[job.ID] = job
 	r.activeWorkers.Add(1)
 	r.workers.Go(func() {
 		defer r.activeWorkers.Add(-1)
-		r.run(ctx, job, days)
+		r.run(ctx, job)
 	})
 	r.mu.Unlock()
 	return job, nil
+}
+
+func (r *RebuildRunner) hasRunningDailyJobLocked() bool {
+	for _, job := range r.jobs {
+		job.mu.Lock()
+		running := job.Status == JobStatusRunning
+		job.mu.Unlock()
+		if running && dailyOnlyTargets(job.Filter.Targets) {
+			return true
+		}
+	}
+	return false
 }
 
 // Get returns the in-memory job by ID; ok=false if unknown or gc'd.
@@ -251,126 +289,54 @@ func runnerNormalizeDateRange(start, end string) (string, string, error) {
 	return start, end, nil
 }
 
-// enumerateDays returns YYYY-MM-DD strings for [start, end] inclusive.
-func enumerateDays(start, end string) ([]string, error) {
-	s, err := time.Parse("2006-01-02", start)
-	if err != nil {
-		return nil, fmt.Errorf("parse start: %w", err)
-	}
-	e, err := time.Parse("2006-01-02", end)
-	if err != nil {
-		return nil, fmt.Errorf("parse end: %w", err)
-	}
-	out := []string{}
-	for d := s; !d.After(e); d = d.AddDate(0, 0, 1) {
-		out = append(out, d.Format("2006-01-02"))
-	}
-	return out, nil
-}
-
-// run is the per-job worker goroutine. The legacy injected path schedules 24
-// per-hour calls and resets daily rows at hour zero. The core path serializes
-// each complete date, rebuilds selected hourly slices, then atomically replaces
-// the selected daily projection group. Any error fails the whole job; context
-// cancellation marks it canceled.
-func (r *RebuildRunner) run(ctx context.Context, job *RebuildJob, days []string) {
+func (r *RebuildRunner) run(ctx context.Context, job *RebuildJob) {
 	r.mu.RLock()
-	fn := r.sliceFn
-	admission := r.coreAdmission
 	sliceSleep := r.sliceSleep
 	r.mu.RUnlock()
 
-	var err error
-	if fn != nil {
-		err = r.runSlices(ctx, job, days, sliceSleep, fn)
-	} else if r.app == nil {
-		err = errors.New("no slice fn and no app provider")
-	} else if admission == nil {
-		err = errors.New("core rebuild admission is not configured")
-	} else {
-		var daily, hourly bool
-		daily, hourly, err = coreRebuildSelection(job.Filter.Targets)
-		if err == nil {
-			err = r.runCoreDates(ctx, job, days, sliceSleep, admission, daily, hourly)
-		}
-	}
+	err := r.runLogDaily(ctx, job, sliceSleep, job.dailyRebuilder)
 	r.finishJob(ctx, job, err)
 }
 
-func (r *RebuildRunner) runCoreDates(
-	ctx context.Context,
-	job *RebuildJob,
-	days []string,
-	sliceSleep time.Duration,
-	admission CoreRebuildAdmission,
-	rebuildDaily bool,
-	rebuildHourly bool,
-) error {
-	for _, date := range days {
-		rebuildDate := date
-		var dailyResult *dao.BillingRebuildResult
-		err := admission.RunCoreDateRebuild(ctx, rebuildDate, rebuildDaily, func() error {
-			if !rebuildHourly {
-				return nil
-			}
-			return r.runCoreHoursForDate(ctx, job, rebuildDate, sliceSleep, admission)
-		}, func(watermark uint) error {
-			r.inflight.Add(1)
-			var err error
-			dailyResult, err = dao.NewAdminMutation(dao.NewContextWithContext(r.app, ctx)).Billing().
-				RebuildCoreDailyForDateThroughID(ctx, rebuildDate, &watermark)
-			r.inflight.Add(-1)
-			return err
-		})
-		if err != nil {
-			return err
-		}
-		if !rebuildHourly {
-			atomic.AddInt64(&job.DoneSlices, 24)
-			if dailyResult != nil {
-				atomic.AddInt64(&job.ReplayedLogs, dailyResult.ReplayedLogs)
-			}
-		}
-	}
-	return nil
-}
-
-func coreRebuildSelection(targets []string) (daily, hourly bool, err error) {
+func dailyOnlyTargets(targets []string) bool {
 	if len(targets) == 0 {
-		return true, true, nil
+		return true
 	}
 	for _, target := range targets {
-		switch target {
-		case dao.RebuildTargetTokenDaily, dao.RebuildTargetChannelDaily:
-			daily = true
-		case dao.RebuildTargetHourlyBucket:
-			hourly = true
-		case dao.RebuildTargetDurationHistogram, dao.RebuildTargetTTFTHistogram, dao.RebuildTargetTPSHistogram:
-		default:
-			return false, false, fmt.Errorf("%w: %q", dao.ErrInvalidRebuildTarget, target)
+		if target != dao.RebuildTargetTokenDaily && target != dao.RebuildTargetChannelDaily {
+			return false
 		}
 	}
-	return daily, hourly, nil
+	return true
 }
 
-func (r *RebuildRunner) runCoreHoursForDate(
+func (r *RebuildRunner) runLogDaily(
 	ctx context.Context,
 	job *RebuildJob,
-	date string,
 	sliceSleep time.Duration,
-	admission CoreRebuildAdmission,
+	rebuilder dao.LogDailyBillingRebuilder,
 ) error {
-	for hour := 0; hour < 24; hour++ {
+	if rebuilder == nil {
+		return errors.New("daily billing rebuilder is not configured")
+	}
+	version := job.dailyBackfillVersion
+	if version > 0 {
+		if err := updateDailyBackfillRunning(ctx, r.app, version); err != nil {
+			return r.failAutomaticDaily(ctx, version, err)
+		}
+	}
+	for _, date := range job.dailyDates {
 		if err := context.Cause(ctx); err != nil {
 			return err
 		}
-		result, err := r.runCoreHour(ctx, date, hour, job.Filter.Targets, admission)
-		if err != nil {
-			r.logSliceError(job.ID, date, hour, err)
-			return err
+		r.inflight.Add(1)
+		result, rebuildErr := rebuilder.RebuildLogDailyDate(ctx, date, version, job.dailyTargets)
+		r.inflight.Add(-1)
+		if rebuildErr != nil {
+			return r.failAutomaticDaily(ctx, version, rebuildErr)
 		}
 		if result == nil {
-			return errors.New("rebuild slice returned nil result")
+			return r.failAutomaticDaily(ctx, version, errors.New("daily billing rebuild returned nil result"))
 		}
 		atomic.AddInt64(&job.DoneSlices, 1)
 		atomic.AddInt64(&job.ReplayedLogs, result.ReplayedLogs)
@@ -378,69 +344,67 @@ func (r *RebuildRunner) runCoreHoursForDate(
 			return err
 		}
 	}
-	return nil
-}
-
-func (r *RebuildRunner) runCoreHour(
-	ctx context.Context,
-	date string,
-	hour int,
-	targets []string,
-	admission CoreRebuildAdmission,
-) (*dao.BillingRebuildResult, error) {
-	var result *dao.BillingRebuildResult
-	err := admission.RunCoreHourRebuildSlice(ctx, date, hour, func(watermark uint) error {
-		r.inflight.Add(1)
-		var rebuildErr error
-		result, rebuildErr = dao.NewAdminMutation(dao.NewContextWithContext(r.app, ctx)).Billing().
-			RebuildCoreHourSliceThroughID(ctx, date, hour, targets, &watermark)
-		r.inflight.Add(-1)
-		return rebuildErr
-	})
-	return result, err
-}
-
-func (r *RebuildRunner) logSliceError(jobID, date string, hour int, err error) {
-	if r.logger == nil {
-		return
-	}
-	r.logger.Error("rebuild_slice_failed",
-		zap.String("job_id", jobID),
-		zap.String("date", date),
-		zap.Int("hour", hour),
-		zap.Error(err))
-}
-
-func (r *RebuildRunner) runSlices(
-	ctx context.Context,
-	job *RebuildJob,
-	days []string,
-	sliceSleep time.Duration,
-	fn SliceContextFn,
-) error {
-	for _, date := range days {
-		for hour := 0; hour < 24; hour++ {
-			if err := context.Cause(ctx); err != nil {
-				return err
-			}
-			r.inflight.Add(1)
-			result, err := fn(ctx, date, hour, job.Filter.Targets, hour == 0)
-			r.inflight.Add(-1)
-			if err != nil {
-				r.logSliceError(job.ID, date, hour, err)
-				return err
-			}
-			if result == nil {
-				return errors.New("rebuild slice returned nil result")
-			}
-			atomic.AddInt64(&job.DoneSlices, 1)
-			atomic.AddInt64(&job.ReplayedLogs, result.ReplayedLogs)
-			if err := waitForNextSlice(ctx, sliceSleep); err != nil {
+	if version > 0 {
+		if err := updateDailyBackfillCompleted(ctx, r.app, version); err != nil {
+			return r.failAutomaticDaily(ctx, version, err)
+		}
+		if job.dailyBackfillCompleted != nil {
+			if err := job.dailyBackfillCompleted(ctx); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func findDailyRebuildDates(
+	ctx context.Context,
+	rebuilder dao.LogDailyBillingRebuilder,
+	startDate, endDate string,
+) ([]string, error) {
+	if rebuilder == nil {
+		return nil, errors.New("daily billing rebuilder is not configured")
+	}
+	previous, err := previousDailyDate(startDate)
+	if err != nil {
+		return nil, err
+	}
+	dates := make([]string, 0)
+	for {
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
+		date, ok, err := rebuilder.FindNextRequestLogDate(ctx, previous, endDate)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return dates, nil
+		}
+		if date <= previous || date > endDate {
+			return nil, fmt.Errorf("daily billing rebuilder returned out-of-order date %q after %q", date, previous)
+		}
+		dates = append(dates, date)
+		previous = date
+	}
+}
+
+func (r *RebuildRunner) failAutomaticDaily(ctx context.Context, version uint, rebuildErr error) error {
+	if version == 0 || context.Cause(ctx) != nil {
+		return rebuildErr
+	}
+	if markerErr := updateDailyBackfillFailed(ctx, r.app, version, rebuildErr); markerErr != nil {
+		return errors.Join(rebuildErr, markerErr)
+	}
+	return rebuildErr
+}
+
+func previousDailyDate(date string) (string, error) {
+	parsed, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return "", fmt.Errorf("parse daily rebuild start date %q: %w", date, err)
+	}
+	return parsed.AddDate(0, 0, -1).Format("2006-01-02"), nil
 }
 
 func waitForNextSlice(ctx context.Context, delay time.Duration) error {

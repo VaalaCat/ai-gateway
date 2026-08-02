@@ -56,6 +56,10 @@ function useDataTableInstance<TData>(options: TableOptions<TData>): TanStackTabl
   return table;
 }
 
+type DataTableToolbar<TData> =
+  | React.ReactNode
+  | ((table: TanStackTable<TData>) => React.ReactNode);
+
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
@@ -65,7 +69,7 @@ interface DataTableProps<TData, TValue> {
   pageSize?: number;
   pageCount?: number;
   onPaginationChange?: (page: number, pageSize: number) => void;
-  toolbar?: React.ReactNode;
+  toolbar?: DataTableToolbar<TData>;
   defaultColumnVisibility?: VisibilityState;
   columnVisibilityState?: VisibilityState;
   onColumnVisibilityChange?: (state: VisibilityState) => void;
@@ -190,12 +194,13 @@ export function DataTable<TData, TValue>({
     getExpandedRowModel: getExpandedRowModel(),
     ...(getRowId ? { getRowId } : {}),
   });
+  const usesTableToolbar = typeof toolbar === "function";
 
   return (
     <TooltipProvider delayDuration={200}>
       <div className="min-w-0 space-y-4">
-        {toolbar}
-        {defaultColumnVisibility && (
+        {usesTableToolbar ? toolbar(table) : toolbar}
+        {defaultColumnVisibility && !usesTableToolbar && (
           <div className="flex justify-end">
             <ColumnVisibility table={table} />
           </div>

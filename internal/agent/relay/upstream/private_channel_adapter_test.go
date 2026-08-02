@@ -60,6 +60,18 @@ func TestProjectPrivateChannelCarriesAffinity(t *testing.T) {
 	}
 }
 
+func TestProjectPrivateChannelCarriesAutoBanRuntimeState(t *testing.T) {
+	state := models.ChannelDisableState{Tripped: true, Reason: "consecutive_errors", TrippedAt: 123}
+	pc := &protocol.SyncedPrivateChannel{ChannelCore: models.ChannelCore{
+		AutoBanState: datatypes.NewJSONType(state), AutoBanRevision: 11,
+	}}
+
+	ch := ProjectPrivateChannelToChannel(pc)
+	if ch.AutoBanState.Data() != state || ch.AutoBanRevision != 11 {
+		t.Fatalf("projection lost auto-ban runtime state: %+v", ch.ChannelCore)
+	}
+}
+
 func TestProjectPrivateChannel_NoHeaderOverrideField(t *testing.T) {
 	pc := &protocol.SyncedPrivateChannel{ChannelCore: models.ChannelCore{ID: 1, Type: 1, Status: 1}, KeyPlaintext: "x"}
 	ch := ProjectPrivateChannelToChannel(pc)

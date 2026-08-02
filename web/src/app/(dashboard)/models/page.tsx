@@ -18,10 +18,22 @@ import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+} from "@/components/ui/field";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,7 +57,11 @@ import { PAGE_SIZES } from "@/lib/constants";
 import { formatPrice } from "@/lib/utils/format";
 import { copyTextWithFeedback } from "@/lib/utils/clipboard";
 import { formatErrorToast } from "@/lib/api/error-toast";
-import type { ModelConfig } from "@/lib/types";
+import type {
+  ModelConfig,
+  ModelMetadata,
+  ModelMetadataOverride,
+} from "@/lib/types";
 
 // --- Helpers ---
 
@@ -71,6 +87,252 @@ function ModelNameCell({ name }: { name: string }) {
     </div>
   );
 }
+
+type MetadataFieldName = keyof ModelMetadata;
+type MetadataFieldKind = "text" | "number" | "list" | "boolean";
+type MetadataFormValue = string | boolean;
+type MetadataFormValues = Record<MetadataFieldName, MetadataFormValue>;
+type MetadataOverridePresence = Record<MetadataFieldName, boolean>;
+
+interface MetadataFieldDefinition {
+  key: MetadataFieldName;
+  kind: MetadataFieldKind;
+  labelKey: string;
+  overrideLabelKey: string;
+  controlLabelKey: string;
+}
+
+const metadataFieldDefinitions: MetadataFieldDefinition[] = [
+  {
+    key: "display_name",
+    kind: "text",
+    labelKey: "metadataDisplayName",
+    overrideLabelKey: "overrideDisplayName",
+    controlLabelKey: "metadataDisplayName",
+  },
+  {
+    key: "description",
+    kind: "text",
+    labelKey: "metadataDescription",
+    overrideLabelKey: "overrideDescription",
+    controlLabelKey: "metadataDescription",
+  },
+  {
+    key: "provider",
+    kind: "text",
+    labelKey: "metadataProvider",
+    overrideLabelKey: "overrideProvider",
+    controlLabelKey: "metadataProvider",
+  },
+  {
+    key: "input_modalities",
+    kind: "list",
+    labelKey: "metadataInputModalities",
+    overrideLabelKey: "overrideInputModalities",
+    controlLabelKey: "metadataInputModalities",
+  },
+  {
+    key: "output_modalities",
+    kind: "list",
+    labelKey: "metadataOutputModalities",
+    overrideLabelKey: "overrideOutputModalities",
+    controlLabelKey: "metadataOutputModalities",
+  },
+  {
+    key: "context_length",
+    kind: "number",
+    labelKey: "metadataContextLength",
+    overrideLabelKey: "overrideContextLength",
+    controlLabelKey: "metadataContextLength",
+  },
+  {
+    key: "max_output_tokens",
+    kind: "number",
+    labelKey: "metadataMaxOutputTokens",
+    overrideLabelKey: "overrideMaxOutputTokens",
+    controlLabelKey: "metadataMaxOutputTokens",
+  },
+  {
+    key: "supported_parameters",
+    kind: "list",
+    labelKey: "metadataSupportedParameters",
+    overrideLabelKey: "overrideSupportedParameters",
+    controlLabelKey: "metadataSupportedParameters",
+  },
+  {
+    key: "tool_calling",
+    kind: "boolean",
+    labelKey: "metadataToolCalling",
+    overrideLabelKey: "overrideToolCalling",
+    controlLabelKey: "metadataToolCalling",
+  },
+  {
+    key: "structured_output",
+    kind: "boolean",
+    labelKey: "metadataStructuredOutput",
+    overrideLabelKey: "overrideStructuredOutput",
+    controlLabelKey: "metadataStructuredOutput",
+  },
+  {
+    key: "reasoning",
+    kind: "boolean",
+    labelKey: "metadataReasoning",
+    overrideLabelKey: "overrideReasoning",
+    controlLabelKey: "metadataReasoning",
+  },
+  {
+    key: "prompt_cache",
+    kind: "boolean",
+    labelKey: "metadataPromptCache",
+    overrideLabelKey: "overridePromptCache",
+    controlLabelKey: "metadataPromptCache",
+  },
+];
+
+const emptyModelMetadata: ModelMetadata = {
+  display_name: "",
+  description: "",
+  provider: "",
+  input_modalities: [],
+  output_modalities: [],
+  context_length: 0,
+  max_output_tokens: 0,
+  supported_parameters: [],
+  tool_calling: false,
+  structured_output: false,
+  reasoning: false,
+  prompt_cache: false,
+};
+
+const metadataValueStrategies: Record<
+  MetadataFieldKind,
+  {
+    format: (
+      value: ModelMetadata[MetadataFieldName] | undefined,
+    ) => MetadataFormValue;
+    parse: (value: MetadataFormValue) => ModelMetadata[MetadataFieldName];
+  }
+> = {
+  text: {
+    format: (value) => String(value ?? ""),
+    parse: (value) => String(value),
+  },
+  number: {
+    format: (value) => String(value ?? 0),
+    parse: (value) => Number(value),
+  },
+  list: {
+    format: (value) => (Array.isArray(value) ? value.join(", ") : ""),
+    parse: (value) =>
+      String(value)
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+  },
+  boolean: {
+    format: (value) => Boolean(value),
+    parse: (value) => Boolean(value),
+  },
+};
+
+interface MetadataControlProps {
+  id: string;
+  label: string;
+  enabled: boolean;
+  value: MetadataFormValue;
+  onChange: (value: MetadataFormValue) => void;
+}
+
+const metadataControlRenderers: Record<
+  MetadataFieldKind,
+  (props: MetadataControlProps) => React.ReactNode
+> = {
+  text: ({ id, label, enabled, value, onChange }) => (
+    <Input
+      id={id}
+      aria-label={label}
+      disabled={!enabled}
+      value={String(value)}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
+  number: ({ id, label, enabled, value, onChange }) => (
+    <Input
+      id={id}
+      aria-label={label}
+      disabled={!enabled}
+      type="number"
+      step={1}
+      value={String(value)}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
+  list: ({ id, label, enabled, value, onChange }) => (
+    <Input
+      id={id}
+      aria-label={label}
+      disabled={!enabled}
+      value={String(value)}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  ),
+  boolean: ({ id, label, enabled, value, onChange }) => (
+    <Switch
+      id={id}
+      aria-label={label}
+      disabled={!enabled}
+      checked={Boolean(value)}
+      onCheckedChange={onChange}
+    />
+  ),
+};
+
+function createMetadataEditState(
+  synced: ModelMetadata,
+  override: ModelMetadataOverride,
+): {
+  values: MetadataFormValues;
+  overrides: MetadataOverridePresence;
+} {
+  const values = Object.fromEntries(
+    metadataFieldDefinitions.map((definition) => {
+      const isOverridden = Object.prototype.hasOwnProperty.call(
+        override,
+        definition.key,
+      );
+      const value = isOverridden
+        ? override[definition.key]
+        : synced[definition.key];
+      return [
+        definition.key,
+        metadataValueStrategies[definition.kind].format(value),
+      ];
+    }),
+  ) as MetadataFormValues;
+  const overrides = Object.fromEntries(
+    metadataFieldDefinitions.map((definition) => [
+      definition.key,
+      Object.prototype.hasOwnProperty.call(override, definition.key),
+    ]),
+  ) as MetadataOverridePresence;
+  return { values, overrides };
+}
+
+function buildMetadataOverride(
+  values: MetadataFormValues,
+  overrides: MetadataOverridePresence,
+): ModelMetadataOverride {
+  return Object.fromEntries(
+    metadataFieldDefinitions
+      .filter((definition) => overrides[definition.key])
+      .map((definition) => [
+        definition.key,
+        metadataValueStrategies[definition.kind].parse(values[definition.key]),
+      ]),
+  ) as ModelMetadataOverride;
+}
+
+const emptyMetadataEditState = createMetadataEditState(emptyModelMetadata, {});
 
 // --- Page ---
 
@@ -126,6 +388,11 @@ export default function ModelsPage() {
     model_name: "", input_price: "", output_price: "",
     cache_read_price: "", cache_write_price: "", status: "1",
   });
+  const [metadataValues, setMetadataValues] = useState<MetadataFormValues>(
+    emptyMetadataEditState.values,
+  );
+  const [metadataOverrides, setMetadataOverrides] =
+    useState<MetadataOverridePresence>(emptyMetadataEditState.overrides);
 
   const handleEdit = async () => {
     if (!editItem) return;
@@ -138,6 +405,7 @@ export default function ModelsPage() {
         cache_read_price: Number(editForm.cache_read_price),
         cache_write_price: Number(editForm.cache_write_price),
         status: Number(editForm.status),
+        metadata_override: buildMetadataOverride(metadataValues, metadataOverrides),
       });
       toast.success(tc("success"));
       setEditItem(null);
@@ -162,6 +430,12 @@ export default function ModelsPage() {
       cache_write_price: String(model.cache_write_price ?? 0),
       status: String(model.status),
     });
+    const metadataEdit = createMetadataEditState(
+      model.synced_metadata ?? emptyModelMetadata,
+      model.metadata_override ?? {},
+    );
+    setMetadataValues(metadataEdit.values);
+    setMetadataOverrides(metadataEdit.overrides);
     setEditItem(model);
   };
 
@@ -256,6 +530,12 @@ export default function ModelsPage() {
         onClick={async () => {
           try {
             const result = await syncMutation.mutateAsync();
+            if (result.metadata_source_error) {
+              toast.error(t("syncMetadataFailed"), {
+                description: result.metadata_source_error,
+              });
+              return;
+            }
             toast.success(t("syncSuccess", { count: result.created }));
           } catch (e) { toast.error(formatErrorToast(e, tc("error"))); }
         }}
@@ -301,9 +581,10 @@ export default function ModelsPage() {
 
       {/* Edit Dialog */}
       <Dialog open={!!editItem} onOpenChange={(open) => { if (!open) setEditItem(null); }}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{tc("edit")}: {editForm.model_name}</DialogTitle>
+            <DialogDescription>{t("editDescription")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -325,6 +606,57 @@ export default function ModelsPage() {
               </div>
             </div>
             <StatusSelect value={editForm.status} onChange={(v) => setEditForm({ ...editForm, status: v })} />
+            <FieldSet>
+              <FieldLegend>{t("metadataOverrides")}</FieldLegend>
+              <FieldDescription>{t("metadataOverridesDesc")}</FieldDescription>
+              <FieldGroup className="gap-3">
+                {metadataFieldDefinitions.map((definition) => {
+                  const overrideID = `override-${definition.key}`;
+                  const controlID = `metadata-${definition.key}`;
+                  const enabled = metadataOverrides[definition.key];
+                  const renderControl = metadataControlRenderers[definition.kind];
+                  return (
+                    <Field key={definition.key} orientation="responsive" className="rounded-lg border p-3">
+                      <FieldContent>
+                        <div className="flex items-center gap-2">
+                          <Checkbox
+                            id={overrideID}
+                            aria-label={t(definition.overrideLabelKey)}
+                            checked={enabled}
+                            onCheckedChange={(checked) => setMetadataOverrides((current) => ({
+                              ...current,
+                              [definition.key]: checked === true,
+                            }))}
+                          />
+                          <FieldLabel htmlFor={controlID}>
+                            {t(definition.labelKey)}
+                          </FieldLabel>
+                        </div>
+                        <FieldDescription>
+                          {enabled ? t("metadataOverrideEnabled") : t("metadataSyncedValue")}
+                        </FieldDescription>
+                      </FieldContent>
+                      <div className="w-full @md/field-group:w-64">
+                        {renderControl({
+                          id: controlID,
+                          label: t(definition.controlLabelKey),
+                          enabled,
+                          value: enabled
+                            ? metadataValues[definition.key]
+                            : metadataValueStrategies[definition.kind].format(
+                                (editItem?.synced_metadata ?? emptyModelMetadata)[definition.key],
+                              ),
+                          onChange: (value) => setMetadataValues((current) => ({
+                            ...current,
+                            [definition.key]: value,
+                          })),
+                        })}
+                      </div>
+                    </Field>
+                  );
+                })}
+              </FieldGroup>
+            </FieldSet>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditItem(null)}>{tc("cancel")}</Button>

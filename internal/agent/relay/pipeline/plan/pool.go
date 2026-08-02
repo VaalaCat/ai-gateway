@@ -54,15 +54,22 @@ func privateChannelsVisibleToCaller(rctx *state.RelayContext, realModel string) 
 	if rctx == nil || rctx.Agent == nil {
 		return nil
 	}
-	ui := rctx.Input.UserInfo
-	if ui == nil || ui.UserID == 0 {
-		return nil
-	}
 	cache := rctx.Agent.GetCache()
 	if cache == nil {
 		return nil
 	}
-	privs := cache.GetVisiblePrivateChannelsForUser(ui.UserID, realModel)
+	return privateCandidatesFromStore(cache, rctx.Input.UserInfo, realModel)
+}
+
+func privateCandidatesFromStore(
+	store app.Store,
+	ui *app.UserInfo,
+	realModel string,
+) []ScoredCandidate {
+	if store == nil || ui == nil || ui.UserID == 0 {
+		return nil
+	}
+	privs := store.GetVisiblePrivateChannelsForUser(ui.UserID, realModel)
 	if len(privs) == 0 {
 		return nil
 	}
@@ -88,7 +95,14 @@ func sharedChannels(rctx *state.RelayContext, realModel string) []ScoredCandidat
 	if cache == nil {
 		return nil
 	}
-	chans := cache.GetChannelsForModel(realModel)
+	return sharedCandidatesFromStore(cache, realModel)
+}
+
+func sharedCandidatesFromStore(store app.Store, realModel string) []ScoredCandidate {
+	if store == nil {
+		return nil
+	}
+	chans := store.GetChannelsForModel(realModel)
 	out := make([]ScoredCandidate, 0, len(chans))
 	for _, ch := range chans {
 		out = append(out, ScoredCandidate{
@@ -101,9 +115,24 @@ func sharedChannels(rctx *state.RelayContext, realModel string) []ScoredCandidat
 }
 
 func (p channelPoolImpl) Available(rctx *state.RelayContext, realModel string) []ScoredCandidate {
+	if rctx == nil {
+		return nil
+	}
 	cands := p.collectCandidates(rctx, realModel)
 	cands = p.applyWhitelist(cands, rctx.Input.UserInfo)
 	return p.applyForcedID(cands, rctx.Input.ForcedChannelID)
+}
+
+func (p channelPoolImpl) availableFromStore(
+	store app.Store,
+	ui *app.UserInfo,
+	realModel string,
+	forcedChannelID uint,
+) []ScoredCandidate {
+	candidates := privateCandidatesFromStore(store, ui, realModel)
+	candidates = append(candidates, sharedCandidatesFromStore(store, realModel)...)
+	candidates = p.applyWhitelist(candidates, ui)
+	return p.applyForcedID(candidates, forcedChannelID)
 }
 
 func (p channelPoolImpl) collectCandidates(rctx *state.RelayContext, realModel string) []ScoredCandidate {

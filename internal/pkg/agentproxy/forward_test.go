@@ -876,14 +876,22 @@ func TestDirectForwardSuccessfulHTTPResultRecoversHalfOpenCircuit(t *testing.T) 
 	now = now.Add(time.Second)
 	order := make([]string, 0, 8)
 	opener.err = nil
+	trigger := attemptwire.ChannelAutoDisableTrigger{
+		Source: attemptwire.SourceAdmin, ChannelID: 7, Revision: 4,
+		Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+	}
 	opener.stream = &helperRelayStream{
 		order: &order, commit: tunnel.Committed,
-		copyResult: attemptwire.AttemptProxyResult{Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true},
+		copyResult: attemptwire.AttemptProxyResult{
+			Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true,
+			AutoDisableTriggers: []attemptwire.ChannelAutoDisableTrigger{trigger},
+		},
 	}
 	recovered := forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder())
 	require.NoError(t, recovered.Err)
 	require.Equal(t, attemptwire.ResultProviderFailed, recovered.AttemptResult.Kind,
 		"a valid provider failure Result still proves the Direct transport is healthy")
+	require.Equal(t, []attemptwire.ChannelAutoDisableTrigger{trigger}, recovered.AttemptResult.AutoDisableTriggers)
 	require.NoError(t, forwarder.Forward(t.Context(), directRequest(t, &directReplayBody{}), httptest.NewRecorder()).Err)
 	require.Equal(t, []agentproxy.DirectCircuitTransition{
 		{TargetAgentID: "target-a", State: "open"},
@@ -1162,6 +1170,10 @@ func TestExecuteRelayTransportPreservesAttemptResultOnInterruptedResponse(t *tes
 	want := attemptwire.AttemptProxyResult{
 		Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true, ProviderDispatched: true,
 		Dispatches: 2, PromptTokens: 17, CompletionTokens: 3,
+		AutoDisableTriggers: []attemptwire.ChannelAutoDisableTrigger{{
+			Source: attemptwire.SourcePrivate, ChannelID: 9, Revision: 4,
+			Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+		}},
 	}
 	stream := &helperRelayStream{
 		order: &order, commit: tunnel.Committed, copyErr: interrupted, copyResult: want,

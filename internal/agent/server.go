@@ -76,26 +76,29 @@ const (
 )
 
 type Server struct {
-	Cfg              *config.AgentRuntimeConfig
-	Logger           *zap.Logger
-	Bus              app.EventBus
-	Router           *gin.Engine
-	Creds            *enrollment.Credentials
-	Store            *cache.Store
-	BodyStore        *bodypkg.Store
-	Reporter         *reporter.Reporter
-	RouteObserver    *agentroute.Observer
-	RouteReporter    *agentroute.Reporter
-	Syncer           *cache.Syncer
-	Listener         net.Listener
-	httpSrv          *http.Server
-	MetricsRegistry  *prometheus.Registry
-	RelayMetrics     *pkgmetrics.AgentRelayMetrics
-	RouteSuppressor  *diagnostics.Suppressor
-	ownsHTTPListener bool
+	Cfg               *config.AgentRuntimeConfig
+	Logger            *zap.Logger
+	Bus               app.EventBus
+	Router            *gin.Engine
+	Creds             *enrollment.Credentials
+	Store             *cache.Store
+	BodyStore         *bodypkg.Store
+	Reporter          *reporter.Reporter
+	RouteObserver     *agentroute.Observer
+	RouteReporter     *agentroute.Reporter
+	Syncer            *cache.Syncer
+	Listener          net.Listener
+	httpSrv           *http.Server
+	MetricsListener   net.Listener
+	metricsHTTPServer *http.Server
+	MetricsRegistry   *prometheus.Registry
+	RelayMetrics      *pkgmetrics.AgentRelayMetrics
+	RouteSuppressor   *diagnostics.Suppressor
+	ownsHTTPListener  bool
 
 	Inflight     *inflight.Registry
 	Breakers     *resilience.Registry
+	AutoBan      *resilience.AutoBanTracker
 	LimiterStore *limiter.MemStore
 	stopWatchdog func()
 
@@ -254,7 +257,7 @@ func (s *Server) setupRoutes() {
 	s.registerAttemptProxyRoute(s.Router, runtime.attemptHandler)
 
 	v1 := s.Router.Group("/v1")
-	v1.Use(auth.TokenAuth(s.Store))
+	v1.Use(ginutil.RecordRequestStart(), auth.TokenAuth(s.Store))
 	v1.GET("/models", agentrelay.ListModels(s.Store))
 	v1.POST("/chat/completions", runtime.relayHandler.Relay)
 	v1.POST("/completions", runtime.relayHandler.Relay)
@@ -269,9 +272,13 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) setupMetricsRoute() {
-	if s != nil && s.Router != nil && s.RelayMetrics != nil {
-		s.Router.GET("/metrics", gin.WrapH(s.RelayMetrics.Handler()))
+	if s == nil || s.Cfg == nil || s.Router == nil || s.MetricsRegistry == nil ||
+		s.Cfg.Metrics.Token == "" || s.Cfg.Metrics.Listen != "" {
+		return
 	}
+	s.Router.GET("/metrics", gin.WrapH(
+		pkgmetrics.NewAuthenticatedHandler(s.MetricsRegistry, s.Cfg.Metrics.Token),
+	))
 }
 
 // NewTunnelTargetHandler binds committed tunnel requests to the same router
@@ -315,10 +322,20 @@ func (s *Server) Run() error {
 	if err != nil {
 		return err
 	}
+	metricsListener, metricsHTTPServer, err := s.prepareMetricsHTTPServer(ctx)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
 	resourcesRegistered := false
 	defer func() {
 		if !resourcesRegistered {
 			_ = ln.Close()
+			if metricsHTTPServer != nil {
+				_ = metricsHTTPServer.Close()
+			} else if metricsListener != nil {
+				_ = metricsListener.Close()
+			}
 		}
 	}()
 
@@ -334,6 +351,8 @@ func (s *Server) Run() error {
 	runtime, err := s.prepareRuntime(ctx, startup, func() {
 		s.Listener = ln
 		s.httpSrv = httpSrv
+		s.MetricsListener = metricsListener
+		s.metricsHTTPServer = metricsHTTPServer
 	})
 	if err != nil {
 		return err
@@ -351,7 +370,58 @@ func (s *Server) Run() error {
 		zap.String("addr", ln.Addr().String()),
 		zap.String("agent_id", s.Creds.AgentID),
 	)
-	return httpSrv.Serve(ln)
+	return s.serveHTTPServers(ctx, ln, httpSrv, metricsListener, metricsHTTPServer)
+}
+
+func (s *Server) prepareMetricsHTTPServer(ctx context.Context) (net.Listener, *http.Server, error) {
+	if s.Cfg.Metrics.Listen == "" {
+		return nil, nil, nil
+	}
+	listener, err := netaddr.Listen(s.Cfg.Metrics.Listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen metrics: %w", err)
+	}
+	authenticated := pkgmetrics.NewAuthenticatedHandler(s.MetricsRegistry, s.Cfg.Metrics.Token)
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/metrics" {
+			http.NotFound(response, request)
+			return
+		}
+		authenticated.ServeHTTP(response, request)
+	})
+	return listener, &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 30 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}, nil
+}
+
+type agentServeResult struct {
+	name string
+	err  error
+}
+
+func (s *Server) serveHTTPServers(ctx context.Context, listener net.Listener, httpServer *http.Server, metricsListener net.Listener, metricsServer *http.Server) error {
+	serverCount := 1
+	if metricsServer != nil {
+		serverCount++
+	}
+	results := make(chan agentServeResult, serverCount)
+	var servers conc.WaitGroup
+	servers.Go(func() { results <- agentServeResult{name: "business", err: httpServer.Serve(listener)} })
+	if metricsServer != nil {
+		servers.Go(func() { results <- agentServeResult{name: "metrics", err: metricsServer.Serve(metricsListener)} })
+	}
+	first := <-results
+	_ = httpServer.Close()
+	if metricsServer != nil {
+		_ = metricsServer.Close()
+	}
+	servers.Wait()
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return first.err
 }
 
 // NewEmbedded creates an agent server for embedding inside master.
@@ -474,7 +544,7 @@ func (s *Server) MountRoutes(router *gin.Engine) {
 	s.registerAttemptProxyRoute(router, runtime.attemptHandler)
 
 	v1 := router.Group("/v1")
-	v1.Use(auth.TokenAuth(s.Store))
+	v1.Use(ginutil.RecordRequestStart(), auth.TokenAuth(s.Store))
 	v1.GET("/models", agentrelay.ListModels(s.Store))
 	v1.POST("/chat/completions", runtime.relayHandler.Relay)
 	v1.POST("/completions", runtime.relayHandler.Relay)
@@ -494,6 +564,7 @@ func (s *Server) registerAttemptProxyRoute(router *gin.Engine, handler *agentatt
 	}
 	router.POST(
 		attemptwire.EndpointPath,
+		ginutil.RecordRequestStart(),
 		agentattemptproxy.IngressMiddleware(agentattemptproxy.IngressConfig{}),
 		auth.TokenAuth(s.Store),
 		handler.Serve,
@@ -905,6 +976,8 @@ func (s *Server) CancelDirectForwarding() {
 func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct{}) {
 	s.lifecycleMu.Lock()
 	httpSrv := s.httpSrv
+	metricsHTTPServer := s.metricsHTTPServer
+	metricsListener := s.MetricsListener
 	tunnelManager := s.TunnelManager
 	directForwarder := s.directForwarder
 	directIngress := s.DirectTunnelIngress
@@ -921,6 +994,9 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	drains := pool.New().WithContext(ctx)
 	if httpSrv != nil {
 		drains.Go(func(ctx context.Context) error { return httpSrv.Shutdown(ctx) })
+	}
+	if metricsHTTPServer != nil {
+		drains.Go(func(ctx context.Context) error { return metricsHTTPServer.Shutdown(ctx) })
 	}
 	if directIngress != nil {
 		// Drain both direct sides gracefully within the shutdown deadline before
@@ -950,6 +1026,11 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	}
 	if httpSrv != nil {
 		_ = httpSrv.Close()
+	}
+	if metricsHTTPServer != nil {
+		_ = metricsHTTPServer.Close()
+	} else if metricsListener != nil {
+		_ = metricsListener.Close()
 	}
 	s.recordShutdown("direct_close")
 	if directPool != nil {
@@ -1986,6 +2067,7 @@ func (s *Server) buildRelayHandler(relayTimeout time.Duration) relayRuntime {
 	dispatcher := backend.NewDispatcher(agentApp)
 	s.LimiterStore = limiter.NewMemStore()
 	s.Breakers = resilience.NewRegistry()
+	s.AutoBan = resilience.NewAutoBanTracker()
 	remote := relayexec.NewRemoteAttemptExecutor(relayexec.RemoteAttemptExecutorOptions{
 		SourceAgentID:         s.Creds.AgentID,
 		Direct:                s.directForwarder,
@@ -1997,7 +2079,8 @@ func (s *Server) buildRelayHandler(relayTimeout time.Duration) relayRuntime {
 		DirectPathDisabled:    agenttunnel.NewDirectPathDisabledRecorder(s.RelayMetrics, s.Logger, s.RouteSuppressor),
 	})
 	relayHandler := agentrelay.NewHandler(
-		s.Bus, agentApp, dispatcher, s.Inflight, s.LimiterStore, s.Breakers,
+		s.Bus, agentApp, dispatcher, s.Inflight, s.LimiterStore,
+		&resilience.RuntimeRegistries{Breakers: s.Breakers, AutoBan: s.AutoBan},
 		agentrelay.WithAttemptRouting(
 			s.Creds.AgentID,
 			relayexec.NewAttemptRouteBuilder(agentApp.GetCache()),

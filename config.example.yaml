@@ -1,5 +1,11 @@
 log_level: info
 
+# Metrics are disabled unless token is configured.
+# metrics:
+#   token: "replace-with-at-least-32-random-bytes"
+#   # Omit listen to serve authenticated /metrics on the business listener.
+#   # listen: "127.0.0.1:9091"
+
 master:
   listen: ":8140"
   core_db_path: "./data/core.db"

@@ -142,3 +142,38 @@ func TestLogsInsights_RangeOutOfBounds_Returns400(t *testing.T) {
 		t.Fatalf("Details.gran = %q, want hour", got)
 	}
 }
+
+func TestLogsInsights_LocalDayRangeDSTTolerance(t *testing.T) {
+	tests := []struct {
+		name       string
+		duration   int64
+		wantStatus int
+	}{
+		{name: "seven exact days", duration: 7 * 86400},
+		{name: "seven local days across fallback", duration: 7*86400 + 3600},
+		{name: "eight exact days", duration: 8 * 86400, wantStatus: 400},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, application := newLogTestCtx(t)
+			start := int64(1_799_380_800)
+			ctx := makeCtx(t, application, 1, true)
+			_, err := h.Insights(ctx, InsightsRequest{Start: start, End: start + tt.duration})
+			if tt.wantStatus == 0 {
+				if err != nil {
+					t.Fatalf("Insights duration %d: %v", tt.duration, err)
+				}
+				return
+			}
+
+			var apiErr *api.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err = %v (%T), want *api.APIError", err, err)
+			}
+			if apiErr.Status != tt.wantStatus || apiErr.Code != "RangeOutOfBounds" {
+				t.Fatalf("error = (%d, %q), want (%d, RangeOutOfBounds)", apiErr.Status, apiErr.Code, tt.wantStatus)
+			}
+		})
+	}
+}

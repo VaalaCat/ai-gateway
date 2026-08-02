@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -322,6 +323,7 @@ func minimalCommitUncertainResult(result attemptwire.AttemptProxyResult, reason 
 		PlanAdvanceAllowed:  false,
 		ReasonCode:          reason,
 		ErrorMessage:        "response commit state uncertain",
+		AutoDisableTriggers: slices.Clone(result.AutoDisableTriggers),
 	}
 }
 
@@ -351,6 +353,9 @@ func resultFromProvider(
 		ProviderResultKnown: true,
 		Written:             outcome.Written,
 		ResponseStarted:     outcome.Written || writer.ResponseStarted(),
+	}
+	if rctx != nil && rctx.State != nil {
+		result.AutoDisableTriggers = slices.Clone(rctx.State.AutoDisableTriggers)
 	}
 	classifyProviderResult(&result, outcome)
 	result.PlanAdvanceAllowed = outcome.Err != nil && result.Kind != attemptwire.ResultCanceled &&

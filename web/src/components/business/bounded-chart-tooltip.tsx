@@ -48,7 +48,7 @@ export function BoundedChartTooltip({
     <div
       role="tooltip"
       tabIndex={0}
-      className="pointer-events-auto max-h-[min(50vh,9rem)] min-w-[8rem] max-w-[min(20rem,calc(100vw-2rem),calc(100cqw-5rem))] touch-pan-y overflow-y-auto overscroll-contain rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-md"
+      className="pointer-events-auto max-h-[min(40vh,7rem)] min-w-[8rem] max-w-[min(12rem,calc(100vw-4rem),calc(100cqw-4rem))] touch-pan-y overflow-y-auto overscroll-contain rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-md sm:max-h-[min(50vh,9rem)] sm:max-w-[min(20rem,calc(100vw-2rem),calc(100cqw-5rem))]"
     >
       <ChartTooltipContent
         {...props}

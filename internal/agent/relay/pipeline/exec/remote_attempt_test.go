@@ -211,6 +211,10 @@ func TestRemoteAttemptResultFollowedByMissingEndIsUncertainAndPreservesDiagnosti
 		Kind: attemptwire.ResultSucceeded, ProviderResultKnown: true, ProviderDispatched: true,
 		Dispatches: 2, PromptTokens: 17, CompletionTokens: 3, CacheReadTokens: 5,
 		ResponseStarted: true, PlanAdvanceAllowed: true,
+		AutoDisableTriggers: []attemptwire.ChannelAutoDisableTrigger{{
+			Source: attemptwire.SourcePrivate, ChannelID: 9, Revision: 4,
+			Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+		}},
 		Trace: &attemptwire.AttemptTraceWire{
 			InboundPath: "/target/inbound", InboundHeaders: `{"X-Target-In":["kept"]}`,
 			OutboundPath: "/target/outbound", OutboundHeaders: `{"X-Target-Out":["kept"]}`,
@@ -256,6 +260,7 @@ func TestRemoteAttemptResultFollowedByMissingEndIsUncertainAndPreservesDiagnosti
 	require.Equal(t, 17, outcome.Result.PromptTokens)
 	require.Equal(t, 3, outcome.Result.CompletionTokens)
 	require.Equal(t, 5, outcome.Result.CacheReadTokens)
+	require.Equal(t, wireResult.AutoDisableTriggers, outcome.AutoDisableTriggers)
 	require.ErrorIs(t, outcome.Result.Err, interrupted)
 	require.Equal(t, agentproxy.CodeRelayResponseInterrupted, outcome.ReasonCode)
 	require.NotNil(t, outcome.Trace)

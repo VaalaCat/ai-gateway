@@ -12,6 +12,9 @@ func AutoMigrate(db *gorm.DB) error {
 	// Transitional legacy entrypoint for production startup and legacy fixtures until
 	// the Server/DAO dual-database routing tasks enable the split layout end to end.
 	// It intentionally keeps the mixed schema and never writes a split layout marker.
+	if err := preBackfillChannelAutoBanRuntime(db); err != nil {
+		return err
+	}
 	if err := db.AutoMigrate(
 		&User{},
 		&Token{},
@@ -70,11 +73,14 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := dropLegacyTraceRequestIDUniqueIndex(db); err != nil {
 		return err
 	}
+	if err := backfillChannelAutoBanRuntime(db); err != nil {
+		return err
+	}
 	return deleteLegacyRelayFallbackSetting(db)
 }
 
 func MigrateCoreDB(db *gorm.DB) error {
-	if err := migrateSplitDatabase(db, DatabaseRoleCore, coreModels(), migrateCoreCleanup); err != nil {
+	if err := migrateSplitDatabase(db, DatabaseRoleCore, coreModels(), migrateCoreCleanup, preBackfillChannelAutoBanRuntime); err != nil {
 		return fmt.Errorf("migrate core database: %w", err)
 	}
 	return nil
@@ -87,7 +93,7 @@ func MigrateLogDB(db *gorm.DB) error {
 	return nil
 }
 
-func migrateSplitDatabase(db *gorm.DB, role string, models []any, finish func(*gorm.DB) error) error {
+func migrateSplitDatabase(db *gorm.DB, role string, models []any, finish func(*gorm.DB) error, beforeMigrate ...func(*gorm.DB) error) error {
 	if db == nil {
 		return fmt.Errorf("%s database is nil", role)
 	}
@@ -97,6 +103,11 @@ func migrateSplitDatabase(db *gorm.DB, role string, models []any, finish func(*g
 	return db.Transaction(func(tx *gorm.DB) error {
 		if err := ensureDatabaseLayout(tx, role); err != nil {
 			return err
+		}
+		for _, before := range beforeMigrate {
+			if err := before(tx); err != nil {
+				return fmt.Errorf("prepare %s schema migration: %w", role, err)
+			}
 		}
 		for _, model := range models {
 			if err := tx.AutoMigrate(model); err != nil {
@@ -213,8 +224,7 @@ func coreModels() []any {
 		&Setting{}, &AgentRoute{}, &RequestLimiter{}, &LimiterBinding{}, &TokenTemplate{},
 		&UserGroup{}, &OAuthProvider{}, &OAuthIdentity{}, &ModelRouting{}, &PrivateChannel{},
 		&PrivateChannelShare{}, &AdminScript{}, &InviteCode{}, &InviteRedemption{},
-		&MasterSigningKey{}, &TokenDailyBilling{}, &ChannelDailyBilling{}, &BillingLog{},
-		&BillingHourlyBucket{}, &BillingProjectionReceipt{}, &BillingProjectionBaseline{}, &HistoryMigration{}, &HistoryCursor{},
+		&MasterSigningKey{}, &BillingLog{}, &HistoryMigration{}, &HistoryCursor{},
 	}
 }
 
@@ -223,20 +233,19 @@ func logModels() []any {
 		&RequestLog{}, &RequestTrace{}, &UsageHourlyBucket{}, &UsageDurationHistogram{},
 		&UsageTTFTHistogram{}, &UsageTPSHistogram{}, &UsageUserTTFTHistogram{},
 		&UsageUserTPSHistogram{},
-		&LogHistoryAggregateMerge{}, &HistoryCursor{},
+		&LogHistoryAggregateMerge{}, &HistoryCursor{}, &TokenDailyBilling{},
+		&ChannelDailyBilling{}, &DailyBillingBackfill{},
 	}
 }
 
 func migrateCoreCleanup(db *gorm.DB) error {
 	steps := []func(*gorm.DB) error{
-		backfillBillingProjectionReceipts,
-		ensureBillingProjectionBaseline,
 		dropLegacyAgentRoutingColumn,
 		ensureModelRoutingOwnerIndex,
 		backfillPasswordSet,
 		ensureUserEmailUniqueIndex,
-		ensureBillingHourlyQueryIndexes,
 		dropLegacyChannelBillingIndex,
+		backfillChannelAutoBanRuntime,
 		deleteLegacyRelayFallbackSetting,
 	}
 	for _, step := range steps {
@@ -247,69 +256,34 @@ func migrateCoreCleanup(db *gorm.DB) error {
 	return nil
 }
 
-func backfillBillingProjectionReceipts(db *gorm.DB) error {
-	if err := db.Exec(`UPDATE billing_projection_receipts
-		SET billing_log_id = COALESCE((
-			SELECT id FROM billing_logs WHERE billing_logs.request_id = billing_projection_receipts.request_id
-		), 0), state = ?
-		WHERE billing_log_id = 0`, BillingProjectionApplied).Error; err != nil {
-		return fmt.Errorf("backfill billing projection receipts: %w", err)
-	}
-	var invalid int64
-	if err := db.Model(&BillingProjectionReceipt{}).
-		Where("billing_log_id = 0 OR state NOT IN ?", []BillingProjectionState{BillingProjectionPending, BillingProjectionApplied}).
-		Count(&invalid).Error; err != nil {
-		return fmt.Errorf("validate billing projection receipts: %w", err)
-	}
-	if invalid > 0 {
-		return fmt.Errorf("validate billing projection receipts: %d invalid rows", invalid)
-	}
-	return nil
+func backfillChannelAutoBanRuntime(db *gorm.DB) error {
+	return backfillChannelAutoBanRuntimeColumns(db)
 }
 
-func ensureBillingProjectionBaseline(db *gorm.DB) error {
-	var existing int64
-	if err := db.Model(&BillingProjectionBaseline{}).Where("id = ?", BillingProjectionBaselineID).Count(&existing).Error; err != nil {
-		return fmt.Errorf("read billing projection baseline: %w", err)
+func preBackfillChannelAutoBanRuntime(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("database is nil")
 	}
-	if existing > 0 {
-		return nil
+	if db.Error != nil {
+		return fmt.Errorf("database is invalid: %w", db.Error)
 	}
-	var watermark uint
-	if err := db.Model(&BillingLog{}).Select("COALESCE(MAX(id), 0)").Scan(&watermark).Error; err != nil {
-		return fmt.Errorf("read billing projection baseline watermark: %w", err)
-	}
-	baseline := BillingProjectionBaseline{ID: BillingProjectionBaselineID, BillingLogHighWatermark: watermark}
-	if err := db.Create(&baseline).Error; err != nil {
-		return fmt.Errorf("create billing projection baseline: %w", err)
-	}
-	return nil
+	return backfillChannelAutoBanRuntimeColumns(db)
 }
 
-func ensureBillingHourlyQueryIndexes(db *gorm.DB) error {
-	wanted := map[string][]string{
-		"idx_bhb_model_user":  {"model_name", "date", "hour", "user_id"},
-		"idx_bhb_user_token":  {"user_id", "token_id", "date", "hour", "model_name"},
-		"idx_bhb_user_window": {"user_id", "date", "hour", "model_name"},
-		"idx_bhb_window_user": {"date", "hour", "user_id"},
-	}
-	for _, name := range []string{"idx_bhb_model_user", "idx_bhb_user_token", "idx_bhb_user_window", "idx_bhb_window_user"} {
-		var rows []struct{ Name string }
-		if err := db.Raw("PRAGMA index_info(" + name + ")").Scan(&rows).Error; err != nil {
-			return fmt.Errorf("inspect billing hourly index %s: %w", name, err)
-		}
-		columns := make([]string, 0, len(rows))
-		for _, row := range rows {
-			columns = append(columns, row.Name)
-		}
-		if strings.Join(columns, ",") == strings.Join(wanted[name], ",") {
+func backfillChannelAutoBanRuntimeColumns(db *gorm.DB) error {
+	for _, table := range []string{"channels", "private_channels"} {
+		if !db.Migrator().HasTable(table) {
 			continue
 		}
-		if err := db.Exec("DROP INDEX IF EXISTS " + name).Error; err != nil {
-			return fmt.Errorf("drop stale billing hourly index %s: %w", name, err)
+		if db.Migrator().HasColumn(table, "auto_ban_state") {
+			if err := db.Exec("UPDATE " + table + " SET auto_ban_state = '{}' WHERE auto_ban_state IS NULL OR auto_ban_state = ''").Error; err != nil {
+				return fmt.Errorf("backfill %s auto_ban_state: %w", table, err)
+			}
 		}
-		if err := db.Migrator().CreateIndex(&BillingHourlyBucket{}, name); err != nil {
-			return fmt.Errorf("create billing hourly index %s: %w", name, err)
+		if db.Migrator().HasColumn(table, "auto_ban_revision") {
+			if err := db.Exec("UPDATE " + table + " SET auto_ban_revision = 0 WHERE auto_ban_revision IS NULL").Error; err != nil {
+				return fmt.Errorf("backfill %s auto_ban_revision: %w", table, err)
+			}
 		}
 	}
 	return nil

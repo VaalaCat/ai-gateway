@@ -1,10 +1,12 @@
 package stats
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -23,22 +25,24 @@ import (
 )
 
 type dashboardFailingFinder struct {
-	failAt string
+	failAt    string
+	failErr   error
+	speedTopN *[]int
 }
 
 type dashboardTrendRoutingFinder struct {
 	dashboardFailingFinder
-	coreBuckets   []dao.TimeBucket
-	hourlyBuckets []dao.TimeBucket
-	coreErr       error
-	hourlyErr     error
-	coreCalls     int
-	hourlyCalls   int
+	dashboardBuckets []dao.TimeBucket
+	hourlyBuckets    []dao.TimeBucket
+	dashboardErr     error
+	hourlyErr        error
+	dashboardCalls   int
+	hourlyCalls      int
 }
 
-func (f *dashboardTrendRoutingFinder) CoreDashboardTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error) {
-	f.coreCalls++
-	return f.coreBuckets, f.coreErr
+func (f *dashboardTrendRoutingFinder) DashboardTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error) {
+	f.dashboardCalls++
+	return f.dashboardBuckets, f.dashboardErr
 }
 
 func (f *dashboardTrendRoutingFinder) HourlyTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error) {
@@ -46,11 +50,11 @@ func (f *dashboardTrendRoutingFinder) HourlyTrend(dao.ObsRange, dao.Scope, dao.O
 	return f.hourlyBuckets, f.hourlyErr
 }
 
-func (f dashboardFailingFinder) CoreDashboardKpis(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiBundle, error) {
+func (f dashboardFailingFinder) DashboardKpis(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiBundle, error) {
 	return dao.KpiBundle{Requests: dao.KpiMetric{Value: 4}}, nil
 }
 
-func (f dashboardFailingFinder) CoreDashboardTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error) {
+func (f dashboardFailingFinder) DashboardTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error) {
 	return []dao.TimeBucket{{Requests: 4, Cost: 40, Tokens: 400}}, nil
 }
 
@@ -70,16 +74,59 @@ func (f dashboardFailingFinder) HourlyTrend(dao.ObsRange, dao.Scope, dao.ObsFilt
 
 func (f dashboardFailingFinder) Leaderboard(by, _ string, _ int, _ dao.ObsRange, _ dao.Scope, _ dao.ObsFilter) ([]dao.LeaderRow, error) {
 	if f.failAt == "leaderboard_"+by {
+		if f.failErr != nil {
+			return nil, f.failErr
+		}
 		return nil, dao.ErrLogDatabaseUnavailable
 	}
 	return []dao.LeaderRow{{Name: by}}, nil
 }
 
-func (f dashboardFailingFinder) SpeedCompare(dimension string, _ dao.ObsRange, _ dao.Scope, _ dao.ObsFilter) ([]dao.SpeedRow, error) {
+func TestLoadDashboardRankingsPropagatesLeaderboardErrors(t *testing.T) {
+	for _, dimension := range []string{"user", "model", "channel"} {
+		t.Run(dimension, func(t *testing.T) {
+			wantErr := errors.New("leaderboard query failed")
+			err := loadDashboardRankings(
+				dashboardFailingFinder{failAt: "leaderboard_" + dimension, failErr: wantErr},
+				&LogMetrics{}, dao.ObsRange{}, dao.Scope{IsAdmin: true}, 10, dao.ObsFilter{},
+			)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("loadDashboardRankings() error = %v, want %v", err, wantErr)
+			}
+		})
+	}
+}
+
+func (f dashboardFailingFinder) SpeedCompare(dimension string, _ dao.ObsRange, _ dao.Scope, topN int, _ dao.ObsFilter) ([]dao.SpeedRow, error) {
+	if f.speedTopN != nil {
+		*f.speedTopN = append(*f.speedTopN, topN)
+	}
 	if f.failAt == "speed_"+dimension {
+		if f.failErr != nil {
+			return nil, f.failErr
+		}
 		return nil, dao.ErrLogDatabaseUnavailable
 	}
 	return []dao.SpeedRow{{Name: dimension}}, nil
+}
+
+func TestLoadDashboardRankingsPropagatesSpeedCompareErrors(t *testing.T) {
+	for _, dimension := range []string{"model", "channel"} {
+		t.Run(dimension, func(t *testing.T) {
+			wantErr := errors.New("speed query failed")
+			err := loadDashboardRankings(
+				dashboardFailingFinder{failAt: "speed_" + dimension, failErr: wantErr},
+				&LogMetrics{},
+				dao.ObsRange{},
+				dao.Scope{IsAdmin: true},
+				10,
+				dao.ObsFilter{},
+			)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("loadDashboardRankings() error = %v, want %v", err, wantErr)
+			}
+		})
+	}
 }
 
 func TestDashboardUsesInjectedStatsCacheAndReturnsIsolatedResponses(t *testing.T) {
@@ -110,94 +157,47 @@ func TestDashboardUsesInjectedStatsCacheAndReturnsIsolatedResponses(t *testing.T
 	}
 }
 
-func TestDashboardKeepsCoreDataWhenLogDatabaseUnavailable(t *testing.T) {
-	h, core, application := newDashboardTestCtx(t)
-	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
-	application.SetLogDB(nil)
-	start, end := dayRange()
-	date := time.Unix(start, 0).UTC().Format("2006-01-02")
-	seedDashboardHourlyBucket(t, core, date, 10, "gpt-4o", 5)
-
-	resp, err := h.Dashboard(makeDashboardCtx(t, application, 1, true), DashboardRequest{Start: start, End: end, Gran: "day"})
-	if err != nil {
-		t.Fatalf("Dashboard degraded: %v", err)
-	}
-	if resp.DataStatus.LogDB != "unavailable" {
-		t.Fatalf("DataStatus.LogDB = %q, want unavailable", resp.DataStatus.LogDB)
-	}
-	if resp.LogMetrics != nil {
-		t.Fatalf("LogMetrics = %+v, want nil", resp.LogMetrics)
-	}
-	if len(resp.Trend.Buckets) != 1 || resp.Trend.Buckets[0].Requests != 5 {
-		t.Fatalf("core Trend = %+v, want one concrete billing bucket", resp.Trend)
-	}
-	if want := []string{"cost", "requests", "tokens"}; !reflect.DeepEqual(resp.Trend.Metrics, want) {
-		t.Fatalf("core Trend.Metrics = %v, want %v", resp.Trend.Metrics, want)
-	}
-	payload, err := json.Marshal(resp)
-	if err != nil {
-		t.Fatalf("marshal degraded dashboard: %v", err)
-	}
-	var wire map[string]any
-	if err := json.Unmarshal(payload, &wire); err != nil {
-		t.Fatalf("unmarshal degraded dashboard: %v", err)
-	}
-	bucket := wire["trend"].(map[string]any)["buckets"].([]any)[0].(map[string]any)
-	for _, logOnlyField := range []string{"ttft_ms", "tps", "cache_hit_rate", "prompt_tokens", "completion_tokens", "cache_read_tokens", "cache_write_tokens"} {
-		if _, exists := bucket[logOnlyField]; exists {
-			t.Fatalf("core trend bucket unexpectedly exposes %q: %s", logOnlyField, payload)
-		}
-	}
-	if resp.Kpis.Requests.Value != 5 || resp.Kpis.Cost.Value != 500 || resp.Kpis.Tokens.Value != 150 {
-		t.Fatalf("core Kpis = %+v, want requests=5 cost=500 tokens=150", resp.Kpis)
-	}
-	if _, exists := wire["model_distribution"]; exists {
-		t.Fatalf("dashboard unexpectedly embeds model_distribution: %s", payload)
-	}
-	distribution, err := h.ModelDistribution(
-		makeDashboardCtx(t, application, 1, true),
-		ModelDistributionRequest{Start: start, End: end, Gran: "day", TopN: 5},
-	)
-	if err != nil {
-		t.Fatalf("independent model distribution with log database unavailable: %v", err)
-	}
-	if len(distribution.Buckets) != 1 || distribution.Buckets[0].Name != "gpt-4o" {
-		t.Fatalf("independent core ModelDistribution = %+v, want gpt-4o", distribution)
-	}
-}
-
-func TestDashboardMarksLogDataUnavailableRatherThanEmpty(t *testing.T) {
+func TestDashboardAdminReturnsErrorWhenLogDatabaseUnavailable(t *testing.T) {
 	h, _, application := newDashboardTestCtx(t)
 	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
 	application.SetLogDB(nil)
 	start, end := dayRange()
 
-	resp, err := h.Dashboard(makeDashboardCtx(t, application, 1, false), DashboardRequest{Start: start, End: end, Gran: "day"})
-	if err != nil {
-		t.Fatalf("Dashboard degraded: %v", err)
-	}
-	if resp.DataStatus.LogDB != "unavailable" || resp.LogMetrics != nil {
-		t.Fatalf("degraded response = %+v, want explicit unavailable and null log_metrics", resp)
-	}
+	_, err := h.Dashboard(makeDashboardCtx(t, application, 1, true), DashboardRequest{Start: start, End: end, Gran: "day"})
+	requireDashboardLogUnavailable(t, err)
 }
 
-func TestDashboardMarksLogUnavailableWhileConnectorIsNotReady(t *testing.T) {
+func TestDashboardUserReturnsErrorWhenLogDatabaseUnavailable(t *testing.T) {
+	h, _, application := newDashboardTestCtx(t)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	application.SetLogDB(nil)
+	start, end := dayRange()
+
+	_, err := h.Dashboard(makeDashboardCtx(t, application, 1, false), DashboardRequest{Start: start, End: end, Gran: "day"})
+	requireDashboardLogUnavailable(t, err)
+}
+
+func TestDashboardChecksConnectorReadinessBeforeCreatingFinder(t *testing.T) {
 	h, db, application := newDashboardTestCtx(t)
 	h.LogDatabaseReady = func() bool { return false }
 	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
 	application.SetLogDB(db)
+	finderCalls := 0
+	h.DashboardDataFinder = func(app.Application, context.Context) DashboardDataFinder {
+		finderCalls++
+		return dashboardFailingFinder{}
+	}
 	start, end := dayRange()
 
-	resp, err := h.Dashboard(makeDashboardCtx(t, application, 1, false), DashboardRequest{Start: start, End: end, Gran: "day"})
-	if err != nil {
-		t.Fatalf("Dashboard degraded: %v", err)
-	}
-	if resp.DataStatus.LogDB != "unavailable" || resp.LogMetrics != nil {
-		t.Fatalf("degraded response = %+v, want connector readiness to control log status", resp)
+	_, err := h.Dashboard(makeDashboardCtx(t, application, 1, false), DashboardRequest{Start: start, End: end, Gran: "day"})
+
+	requireDashboardLogUnavailable(t, err)
+	if finderCalls != 0 {
+		t.Fatalf("dashboard finder factory calls = %d, want 0 before log readiness", finderCalls)
 	}
 }
 
-func TestDashboardLogSectionDegradesAtomicallyOnMidRequestDisconnect(t *testing.T) {
+func TestDashboardReturnsErrorOnMidRequestLogDisconnect(t *testing.T) {
 	for _, failAt := range []string{
 		"success", "trend", "leaderboard_user", "leaderboard_model", "leaderboard_channel", "speed_model", "speed_channel",
 	} {
@@ -209,35 +209,30 @@ func TestDashboardLogSectionDegradesAtomicallyOnMidRequestDisconnect(t *testing.
 			h.DashboardDataFinder = func(app.Application, context.Context) DashboardDataFinder { return finder }
 			start, end := dayRange()
 
-			resp, err := h.Dashboard(makeDashboardCtx(t, application, 1, true), DashboardRequest{Start: start, End: end, Gran: "day"})
-			if err != nil {
-				t.Fatalf("Dashboard: %v", err)
-			}
-			if resp.DataStatus.LogDB != "unavailable" || resp.LogMetrics != nil {
-				t.Fatalf("degraded log section = %+v", resp)
-			}
-			if resp.Kpis.SuccessRate != nil {
-				t.Fatalf("SuccessRate = %+v, want nil after %s disconnect", resp.Kpis.SuccessRate, failAt)
-			}
-			if len(resp.Trend.Buckets) != 1 || resp.Trend.Buckets[0].Requests != 4 {
-				t.Fatalf("core trend lost after %s disconnect: %+v", failAt, resp.Trend)
-			}
+			_, err := h.Dashboard(makeDashboardCtx(t, application, 1, true), DashboardRequest{Start: start, End: end, Gran: "day"})
+			requireDashboardLogUnavailable(t, err)
 		})
 	}
 }
 
-// Legacy admin KPI still has its own billing-table baseline dependency. These
-// routing tests isolate only the trend ownership regression.
-func TestDashboardCoreTrendRoutingUsesHourlyTrendForLegacyAdmin(t *testing.T) {
-	finder := &dashboardTrendRoutingFinder{hourlyBuckets: []dao.TimeBucket{{Requests: 5, Cost: 120, Tokens: 75}}}
+func requireDashboardLogUnavailable(t *testing.T, err error) {
+	t.Helper()
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) || !errors.Is(apiErr.Cause, dao.ErrLogDatabaseUnavailable) {
+		t.Fatalf("dashboard error = %v, want API error wrapping ErrLogDatabaseUnavailable", err)
+	}
+}
+
+func TestDashboardRequestFactTrendUsesDashboardFinder(t *testing.T) {
+	finder := &dashboardTrendRoutingFinder{dashboardBuckets: []dao.TimeBucket{{Requests: 5, Cost: 120, Tokens: 75}}}
 	start, end := dayRange()
 
-	got, err := dashboardCoreTrend(finder, app.DatabaseLayoutLegacySingle, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
+	got, err := dashboardTrendFromRequestFacts(finder, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
 	if err != nil {
 		t.Fatalf("legacy admin trend: %v", err)
 	}
-	if finder.hourlyCalls != 1 || finder.coreCalls != 0 {
-		t.Fatalf("legacy calls hourly/core = %d/%d, want 1/0", finder.hourlyCalls, finder.coreCalls)
+	if finder.hourlyCalls != 0 || finder.dashboardCalls != 1 {
+		t.Fatalf("request-fact calls hourly/dashboard = %d/%d, want 0/1", finder.hourlyCalls, finder.dashboardCalls)
 	}
 	if len(got) != 1 || got[0].Requests != 5 || got[0].Cost != 120 || got[0].Tokens != 75 {
 		t.Fatalf("legacy admin trend = %+v, want usage-hourly aggregate", got)
@@ -260,40 +255,40 @@ func TestDashboardLegacyUserTrendHonorsExactBoundariesWithoutBillingTables(t *te
 	}
 }
 
-func TestDashboardCoreTrendRoutingKeepsLegacyEmptyResult(t *testing.T) {
+func TestDashboardRequestFactTrendKeepsEmptyResult(t *testing.T) {
 	finder := &dashboardTrendRoutingFinder{}
 	start, end := dayRange()
 
-	got, err := dashboardCoreTrend(finder, app.DatabaseLayoutLegacySingle, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
+	got, err := dashboardTrendFromRequestFacts(finder, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
 	if err != nil {
 		t.Fatalf("empty legacy trend: %v", err)
 	}
-	if len(got) != 0 || finder.hourlyCalls != 1 || finder.coreCalls != 0 {
-		t.Fatalf("empty legacy result=%+v calls=%d/%d, want empty and 1/0", got, finder.hourlyCalls, finder.coreCalls)
+	if len(got) != 0 || finder.hourlyCalls != 0 || finder.dashboardCalls != 1 {
+		t.Fatalf("empty result=%+v calls=%d/%d, want empty and 0/1", got, finder.hourlyCalls, finder.dashboardCalls)
 	}
 }
 
-func TestDashboardCoreTrendRoutingPropagatesLegacyHourlyError(t *testing.T) {
-	wantErr := errors.New("legacy hourly failed")
-	finder := &dashboardTrendRoutingFinder{hourlyErr: wantErr}
+func TestDashboardTrendFromRequestFactsPropagatesError(t *testing.T) {
+	wantErr := errors.New("request fact trend failed")
+	finder := &dashboardTrendRoutingFinder{dashboardErr: wantErr}
 	start, end := dayRange()
 
-	_, err := dashboardCoreTrend(finder, app.DatabaseLayoutLegacySingle, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
+	_, err := dashboardTrendFromRequestFacts(finder, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
 	if !errors.Is(err, wantErr) {
-		t.Fatalf("legacy trend error = %v, want %v", err, wantErr)
+		t.Fatalf("request fact trend error = %v, want %v", err, wantErr)
 	}
 }
 
-func TestDashboardCoreTrendRoutingKeepsSplitOnCoreBilling(t *testing.T) {
-	finder := &dashboardTrendRoutingFinder{coreBuckets: []dao.TimeBucket{{Requests: 7}}}
+func TestDashboardTrendFromRequestFactsUsesFinder(t *testing.T) {
+	finder := &dashboardTrendRoutingFinder{dashboardBuckets: []dao.TimeBucket{{Requests: 7}}}
 	start, end := dayRange()
 
-	got, err := dashboardCoreTrend(finder, app.DatabaseLayoutSplit, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
+	got, err := dashboardTrendFromRequestFacts(finder, dao.ObsRange{Start: start, End: end, Gran: dao.GranDay}, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
 	if err != nil {
-		t.Fatalf("split core trend: %v", err)
+		t.Fatalf("request fact trend: %v", err)
 	}
-	if len(got) != 1 || got[0].Requests != 7 || finder.coreCalls != 1 || finder.hourlyCalls != 0 {
-		t.Fatalf("split result=%+v calls=%d/%d, want core billing only", got, finder.coreCalls, finder.hourlyCalls)
+	if len(got) != 1 || got[0].Requests != 7 || finder.dashboardCalls != 1 || finder.hourlyCalls != 0 {
+		t.Fatalf("result=%+v calls=%d/%d, want request fact finder only", got, finder.dashboardCalls, finder.hourlyCalls)
 	}
 }
 
@@ -331,9 +326,6 @@ func newDashboardTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
-	if err := db.AutoMigrate(&models.BillingHourlyBucket{}, &models.BillingLog{}); err != nil {
-		t.Fatalf("migrate billing hourly fixture: %v", err)
-	}
 	if err := models.SeedDefaultUserGroup(db); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
@@ -343,8 +335,17 @@ func newDashboardTestCtx(t *testing.T) (*Handler, *gorm.DB, app.Application) {
 
 	application := app.NewApplication()
 	application.SetCoreDB(db)
+	logDB, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "log.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("open log sqlite: %v", err)
+	}
+	if err := models.MigrateLogDB(logDB); err != nil {
+		t.Fatalf("migrate log fixture: %v", err)
+	}
+	application.SetLogDB(logDB)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
 	application.SetEventBus(eventbus.NewMemoryBus())
-	return &Handler{}, db, application
+	return &Handler{}, logDB, application
 }
 
 func makeDashboardCtx(t *testing.T, application app.Application, userID uint, isAdmin bool) *app.Context {
@@ -382,19 +383,12 @@ func seedDashboardHourlyBucket(t *testing.T, db *gorm.DB, date string, hour int,
 	}).Error; err != nil {
 		t.Fatalf("seed hourly bucket: %v", err)
 	}
-	if err := db.Create(&models.BillingHourlyBucket{
-		Date: date, Hour: hour, UserID: 1, TokenID: uint(hour + 1), ChannelID: 5,
-		ModelName: modelName, OwnerType: "admin", RequestCount: reqs, SuccessCount: reqs,
-		PromptTokens: reqs * 10, CompletionTokens: reqs * 20, TotalCost: reqs * 100,
-	}).Error; err != nil {
-		t.Fatalf("seed billing hourly bucket: %v", err)
-	}
 }
 
 // seedDashboardUserLog 写入 usage_log 行供 user-scope 测试 (HourlyTrend user 分支 + KpiUsers.Active)。
 func seedDashboardUserLog(t *testing.T, db *gorm.DB, userID uint, ts int64) {
 	t.Helper()
-	if err := db.Select("*").Create(&models.UsageLog{
+	row := models.UsageLog{
 		UserID:           userID,
 		ChannelID:        5,
 		ModelName:        "gpt-4o",
@@ -408,7 +402,15 @@ func seedDashboardUserLog(t *testing.T, db *gorm.DB, userID uint, ts int64) {
 		FirstResponseMs:  50,
 		RequestID:        "seed-user-log",
 		CreatedAt:        ts,
-	}).Error; err != nil {
+	}
+	var err error
+	if db.Migrator().HasTable(&models.RequestLog{}) {
+		request := models.RequestLog(row)
+		err = db.Select("*").Create(&request).Error
+	} else {
+		err = db.Select("*").Create(&row).Error
+	}
+	if err != nil {
 		t.Fatalf("seed usage log: %v", err)
 	}
 }
@@ -469,6 +471,35 @@ func TestDashboard_Admin_IncludesAllBlocks(t *testing.T) {
 	}
 	if len(resp.LogMetrics.Leaderboard.AvailableMetrics) != 5 {
 		t.Fatalf("Leaderboard.AvailableMetrics len = %d, want 5", len(resp.LogMetrics.Leaderboard.AvailableMetrics))
+	}
+}
+
+func TestDashboard_Admin_EmptyRankingsEncodeAsArrays(t *testing.T) {
+	h, _, application := newDashboardTestCtx(t)
+	start, end := dayRange()
+
+	resp, err := h.Dashboard(
+		makeDashboardCtx(t, application, 1, true),
+		DashboardRequest{Start: start, End: end, Gran: "day"},
+	)
+	if err != nil {
+		t.Fatalf("Dashboard admin: %v", err)
+	}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal admin dashboard: %v", err)
+	}
+
+	for _, field := range []string{
+		`"users":[]`,
+		`"models":[]`,
+		`"channels":[]`,
+		`"by_model":[]`,
+		`"by_channel":[]`,
+	} {
+		if !bytes.Contains(payload, []byte(field)) {
+			t.Fatalf("empty ranking field %s must encode as an array: %s", field, payload)
+		}
 	}
 }
 
@@ -544,7 +575,7 @@ func TestDashboard_Leaderboard_SortedByTokens(t *testing.T) {
 // seedDashboardUserLogWithID 与 seedDashboardUserLog 相同，但允许指定 request_id 以避免 UNIQUE 冲突。
 func seedDashboardUserLogWithID(t *testing.T, db *gorm.DB, userID uint, ts int64, requestID string) {
 	t.Helper()
-	if err := db.Select("*").Create(&models.UsageLog{
+	row := models.UsageLog{
 		UserID:           userID,
 		ChannelID:        5,
 		ModelName:        "gpt-4o",
@@ -558,7 +589,15 @@ func seedDashboardUserLogWithID(t *testing.T, db *gorm.DB, userID uint, ts int64
 		FirstResponseMs:  50,
 		RequestID:        requestID,
 		CreatedAt:        ts,
-	}).Error; err != nil {
+	}
+	var err error
+	if db.Migrator().HasTable(&models.RequestLog{}) {
+		request := models.RequestLog(row)
+		err = db.Select("*").Create(&request).Error
+	} else {
+		err = db.Select("*").Create(&row).Error
+	}
+	if err != nil {
 		t.Fatalf("seed usage log (%s): %v", requestID, err)
 	}
 }
@@ -585,13 +624,23 @@ func TestDashboard_NonAdmin_UserIDCollapsed(t *testing.T) {
 	}
 }
 
-func TestDashboard_RangeOutOfBounds_Returns400(t *testing.T) {
+func TestDashboard_LongDayRange_IsAllowed(t *testing.T) {
 	h, _, application := newDashboardTestCtx(t)
 	now := time.Now().UTC().Unix()
-	// gran=day max 365 天；这里给 400 天必越界。
 	start := now - 400*86400
 	ctx := makeDashboardCtx(t, application, 1, true)
 	_, err := h.Dashboard(ctx, DashboardRequest{Start: start, End: now, Gran: "day"})
+	if err != nil {
+		t.Fatalf("Dashboard long day range: %v", err)
+	}
+}
+
+func TestDashboard_HourRangeOutOfBounds_Returns400(t *testing.T) {
+	h, _, application := newDashboardTestCtx(t)
+	now := time.Now().UTC().Unix()
+	start := now - 8*86400
+	ctx := makeDashboardCtx(t, application, 1, true)
+	_, err := h.Dashboard(ctx, DashboardRequest{Start: start, End: now, Gran: "hour"})
 	if err == nil {
 		t.Fatalf("expected 400 RangeOutOfBounds, got nil")
 	}
@@ -605,7 +654,83 @@ func TestDashboard_RangeOutOfBounds_Returns400(t *testing.T) {
 	if apiErr.Code != "RangeOutOfBounds" {
 		t.Fatalf("Code = %q, want RangeOutOfBounds", apiErr.Code)
 	}
-	if got, _ := apiErr.Details["gran"].(string); got != "day" {
-		t.Fatalf("Details.gran = %q, want day", got)
+	if got, _ := apiErr.Details["gran"].(string); got != "hour" {
+		t.Fatalf("Details.gran = %q, want hour", got)
+	}
+}
+
+func TestDashboardTopNRequestContract(t *testing.T) {
+	requestType := reflect.TypeOf(DashboardRequest{})
+	field, ok := requestType.FieldByName("TopN")
+	if !ok {
+		t.Fatal("DashboardRequest.TopN is missing")
+	}
+	if got := field.Tag.Get("form"); got != "top_n" {
+		t.Fatalf("DashboardRequest.TopN form tag = %q, want top_n", got)
+	}
+}
+
+func TestDashboardRejectsInvalidTopN(t *testing.T) {
+	h, _, application := newDashboardTestCtx(t)
+	start, end := dayRange()
+	req := DashboardRequest{Start: start, End: end, Gran: "day", TopN: 7}
+	_, err := h.Dashboard(makeDashboardCtx(t, application, 1, true), req)
+	var apiErr *api.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 400 || apiErr.Code != "InvalidTopN" {
+		t.Fatalf("error = %v, want InvalidTopN status 400", err)
+	}
+}
+
+func TestDashboardPassesDefaultAndRequestedTopNToSpeedRankings(t *testing.T) {
+	h, _, application := newDashboardTestCtx(t)
+	start, end := dayRange()
+	var speedTopN []int
+	h.DashboardDataFinder = func(app.Application, context.Context) DashboardDataFinder {
+		return dashboardFailingFinder{speedTopN: &speedTopN}
+	}
+
+	_, err := h.Dashboard(makeDashboardCtx(t, application, 1, true), DashboardRequest{
+		Start: start, End: end, Gran: "day",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int{10, 10}; !reflect.DeepEqual(speedTopN, want) {
+		t.Fatalf("default speed top n = %v, want %v", speedTopN, want)
+	}
+
+	speedTopN = nil
+	_, err = h.Dashboard(makeDashboardCtx(t, application, 1, true), DashboardRequest{
+		Start: start, End: end, Gran: "day", TopN: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int{20, 20}; !reflect.DeepEqual(speedTopN, want) {
+		t.Fatalf("requested speed top n = %v, want %v", speedTopN, want)
+	}
+}
+
+func TestDashboardCacheSeparatesTopN(t *testing.T) {
+	h, _, application := newDashboardTestCtx(t)
+	h.Cache = dao.NewStatsCache()
+	start, end := dayRange()
+	var speedTopN []int
+	h.DashboardDataFinder = func(app.Application, context.Context) DashboardDataFinder {
+		return dashboardFailingFinder{speedTopN: &speedTopN}
+	}
+	ctx := makeDashboardCtx(t, application, 1, true)
+
+	for _, req := range []DashboardRequest{
+		{Start: start, End: end, Gran: "day"},
+		{Start: start, End: end, Gran: "day", TopN: 10},
+		{Start: start, End: end, Gran: "day", TopN: 20},
+	} {
+		if _, err := h.Dashboard(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if want := []int{10, 10, 20, 20}; !reflect.DeepEqual(speedTopN, want) {
+		t.Fatalf("speed ranking loads = %v, want %v", speedTopN, want)
 	}
 }

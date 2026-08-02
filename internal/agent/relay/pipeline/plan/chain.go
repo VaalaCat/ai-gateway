@@ -1,7 +1,10 @@
 package plan
 
 import (
+	"context"
+
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
@@ -66,19 +69,48 @@ func buildChainFromStore(rs RoutingStore, rctx *state.RelayContext) ModelChain {
 	if rctx.Request == nil {
 		return ModelChain{}
 	}
+	return buildChainFromInput(
+		rs,
+		rctx.Request.Context(),
+		rctx.Input.Model,
+		rctx.Input.UserInfo,
+		NewResolveCtx(),
+	)
+}
+
+func buildDeterministicChainFromInput(
+	rs RoutingStore,
+	requestCtx context.Context,
+	model string,
+	ui *app.UserInfo,
+) ModelChain {
+	return buildChainFromInput(rs, requestCtx, model, ui, newDeterministicResolveCtx())
+}
+
+func buildChainFromInput(
+	rs RoutingStore,
+	requestCtx context.Context,
+	model string,
+	ui *app.UserInfo,
+	walk *ResolveCtx,
+) ModelChain {
+	if rs == nil || walk == nil || model == "" {
+		return ModelChain{}
+	}
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
 	owner := protocol.RoutingOwner{}
-	if ui := rctx.Input.UserInfo; ui != nil {
+	if ui != nil {
 		owner.UserID = ui.UserID
 		owner.TokenID = ui.TokenID
 	}
-	requestCtx := rctx.Request.Context()
 
-	ctx := NewResolveCtx()
-	first := ResolveToRealModel(requestCtx, rs, rctx.Input.Model, owner, ctx)
+	first := ResolveToRealModel(requestCtx, rs, model, owner, walk)
 	// 首次 Resolve 完成后立刻拍照 trace——这是 Plan.Trace 的最终值。
 	// 后续 Mark+Resolve 仍累积 ctx.trace，但不传出（否则
 	// UsageLog.Other.routing_trace 被几何级数放大，违反 main parity）。
-	firstTrace := ctx.Trace()
+	firstTrace := walk.Trace()
 
 	if first == "" {
 		// 整链 cycle / depth_exceeded：返回空 Models，Trace 仍保留供 UsageLog 写。
@@ -88,10 +120,19 @@ func buildChainFromStore(rs RoutingStore, rctx *state.RelayContext) ModelChain {
 	models := []string{first}
 	for {
 		last := models[len(models)-1]
-		ctx.MarkMemberExhausted(last)
-		next := ResolveToRealModel(requestCtx, rs, rctx.Input.Model, owner, ctx)
-		// next == "" 表示 routing 链耗尽；next == last 是退化情况（非 routing 路径）
-		if next == "" || next == last {
+		walk.MarkMemberExhausted(last)
+		next := ResolveToRealModel(requestCtx, rs, model, owner, walk)
+		if next == "" {
+			break
+		}
+		if next == last {
+			// A deterministic inspection may reach the same leaf through a
+			// different routing path. Keep the result de-duplicated, but retain
+			// this path in lastChain so the next iteration can exhaust it.
+			if walk.exhaustRepeatedModels && len(walk.lastChain) > 0 {
+				continue
+			}
+			// Online Relay preserves the historical non-routing/repeated stop.
 			break
 		}
 		models = append(models, next)
@@ -99,8 +140,8 @@ func buildChainFromStore(rs RoutingStore, rctx *state.RelayContext) ModelChain {
 
 	// RoutingName 只在第一个 realModel 与入参不同时填。
 	routingName := ""
-	if models[0] != rctx.Input.Model {
-		routingName = rctx.Input.Model
+	if models[0] != model {
+		routingName = model
 	}
 
 	return ModelChain{

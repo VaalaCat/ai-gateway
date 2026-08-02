@@ -1,4 +1,5 @@
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RebuildDialog } from "./rebuild-dialog";
@@ -12,12 +13,13 @@ const mocks = vi.hoisted(() => ({
   success: vi.fn(),
   error: vi.fn(),
   warning: vi.fn(),
+  submit: vi.fn(),
 }));
 
 vi.mock("next-intl", () => ({ useTranslations: () => (key: string) => key }));
 vi.mock("sonner", () => ({ toast: { success: mocks.success, error: mocks.error, warning: mocks.warning } }));
 vi.mock("@/lib/api/billing", () => ({
-  useRebuildBillingSubmit: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useRebuildBillingSubmit: () => ({ mutateAsync: mocks.submit, isPending: false }),
   useRebuildBillingJob: (id: string | null) => {
     mocks.trackedJob(id);
     return { data: id ? mocks.job : undefined, isError: false };
@@ -27,6 +29,39 @@ vi.mock("@/lib/api/billing", () => ({
     return { data: { jobs: mocks.jobs } };
   },
   useInvalidateBillingCaches: () => mocks.invalidate,
+}));
+vi.mock("@/components/business/date-picker/date-range-picker", () => ({
+  DateRangePicker: ({
+    label,
+    onValueChange,
+  }: {
+    label?: string;
+    onValueChange: (value: { startDate: string; endDate: string }) => void;
+  }) => (
+    <div>
+      <span>{label}</span>
+      <button
+        type="button"
+        onClick={() => onValueChange({ startDate: "2026-07-20", endDate: "2026-07-25" })}
+      >
+        full-range
+      </button>
+      <button
+        type="button"
+        onClick={() => onValueChange({ startDate: "2026-07-20", endDate: "2026-07-20" })}
+      >
+        single-day
+      </button>
+      <button
+        type="button"
+        onClick={() => onValueChange({ startDate: "", endDate: "" })}
+      >
+        clear-range
+      </button>
+    </div>
+  ),
+  isDateRangeValid: ({ startDate, endDate }: { startDate: string; endDate: string }) =>
+    (!startDate && !endDate) || Boolean(startDate && endDate && startDate <= endDate),
 }));
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -45,6 +80,44 @@ beforeEach(() => {
   mocks.success.mockReset();
   mocks.error.mockReset();
   mocks.warning.mockReset();
+  mocks.submit.mockReset();
+  mocks.submit.mockResolvedValue({ job_id: "new-job" });
+});
+
+describe("RebuildDialog date range", () => {
+  it("submits both boundaries from one complete range update", async () => {
+    render(<RebuildDialog open onOpenChange={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "full-range" }));
+    await userEvent.click(screen.getByRole("button", { name: "rebuildConfirm" }));
+
+    await waitFor(() => expect(mocks.submit).toHaveBeenCalledOnce());
+    expect(mocks.submit).toHaveBeenCalledWith({
+      start_date: "2026-07-20",
+      end_date: "2026-07-25",
+    });
+  });
+
+  it("enables confirmation for a complete same-day range", async () => {
+    render(<RebuildDialog open onOpenChange={vi.fn()} />);
+    const confirm = screen.getByRole("button", { name: "rebuildConfirm" });
+
+    expect(confirm).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "single-day" }));
+
+    expect(confirm).toBeEnabled();
+  });
+
+  it("disables confirmation after clearing the complete range", async () => {
+    render(<RebuildDialog open onOpenChange={vi.fn()} />);
+    const confirm = screen.getByRole("button", { name: "rebuildConfirm" });
+
+    await userEvent.click(screen.getByRole("button", { name: "full-range" }));
+    expect(confirm).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "clear-range" }));
+
+    expect(confirm).toBeDisabled();
+  });
 });
 
 function runningJob(id: string, startedAt = 1) {

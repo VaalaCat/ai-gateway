@@ -47,17 +47,19 @@ type StatsCache struct {
 	now     func() time.Time
 	group   singleflight.Group
 
-	flightMu  sync.Mutex
-	flights   map[string]*statsLoadFlight
-	flightSeq uint64
+	flightMu   sync.Mutex
+	flights    map[string]*statsLoadFlight
+	flightSeq  uint64
+	generation uint64
 }
 
 type statsLoadFlight struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	key      string
-	waiters  int
-	finished bool
+	ctx        context.Context
+	cancel     context.CancelFunc
+	key        string
+	generation uint64
+	waiters    int
+	finished   bool
 }
 
 func NewStatsCache() *StatsCache {
@@ -102,7 +104,7 @@ func (c *StatsCache) Get(ctx context.Context, key QueryKey, load func(context.Co
 		if err != nil {
 			return nil, err
 		}
-		c.entries.Add(key, entry)
+		c.storeEntryIfCurrent(key, entry, flight.generation)
 		return entry, nil
 	})
 
@@ -119,6 +121,19 @@ func (c *StatsCache) Get(ctx context.Context, key QueryKey, load func(context.Co
 		}
 		return decodeStatsCacheEntry(entry)
 	}
+}
+
+// Clear invalidates completed entries and every current in-flight generation.
+// A load that ignores its canceled context is still prevented from storing later.
+func (c *StatsCache) Clear() {
+	c.flightMu.Lock()
+	c.generation++
+	for _, flight := range c.flights {
+		flight.cancel()
+	}
+	c.flights = make(map[string]*statsLoadFlight)
+	c.entries.Purge()
+	c.flightMu.Unlock()
 }
 
 func (c *StatsCache) get(key QueryKey) (any, bool) {
@@ -157,10 +172,18 @@ func (c *StatsCache) joinFlight(ctx context.Context, baseKey string) *statsLoadF
 	c.flightSeq++
 	flight := &statsLoadFlight{
 		ctx: sharedCtx, cancel: cancel, waiters: 1,
-		key: fmt.Sprintf("%s#%d", baseKey, c.flightSeq),
+		key: fmt.Sprintf("%s#%d", baseKey, c.flightSeq), generation: c.generation,
 	}
 	c.flights[baseKey] = flight
 	return flight
+}
+
+func (c *StatsCache) storeEntryIfCurrent(key QueryKey, entry statsCacheEntry, generation uint64) {
+	c.flightMu.Lock()
+	defer c.flightMu.Unlock()
+	if c.generation == generation {
+		c.entries.Add(key, entry)
+	}
 }
 
 func (c *StatsCache) leaveFlight(baseKey string, flight *statsLoadFlight) {

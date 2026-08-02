@@ -40,6 +40,8 @@ func ProjectPrivateChannelToChannel(pc *protocol.SyncedPrivateChannel) *models.C
 			Remark:              pc.Remark,
 			TestModel:           pc.TestModel,
 			AutoBan:             pc.AutoBan,
+			AutoBanState:        pc.AutoBanState,
+			AutoBanRevision:     pc.AutoBanRevision,
 			StatusCodeMapping:   pc.StatusCodeMapping,
 			OtherSettings:       pc.OtherSettings,
 			// CreatedAt 留零值：gorm autoCreateTime 只在 INSERT 时填充，struct literal 给零值不影响读写路径。

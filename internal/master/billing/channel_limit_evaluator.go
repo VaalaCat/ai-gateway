@@ -13,7 +13,6 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/sourcegraph/conc"
 	"go.uber.org/zap"
-	"gorm.io/datatypes"
 )
 
 // evaluateLimit 判定一个渠道当前是否应被禁用。OR 语义:cutoff 优先,其后逐条 rule,命中即停。
@@ -52,36 +51,39 @@ const (
 	statusDisabled = 0
 )
 
-// reconcile 依当前 status + state 与 shouldDisable 判定,算出目标 status / state / 是否需要落库。
-// 区分手动/自动靠 state.Tripped:评估器禁用才置 true;手动禁用为 false,评估器永不自动复活。
-func reconcile(status int, state models.ChannelLimitState, shouldDisable bool, reason string, autoRecover bool, now int64) (int, models.ChannelLimitState, bool) {
+// reconcile 依当前 status + 限额状态与 shouldDisable 判定,算出目标 status / state / 是否需要落库。
+// 连续错误自动禁用有独立所有权:限额恢复只能在其未 tripped 时重新启用渠道。
+func reconcile(status int, limitState, autoBanState models.ChannelDisableState, shouldDisable bool, reason string, autoRecover bool, now int64) (int, models.ChannelDisableState, bool) {
 	if shouldDisable {
 		if status == statusEnabled {
-			return statusDisabled, models.ChannelLimitState{
+			return statusDisabled, models.ChannelDisableState{
 				Tripped: true, Reason: reason, AutoRecover: autoRecover, TrippedAt: now,
 			}, true
 		}
 		// 已禁用:若是评估器自己禁的(Tripped),按需更新 reason/autoRecover;手动禁的(无 Tripped)不碰。
-		if state.Tripped && (state.Reason != reason || state.AutoRecover != autoRecover) {
-			next := state
+		if limitState.Tripped && (limitState.Reason != reason || limitState.AutoRecover != autoRecover) {
+			next := limitState
 			next.Reason = reason
 			next.AutoRecover = autoRecover
 			return status, next, true
 		}
-		return status, state, false
+		return status, limitState, false
 	}
 	// 不该禁用
 	if status == statusDisabled {
-		if state.Tripped && state.AutoRecover {
-			return statusEnabled, models.ChannelLimitState{}, true // 周期窗口自动恢复
+		if limitState.Tripped && limitState.AutoRecover {
+			if autoBanState.Tripped {
+				return statusDisabled, models.ChannelDisableState{}, true
+			}
+			return statusEnabled, models.ChannelDisableState{}, true // 周期窗口自动恢复
 		}
-		return status, state, false // 永久 trip 或手动禁:保持
+		return status, limitState, false // 永久 trip 或手动禁:保持
 	}
 	// status == enabled
-	if state.Tripped {
-		return statusEnabled, models.ChannelLimitState{}, true // 清残留 state
+	if limitState.Tripped {
+		return statusEnabled, models.ChannelDisableState{}, true // 清残留 state
 	}
-	return status, state, false
+	return status, limitState, false
 }
 
 // LimitEvaluator 周期评估所有配了限额的 admin channel,翻 Status + 写 LimitState。
@@ -225,17 +227,18 @@ func (e *LimitEvaluator) TickContext(ctx context.Context, now time.Time) error {
 			}
 			continue
 		}
-		newStatus, newState, changed := reconcile(ch.Status, ch.LimitState.Data(), shouldDisable, reason, autoRecover, now.Unix())
+		newStatus, newState, changed := reconcile(ch.Status, ch.LimitState.Data(), ch.AutoBanState.Data(), shouldDisable, reason, autoRecover, now.Unix())
 		if !changed {
 			continue
 		}
-		if err := m.Update(ch.ID, map[string]any{
-			"status":      newStatus,
-			"limit_state": datatypes.NewJSONType(newState),
-		}); err != nil {
+		committed, err := m.ReconcileLimit(ch, newStatus, newState)
+		if err != nil {
 			if e.Logger != nil {
 				e.Logger.Error("channel_limit_update_failed", zap.Uint("channel_id", ch.ID), zap.Error(err))
 			}
+			continue
+		}
+		if !committed {
 			continue
 		}
 		if e.Bus != nil {

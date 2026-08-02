@@ -1,11 +1,9 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -21,11 +19,11 @@ import {
 } from "@/components/ui/accordion";
 import { FieldTip } from "@/components/business/field-tip";
 import { ProtocolRuleCard } from "../protocol-rule-card";
-import { ChannelForm, ENDPOINT_DEFAULTS, ENDPOINT_OPTIONS } from "../types";
+import { ChannelEndpointsEditor } from "../channel-endpoints-editor";
+import { ChannelForm } from "../types";
 import type { ChannelOtherSettings, BuiltinToolFallbackPolicy } from "../types";
 import {
   parseEndpoints,
-  stringifyEndpoints,
   parseOtherSettings,
   stringifyOtherSettings,
   channelProtocols,
@@ -41,27 +39,9 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
 
   // ── shared helpers ──
   const otherSettings = parseOtherSettings(form.other_settings);
+  const endpoints = parseEndpoints(form.endpoints);
   const updateOtherSettings = (patch: Partial<ChannelOtherSettings>) =>
     setForm({ ...form, other_settings: stringifyOtherSettings({ ...otherSettings, ...patch }) });
-
-  // ── endpoints helpers ──
-  const eps = parseEndpoints(form.endpoints);
-  const baseUrl = form.base_url ? form.base_url.replace(/\/+$/, "") : "";
-
-  const toggleEndpoint = (key: string, checked: boolean) => {
-    const updated = { ...eps };
-    if (checked) {
-      (updated as Record<string, string>)[key] = ENDPOINT_DEFAULTS[key];
-    } else {
-      delete (updated as Record<string, string | undefined>)[key];
-    }
-    setForm({ ...form, endpoints: stringifyEndpoints(updated) });
-  };
-
-  const updatePath = (key: string, path: string) => {
-    const updated = { ...eps, [key]: path };
-    setForm({ ...form, endpoints: stringifyEndpoints(updated) });
-  };
 
   // ── protocol-override helpers ──
   const protos = channelProtocols(form.endpoints);
@@ -115,7 +95,7 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
   };
 
   const endpointsSummary = t("encodeSummaryEndpoints", {
-    count: Object.keys(eps).length,
+    count: Object.keys(endpoints).length,
     passthrough: form.passthrough_enabled ? "on" : "off",
   });
   const overrideTotal =
@@ -139,45 +119,11 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
           </div>
         </AccordionTrigger>
         <AccordionContent className="space-y-3 px-3 pb-3">
-          {Object.keys(eps).length === 0 && (
-            <p className="text-xs text-destructive">{t("encodeEndpointsRequired")}</p>
-          )}
-          <div className="space-y-3">
-            {ENDPOINT_OPTIONS.map((opt) => {
-              const enabled = opt.key in eps;
-              const path = eps[opt.key] || "";
-              const fullUrl = baseUrl && path ? `${baseUrl}${path}` : "";
-              return (
-                <div key={opt.key} className="space-y-2">
-                  <label className="flex items-center gap-2 text-sm cursor-pointer">
-                    <Checkbox
-                      checked={enabled}
-                      onCheckedChange={(v) => toggleEndpoint(opt.key, !!v)}
-                    />
-                    <span className="font-medium">{t(opt.labelKey)}</span>
-                  </label>
-                  {enabled && (
-                    <div className="ml-6 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <Label className="text-xs w-10 shrink-0">{t("endpointPath")}</Label>
-                        <Input
-                          value={path}
-                          onChange={(e) => updatePath(opt.key, e.target.value)}
-                          placeholder={opt.default}
-                          className="h-8 text-xs font-mono"
-                        />
-                      </div>
-                      {fullUrl && (
-                        <p className="text-xs text-muted-foreground font-mono ml-12 break-all">
-                          {"→"} {fullUrl}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          <ChannelEndpointsEditor
+            endpoints={form.endpoints}
+            baseURL={form.base_url}
+            onEndpointsChange={(endpoints) => setForm({ ...form, endpoints })}
+          />
 
           <div className="flex items-center justify-between pt-2 border-t">
             <div className="space-y-0.5">

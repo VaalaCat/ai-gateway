@@ -11,6 +11,9 @@ import (
 
 func TestApplicationCoreAndLogDatabases(t *testing.T) {
 	application := NewApplication()
+	if application.GetMasterSettings() == nil {
+		t.Fatal("new application master settings snapshot must be initialized")
+	}
 	if application.GetCoreDB() != nil || application.GetLogDB() != nil {
 		t.Fatal("new application databases must be nil")
 	}

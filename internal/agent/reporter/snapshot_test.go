@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -19,8 +21,13 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "usage_backlog.snapshot.gz")
 	store := NewMemPendingUsageStore(100, zap.NewNop())
 	u := newTestUploader(t, "http://127.0.0.1:0") // 不会真发
-	store.Append([]protocol.UsageLogEntry{{RequestID: "s1", Timestamp: 1}})
-	u.retry.pushItem(retryItem{entry: protocol.UsageLogEntry{RequestID: "r1"},
+	trigger := autoDisableTrigger()
+	store.Append([]protocol.UsageLogEntry{{
+		RequestID: "s1", Timestamp: 1, AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
+	}})
+	u.retry.pushItem(retryItem{entry: protocol.UsageLogEntry{
+		RequestID: "r1", AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
+	},
 		attempts: 7, degrade: DegradeStripTrace, bytes: 10, nextAt: time.Now().Add(time.Hour)})
 	snap := &Snapshotter{Store: store, Uploader: u, Path: path, Logger: zap.NewNop()}
 	if err := snap.WriteNow(); err != nil {
@@ -39,6 +46,8 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("store=%d retry=%d, want 1/1", store2.Len(), u2.retry.Len())
 	}
 	it := u2.retry.snapshotTop(1)[0]
+	require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{trigger}, it.entry.AutoDisableTriggers)
+	require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{trigger}, store2.PeekBatch(1)[0].AutoDisableTriggers)
 	if it.attempts != 7 || it.degrade != DegradeStripTrace {
 		t.Fatalf("retry item lost fields: %+v", it)
 	}

@@ -6,7 +6,8 @@ import (
 
 // Application 是整个应用的顶层容器接口
 // 统一管理 Master 和 Agent 侧的所有组件，通过 Get/Set 方法实现依赖注入
-// 除 LogDB 支持后台 connector 原子替换外，其余依赖仅在初始化阶段 Set。
+// LogDB 支持后台 connector 原子替换，MasterSettings 支持运行期原子发布；
+// 其余依赖仅在初始化阶段 Set。
 type Application interface {
 	GetCoreDB() *gorm.DB
 	SetCoreDB(*gorm.DB)
@@ -14,6 +15,7 @@ type Application interface {
 	SetLogDB(*gorm.DB)
 	GetDatabaseLayoutMode() DatabaseLayoutMode
 	SetDatabaseLayoutMode(DatabaseLayoutMode)
+	GetMasterSettings() *MasterSettingsSnapshot
 	GetMasterServer() MasterServer
 	SetMasterServer(MasterServer)
 	GetHub() Hub

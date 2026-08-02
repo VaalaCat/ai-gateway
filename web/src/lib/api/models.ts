@@ -36,6 +36,13 @@ export interface FetchPricingResponse {
   source_errors?: Record<string, string>;
 }
 
+export interface SyncModelsResponse {
+  created: number;
+  removed: number;
+  metadata_updated: number;
+  metadata_source_error?: string;
+}
+
 interface PricingUpdate {
   model_id: number;
   input_price: number;
@@ -96,7 +103,7 @@ export function useDeleteModel() {
 export function useSyncModels() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => api.post<{ created: number }>("/admin/models/sync", {}),
+    mutationFn: () => api.post<SyncModelsResponse>("/admin/models/sync", {}),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["models"] });
     },

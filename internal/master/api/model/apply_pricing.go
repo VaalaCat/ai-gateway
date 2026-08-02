@@ -10,6 +10,9 @@ import (
 )
 
 func (h *Handler) ApplyPricing(c *app.Context, req ApplyPricingRequest) (ApplyPricingResponse, error) {
+	if err := validatePricingUpdates(req.Updates); err != nil {
+		return ApplyPricingResponse{}, api.BadRequestError(err.Error(), err)
+	}
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 	m := dao.NewAdminMutation(daoCtx)

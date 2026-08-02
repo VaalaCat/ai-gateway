@@ -55,6 +55,35 @@ func TestResultFromProviderClassifiesSuccessFailureAndCancellation(t *testing.T)
 	}
 }
 
+func TestResultFromProviderPreservesAutoDisableTrigger(t *testing.T) {
+	trigger := attemptwire.ChannelAutoDisableTrigger{
+		Source: attemptwire.SourcePrivate, ChannelID: 9, Revision: 4,
+		Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	rctx, _ := newResponseRelayContext(trace.CaptureOff)
+	rctx.State.AutoDisableTriggers = []attemptwire.ChannelAutoDisableTrigger{trigger}
+
+	result := resultFromProvider(rctx, attemptexec.ProviderResult{}, nil)
+	rctx.State.AutoDisableTriggers[0].Revision = 99
+
+	require.Equal(t, []attemptwire.ChannelAutoDisableTrigger{trigger}, result.AutoDisableTriggers)
+}
+
+func TestMinimalCommitUncertainResultPreservesAutoDisableTrigger(t *testing.T) {
+	trigger := attemptwire.ChannelAutoDisableTrigger{
+		Source: attemptwire.SourceAdmin, ChannelID: 7,
+		Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	result := attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultSucceeded, AutoDisableTriggers: []attemptwire.ChannelAutoDisableTrigger{trigger},
+	}
+
+	got := minimalCommitUncertainResult(result, "response_commit_uncertain")
+	result.AutoDisableTriggers[0].Revision = 99
+
+	require.Equal(t, []attemptwire.ChannelAutoDisableTrigger{trigger}, got.AutoDisableTriggers)
+}
+
 func TestAttemptResponseWriterKeepsProviderResponseSeparateFromExplicitResult(t *testing.T) {
 	rctx, recorder := newResponseRelayContext(trace.CaptureOff)
 	writer := newAttemptResponseWriter(rctx.Writer)

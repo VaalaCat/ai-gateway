@@ -1,7 +1,7 @@
 package models
 
 type BillingLog struct {
-	ID                uint     `gorm:"primaryKey" json:"id"`
+	ID                uint     `gorm:"primaryKey;index:idx_billing_logs_created_id,priority:2" json:"id"`
 	RequestID         string   `gorm:"size:64;uniqueIndex" json:"request_id"`
 	UserID            uint     `gorm:"index" json:"user_id"`
 	TokenID           uint     `gorm:"index" json:"token_id"`
@@ -29,7 +29,7 @@ type BillingLog struct {
 	PriceRatio        float64  `gorm:"default:1" json:"price_ratio"`
 	Free              bool     `json:"free"`
 	Status            int      `json:"status"`
-	CreatedAt         int64    `gorm:"autoCreateTime;index" json:"created_at"`
+	CreatedAt         int64    `gorm:"autoCreateTime;index;index:idx_billing_logs_created_id,priority:1" json:"created_at"`
 }
 
 func (l *BillingLog) RawTotal() int64 {

@@ -269,9 +269,15 @@ func TestFullAPIFlow(t *testing.T) {
 	}
 
 	// Update channel
-	w_cu := doReq("PUT", "/api/admin/channels/1", map[string]any{"name": "updated-channel"})
+	w_cu := doReq("PUT", "/api/admin/channels/1", map[string]any{"tag": "updated-channel"})
 	if w_cu.Code != 200 {
 		t.Fatalf("update channel: %d %s", w_cu.Code, w_cu.Body.String())
+	}
+
+	// Channel names are identity fields and cannot be changed by a patch.
+	w_cni := doReq("PUT", "/api/admin/channels/1", map[string]any{"name": "renamed-channel"})
+	if w_cni.Code != 400 {
+		t.Fatalf("expected 400 for read-only channel name, got %d: %s", w_cni.Code, w_cni.Body.String())
 	}
 
 	// Channel update with illegal status=2 must be rejected

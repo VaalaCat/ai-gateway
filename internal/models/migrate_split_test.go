@@ -34,9 +34,7 @@ func TestMigrateCoreDBOwnsOnlyCoreTables(t *testing.T) {
 		"settings", "agent_routes", "request_limiters", "limiter_bindings", "token_templates",
 		"user_groups", "o_auth_providers", "o_auth_identities", "model_routings",
 		"private_channels", "private_channel_shares", "admin_scripts", "invite_codes",
-		"invite_redemptions", "master_signing_keys", "token_daily_billings",
-		"channel_daily_billings", "billing_logs", "billing_hourly_buckets",
-		"billing_projection_receipts", "database_layouts",
+		"invite_redemptions", "master_signing_keys", "billing_logs", "database_layouts",
 	} {
 		require.Truef(t, db.Migrator().HasTable(table), "core table %s missing", table)
 	}
@@ -44,10 +42,35 @@ func TestMigrateCoreDBOwnsOnlyCoreTables(t *testing.T) {
 		"usage_logs", "usage_log_traces", "request_logs", "request_traces",
 		"usage_hourly_buckets", "usage_duration_histograms", "usage_ttft_histograms",
 		"usage_tps_histograms", "usage_user_ttft_histograms", "usage_user_tps_histograms",
+		"daily_billing_backfills", "token_daily_billings", "channel_daily_billings",
+		"billing_hourly_buckets", "billing_projection_receipts", "billing_projection_baselines",
 	} {
 		require.Falsef(t, db.Migrator().HasTable(table), "log table %s leaked into core DB", table)
 	}
 	assertNoForeignKeys(t, db)
+}
+
+func TestMigrateCoreDBAutoBanRuntimeColumnsAreNonNull(t *testing.T) {
+	db := openSplitTestDB(t)
+	require.NoError(t, MigrateCoreDB(db))
+
+	type columnInfo struct {
+		Name       string `gorm:"column:name"`
+		NotNull    int    `gorm:"column:notnull"`
+		DefaultSQL string `gorm:"column:dflt_value"`
+	}
+	for _, table := range []string{"channels", "private_channels"} {
+		var columns []columnInfo
+		require.NoError(t, db.Raw("PRAGMA table_info('"+table+"')").Scan(&columns).Error)
+		byName := make(map[string]columnInfo, len(columns))
+		for _, column := range columns {
+			byName[column.Name] = column
+		}
+		require.Equalf(t, 1, byName["auto_ban_state"].NotNull, "%s.auto_ban_state must be NOT NULL", table)
+		require.NotEmptyf(t, byName["auto_ban_state"].DefaultSQL, "%s.auto_ban_state must default to an empty object", table)
+		require.Equalf(t, 1, byName["auto_ban_revision"].NotNull, "%s.auto_ban_revision must be NOT NULL", table)
+		require.NotEmptyf(t, byName["auto_ban_revision"].DefaultSQL, "%s.auto_ban_revision must default to zero", table)
+	}
 }
 
 func TestMigrateLogDBOwnsOnlyLogTables(t *testing.T) {
@@ -57,17 +80,76 @@ func TestMigrateLogDBOwnsOnlyLogTables(t *testing.T) {
 	for _, table := range []string{
 		"request_logs", "request_traces", "usage_hourly_buckets", "usage_duration_histograms",
 		"usage_ttft_histograms", "usage_tps_histograms", "usage_user_ttft_histograms",
-		"usage_user_tps_histograms", "database_layouts",
+		"usage_user_tps_histograms", "token_daily_billings", "channel_daily_billings",
+		"daily_billing_backfills", "database_layouts",
 	} {
 		require.Truef(t, db.Migrator().HasTable(table), "log table %s missing", table)
 	}
 	for _, table := range []string{
 		"users", "tokens", "channels", "settings", "billing_logs", "billing_hourly_buckets",
-		"token_daily_billings", "channel_daily_billings", "usage_logs", "usage_log_traces",
+		"billing_projection_receipts", "billing_projection_baselines", "usage_logs", "usage_log_traces",
 	} {
 		require.Falsef(t, db.Migrator().HasTable(table), "core or legacy table %s leaked into log DB", table)
 	}
 	assertNoForeignKeys(t, db)
+}
+
+func TestMigrateLogDBCreatesDailyBillingBackfillSchema(t *testing.T) {
+	db := openSplitTestDB(t)
+	require.NoError(t, MigrateLogDB(db))
+
+	for _, table := range []string{"token_daily_billings", "channel_daily_billings", "daily_billing_backfills"} {
+		require.Truef(t, db.Migrator().HasTable(table), "log-owned daily billing table %s missing", table)
+	}
+	for _, column := range []string{
+		"version", "state", "start_date", "end_date", "last_completed_date", "last_error",
+		"started_at_unix", "completed_at_unix", "updated_at_unix",
+	} {
+		require.Truef(t, db.Migrator().HasColumn("daily_billing_backfills", column), "backfill column %s missing", column)
+	}
+
+	var createSQL string
+	require.NoError(t, db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'daily_billing_backfills'`).Scan(&createSQL).Error)
+	require.NotContains(t, createSQL, "AUTOINCREMENT")
+	type columnInfo struct {
+		Name    string `gorm:"column:name"`
+		Type    string `gorm:"column:type"`
+		NotNull int    `gorm:"column:notnull"`
+		PK      int    `gorm:"column:pk"`
+	}
+	var columns []columnInfo
+	require.NoError(t, db.Raw(`PRAGMA table_info('daily_billing_backfills')`).Scan(&columns).Error)
+	columnsByName := make(map[string]columnInfo, len(columns))
+	for _, column := range columns {
+		columnsByName[column.Name] = column
+	}
+	require.Equal(t, 1, columnsByName["version"].PK)
+	require.Equal(t, "TEXT", columnsByName["last_error"].Type)
+	for _, column := range []string{"started_at_unix", "completed_at_unix", "updated_at_unix"} {
+		require.Equalf(t, 1, columnsByName[column].NotNull, "backfill column %s must be NOT NULL", column)
+	}
+
+	require.NoError(t, MigrateLogDB(db), "repeated migration must be idempotent")
+	var count int64
+	require.NoError(t, db.Table("daily_billing_backfills").Count(&count).Error)
+	require.Zero(t, count, "schema migration must not create backfill state rows")
+
+	for _, state := range []string{"pending", "running", "failed", "completed"} {
+		require.NoError(t, db.Exec(`INSERT INTO daily_billing_backfills(version, state, started_at_unix, completed_at_unix, updated_at_unix) VALUES (1, ?, 0, 0, 1)`, state).Error)
+		require.NoError(t, db.Exec(`DELETE FROM daily_billing_backfills WHERE version = 1`).Error)
+	}
+	require.Error(t, db.Exec(`INSERT INTO daily_billing_backfills(version, state, started_at_unix, completed_at_unix, updated_at_unix) VALUES (1, 'unknown', 0, 0, 1)`).Error)
+	require.Error(t, db.Exec(`INSERT INTO daily_billing_backfills(version, state, started_at_unix, completed_at_unix, updated_at_unix) VALUES (1, NULL, 0, 0, 1)`).Error)
+
+	for _, statement := range []string{
+		`INSERT INTO daily_billing_backfills(version, state, completed_at_unix, updated_at_unix) VALUES (11, 'pending', 0, 1)`,
+		`INSERT INTO daily_billing_backfills(version, state, started_at_unix, updated_at_unix) VALUES (12, 'pending', 0, 1)`,
+		`INSERT INTO daily_billing_backfills(version, state, started_at_unix, completed_at_unix) VALUES (13, 'pending', 0, 0)`,
+	} {
+		require.Error(t, db.Exec(statement).Error)
+	}
+	require.NoError(t, db.Exec(`INSERT INTO daily_billing_backfills(version, state, started_at_unix, completed_at_unix, updated_at_unix) VALUES (21, 'pending', 0, 0, 1)`).Error)
+	require.Error(t, db.Exec(`INSERT INTO daily_billing_backfills(version, state, started_at_unix, completed_at_unix, updated_at_unix) VALUES (21, 'running', 1, 0, 2)`).Error)
 }
 
 func TestMigrationStateTablesCoreOwnership(t *testing.T) {
@@ -368,6 +450,46 @@ func TestMigrateSplitDatabaseRollsBackFinishFailureOnDisk(t *testing.T) {
 	})
 }
 
+func TestMigrateSplitDatabaseRollsBackPreBackfillOnLaterFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-backfill-failure.db")
+	db, sqlDB := openFileSplitTestDB(t, path)
+	require.NoError(t, db.AutoMigrate(&DatabaseLayout{}))
+	require.NoError(t, db.Create(&DatabaseLayout{
+		ID: DatabaseLayoutID, Role: DatabaseRoleCore, Version: DatabaseLayoutVersion,
+	}).Error)
+	for _, table := range []string{"channels", "private_channels"} {
+		require.NoError(t, db.Exec("CREATE TABLE "+table+" (id integer primary key, auto_ban_state text NULL, auto_ban_revision integer NULL)").Error)
+		require.NoError(t, db.Exec("INSERT INTO "+table+" VALUES (1, NULL, NULL)").Error)
+	}
+
+	sentinel := errors.New("finish after pre-backfill")
+	finishCalled := false
+	err := migrateSplitDatabase(db, DatabaseRoleCore, nil, func(tx *gorm.DB) error {
+		finishCalled = true
+		for _, table := range []string{"channels", "private_channels"} {
+			var state sql.NullString
+			var revision sql.NullInt64
+			require.NoError(t, tx.Raw("SELECT auto_ban_state, auto_ban_revision FROM "+table+" WHERE id = 1").Row().Scan(&state, &revision))
+			require.Equal(t, sql.NullString{String: "{}", Valid: true}, state)
+			require.Equal(t, sql.NullInt64{Int64: 0, Valid: true}, revision)
+		}
+		return sentinel
+	}, preBackfillChannelAutoBanRuntime)
+	require.ErrorIs(t, err, sentinel)
+	require.True(t, finishCalled, "finish must observe pre-backfill before forcing rollback")
+	require.NoError(t, sqlDB.Close())
+
+	reopened, reopenedSQL := openFileSplitTestDB(t, path)
+	defer reopenedSQL.Close()
+	for _, table := range []string{"channels", "private_channels"} {
+		var state sql.NullString
+		var revision sql.NullInt64
+		require.NoError(t, reopened.Raw("SELECT auto_ban_state, auto_ban_revision FROM "+table+" WHERE id = 1").Row().Scan(&state, &revision))
+		require.False(t, state.Valid, "%s.auto_ban_state must remain NULL after rollback", table)
+		require.False(t, revision.Valid, "%s.auto_ban_revision must remain NULL after rollback", table)
+	}
+}
+
 func TestMigrateSplitDatabaseRollsBackMidAutoMigrateFailureOnDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "automigrate-failure.db")
 	db, sqlDB := openFileSplitTestDB(t, path)
@@ -425,116 +547,6 @@ func TestBillingLogSchemaAndRawTotal(t *testing.T) {
 	require.NoError(t, db.Raw(`SELECT raw_input_cost, billing_factor FROM billing_logs WHERE request_id = ?`, legacy.RequestID).Row().Scan(&rawInput, &factor))
 	require.False(t, rawInput.Valid)
 	require.False(t, factor.Valid)
-}
-
-func TestBillingHourlyBucketDimensionsAndIndexes(t *testing.T) {
-	db := openSplitTestDB(t)
-	require.NoError(t, MigrateCoreDB(db))
-
-	base := BillingHourlyBucket{Date: "2026-07-23", Hour: 8, UserID: 1, TokenID: 2, ChannelID: 3, OwnerType: "admin", ModelName: "gpt-5"}
-	require.NoError(t, db.Create(&base).Error)
-	dup := base
-	dup.ID = 0
-	require.Error(t, db.Create(&dup).Error)
-	for _, row := range []BillingHourlyBucket{
-		{Date: base.Date, Hour: base.Hour, UserID: 2, TokenID: base.TokenID, ChannelID: base.ChannelID, OwnerType: base.OwnerType, ModelName: base.ModelName},
-		{Date: base.Date, Hour: base.Hour, UserID: base.UserID, TokenID: 9, ChannelID: base.ChannelID, OwnerType: base.OwnerType, ModelName: base.ModelName},
-		{Date: base.Date, Hour: base.Hour, UserID: base.UserID, TokenID: base.TokenID, PrivateChannelID: 7, OwnerType: "private", ModelName: base.ModelName},
-		{Date: base.Date, Hour: base.Hour, UserID: base.UserID, TokenID: base.TokenID, ChannelID: base.ChannelID, OwnerType: base.OwnerType, ModelName: "gpt-5-mini"},
-	} {
-		require.NoError(t, db.Create(&row).Error)
-	}
-
-	assertIndexColumns(t, db, "billing_hourly_buckets", "idx_bhb_bucket", []indexColumn{
-		{name: "date"}, {name: "hour"}, {name: "user_id"}, {name: "token_id"},
-		{name: "channel_id"}, {name: "private_channel_id"}, {name: "owner_type"}, {name: "model_name"},
-	})
-	assertIndexColumns(t, db, "billing_hourly_buckets", "idx_bhb_model_user", []indexColumn{
-		{name: "model_name"}, {name: "date"}, {name: "hour"}, {name: "user_id"},
-	})
-	assertIndexColumns(t, db, "billing_hourly_buckets", "idx_bhb_user_token", []indexColumn{
-		{name: "user_id"}, {name: "token_id"}, {name: "date"}, {name: "hour"}, {name: "model_name"},
-	})
-	assertIndexColumns(t, db, "billing_hourly_buckets", "idx_bhb_user_window", []indexColumn{
-		{name: "user_id"}, {name: "date"}, {name: "hour"}, {name: "model_name"},
-	})
-	assertIndexColumns(t, db, "billing_hourly_buckets", "idx_bhb_window_user", []indexColumn{
-		{name: "date"}, {name: "hour"}, {name: "user_id"},
-	})
-}
-
-func TestBillingProjectionReceiptUsesRequestIDAsPrimaryKey(t *testing.T) {
-	db := openSplitTestDB(t)
-	require.NoError(t, MigrateCoreDB(db))
-
-	receipt := BillingProjectionReceipt{RequestID: "request-1", BillingLogID: 1, State: BillingProjectionPending}
-	require.NoError(t, db.Create(&receipt).Error)
-	require.Error(t, db.Create(&BillingProjectionReceipt{RequestID: receipt.RequestID}).Error)
-	require.True(t, db.Migrator().HasColumn(&BillingProjectionReceipt{}, "billing_log_id"))
-	require.True(t, db.Migrator().HasColumn(&BillingProjectionReceipt{}, "state"))
-	require.True(t, db.Migrator().HasColumn(&BillingProjectionReceipt{}, "projected_at_unix"))
-	assertIndexColumns(t, db, "billing_projection_receipts", "idx_billing_projection_pending", []indexColumn{
-		{name: "state"}, {name: "billing_log_id"},
-	})
-	require.Error(t, db.Create(&BillingProjectionReceipt{
-		RequestID: "invalid-state", BillingLogID: 2, State: BillingProjectionState("invalid"),
-	}).Error)
-}
-
-func TestMigrateCoreDBCreatesFreshProjectionBaselineAtZero(t *testing.T) {
-	db := openSplitTestDB(t)
-	require.NoError(t, MigrateCoreDB(db))
-
-	var baseline BillingProjectionBaseline
-	require.NoError(t, db.First(&baseline, BillingProjectionBaselineID).Error)
-	require.Zero(t, baseline.BillingLogHighWatermark)
-}
-
-func TestMigrateCoreDBCapturesExistingBillingLogHighWatermarkWithoutReceipts(t *testing.T) {
-	db := openSplitTestDB(t)
-	require.NoError(t, MigrateCoreDB(db))
-	require.NoError(t, db.Migrator().DropTable(&BillingProjectionReceipt{}, &BillingProjectionBaseline{}))
-	require.NoError(t, db.Create(&BillingLog{RequestID: "legacy-1"}).Error)
-	require.NoError(t, db.Create(&BillingLog{RequestID: "legacy-2"}).Error)
-
-	require.NoError(t, MigrateCoreDB(db))
-	var baseline BillingProjectionBaseline
-	require.NoError(t, db.First(&baseline, BillingProjectionBaselineID).Error)
-	require.Equal(t, uint(2), baseline.BillingLogHighWatermark)
-	var receipts int64
-	require.NoError(t, db.Model(&BillingProjectionReceipt{}).Count(&receipts).Error)
-	require.Zero(t, receipts)
-}
-
-func TestMigrateCoreDBBackfillsLegacyProjectionReceiptsAsApplied(t *testing.T) {
-	db := openSplitTestDB(t)
-	require.NoError(t, MigrateCoreDB(db))
-	require.NoError(t, db.Migrator().DropTable(&BillingProjectionReceipt{}, &BillingProjectionBaseline{}))
-	fact := BillingLog{RequestID: "legacy-receipt"}
-	require.NoError(t, db.Create(&fact).Error)
-	require.NoError(t, db.Exec(`CREATE TABLE billing_projection_receipts (
-		request_id text PRIMARY KEY,
-		projected_at_unix integer NOT NULL
-	)`).Error)
-	require.NoError(t, db.Exec(`INSERT INTO billing_projection_receipts(request_id, projected_at_unix) VALUES (?, ?)`, fact.RequestID, 123).Error)
-
-	require.NoError(t, MigrateCoreDB(db))
-	var receipt BillingProjectionReceipt
-	require.NoError(t, db.First(&receipt, "request_id = ?", fact.RequestID).Error)
-	require.Equal(t, fact.ID, receipt.BillingLogID)
-	require.Equal(t, BillingProjectionApplied, receipt.State)
-}
-
-func TestMigrateCoreDBRepairsStaleBillingHourlyUserWindowIndex(t *testing.T) {
-	db := openSplitTestDB(t)
-	require.NoError(t, MigrateCoreDB(db))
-	require.NoError(t, db.Exec(`DROP INDEX idx_bhb_user_window`).Error)
-	require.NoError(t, db.Exec(`CREATE INDEX idx_bhb_user_window ON billing_hourly_buckets(user_id, token_id, date, hour)`).Error)
-
-	require.NoError(t, MigrateCoreDB(db))
-	assertIndexColumns(t, db, "billing_hourly_buckets", "idx_bhb_user_window", []indexColumn{
-		{name: "user_id"}, {name: "date"}, {name: "hour"}, {name: "model_name"},
-	})
 }
 
 func TestRequestLogAndTraceSchemaIndexes(t *testing.T) {

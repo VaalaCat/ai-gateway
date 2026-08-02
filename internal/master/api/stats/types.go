@@ -15,12 +15,12 @@ type Handler struct {
 }
 
 type DashboardDataFinder interface {
-	CoreDashboardKpis(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiBundle, error)
-	CoreDashboardTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error)
+	DashboardKpis(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiBundle, error)
+	DashboardTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error)
 	DashboardSuccessRate(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiMetric, error)
 	HourlyTrend(dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.TimeBucket, error)
 	Leaderboard(string, string, int, dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.LeaderRow, error)
-	SpeedCompare(string, dao.ObsRange, dao.Scope, dao.ObsFilter) ([]dao.SpeedRow, error)
+	SpeedCompare(string, dao.ObsRange, dao.Scope, int, dao.ObsFilter) ([]dao.SpeedRow, error)
 }
 
 type OverviewResponse struct {
@@ -57,15 +57,16 @@ type DashboardRequest struct {
 	Gran   string `form:"gran"`
 	Model  string `form:"model"`
 	UserID uint   `form:"user_id"`
+	TopN   int    `form:"top_n"`
 }
 
-// DashboardResponse keeps core billing facts concrete and groups every
-// log-backed chart under the nullable LogMetrics section.
+// DashboardResponse keeps request and billing metrics concrete and groups
+// optional performance charts under the nullable LogMetrics section.
 type DashboardResponse struct {
-	Kpis              dao.KpiBundle `json:"kpis"`
-	Trend             TrendBlock    `json:"trend"`
-	LogMetrics        *LogMetrics   `json:"log_metrics"`
-	DataStatus        DataStatus    `json:"data_status"`
+	Kpis       dao.KpiBundle `json:"kpis"`
+	Trend      TrendBlock    `json:"trend"`
+	LogMetrics *LogMetrics   `json:"log_metrics"`
+	DataStatus DataStatus    `json:"data_status"`
 }
 
 type DataStatus struct {
@@ -91,7 +92,7 @@ type PerformanceBucket struct {
 	CacheHitRate float64 `json:"cache_hit_rate"`
 }
 
-// TrendBlock contains only core billing metrics.
+// TrendBlock contains cost, request, and token metrics from log-owned facts.
 type TrendBlock struct {
 	Buckets []BillingTrendBucket `json:"buckets"`
 	Metrics []string             `json:"metrics"`

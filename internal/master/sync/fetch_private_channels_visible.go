@@ -108,6 +108,8 @@ func (h *privateChannelsVisibleFetchHandler) project(pc *models.PrivateChannel) 
 			Remark:              pc.Remark,
 			TestModel:           pc.TestModel,
 			AutoBan:             pc.AutoBan,
+			AutoBanState:        pc.AutoBanState,
+			AutoBanRevision:     pc.AutoBanRevision,
 			StatusCodeMapping:   pc.StatusCodeMapping,
 			OtherSettings:       pc.OtherSettings,
 			CreatedAt:           pc.CreatedAt,

@@ -9,6 +9,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
 	"github.com/gin-gonic/gin"
@@ -66,18 +67,21 @@ func TokenAuth(store *cache.Store) gin.HandlerFunc {
 		// === user → group 查链 ===
 		// UserID==0 是 __system_test__ 等系统级 token 的哨兵值（DB 里不存在 user），
 		// 跳过 GetUser 直接走 default group=1，避免每次 channel test 都污染 users.negative_hits。
-		groupID := uint(1) // default fallback
+		groupID := models.DefaultUserGroupID
 		if token.UserID != 0 {
 			if syncedUser := store.GetUser(c.Request.Context(), token.UserID); syncedUser != nil && syncedUser.GroupID != 0 {
 				groupID = syncedUser.GroupID
 			}
 		}
 		group := store.GetUserGroup(groupID)
-		if group == nil && groupID != 1 {
-			group = store.GetUserGroup(1)
+		if group == nil && groupID != models.DefaultUserGroupID {
+			// Borrow the default group's authorization configuration without
+			// rewriting the persisted group identity consumed by limiters,
+			// scripts, routing, and audit fields.
+			group = store.GetUserGroup(models.DefaultUserGroupID)
 		}
 
-		if group != nil && group.ID != 1 && group.Status == consts.StatusDisabled {
+		if models.UserGroupAccessDisabled(group) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "user group disabled"})
 			return
 		}

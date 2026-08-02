@@ -39,6 +39,7 @@ type AttemptOutcome struct {
 	Trace                 *trace.TraceRecord
 	Dispatches            int
 	DurationMs            int
+	AutoDisableTriggers   []attemptproxy.ChannelAutoDisableTrigger
 	remoteFailureFallback bool
 }
 

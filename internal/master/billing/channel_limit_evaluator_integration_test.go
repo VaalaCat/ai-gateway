@@ -10,7 +10,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"gorm.io/datatypes"
 )
 
@@ -57,6 +59,27 @@ func TestLimitEvaluator_Tick(t *testing.T) {
 	if got2.Status != 1 || got2.LimitState.Data().Tripped {
 		t.Fatalf("Status=%d tripped=%v want 1/false (auto-recovered)", got2.Status, got2.LimitState.Data().Tripped)
 	}
+}
+
+func TestLimitEvaluatorKeepsStateAndLogsWhenLogDatabaseUnavailable(t *testing.T) {
+	core, _ := setupTestDB(t)
+	application := app.NewApplication()
+	application.SetCoreDB(core)
+	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	ch := &models.Channel{
+		ChannelCore: models.ChannelCore{Name: "unavailable", Type: 1, Status: 1},
+		Limit:       datatypes.NewJSONType(models.ChannelLimit{Rules: []models.LimitRule{{Metric: models.LimitMetricCost, Window: models.LimitWindowDaily, Threshold: 1}}}),
+	}
+	require.NoError(t, core.Create(ch).Error)
+	observedCore, observed := observer.New(zap.ErrorLevel)
+	ev := NewLimitEvaluator(application, nil, zap.New(observedCore), time.Minute)
+
+	require.NoError(t, ev.Tick(time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)))
+	var got models.Channel
+	require.NoError(t, core.First(&got, ch.ID).Error)
+	require.Equal(t, 1, got.Status)
+	require.False(t, got.LimitState.Data().Tripped)
+	require.Equal(t, 1, observed.FilterMessage("channel_limit_eval_failed").Len())
 }
 
 func TestLimitEvaluatorCloseDeadlineCancelsTickAndRejectsRestart(t *testing.T) {

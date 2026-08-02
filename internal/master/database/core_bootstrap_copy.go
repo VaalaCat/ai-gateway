@@ -81,6 +81,14 @@ type bootstrapTableCopier struct {
 	copyAll func(context.Context, *gorm.DB, *gorm.DB) (int64, error)
 }
 
+type bootstrapColumn struct {
+	name          string
+	nullable      bool
+	nullableKnown bool
+	hasDefault    bool
+	primaryKey    bool
+}
+
 func bootstrapTableCopiers() []bootstrapTableCopier {
 	return []bootstrapTableCopier{
 		bootstrapUintCopier[models.User]("users"), bootstrapUintCopier[models.Token]("tokens"),
@@ -110,35 +118,124 @@ func bootstrapCopier[T any](name, key string) bootstrapTableCopier {
 		if err != nil || !exists {
 			return 0, err
 		}
+		sourceColumns, err := readBootstrapColumns(ctx, source, name)
+		if err != nil {
+			return 0, err
+		}
+		targetColumns, err := readBootstrapColumns(ctx, target, name)
+		if err != nil {
+			return 0, err
+		}
+		columns, err := sharedBootstrapColumns(sourceColumns, targetColumns, key)
+		if err != nil {
+			return 0, err
+		}
 		var copied int64
 		var last any
 		for {
-			var values []T
-			query := source.WithContext(ctx).Order(key).Limit(defaultMigrationReadBatch)
-			if last != nil {
-				query = query.Where(key+" > ?", last)
-			}
-			if err := query.Find(&values).Error; err != nil {
+			rows, err := readBootstrapRows(ctx, source, name, columns, key, last)
+			if err != nil {
 				return 0, err
 			}
-			if len(values) == 0 {
+			if len(rows) == 0 {
 				return copied, nil
 			}
-			if err := CreateInSafeBatches(ctx, target, values, clause.OnConflict{DoNothing: true}); err != nil {
+			if err := insertBootstrapRows(ctx, target, name, columns, rows); err != nil {
 				return 0, err
 			}
-			var keys []any
-			keyQuery := source.WithContext(ctx).Model(new(T)).Order(key).Limit(defaultMigrationReadBatch)
-			if last != nil {
-				keyQuery = keyQuery.Where(key+" > ?", last)
+			last = rows[len(rows)-1][key]
+			if last == nil {
+				return 0, fmt.Errorf("bootstrap pagination key %s is null", key)
 			}
-			if err := keyQuery.Pluck(key, &keys).Error; err != nil {
-				return 0, err
-			}
-			last = keys[len(keys)-1]
-			copied += int64(len(values))
+			copied += int64(len(rows))
 		}
 	}}
+}
+
+func readBootstrapColumns(ctx context.Context, db *gorm.DB, table string) ([]bootstrapColumn, error) {
+	types, err := db.WithContext(ctx).Migrator().ColumnTypes(table)
+	if err != nil {
+		return nil, fmt.Errorf("inspect bootstrap table schema: %w", err)
+	}
+	columns := make([]bootstrapColumn, 0, len(types))
+	for _, columnType := range types {
+		nullable, nullableKnown := columnType.Nullable()
+		_, hasDefault := columnType.DefaultValue()
+		primaryKey, _ := columnType.PrimaryKey()
+		columns = append(columns, bootstrapColumn{
+			name:          columnType.Name(),
+			nullable:      nullable,
+			nullableKnown: nullableKnown,
+			hasDefault:    hasDefault,
+			primaryKey:    primaryKey,
+		})
+	}
+	return columns, nil
+}
+
+func sharedBootstrapColumns(source, target []bootstrapColumn, key string) ([]string, error) {
+	sourceByName := make(map[string]bootstrapColumn, len(source))
+	for _, column := range source {
+		sourceByName[column.name] = column
+	}
+	if _, found := sourceByName[key]; !found {
+		return nil, fmt.Errorf("pagination key %s is not shared", key)
+	}
+	targetByName := make(map[string]bootstrapColumn, len(target))
+	for _, column := range target {
+		targetByName[column.name] = column
+	}
+	if _, found := targetByName[key]; !found {
+		return nil, fmt.Errorf("pagination key %s is not shared", key)
+	}
+
+	columns := make([]string, 0, len(target))
+	for _, column := range target {
+		if _, found := sourceByName[column.name]; found {
+			columns = append(columns, column.name)
+			continue
+		}
+		if column.primaryKey {
+			return nil, fmt.Errorf("target column %s is a primary key and is not shared", column.name)
+		}
+		if !column.hasDefault && (!column.nullableKnown || !column.nullable) {
+			return nil, fmt.Errorf("target column %s is not nullable and has no default", column.name)
+		}
+	}
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("bootstrap tables have no shared columns")
+	}
+	return columns, nil
+}
+
+func readBootstrapRows(ctx context.Context, source *gorm.DB, table string, columns []string, key string, last any) ([]map[string]any, error) {
+	query := source.WithContext(ctx).Table(table).Select(columns).
+		Clauses(clause.Select{Columns: bootstrapClauseColumns(columns)}).
+		Order(clause.OrderByColumn{Column: clause.Column{Name: key}}).
+		Limit(defaultMigrationReadBatch)
+	if last != nil {
+		query = query.Where(clause.Gt{Column: clause.Column{Name: key}, Value: last})
+	}
+	var rows []map[string]any
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func bootstrapClauseColumns(columns []string) []clause.Column {
+	result := make([]clause.Column, len(columns))
+	for i, column := range columns {
+		result[i] = clause.Column{Name: column}
+	}
+	return result
+}
+
+func insertBootstrapRows(ctx context.Context, target *gorm.DB, table string, columns []string, rows []map[string]any) error {
+	result := target.WithContext(ctx).Table(table).Select(columns).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		CreateInBatches(rows, safeInsertBatchRows(sqliteVariableLimit(target), len(columns)))
+	return result.Error
 }
 
 func bootstrapSourceHasTable(ctx context.Context, source *gorm.DB, name string) (bool, error) {

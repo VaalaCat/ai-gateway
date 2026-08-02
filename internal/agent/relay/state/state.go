@@ -254,6 +254,8 @@ type RelayState struct {
 	StreamOpened bool
 	// RateLimit 累积本请求的限流决策，供 publish 落 usage_log；无命中时为 nil。
 	RateLimit *RateLimitRecord
+	// AutoDisableTriggers accumulates internal channel auto-disable signals for usage reporting.
+	AutoDisableTriggers []attemptproxy.ChannelAutoDisableTrigger
 }
 
 // RateLimitRecord 累积本请求的限流决策，供 publish 落 usage_log。

@@ -9,6 +9,7 @@ import (
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/failsafe-go/failsafe-go/retrypolicy"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
 )
@@ -29,6 +30,7 @@ type SettingsReader interface {
 type Runner struct {
 	Settings SettingsReader
 	Breakers *Registry
+	AutoBan  *AutoBanTracker
 }
 
 // globalDefaults 把后台 Settings 快照映射成韧性 Config(全局默认)。
@@ -53,7 +55,7 @@ func (r *Runner) globalDefaults() Config {
 // Timeout 到点不会取消底层 HTTP，只会丢下仍在写客户端的 dispatch 并误触发转移，
 // 造成响应双写/错乱。超时保护交给 request context（客户端断连）、transport 的
 // ResponseHeaderTimeout（上游迟迟不出响应头）和非流式的 RelayTimeout。
-func (r *Runner) Run(_ *state.RelayContext, a state.Attempt, dispatch func() state.AttemptResult) state.AttemptResult {
+func (r *Runner) Run(rctx *state.RelayContext, a state.Attempt, dispatch func() attemptexec.DispatchResult) state.AttemptResult {
 	base := r.globalDefaults()
 	cfg := base
 	channelID := a.SourceID
@@ -85,25 +87,52 @@ func (r *Runner) Run(_ *state.RelayContext, a state.Attempt, dispatch func() sta
 		// 返回最后一次失败结果（含 res.Err），而非 retrypolicy.ErrExceeded 包装器。
 		ReturnLastFailure().
 		Build()
+	dispatchAndObserve := func() (state.AttemptResult, error) {
+		dispatched := dispatch()
+		if dispatched.ProviderDispatched {
+			r.observeAutoBan(rctx, a, cfg, dispatched.Outcome)
+		}
+		return dispatched.Outcome, dispatched.Outcome.Err
+	}
 
 	if !cfg.BreakerEnabled {
+		if r.Breakers != nil {
+			r.Breakers.Delete(BreakerKey{Source: a.Source, ID: channelID})
+		}
 		res, _ := failsafe.With[state.AttemptResult](retry).
-			Get(func() (state.AttemptResult, error) {
-				out := dispatch()
-				return out, out.Err
-			})
+			Get(dispatchAndObserve)
 		return res
 	}
 
 	cb := r.Breakers.Get(BreakerKey{Source: a.Source, ID: channelID}, cfg)
 	res, err := failsafe.With[state.AttemptResult](retry, cb).
-		Get(func() (state.AttemptResult, error) {
-			out := dispatch()
-			return out, out.Err
-		})
+		Get(dispatchAndObserve)
 
 	if errors.Is(err, circuitbreaker.ErrOpen) {
 		return state.AttemptResult{Err: fmt.Errorf("%w (channel %d)", ErrBreakerOpen, channelID)}
 	}
 	return res
+}
+
+func (r *Runner) observeAutoBan(rctx *state.RelayContext, attempt state.Attempt, cfg Config, result state.AttemptResult) {
+	if r.AutoBan == nil || rctx == nil || rctx.State == nil {
+		return
+	}
+	channelID := attempt.SourceID
+	enabled := false
+	revision := uint64(0)
+	if attempt.Channel != nil {
+		enabled = attempt.Channel.AutoBan == 1
+		revision = attempt.Channel.AutoBanRevision
+		if channelID == 0 {
+			channelID = attempt.Channel.ID
+		}
+	}
+	trigger := r.AutoBan.Observe(AutoBanObservation{
+		Key: BreakerKey{Source: attempt.Source, ID: channelID}, Enabled: enabled,
+		Threshold: cfg.BreakerThreshold, Revision: revision, Result: result,
+	})
+	if trigger != nil {
+		rctx.State.AutoDisableTriggers = append(rctx.State.AutoDisableTriggers, *trigger)
+	}
 }

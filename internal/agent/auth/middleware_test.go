@@ -327,6 +327,62 @@ func TestTokenAuth_DefaultsToGroupOneWhenUserMissing(t *testing.T) {
 	}
 }
 
+func TestTokenAuth_DefaultGroupFallbackMatrix(t *testing.T) {
+	tests := []struct {
+		name           string
+		groupID        uint
+		wantIdentityID uint
+	}{
+		{
+			name:    "zero group uses default identity",
+			groupID: 0, wantIdentityID: models.DefaultUserGroupID,
+		},
+		{
+			name:    "dangling non-default group keeps assigned identity",
+			groupID: 999999, wantIdentityID: 999999,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := cache.NewStore(nil, config.AgentCacheConfig{})
+			store.SetUserGroup(&models.UserGroup{
+				ID: models.DefaultUserGroupID, Status: consts.StatusEnabled, Name: "default",
+				AllowedChannelIDs: []uint{10, 20}, Models: `["gpt-4o"]`,
+			})
+			store.SetUser(&protocol.SyncedUser{ID: 42, GroupID: test.groupID})
+			store.SetToken(&models.Token{
+				ID: 1, UserID: 42, Key: "tk_default_fallback", Status: consts.StatusEnabled, ExpiredAt: -1,
+			})
+
+			var captured *app.UserInfo
+			r := gin.New()
+			r.Use(TokenAuth(store))
+			r.GET("/x", func(c *gin.Context) {
+				value, _ := c.Get(consts.CtxKeyUserInfo)
+				captured = value.(*app.UserInfo)
+				c.Status(http.StatusOK)
+			})
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			req.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+"tk_default_fallback")
+			r.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if captured.GroupID != test.wantIdentityID {
+				t.Fatalf("GroupID = %d, want identity %d", captured.GroupID, test.wantIdentityID)
+			}
+			if !reflect.DeepEqual(captured.GroupAllowedChannelIDs, []uint{10, 20}) {
+				t.Fatalf("GroupAllowedChannelIDs = %v, want default group config", captured.GroupAllowedChannelIDs)
+			}
+			if !reflect.DeepEqual(captured.GroupModels, []string{"gpt-4o"}) {
+				t.Fatalf("GroupModels = %v, want default group config", captured.GroupModels)
+			}
+		})
+	}
+}
+
 func TestTokenAuth_GroupDisabled_403(t *testing.T) {
 	store := cache.NewStore(nil, config.AgentCacheConfig{})
 	store.SetUserGroup(&models.UserGroup{ID: 7, Status: consts.StatusDisabled, Name: "off"})

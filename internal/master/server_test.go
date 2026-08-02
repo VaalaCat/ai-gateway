@@ -16,6 +16,7 @@ import (
 	agentauthcache "github.com/VaalaCat/ai-gateway/internal/agent/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/model_marketplace"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
@@ -29,17 +30,38 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestMasterMetricEndpointUsesInjectedRegistry(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	relayMetrics := pkgmetrics.NewAgentRelayMetrics(registry, registry)
-	server := &Server{Router: gin.New(), RelayMetrics: relayMetrics}
-	server.setupMetricsRoute()
-	relayMetrics.IncRouteTelemetryDropped()
+func TestMasterMetricEndpointModes(t *testing.T) {
+	const token = "abcdefghijklmnopqrstuvwxyz012345"
+	for _, test := range []struct {
+		name       string
+		metrics    config.MetricsConfig
+		authorize  bool
+		wantStatus int
+	}{
+		{name: "disabled", wantStatus: http.StatusNotFound},
+		{name: "shared rejects anonymous", metrics: config.MetricsConfig{Token: token}, wantStatus: http.StatusUnauthorized},
+		{name: "shared accepts bearer", metrics: config.MetricsConfig{Token: token}, authorize: true, wantStatus: http.StatusOK},
+		{name: "independent absent from business router", metrics: config.MetricsConfig{Token: token, Listen: "127.0.0.1:9091"}, authorize: true, wantStatus: http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			relayMetrics := pkgmetrics.NewAgentRelayMetrics(registry, registry)
+			server := &Server{Cfg: &config.MasterRuntimeConfig{Metrics: test.metrics}, Router: gin.New(), MetricsRegistry: registry, RelayMetrics: relayMetrics}
+			server.setupMetricsRoute()
+			relayMetrics.IncRouteTelemetryDropped()
 
-	response := httptest.NewRecorder()
-	server.Router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	require.Equal(t, http.StatusOK, response.Code)
-	require.Contains(t, response.Body.String(), "agent_route_telemetry_dropped_total")
+			request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			if test.authorize {
+				request.Header.Set("Authorization", "Bearer "+token)
+			}
+			response := httptest.NewRecorder()
+			server.Router.ServeHTTP(response, request)
+			require.Equal(t, test.wantStatus, response.Code)
+			if test.wantStatus == http.StatusOK {
+				require.Contains(t, response.Body.String(), "agent_route_telemetry_dropped_total")
+			}
+		})
+	}
 }
 
 type serverSigningKeySource struct {
@@ -88,6 +110,9 @@ func setupConnectedEmbeddedAgent(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("new master: %v", err)
 	}
+	if srv.ModelMarketplaceHandler.ModelOfferPlanningReady() {
+		t.Fatal("marketplace planner published before embedded Agent commit")
+	}
 	ts := httptest.NewServer(srv.Router)
 	t.Cleanup(ts.Close)
 	parsed, err := url.Parse(ts.URL)
@@ -97,8 +122,80 @@ func setupConnectedEmbeddedAgent(t *testing.T) *Server {
 	if err := srv.SetupEmbeddedAgentForTest(parsed.Host); err != nil {
 		t.Fatalf("setup embedded agent: %v", err)
 	}
+	if !srv.ModelMarketplaceHandler.ModelOfferPlanningReady() {
+		t.Fatal("marketplace planner unavailable after embedded Agent commit")
+	}
 	waitForConnectedAgents(t, srv, 1)
 	return srv
+}
+
+func TestNewConstructsOneGlobalModelPerformanceCache(t *testing.T) {
+	cfg := &config.MasterRuntimeConfig{
+		Master: config.MasterConfig{
+			Listen: ":0", DBPath: ":memory:", LogDBPath: ":memory:",
+			JWTSecret: strings.Repeat("x", 32),
+		},
+		Agent: config.AgentConfig{CredentialsFile: filepath.Join(t.TempDir(), "embedded-agent.json")},
+	}
+	srv, err := New(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	require.NotNil(t, srv.ModelPerformanceCache)
+	require.False(t, srv.ModelMarketplaceHandler.ModelOfferPlanningReady(),
+		"New must not publish a planner before the embedded Agent store commits")
+	cache := srv.ModelPerformanceCache
+	require.Same(t, cache, srv.ModelPerformanceCache,
+		"the process must retain one cache instance for every future marketplace handler")
+	snapshot, status, err := cache.Get(context.Background(), time.Date(2026, 7, 31, 10, 30, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Equal(t, model_marketplace.PerformanceAvailable, status)
+	require.NotNil(t, snapshot)
+	require.Empty(t, snapshot.Offers)
+}
+
+func TestShutdownCancelsModelPerformanceRefresh(t *testing.T) {
+	cfg := &config.MasterRuntimeConfig{
+		Master: config.MasterConfig{
+			Listen: ":0", DBPath: ":memory:", LogDBPath: ":memory:",
+			JWTSecret: strings.Repeat("x", 32),
+		},
+		Agent: config.AgentConfig{CredentialsFile: filepath.Join(t.TempDir(), "embedded-agent.json")},
+	}
+	srv, err := New(cfg, zap.NewNop())
+	require.NoError(t, err)
+	loadStarted := make(chan struct{})
+	loadCanceled := make(chan struct{})
+	srv.ModelPerformanceCache = model_marketplace.NewGlobalModelPerformanceCacheWithLifecycle(
+		srv.lifecycleContext(),
+		model_marketplace.PerformanceSnapshotLoaderFunc(func(ctx context.Context, _ time.Time) (*model_marketplace.GlobalModelPerformanceSnapshot, error) {
+			close(loadStarted)
+			<-ctx.Done()
+			close(loadCanceled)
+			return nil, ctx.Err()
+		}),
+	)
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, _, getErr := srv.ModelPerformanceCache.Get(context.Background(), time.Date(2026, 7, 31, 10, 30, 0, 0, time.UTC))
+		refreshDone <- getErr
+	}()
+	<-loadStarted
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(shutdownCtx))
+	select {
+	case <-loadCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("Master shutdown did not cancel the model performance loader")
+	}
+	select {
+	case getErr := <-refreshDone:
+		require.Error(t, getErr)
+	case <-time.After(time.Second):
+		t.Fatal("model performance waiter remained blocked after Master shutdown")
+	}
 }
 
 type masterShutdownOutcome struct {

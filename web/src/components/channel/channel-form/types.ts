@@ -6,6 +6,7 @@ import type {
 
 export interface ChannelForm {
   name: string;
+  public_display_name: string;
   type: string;
   key: string;
   base_url: string;
@@ -45,6 +46,7 @@ export interface ChannelForm {
 
 export const emptyForm: ChannelForm = {
   name: "",
+  public_display_name: "",
   type: "1",
   key: "",
   base_url: "",

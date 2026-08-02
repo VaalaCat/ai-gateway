@@ -5,11 +5,22 @@ import SystemMaintenancePage from "./page";
 
 const mocks = vi.hoisted(() => ({
   refetchStats: vi.fn(),
-  refetchPreview: vi.fn(),
-  cleanup: vi.fn(),
   updateSettings: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
+  settings: {} as Record<string, string>,
+}));
+
+const navigation = vi.hoisted(() => ({
+  pathname: "/system",
+  query: "",
+  replace: vi.fn(),
+}));
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => navigation.pathname,
+  useRouter: () => ({ replace: navigation.replace }),
+  useSearchParams: () => new URLSearchParams(navigation.query),
 }));
 
 vi.mock("next-intl", () => ({
@@ -33,19 +44,15 @@ vi.mock("@/lib/api/system", () => ({
         num_gc: 3,
         num_goroutine: 4,
       },
-      tables: [{ name: "billing_logs", count: 10 }],
+      tables: [
+        { database: "core", name: "history_cursors", count: 10 },
+        { database: "log", name: "history_cursors", count: 20 },
+      ],
     },
     refetch: mocks.refetchStats,
     isLoading: false,
   }),
-  useCleanupPreview: () => ({
-    data: { total: 10, to_delete: 2, cutoff_unix: 1_700_000_000 },
-    dataUpdatedAt: Date.now(),
-    isFetching: false,
-    refetch: mocks.refetchPreview,
-  }),
-  useCleanup: () => ({ mutate: mocks.cleanup }),
-  useSettings: () => ({ data: { settings: {} } }),
+  useSettings: () => ({ data: { settings: mocks.settings } }),
   useUpdateSettings: () => ({
     mutate: mocks.updateSettings,
     isPending: false,
@@ -64,6 +71,12 @@ vi.mock("@/components/system/log-storage-status", () => ({
   LogStorageStatus: () => <div>logStorageStatus</div>,
 }));
 
+vi.mock("@/components/system/data-cleanup-stats", () => ({
+  DataCleanupStats: ({ tables }: { tables: unknown[] }) => (
+    <div>dataCleanupStats:{tables.length}</div>
+  ),
+}));
+
 function panelForTab(name: string) {
   const tab = screen.getByRole("tab", { name });
   const panelID = tab.getAttribute("aria-controls");
@@ -72,13 +85,43 @@ function panelForTab(name: string) {
   return panel as HTMLElement;
 }
 
+function billingLogRetentionInput() {
+  const panel = within(panelForTab("tabs.policyBilling"));
+  const label = panel.getByText("billingLogRetentionDays");
+  const input = label.parentElement?.querySelector("input");
+  expect(input).not.toBeNull();
+  return input as HTMLInputElement;
+}
+
+function marketplaceMinSamplesInput() {
+  const panel = within(panelForTab("tabs.policyBilling"));
+  const label = panel.getByText("modelMarketplaceMinSamples");
+  const input = label.parentElement?.querySelector("input");
+  expect(input).not.toBeNull();
+  return input as HTMLInputElement;
+}
+
+function marketplaceEnabledSwitch() {
+  const panel = within(panelForTab("tabs.policyBilling"));
+  const label = panel.getByText("modelMarketplaceEnabled");
+  const row = label.parentElement?.parentElement;
+  const control = row?.querySelector('[role="switch"]');
+  expect(control).not.toBeNull();
+  return control as HTMLButtonElement;
+}
+
 beforeEach(() => {
+  navigation.pathname = "/system";
+  navigation.query = "";
+  navigation.replace.mockReset();
+  navigation.replace.mockImplementation((url: string) => {
+    navigation.query = url.split("?")[1] ?? "";
+  });
   mocks.refetchStats.mockReset();
-  mocks.refetchPreview.mockReset();
-  mocks.cleanup.mockReset();
   mocks.updateSettings.mockReset();
   mocks.toastSuccess.mockReset();
   mocks.toastError.mockReset();
+  mocks.settings = {};
 });
 
 it("assigns the key fields to all five maintenance panels", () => {
@@ -112,8 +155,7 @@ it("assigns the key fields to all five maintenance panels", () => {
   ).toBeInTheDocument();
   const maintenance = within(panelForTab("tabs.dataMaintenance"));
   expect(maintenance.getByText("logStorageStatus")).toBeInTheDocument();
-  expect(maintenance.getByText("databaseStats")).toBeInTheDocument();
-  expect(maintenance.getByText("dataCleanup")).toBeInTheDocument();
+  expect(maintenance.getByText("dataCleanupStats:2")).toBeInTheDocument();
 });
 
 it("preserves a request-path draft after switching to policy and back", () => {
@@ -178,17 +220,135 @@ it("keeps the cross-tab draft when saving settings fails", () => {
   expect(proxyInput).toHaveValue("http://retry.test:8080");
 });
 
-it("keeps an open cleanup confirmation dialog mounted when switching tabs", () => {
+it("saves a valid billing log retention draft", () => {
+  mocks.settings = { "billing.log_retention_days": "14" };
   render(<SystemMaintenancePage />);
 
-  const overviewTab = screen.getByRole("tab", { name: "tabs.overview" });
-  fireEvent.click(screen.getByRole("tab", { name: "tabs.dataMaintenance" }));
-  const maintenance = within(panelForTab("tabs.dataMaintenance"));
-  fireEvent.click(maintenance.getByRole("button", { name: "preview" }));
-  fireEvent.click(maintenance.getByRole("button", { name: "executeCleanup" }));
-  expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  const input = billingLogRetentionInput();
+  expect(input).toHaveValue(14);
+  fireEvent.change(input, { target: { value: "30" } });
+  fireEvent.click(
+    within(panelForTab("tabs.policyBilling")).getByRole("button", {
+      name: "saveSettings",
+    }),
+  );
 
-  fireEvent.click(overviewTab);
-
-  expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  expect(mocks.updateSettings).toHaveBeenCalledWith(
+    { settings: { "billing.log_retention_days": "30" } },
+    expect.objectContaining({
+      onSuccess: expect.any(Function),
+      onError: expect.any(Function),
+    }),
+  );
 });
+
+it.each(["", "0", "366", "1.5"])(
+  "rejects invalid billing log retention value %j",
+  (value) => {
+    render(<SystemMaintenancePage />);
+
+    fireEvent.change(billingLogRetentionInput(), { target: { value } });
+    fireEvent.click(
+      within(panelForTab("tabs.policyBilling")).getByRole("button", {
+        name: "saveSettings",
+      }),
+    );
+
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
+    expect(mocks.toastError).toHaveBeenCalledWith(
+      "billingLogRetentionDaysRangeError",
+    );
+  },
+);
+
+it("loads the persisted billing log retention value and resets its draft after save", () => {
+  mocks.settings = { "billing.log_retention_days": "45" };
+  mocks.updateSettings.mockImplementation((payload, options) => {
+    const response = {
+      settings: { ...mocks.settings, ...payload.settings },
+    };
+    mocks.settings = response.settings;
+    options.onSuccess(response);
+  });
+  render(<SystemMaintenancePage />);
+
+  const input = billingLogRetentionInput();
+  expect(input).toHaveValue(45);
+  fireEvent.change(input, { target: { value: "90" } });
+  fireEvent.click(
+    within(panelForTab("tabs.policyBilling")).getByRole("button", {
+      name: "saveSettings",
+    }),
+  );
+
+  expect(input).toHaveValue(90);
+  expect(mocks.toastSuccess).toHaveBeenCalledWith("settingsSaved");
+});
+
+it("shows disabled marketplace and twenty samples by default", () => {
+  render(<SystemMaintenancePage />);
+
+  expect(marketplaceEnabledSwitch()).toHaveAttribute("data-state", "unchecked");
+  expect(marketplaceMinSamplesInput()).toHaveValue(20);
+});
+
+it("saves marketplace enablement and minimum samples together", () => {
+  render(<SystemMaintenancePage />);
+
+  fireEvent.click(marketplaceEnabledSwitch());
+  fireEvent.change(marketplaceMinSamplesInput(), { target: { value: "50" } });
+  fireEvent.click(
+    within(panelForTab("tabs.policyBilling")).getByRole("button", {
+      name: "saveSettings",
+    }),
+  );
+
+  expect(mocks.updateSettings).toHaveBeenCalledWith(
+    {
+      settings: {
+        model_marketplace_enabled: "true",
+        model_marketplace_min_samples: "50",
+      },
+    },
+    expect.objectContaining({
+      onSuccess: expect.any(Function),
+      onError: expect.any(Function),
+    }),
+  );
+});
+
+it.each(["", "0", "100001", "1.5"])(
+  "rejects invalid marketplace minimum sample value %j",
+  (value) => {
+    render(<SystemMaintenancePage />);
+    fireEvent.change(marketplaceMinSamplesInput(), { target: { value } });
+    fireEvent.click(
+      within(panelForTab("tabs.policyBilling")).getByRole("button", {
+        name: "saveSettings",
+      }),
+    );
+
+    expect(mocks.updateSettings).not.toHaveBeenCalled();
+    expect(mocks.toastError).toHaveBeenCalledWith(
+      "modelMarketplaceMinSamplesRangeError",
+    );
+  },
+);
+
+it.each(["1", "100000"])(
+  "accepts marketplace minimum sample boundary %s",
+  (value) => {
+    render(<SystemMaintenancePage />);
+    fireEvent.change(marketplaceMinSamplesInput(), { target: { value } });
+    fireEvent.click(
+      within(panelForTab("tabs.policyBilling")).getByRole("button", {
+        name: "saveSettings",
+      }),
+    );
+
+    expect(mocks.updateSettings).toHaveBeenCalledWith(
+      { settings: { model_marketplace_min_samples: value } },
+      expect.any(Object),
+    );
+  },
+);

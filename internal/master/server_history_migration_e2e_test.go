@@ -126,7 +126,9 @@ func startHistoryMigrationServer(t *testing.T, cfg *config.MasterRuntimeConfig) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("master did not become HTTP ready")
 	}
-	baseURL := "http://" + srv.Listener.Addr().String()
+	listenAddress, ok := srv.ListenAddress()
+	require.True(t, ok)
+	baseURL := "http://" + listenAddress
 	response, err := http.Get(baseURL + "/ping")
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())

@@ -311,13 +311,15 @@ func TestEndToEnd_ChannelTest(t *testing.T) {
 	go func() { errCh <- srv.Run() }()
 
 	deadline := time.Now().Add(5 * time.Second)
-	for srv.Listener == nil && time.Now().Before(deadline) {
+	listenAddress, ready := srv.ListenAddress()
+	for !ready && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
+		listenAddress, ready = srv.ListenAddress()
 	}
-	if srv.Listener == nil {
+	if !ready {
 		t.Fatal("master did not start in time")
 	}
-	masterURL := fmt.Sprintf("http://%s", srv.Listener.Addr().String())
+	masterURL := fmt.Sprintf("http://%s", listenAddress)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -483,13 +485,15 @@ func TestEndToEnd_MasterEmbeddedRelay(t *testing.T) {
 
 	// Wait for listener to be ready
 	deadline := time.Now().Add(5 * time.Second)
-	for srv.Listener == nil && time.Now().Before(deadline) {
+	listenAddress, ready := srv.ListenAddress()
+	for !ready && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
+		listenAddress, ready = srv.ListenAddress()
 	}
-	if srv.Listener == nil {
+	if !ready {
 		t.Fatal("master did not start in time")
 	}
-	masterURL := fmt.Sprintf("http://%s", srv.Listener.Addr().String())
+	masterURL := fmt.Sprintf("http://%s", listenAddress)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

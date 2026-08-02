@@ -14,11 +14,48 @@ import (
 func BuildRequestAggregateBatch(log models.UsageLog) LogBatch {
 	log.ID = 0
 	batch := LogBatch{
-		Request: models.RequestLog(log),
-		Hourly:  []models.UsageHourlyBucket{requestHourlyDelta(log)},
+		Request:      models.RequestLog(log),
+		TokenDaily:   []models.TokenDailyBilling{requestTokenDailyDelta(log)},
+		ChannelDaily: []models.ChannelDailyBilling{requestChannelDailyDelta(log)},
+		Hourly:       []models.UsageHourlyBucket{requestHourlyDelta(log)},
 	}
 	appendRequestHistograms(&batch, log)
 	return batch
+}
+
+func requestTokenDailyDelta(log models.UsageLog) models.TokenDailyBilling {
+	ts := log.CreatedAt
+	success, failed := int64(0), int64(1)
+	if log.Status != 0 {
+		success, failed = 1, 0
+	}
+	return models.TokenDailyBilling{
+		Date:   time.Unix(ts, 0).UTC().Format("2006-01-02"),
+		UserID: log.UserID, TokenID: log.TokenID, TokenName: log.TokenName,
+		RequestCount: 1, SuccessCount: success, FailedCount: failed,
+		PromptTokens: int64(log.PromptTokens), CompletionTokens: int64(log.CompletionTokens),
+		CacheReadTokens: int64(log.CacheReadTokens), CacheWriteTokens: int64(log.CacheWriteTokens),
+		InputCost: log.InputCost, OutputCost: log.OutputCost, TotalCost: log.TotalCost,
+		LastUsedAt: ts, CreatedAt: ts, UpdatedAt: ts,
+	}
+}
+
+func requestChannelDailyDelta(log models.UsageLog) models.ChannelDailyBilling {
+	ts := log.CreatedAt
+	success, failed := int64(0), int64(1)
+	if log.Status != 0 {
+		success, failed = 1, 0
+	}
+	return models.ChannelDailyBilling{
+		Date:      time.Unix(ts, 0).UTC().Format("2006-01-02"),
+		ChannelID: log.ChannelID, PrivateChannelID: log.PrivateChannelID,
+		OwnerType: normalizedOwnerType(log.OwnerType), ChannelName: log.ChannelName, ChannelType: log.ChannelType,
+		RequestCount: 1, SuccessCount: success, FailedCount: failed,
+		PromptTokens: int64(log.PromptTokens), CompletionTokens: int64(log.CompletionTokens),
+		CacheReadTokens: int64(log.CacheReadTokens), CacheWriteTokens: int64(log.CacheWriteTokens),
+		InputCost: log.InputCost, OutputCost: log.OutputCost, TotalCost: log.TotalCost, RawCost: log.RawTotal(),
+		LastUsedAt: ts, CreatedAt: ts, UpdatedAt: ts,
+	}
 }
 
 func requestHourlyDelta(log models.UsageLog) models.UsageHourlyBucket {

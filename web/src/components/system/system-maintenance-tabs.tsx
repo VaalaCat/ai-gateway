@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useTranslations } from "next-intl";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Database, Gauge, KeyRound, Route, ShieldCheck } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -22,6 +23,12 @@ const tabs = [
   { value: "data-maintenance", label: "dataMaintenance", icon: Database },
 ] as const;
 
+type MaintenanceSection = (typeof tabs)[number]["value"];
+
+function getMaintenanceSection(value: string | null): MaintenanceSection {
+  return tabs.some((tab) => tab.value === value) ? value as MaintenanceSection : "overview";
+}
+
 export function SystemMaintenanceTabs({
   overview,
   requestPath,
@@ -30,6 +37,10 @@ export function SystemMaintenanceTabs({
   dataMaintenance,
 }: SystemMaintenanceTabsProps) {
   const t = useTranslations("system");
+  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const section = getMaintenanceSection(searchParams.get("section"));
   const contents = {
     overview,
     "request-path": requestPath,
@@ -38,8 +49,14 @@ export function SystemMaintenanceTabs({
     "data-maintenance": dataMaintenance,
   } satisfies Record<(typeof tabs)[number]["value"], ReactNode>;
 
+  const handleSectionChange = (nextSection: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("section", getMaintenanceSection(nextSection));
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  };
+
   return (
-    <Tabs defaultValue="overview" className="min-w-0">
+    <Tabs value={section} onValueChange={handleSectionChange} className="min-w-0">
       <div className="min-w-0 overflow-x-auto">
         <TabsList
           aria-label={t("tabs.label")}

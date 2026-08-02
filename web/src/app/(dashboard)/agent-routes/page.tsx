@@ -1,22 +1,30 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { useTranslations } from "next-intl";
+import { useMemo, useState } from "react";
 import { ColumnDef } from "@tanstack/react-table";
+import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { Trash2 } from "lucide-react";
 
-import { DataTable } from "@/components/data-table/data-table";
-import { DataTableColumnHeader } from "@/components/data-table/column-header";
-import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
-import { useFilterState } from "@/components/data-table/use-filter-state";
-import type { FilterSpec } from "@/components/data-table/filter-spec";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-
-import { DeleteConfirm } from "@/components/business/delete-confirm";
+import { AgentRouteFormDialog } from "@/components/agent-route-form-dialog";
 import { DateCell } from "@/components/business/date-cell";
-
+import { DeleteConfirm } from "@/components/business/delete-confirm";
+import { DataTableColumnHeader } from "@/components/data-table/column-header";
+import { DataTable } from "@/components/data-table/data-table";
+import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
+import type { FilterSpec, FilterValues } from "@/components/data-table/filter-spec";
+import { useFilterState } from "@/components/data-table/use-filter-state";
+import { usePaginationState } from "@/components/data-table/use-pagination-state";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useAgentRoutesOverview, useDeleteAgentRoute } from "@/lib/api/agent-routes";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { PAGE_SIZES } from "@/lib/constants";
@@ -24,13 +32,13 @@ import type { AgentRouteOverviewItem } from "@/lib/types";
 
 function PriorityBadge({ priority }: { priority: number }) {
   if (priority >= 100) {
-    return <Badge className="bg-red-500 hover:bg-red-500 text-white">{priority}</Badge>;
+    return <Badge className="bg-red-500 text-white hover:bg-red-500">{priority}</Badge>;
   }
   if (priority >= 90) {
-    return <Badge className="bg-orange-500 hover:bg-orange-500 text-white">{priority}</Badge>;
+    return <Badge className="bg-orange-500 text-white hover:bg-orange-500">{priority}</Badge>;
   }
   if (priority >= 80) {
-    return <Badge className="bg-blue-500 hover:bg-blue-500 text-white">{priority}</Badge>;
+    return <Badge className="bg-blue-500 text-white hover:bg-blue-500">{priority}</Badge>;
   }
   return <Badge variant="secondary">{priority}</Badge>;
 }
@@ -38,12 +46,14 @@ function PriorityBadge({ priority }: { priority: number }) {
 export default function AgentRoutesPage() {
   const t = useTranslations("agentRoutes");
   const tc = useTranslations("common");
-
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
+  const searchParams = useSearchParams();
+  const sourceType = searchParams.get("source_type");
+  const selectedSourceType = sourceType === "token" || sourceType === "channel"
+    ? sourceType
+    : undefined;
 
   const filterSpec = useMemo(() => ({
-    search: { kind: "text", placeholder: tc("search") },
+    q: { kind: "text", placeholder: tc("search") },
     source_type: {
       kind: "enum",
       options: [
@@ -52,41 +62,80 @@ export default function AgentRoutesPage() {
       ],
       placeholder: t("filterBySourceType"),
     },
-  } satisfies FilterSpec), [t, tc]);
+    source_id: {
+      kind: "picker",
+      entity: selectedSourceType ?? "token",
+      label: t("source"),
+      visible: (context) => Boolean(context.hasSourceType),
+    },
+    model: {
+      kind: "text",
+      label: t("model"),
+      placeholder: t("modelFilterPlaceholder"),
+      advanced: true,
+    },
+    agent_id: {
+      kind: "picker",
+      entity: "agent",
+      label: t("agentId"),
+      advanced: true,
+    },
+  } satisfies FilterSpec), [selectedSourceType, t, tc]);
 
   const [filterValues, setFilterValues] = useFilterState(filterSpec);
+  const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
 
+  const handleFilterChange = (next: Partial<FilterValues>) => {
+    if (
+      Object.hasOwn(next, "source_type")
+      && next.source_type !== filterValues.source_type
+    ) {
+      setFilterValues({ ...next, source_id: "" });
+      return;
+    }
+    setFilterValues(next);
+  };
+
+  const sourceId = Number(filterValues.source_id);
   const { data, isLoading } = useAgentRoutesOverview({
     page,
     page_size: pageSize,
-    ...(filterValues.search ? { search: String(filterValues.search) } : {}),
-    ...(filterValues.source_type ? { source_type: String(filterValues.source_type) } : {}),
+    ...(filterValues.q ? { q: String(filterValues.q) } : {}),
+    ...(selectedSourceType ? { source_type: selectedSourceType } : {}),
+    ...(selectedSourceType && Number.isSafeInteger(sourceId) && sourceId > 0
+      ? { source_id: sourceId }
+      : {}),
+    ...(filterValues.model ? { model: String(filterValues.model) } : {}),
+    ...(filterValues.agent_id ? { agent_id: String(filterValues.agent_id) } : {}),
   });
 
   const routes = data?.data ?? [];
   const total = data?.total ?? 0;
   const pageCount = Math.ceil(total / pageSize) || 1;
 
-  const handlePaginationChange = (newPage: number, newPageSize: number) => {
-    if (newPageSize !== pageSize) {
-      setPage(1);
-      setPageSize(newPageSize);
-    } else {
-      setPage(newPage);
-    }
-  };
-
   const deleteMutation = useDeleteAgentRoute();
   const [deleteItem, setDeleteItem] = useState<AgentRouteOverviewItem | null>(null);
+  const [formRoute, setFormRoute] = useState<AgentRouteOverviewItem | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+
+  const openCreate = () => {
+    setFormRoute(null);
+    setFormOpen(true);
+  };
+
+  const openEdit = (route: AgentRouteOverviewItem) => {
+    setFormRoute(route);
+    setFormOpen(true);
+  };
 
   const handleDelete = async () => {
     if (!deleteItem) return;
     try {
       await deleteMutation.mutateAsync(deleteItem.id);
-      toast.success(tc("success"));
+      toast.success(t("ruleDeleted"));
       setDeleteItem(null);
-    } catch (e) {
-      toast.error(formatErrorToast(e, tc("error")));
+    } catch (error) {
+      toast.error(formatErrorToast(error, t("deleteFailed")));
     }
   };
 
@@ -135,23 +184,34 @@ export default function AgentRoutesPage() {
       id: "actions",
       header: tc("actions"),
       cell: ({ row }) => (
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8 text-destructive hover:text-destructive"
-          onClick={() => setDeleteItem(row.original)}
-        >
-          <Trash2 className="size-4" />
-        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label={tc("actions")}>
+              <MoreHorizontal data-icon="inline-start" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuGroup>
+              <DropdownMenuItem onClick={() => openEdit(row.original)}>
+                <Pencil data-icon="inline-start" />
+                {tc("edit")}
+              </DropdownMenuItem>
+              <DropdownMenuItem variant="destructive" onClick={() => setDeleteItem(row.original)}>
+                <Trash2 data-icon="inline-start" />
+                {tc("delete")}
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
       ),
     },
   ];
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
+        <p className="mt-1 text-muted-foreground">{t("description")}</p>
       </div>
 
       <DataTable
@@ -162,18 +222,31 @@ export default function AgentRoutesPage() {
         page={page}
         pageSize={pageSize}
         pageCount={pageCount}
-        onPaginationChange={handlePaginationChange}
+        onPaginationChange={setPagination}
         toolbar={
           <FilterableToolbar
             spec={filterSpec}
             value={filterValues}
-            onChange={setFilterValues}
+            onChange={handleFilterChange}
+            context={{ hasSourceType: Boolean(selectedSourceType) }}
+            primaryAction={
+              <Button onClick={openCreate}>
+                <Plus data-icon="inline-start" />
+                {t("createRule")}
+              </Button>
+            }
           />
         }
       />
 
+      <AgentRouteFormDialog
+        open={formOpen}
+        route={formRoute}
+        onOpenChange={setFormOpen}
+      />
+
       <DeleteConfirm
-        open={!!deleteItem}
+        open={Boolean(deleteItem)}
         onOpenChange={(open) => { if (!open) setDeleteItem(null); }}
         onConfirm={handleDelete}
       />

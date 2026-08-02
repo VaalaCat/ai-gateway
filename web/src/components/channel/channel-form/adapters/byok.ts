@@ -164,7 +164,7 @@ const BYOK_PERSISTED_FIELDS = [
 
 // BYOK 隐藏字段：不持久化、表单中不渲染编辑入口。
 const HIDDEN_FIELDS = [
-  "proxy_url", "header_override", "use_legacy_adaptor", "price_ratio", "free",
+  "public_display_name", "proxy_url", "header_override", "use_legacy_adaptor", "price_ratio", "free",
   "disable_keepalive", "resilience", "limit",
 ] as const satisfies ReadonlyArray<keyof ChannelForm>;
 

@@ -12,6 +12,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
@@ -25,20 +26,6 @@ var _ app.Settler = (*Settler)(nil)
 
 const quotaPerDollar = 100_000 // 1 dollar = 100,000 internal units
 
-// CoreAggregator is the narrow post-commit contract implemented by Aggregator.
-// Submitting before commit would create phantom rollup counts after rollback.
-type CoreAggregator interface {
-	SubmitBilling(log *models.BillingLog)
-}
-
-type pendingCoreAggregator interface {
-	SubmitPendingBilling(log *models.BillingLog)
-}
-
-type noopCoreAggregator struct{}
-
-func (noopCoreAggregator) SubmitBilling(*models.BillingLog) {}
-
 type LogBatchQueue interface {
 	Enqueue(logqueue.LogBatch) deliveryqueue.EnqueueResult
 }
@@ -49,29 +36,30 @@ func (noopLogBatchQueue) Enqueue(logqueue.LogBatch) deliveryqueue.EnqueueResult 
 	return deliveryqueue.EnqueueResult{Dropped: true, Error: "log queue is not configured"}
 }
 
+type AutoDisableTriggerHandler interface {
+	DisableFromTriggers(context.Context, []attemptproxy.ChannelAutoDisableTrigger) error
+}
+
 type Settler struct {
-	App        dao.AppProvider
-	Bus        app.EventBus
-	Logger     *zap.Logger
-	Aggregator CoreAggregator
-	LogQueue   LogBatchQueue
-	coreFacts  bool
+	App          dao.AppProvider
+	Bus          app.EventBus
+	Logger       *zap.Logger
+	LogQueue     LogBatchQueue
+	AutoDisabler AutoDisableTriggerHandler
+	coreFacts    bool
 }
 
 func NewSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger) *Settler {
-	return newSettler(application, bus, logger, noopCoreAggregator{}, noopLogBatchQueue{}, false)
+	return newSettler(application, bus, logger, noopLogBatchQueue{}, false)
 }
 
 // NewCoreFactSettler is the split-schema settler activated together with the
 // log worker and strict dual-database startup in Task 3B.
-func NewCoreFactSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg CoreAggregator, queue LogBatchQueue) *Settler {
-	return newSettler(application, bus, logger, agg, queue, true)
+func NewCoreFactSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, queue LogBatchQueue) *Settler {
+	return newSettler(application, bus, logger, queue, true)
 }
 
-func newSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, agg CoreAggregator, queue LogBatchQueue, coreFacts bool) *Settler {
-	if agg == nil {
-		agg = noopCoreAggregator{}
-	}
+func newSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logger, queue LogBatchQueue, coreFacts bool) *Settler {
 	if queue == nil {
 		queue = noopLogBatchQueue{}
 	}
@@ -79,12 +67,11 @@ func newSettler(application dao.AppProvider, bus app.EventBus, logger *zap.Logge
 		logger = zap.NewNop()
 	}
 	return &Settler{
-		App:        application,
-		Bus:        bus,
-		Logger:     logger,
-		Aggregator: agg,
-		LogQueue:   queue,
-		coreFacts:  coreFacts,
+		App:       application,
+		Bus:       bus,
+		Logger:    logger,
+		LogQueue:  queue,
+		coreFacts: coreFacts,
 	}
 }
 
@@ -294,11 +281,15 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		s.Logger.Debug("settle dedup hit",
 			zap.String("request_id", entry.RequestID), zap.String("agent_id", agentID))
 	}
-
 	// Event OUTSIDE transaction
 	if depleted {
 		if err := events.PublishUserQuotaDepleted(ctx, s.Bus, models.User{ID: entry.UserID}); err != nil {
 			s.Logger.Error("publish user.quota_depleted failed", zap.Error(err))
+		}
+	}
+	if s.AutoDisabler != nil && len(entry.AutoDisableTriggers) > 0 {
+		if err := s.AutoDisabler.DisableFromTriggers(ctx, entry.AutoDisableTriggers); err != nil {
+			return fmt.Errorf("auto-disable channels: %w", err)
 		}
 	}
 	return nil
@@ -313,20 +304,12 @@ func (s *Settler) commitCoreFact(ctx context.Context, daoCtx dao.Context, log *m
 		if result.Error != nil || result.RowsAffected == 0 {
 			return false, result.Error
 		}
-		if err := RegisterPendingBillingProjectionInTx(ctx, txCtx.GetCoreDB(), &fact); err != nil {
-			return false, err
-		}
 		return true, nil
 	})
 	if err != nil || !inserted {
 		return inserted, depleted, err
 	}
 	log.CreatedAt = fact.CreatedAt
-	if durable, ok := s.Aggregator.(pendingCoreAggregator); ok {
-		durable.SubmitPendingBilling(&fact)
-	} else {
-		s.Aggregator.SubmitBilling(&fact)
-	}
 	s.enqueueRequestLog(*log, entry)
 	return true, depleted, nil
 }
@@ -424,8 +407,6 @@ func (s *Settler) submitLegacyRollups(log *models.UsageLog) {
 		name string
 		run  func() error
 	}{
-		{name: "token_daily", run: func() error { return mutation.UpsertTokenDaily(log) }},
-		{name: "channel_daily", run: func() error { return mutation.UpsertChannelDaily(log) }},
 		{name: "usage_hourly", run: func() error { return mutation.UpsertHourlyBucket(log) }},
 		{name: "duration_histogram", run: func() error { return mutation.UpsertDurationHistogram(log) }},
 		{name: "ttft_histogram", run: func() error { return mutation.UpsertTTFTHistogram(log) }},

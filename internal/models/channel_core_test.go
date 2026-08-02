@@ -3,6 +3,9 @@ package models
 import (
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func TestChannelCore_FieldsPresent(t *testing.T) {
@@ -11,6 +14,7 @@ func TestChannelCore_FieldsPresent(t *testing.T) {
 		"SupportedAPITypes", "Endpoints", "PassthroughEnabled", "UseLegacyAdaptor",
 		"Organization", "ApiVersion", "SystemPrompt", "SystemPromptInInput", "RoleMapping",
 		"ParamOverride", "Setting", "Tag", "Remark", "TestModel", "AutoBan",
+		"AutoBanState", "AutoBanRevision",
 		"StatusCodeMapping", "OtherSettings", "CreatedAt", "UpdatedAt",
 	}
 	typ := reflect.TypeOf(ChannelCore{})
@@ -116,4 +120,43 @@ func TestSchemaIntact_PrivateChannelTable(t *testing.T) {
 	if !db.Migrator().HasIndex(&PrivateChannel{}, "uidx_pchan_owner_name") {
 		t.Fatal("PrivateChannel unique composite index uidx_pchan_owner_name missing")
 	}
+}
+
+func TestChannelDisableStateRoundTrip(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	state := ChannelDisableState{Tripped: true, Reason: "consecutive_errors", TrippedAt: 123}
+	ch := Channel{
+		ChannelCore: ChannelCore{
+			AutoBanState:    datatypes.NewJSONType(state),
+			AutoBanRevision: 7,
+		},
+		LimitState: datatypes.NewJSONType(state),
+	}
+	require.NoError(t, db.Create(&ch).Error)
+
+	var got Channel
+	require.NoError(t, db.First(&got, ch.ID).Error)
+	require.Equal(t, state, got.AutoBanState.Data())
+	require.Equal(t, state, got.LimitState.Data())
+	require.Equal(t, uint64(7), got.AutoBanRevision)
+}
+
+func TestChannelDisableStateReadsLegacyLimitStateJSON(t *testing.T) {
+	db := setupTestDB(t)
+	sqlDB, _ := db.DB()
+	defer sqlDB.Close()
+
+	ch := Channel{}
+	require.NoError(t, db.Create(&ch).Error)
+	legacy := `{"tripped":true,"reason":"cost/daily","auto_recover":true,"tripped_at":456}`
+	require.NoError(t, db.Model(&Channel{}).Where("id = ?", ch.ID).Update("limit_state", legacy).Error)
+
+	var got Channel
+	require.NoError(t, db.First(&got, ch.ID).Error)
+	require.Equal(t, ChannelDisableState{
+		Tripped: true, Reason: "cost/daily", AutoRecover: true, TrippedAt: 456,
+	}, got.LimitState.Data())
 }

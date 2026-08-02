@@ -26,6 +26,14 @@ export function stringifySetting(s: ChannelSettings): string {
   return Object.keys(cleaned).length ? JSON.stringify(cleaned) : "";
 }
 
+export type PublicDisplayNameValidationError = "publicDisplayNameTooLong" | "publicDisplayNameControlCharacters";
+
+export function getPublicDisplayNameValidationError(value: string): PublicDisplayNameValidationError | undefined {
+  if ([...value].length > 64) return "publicDisplayNameTooLong";
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(value)) return "publicDisplayNameControlCharacters";
+  return undefined;
+}
+
 /* ── parseOtherSettings / stringifyOtherSettings ─────────────────────── */
 
 export function parseOtherSettings(raw: string): ChannelOtherSettings {
@@ -220,12 +228,27 @@ export function stringifyLimit(l: ChannelLimit): string {
   return JSON.stringify(l);
 }
 
+// 发送给平台 channel API 的 limit 统一使用这条路径：空对象是显式清空，
+// 非正阈值和非正截止时间均是编辑中的半成品，不能写入后端。
+export function serializeChannelLimitForPayload(raw: string): ChannelLimit {
+  const limit = parseLimit(raw);
+  const rules = (limit.rules ?? []).filter((rule) => rule.threshold > 0);
+  const disableAt = typeof limit.disable_at === "number" && limit.disable_at > 0
+    ? limit.disable_at
+    : undefined;
+  return {
+    ...(disableAt !== undefined && { disable_at: disableAt }),
+    ...(rules.length > 0 && { rules }),
+  };
+}
+
 /* ── mapChannelToForm (used by edit-mode initial fill) ───────────────── */
 
 export function mapChannelToForm(channel: Channel): ChannelForm {
   return {
     ...emptyForm,
     name: channel.name ?? "",
+    public_display_name: channel.public_display_name ?? "",
     type: String(channel.type ?? 1),
     key: channel.key ?? "",
     base_url: channel.base_url ?? "",

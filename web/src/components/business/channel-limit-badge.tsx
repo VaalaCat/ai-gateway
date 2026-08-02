@@ -32,10 +32,11 @@ export function ChannelLimitBadge({ channel }: ChannelLimitBadgeProps) {
 
   const state = channel.limit_state;
   const auto = !!state?.tripped;
+  if (!auto && channel.auto_ban_state?.tripped) return null;
 
   const badge = (
-    <Badge variant="outline" className="gap-1 text-2xs">
-      {auto ? <Lock className="size-3" /> : <Hand className="size-3" />}
+    <Badge variant="outline" className="text-2xs">
+      {auto ? <Lock data-icon="inline-start" /> : <Hand data-icon="inline-start" />}
       {auto ? t("limitBadgeAuto") : t("limitBadgeManual")}
     </Badge>
   );
@@ -47,7 +48,7 @@ export function ChannelLimitBadge({ channel }: ChannelLimitBadgeProps) {
       <Tooltip>
         <TooltipTrigger asChild>{badge}</TooltipTrigger>
         <TooltipContent>
-          <div className="space-y-1 text-xs">
+          <div className="flex flex-col gap-1 text-xs">
             <div className="font-medium">{reasonText(t, state?.reason)}</div>
             {state?.tripped_at ? (
               <div>

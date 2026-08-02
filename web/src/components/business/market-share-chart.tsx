@@ -152,8 +152,8 @@ export function MarketShareChart({
         <BarChart
           data={data}
           accessibilityLayer
-          maxBarSize={48}
-          barCategoryGap="20%"
+          maxBarSize={64}
+          barCategoryGap="8%"
         >
           <CartesianGrid vertical={false} />
           <XAxis dataKey="label" tickLine={false} axisLine={false} />

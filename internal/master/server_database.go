@@ -49,6 +49,10 @@ func prepareDatabases(ctx context.Context, cfg *config.MasterConfig, connector *
 	}
 	if err != nil {
 		logger.Warn("log_database_startup_degraded", zap.Error(err), zap.String("path", cfg.LogDBPath))
+	} else if _, err := masterdatabase.RetireCoreBillingProjectionTables(ctx, core, logDB); err != nil {
+		closeGormDatabase(logDB)
+		closeGormDatabase(core)
+		return splitDatabases{}, fmt.Errorf("retire core billing projections: %w", err)
 	}
 	return splitDatabases{core: core, log: logDB}, nil
 }

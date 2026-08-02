@@ -20,7 +20,9 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -630,6 +632,32 @@ func TestUploadOnceSendsGzip(t *testing.T) {
 	}
 }
 
+func TestUploadRetryPreservesAutoDisableTriggerBody(t *testing.T) {
+	trigger := autoDisableTrigger()
+	var bodies [][]attemptproxy.ChannelAutoDisableTrigger
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, r, &report)
+		require.Len(t, report.Logs, 1)
+		bodies = append(bodies, report.Logs[0].AutoDisableTriggers)
+		if len(bodies) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	uploader := newTestUploader(t, server.URL)
+	entry := protocol.UsageLogEntry{
+		RequestID: "triggered", AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
+	}
+
+	require.Error(t, uploader.uploadOnce(t.Context(), []protocol.UsageLogEntry{entry}))
+	require.NoError(t, uploader.uploadOnce(t.Context(), []protocol.UsageLogEntry{entry}))
+
+	require.Equal(t, [][]attemptproxy.ChannelAutoDisableTrigger{{trigger}, {trigger}}, bodies)
+}
+
 // TestUploadOncePlaintextFallbackOn400 covers the deployment-order escape hatch: an
 // old master that doesn't understand gzip yet rejects it with 400 — uploadOnce must
 // resend the exact same payload uncompressed once, rather than treating it as a
@@ -821,8 +849,9 @@ func TestRetryDispatchAppliesDegradeLadder(t *testing.T) {
 	u := newTestUploader(t, srv.URL) // 门槛用默认 3/6/9
 	mk := func(id string) protocol.UsageLogEntry {
 		return protocol.UsageLogEntry{RequestID: id,
-			TraceData:     `{"inbound_body":"big"}`,
-			FallbackChain: []models.AttemptRecord{{Seq: 1}}}
+			TraceData:           `{"inbound_body":"big"}`,
+			FallbackChain:       []models.AttemptRecord{{Seq: 1}},
+			AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}}
 	}
 	u.retry.push([]protocol.UsageLogEntry{mk("l2")}, 6, time.Time{})
 	u.retry.push([]protocol.UsageLogEntry{mk("l3")}, 9, time.Time{})
@@ -832,9 +861,13 @@ func TestRetryDispatchAppliesDegradeLadder(t *testing.T) {
 	mu.Lock()
 	if e := got["l2"]; e.TraceData != "" || len(e.FallbackChain) != 1 {
 		t.Fatalf("l2 not strip-trace degraded: %+v", e)
+	} else {
+		require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, e.AutoDisableTriggers)
 	}
 	if e := got["l3"]; e.TraceData != "" || e.FallbackChain != nil {
 		t.Fatalf("l3 not billing-only degraded: %+v", e)
+	} else {
+		require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, e.AutoDisableTriggers)
 	}
 	fail = false
 	mu.Unlock()
@@ -846,10 +879,12 @@ func TestRetryDispatchAppliesDegradeLadder(t *testing.T) {
 			if it.degrade != DegradeStripTrace {
 				t.Fatalf("l2 degrade lost on re-push: %d", it.degrade)
 			}
+			require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, it.entry.AutoDisableTriggers)
 		case "l3":
 			if it.degrade != DegradeBillingOnly {
 				t.Fatalf("l3 degrade lost on re-push: %d", it.degrade)
 			}
+			require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, it.entry.AutoDisableTriggers)
 		}
 	}
 }

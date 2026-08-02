@@ -3,8 +3,26 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Token } from "@/lib/types";
+import type {
+  BillingOverviewQueryParams,
+  BillingTokenQueryParams,
+  Token,
+} from "@/lib/types";
 import TokensPage from "./page";
+
+interface BillingQueryOptions {
+  enabled?: boolean;
+}
+
+interface BillingOverviewCall {
+  params: BillingOverviewQueryParams;
+  options: BillingQueryOptions;
+}
+
+interface TokenBillingCall {
+  params: BillingTokenQueryParams;
+  options: BillingQueryOptions;
+}
 
 const { state } = vi.hoisted(() => ({
   state: {
@@ -12,6 +30,8 @@ const { state } = vi.hoisted(() => ({
     token: null as Token | null,
     create: vi.fn(),
     update: vi.fn(),
+    billingOverviewCalls: [] as BillingOverviewCall[],
+    tokenBillingCalls: [] as TokenBillingCall[],
   },
 }));
 
@@ -48,12 +68,42 @@ vi.mock("@/lib/api/token-templates", () => ({
   useEnabledTokenTemplates: () => ({ data: { data: [{ id: 5, byok_only: false }] } }),
 }));
 vi.mock("@/lib/api/billing", () => ({
-  useBillingOverview: () => ({ data: undefined, isError: false }),
-  useTokenBilling: () => ({
-    data: { data: [], total: 0 },
-    isLoading: false,
-    isError: false,
-  }),
+  useBillingOverview: (
+    params: BillingOverviewQueryParams,
+    options: BillingQueryOptions,
+  ) => {
+    state.billingOverviewCalls.push({ params, options });
+    return { data: undefined, isError: false };
+  },
+  useTokenBilling: (
+    params: BillingTokenQueryParams,
+    options: BillingQueryOptions,
+  ) => {
+    state.tokenBillingCalls.push({ params, options });
+    return {
+      data: { data: [], total: 0 },
+      isLoading: false,
+      isError: false,
+    };
+  },
+}));
+vi.mock("@/components/business/date-picker/date-range-picker", () => ({
+  DateRangePicker: ({
+    label,
+    onValueChange,
+  }: {
+    label?: string;
+    onValueChange: (value: { startDate: string; endDate: string }) => void;
+  }) => (
+    <button
+      type="button"
+      onClick={() => onValueChange({ startDate: "2026-07-20", endDate: "2026-07-25" })}
+    >
+      {label}
+    </button>
+  ),
+  isDateRangeValid: ({ startDate, endDate }: { startDate: string; endDate: string }) =>
+    (!startDate && !endDate) || Boolean(startDate && endDate && startDate <= endDate),
 }));
 vi.mock("@/components/data-table/use-filter-state", () => ({
   useFilterState: () => [{}, vi.fn()],
@@ -66,16 +116,33 @@ vi.mock("@/components/data-table/data-table", () => ({
     columns,
     data,
     toolbar,
+    page,
+    pageSize,
+    onPaginationChange,
   }: {
     columns: Array<{ id?: string; cell?: (context: unknown) => ReactNode }>;
     data: Token[];
     toolbar?: ReactNode;
+    page?: number;
+    pageSize?: number;
+    onPaginationChange?: (page: number, pageSize: number) => void;
   }) => {
     const action = columns.find((column) => column.id === "actions");
+    const isBillingTable = columns.some(
+      (column) => (column as { accessorKey?: string }).accessorKey === "token_name",
+    );
     return (
       <div>
         {toolbar}
         {data[0] && action?.cell?.({ row: { original: data[0] } })}
+        {isBillingTable && (
+          <button
+            type="button"
+            onClick={() => onPaginationChange?.(2, pageSize ?? 10)}
+          >
+            billing-page-{page}
+          </button>
+        )}
       </div>
     );
   },
@@ -136,6 +203,8 @@ describe("TokensPage trace mode payloads", () => {
     state.create.mockResolvedValue({});
     state.update.mockReset();
     state.update.mockResolvedValue({});
+    state.billingOverviewCalls = [];
+    state.tokenBillingCalls = [];
   });
 
   it.each([
@@ -203,4 +272,77 @@ describe("TokensPage trace mode payloads", () => {
       );
     },
   );
+});
+
+describe("TokensPage billing date range", () => {
+  beforeEach(() => {
+    state.isAdmin = false;
+    state.token = null;
+    state.billingOverviewCalls = [];
+    state.tokenBillingCalls = [];
+  });
+
+  it("updates both query boundaries atomically and resets billing pagination", async () => {
+    render(<TokensPage />);
+
+    await userEvent.click(screen.getByRole("button", { name: "billing-page-1" }));
+    await waitFor(() =>
+      expect(state.tokenBillingCalls.at(-1)?.params).toMatchObject({ page: 2 }),
+    );
+
+    const overviewCallCount = state.billingOverviewCalls.length;
+    const tokenBillingCallCount = state.tokenBillingCalls.length;
+    await userEvent.click(screen.getByRole("button", { name: "dateRange" }));
+
+    await waitFor(() => {
+      expect(state.billingOverviewCalls.length).toBeGreaterThan(overviewCallCount);
+      expect(state.tokenBillingCalls.length).toBeGreaterThan(tokenBillingCallCount);
+    });
+
+    const newOverviewCalls = state.billingOverviewCalls.slice(overviewCallCount);
+    for (const { params, options } of newOverviewCalls) {
+      expect(Boolean(params.start_date)).toBe(Boolean(params.end_date));
+      if (options.enabled) {
+        expect(params).toEqual({
+          start_date: "2026-07-20",
+          end_date: "2026-07-25",
+        });
+      }
+    }
+
+    const newTokenBillingCalls = state.tokenBillingCalls.slice(tokenBillingCallCount);
+    for (const { params, options } of newTokenBillingCalls) {
+      expect(Boolean(params.start_date)).toBe(Boolean(params.end_date));
+      if (options.enabled) {
+        expect(params).toMatchObject({
+          page: 1,
+          start_date: "2026-07-20",
+          end_date: "2026-07-25",
+        });
+      }
+      if (params.start_date || params.end_date) {
+        expect(params).toMatchObject({
+          page: 1,
+          start_date: "2026-07-20",
+          end_date: "2026-07-25",
+        });
+      }
+    }
+
+    expect(state.billingOverviewCalls.at(-1)).toEqual({
+      params: {
+        start_date: "2026-07-20",
+        end_date: "2026-07-25",
+      },
+      options: { enabled: true },
+    });
+    expect(state.tokenBillingCalls.at(-1)).toMatchObject({
+      params: {
+        page: 1,
+        start_date: "2026-07-20",
+        end_date: "2026-07-25",
+      },
+      options: { enabled: true },
+    });
+  });
 });

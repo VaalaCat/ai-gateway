@@ -99,9 +99,19 @@ func NewHandler(
 	dispatcher state.Dispatcher,
 	registry *inflight.Registry,
 	permit limiter.PermitStore,
-	breakers *resilience.Registry,
+	registries *resilience.RuntimeRegistries,
 	options ...HandlerOption,
 ) *Handler {
+	if registries == nil {
+		registries = resilience.NewRuntimeRegistries()
+	} else {
+		if registries.Breakers == nil {
+			registries.Breakers = resilience.NewRegistry()
+		}
+		if registries.AutoBan == nil {
+			registries.AutoBan = resilience.NewAutoBanTracker()
+		}
+	}
 	h := &Handler{
 		Agent:    agentApp,
 		registry: registry,
@@ -122,10 +132,7 @@ func NewHandler(
 			aff = affinity.New(c) // app.AgentCache 满足 affinity.ConfigReader（含 Settings()）
 			// 韧性默认参数走管理后台 Settings(非 config.yaml);Runner 每请求实时读取,
 			// admin 改后经同步即时生效。Breakers 注册表每 handler 建一次、跨请求复用。
-			if breakers == nil {
-				breakers = resilience.NewRegistry()
-			}
-			runner = &resilience.Runner{Settings: c, Breakers: breakers}
+			runner = &resilience.Runner{Settings: c, Breakers: registries.Breakers, AutoBan: registries.AutoBan}
 			// PermitStore 每 handler 建一次、跨请求复用（同 Breakers 注册表）。
 			// c 是 app.AgentCache，满足 limiter.Resolver（EffectiveRequest/AttemptLimiters）。
 			ps := permit
@@ -222,7 +229,7 @@ func (h *Handler) Relay(c *gin.Context) {
 	}
 
 	if rctx.Inflight != nil {
-		rctx.Inflight.Update(publish.ProjectUsageEntry(rctx))
+		rctx.Inflight.Update(publish.ProjectInflightEntry(rctx))
 	}
 
 	if err := h.planner.Solve(rctx); err != nil {
@@ -240,13 +247,13 @@ func (h *Handler) Relay(c *gin.Context) {
 	}
 
 	if rctx.Inflight != nil {
-		rctx.Inflight.Update(publish.ProjectUsageEntry(rctx))
+		rctx.Inflight.Update(publish.ProjectInflightEntry(rctx))
 	}
 
 	h.executor.Run(rctx)
 
 	if rctx.Inflight != nil {
-		rctx.Inflight.Update(publish.ProjectUsageEntry(rctx))
+		rctx.Inflight.Update(publish.ProjectInflightEntry(rctx))
 	}
 
 	if rctx.State.Execution.Err != nil {

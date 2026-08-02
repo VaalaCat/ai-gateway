@@ -1,7 +1,6 @@
 "use client";
 
-import { getModelProvider, getProviderIconKey } from "@/lib/constants";
-import { ProviderAvatar } from "@/components/business/provider-avatar";
+import { ModelProviderLogo } from "@/components/business/model-provider-logo";
 import { cn } from "@/lib/utils";
 
 interface ModelNameProps {
@@ -11,11 +10,9 @@ interface ModelNameProps {
 }
 
 export function ModelName({ name, size = 14, className }: ModelNameProps) {
-  const provider = getModelProvider(name);
-  const iconKey = provider ? getProviderIconKey(provider) : null;
   return (
     <span className={cn("inline-flex items-center gap-1", className)}>
-      {iconKey && <ProviderAvatar provider={iconKey} size={size} />}
+      <ModelProviderLogo modelName={name} size={size} />
       <span className="font-mono text-xs">{name}</span>
     </span>
   );

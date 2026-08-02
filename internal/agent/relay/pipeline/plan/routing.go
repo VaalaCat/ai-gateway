@@ -25,18 +25,34 @@ type RoutingStore interface {
 // 由 ModelChainBuilder.Build 创建并复用：每次链失败后调 MarkMemberExhausted
 // 重新 ResolveToRealModel 寻找下一个成员。
 type ResolveCtx struct {
-	excluded  map[uint]map[string]bool // routingID → ref → tried
-	visited   map[uint]bool
-	depth     int
-	trace     []string
-	lastChain []uint // 上次成功 resolve 经过的 routing IDs（深→浅，resolveStep 成功路径自下而上 append）
+	excluded   map[uint]map[string]bool // routingID → ref → tried
+	visited    map[uint]bool
+	depth      int
+	trace      []string
+	lastChain  []uint // 上次成功 resolve 经过的 routing IDs（深→浅，resolveStep 成功路径自下而上 append）
+	pickMember func([]protocol.RoutingMember, map[string]bool) string
+	// Inspection must keep exhausting a different routing path even when it
+	// converges on the same real model as the previous path. Online Relay keeps
+	// the historical stop-on-repeat behavior.
+	exhaustRepeatedModels bool
 }
 
 func NewResolveCtx() *ResolveCtx {
 	return &ResolveCtx{
-		excluded: make(map[uint]map[string]bool),
-		visited:  make(map[uint]bool),
+		excluded:   make(map[uint]map[string]bool),
+		visited:    make(map[uint]bool),
+		pickMember: selectRoutingMember,
 	}
+}
+
+// newDeterministicResolveCtx keeps the production routing semantics while
+// replacing weighted random ordering with a stable priority/name order. It is
+// used only by read-only exhaustive inspection; online Relay keeps NewResolveCtx.
+func newDeterministicResolveCtx() *ResolveCtx {
+	walk := NewResolveCtx()
+	walk.pickMember = selectDeterministicRoutingMember
+	walk.exhaustRepeatedModels = true
+	return walk
 }
 
 // Trace 返回解析路径快照（仅调试 / UsageLog 写入用）。
@@ -108,7 +124,11 @@ func resolveStep(requestCtx context.Context, store RoutingStore, ref string, own
 	}()
 
 	for {
-		member := selectRoutingMember(r.Members, walk.excluded[r.ID])
+		pickMember := walk.pickMember
+		if pickMember == nil {
+			pickMember = selectRoutingMember
+		}
+		member := pickMember(r.Members, walk.excluded[r.ID])
 		if member == "" {
 			return ""
 		}
@@ -120,6 +140,28 @@ func resolveStep(requestCtx context.Context, store RoutingStore, ref string, own
 		// 递归失败：才把这个 member 加 excluded，成功路径不 mark
 		walk.excluded[r.ID][member] = true
 	}
+}
+
+func selectDeterministicRoutingMember(
+	members []protocol.RoutingMember,
+	excluded map[string]bool,
+) string {
+	candidates := make([]protocol.RoutingMember, 0, len(members))
+	for _, member := range members {
+		if !excluded[member.Ref] {
+			candidates = append(candidates, member)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority > candidates[j].Priority
+		}
+		return candidates[i].Ref < candidates[j].Ref
+	})
+	return candidates[0].Ref
 }
 
 // selectRoutingMember 按 priority 分组取最高组、组内按 weight 加权随机选一个 ref。

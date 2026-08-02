@@ -154,10 +154,11 @@ function SettingsPanel({
         ) : (
           <EntityPicker
             entity="token"
+            size="sm"
             value={selectedTokenId}
             onChange={setSelectedTokenId}
             placeholder={t("selectToken")}
-            className="w-full h-8"
+            className="w-full"
           />
         )}
         <button

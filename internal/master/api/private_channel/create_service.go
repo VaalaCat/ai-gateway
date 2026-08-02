@@ -168,6 +168,7 @@ func privateInputToMap(input PrivateChannelCreateInput) map[string]any {
 		"status_code_mapping": input.StatusCodeMapping, "other_settings": input.OtherSettings,
 		"models": input.Models, "model_mapping": input.ModelMapping,
 		"weight": input.Weight, "priority": input.Priority,
+		"auto_ban": input.AutoBan,
 	}
 }
 

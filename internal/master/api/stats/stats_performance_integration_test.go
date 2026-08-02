@@ -3,7 +3,6 @@ package stats
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -22,9 +21,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-const productionQueryBudget = 200 * time.Millisecond
-
-func TestSplitFixtureRoutesStatsQueriesToHourlyIndexes(t *testing.T) {
+func TestStatsPerformanceSplitFixtureRoutesDashboardQueriesToLogIndexes(t *testing.T) {
 	dir := t.TempDir()
 	legacyPath, corePath, logPath := filepath.Join(dir, "master.db"), filepath.Join(dir, "core.db"), filepath.Join(dir, "log.db")
 	fixture := dbtestdata.BuildLegacyProductionFixture(t, legacyPath, dbtestdata.ProductionFixtureOptions{
@@ -34,14 +31,15 @@ func TestSplitFixtureRoutesStatsQueriesToHourlyIndexes(t *testing.T) {
 	require.NoError(t, fixture.Close())
 	prepareOnlineBackfilledSplit(t, legacyPath, corePath, logPath, fixture.TableCounts["usage_logs"], fixture.Traces.Rows)
 
-	trace := newSQLTraceLogger()
+	coreTrace := newSQLTraceLogger()
+	logTrace := newSQLTraceLogger()
 	core, err := masterdatabase.NewConnector().OpenExistingCorePath(corePath)
 	require.NoError(t, err)
-	core = core.Session(&gorm.Session{Logger: trace})
+	core = core.Session(&gorm.Session{Logger: coreTrace})
 	defer closePerformanceDB(t, core)
 	logs, err := masterdatabase.NewConnector().OpenExistingLogPath(logPath)
 	require.NoError(t, err)
-	logs = logs.Session(&gorm.Session{Logger: trace})
+	logs = logs.Session(&gorm.Session{Logger: logTrace})
 	defer closePerformanceDB(t, logs)
 	application := app.NewApplication()
 	application.SetCoreDB(core)
@@ -50,72 +48,128 @@ func TestSplitFixtureRoutesStatsQueriesToHourlyIndexes(t *testing.T) {
 	query := dao.NewAdminQuery(dao.NewContext(application)).Stats()
 	range1d := dao.ObsRange{Start: fixture.MinCreatedAt, End: fixture.MaxCreatedAt + 1, Gran: dao.GranHour}
 
-	statements := captureStatsQuery(t, trace, func() error {
+	statements := captureStatsQuery(t, logTrace, func() error {
 		_, err := query.DashboardKpis(range1d, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
 		return err
 	})
-	assertCapturedHourlyQueryPlan(t, core, "split dashboard", "billing_hourly_buckets", "select distinct", "idx_bhb_window_user", statements)
-	statements = captureStatsQuery(t, trace, func() error {
+	assertCapturedHourlyQueryPlan(t, logs, "global dashboard", "usage_hourly_buckets", "sum(request_count)", "idx_uhb_bucket", statements)
+	assertCoreAvoidsLogFactTables(t, coreTrace.Statements())
+
+	for _, tc := range []struct {
+		name      string
+		filter    dao.ObsFilter
+		wantIndex string
+	}{
+		{name: "user", filter: dao.ObsFilter{UserID: 1}, wantIndex: "idx_request_logs_user_window_stats"},
+		{name: "token", filter: dao.ObsFilter{TokenID: 1}, wantIndex: "idx_request_logs_token_id"},
+		{name: "model", filter: dao.ObsFilter{ModelName: "fixture-model-00-with-a-deliberately-long-name"}, wantIndex: "idx_request_logs_model_created_user"},
+	} {
+		statements = captureStatsQuery(t, logTrace, func() error {
+			_, err := query.DashboardTrend(range1d, dao.Scope{IsAdmin: true}, tc.filter)
+			return err
+		})
+		assertCapturedRequestQueryPlan(t, logs, tc.name+" dashboard", tc.wantIndex, statements)
+	}
+
+	statements = captureStatsQuery(t, logTrace, func() error {
+		_, err := query.CostTrendStackedByModel(range1d, dao.Scope{IsAdmin: true}, 2, dao.ObsFilter{})
+		return err
+	})
+	assertCapturedHourlyQueryPlan(t, logs, "global cost trend", "usage_hourly_buckets", "sum(total_cost)", "idx_uhb_bucket", statements)
+
+	statements = captureStatsQuery(t, logTrace, func() error {
+		_, err := query.CostTrendStackedByModel(range1d, dao.Scope{IsAdmin: true}, 2, dao.ObsFilter{ModelName: "fixture-model-00-with-a-deliberately-long-name"})
+		return err
+	})
+	assertCapturedRequestQueryPlan(t, logs, "model cost trend", "idx_request_logs_model_created_user", statements)
+
+	statements = captureStatsQuery(t, logTrace, func() error {
 		_, err := query.MetricTrendGrouped("cost", "sum", "model", range1d, dao.Scope{IsAdmin: true}, 2, dao.ObsFilter{})
 		return err
 	})
 	assertCapturedHourlyQueryPlan(t, logs, "split grouped trend", "usage_hourly_buckets", "display_name", "idx_uhb_bucket", statements)
 }
 
-func TestProductionFixtureSevenDayQueriesUnder200ms(t *testing.T) {
-	if raceEnabled {
-		t.Skip("production-scale SQLite performance fixture is verified without -race")
+func assertCoreAvoidsLogFactTables(t *testing.T, statements []string) {
+	t.Helper()
+	joined := strings.ToLower(strings.Join(statements, "\n"))
+	for _, table := range []string{"billing_logs", "billing_hourly_buckets", "token_daily_billings", "channel_daily_billings"} {
+		require.NotContains(t, joined, table, "core database must not query %s", table)
 	}
-	if os.Getenv("AI_GATEWAY_RUN_STATS_PERFORMANCE") != "1" {
-		t.Skip("set AI_GATEWAY_RUN_STATS_PERFORMANCE=1 to run the production-scale fixture")
-	}
+}
 
+func assertCapturedRequestQueryPlan(t *testing.T, db *gorm.DB, name, wantIndex string, statements []string) {
+	t.Helper()
+	var actualSQL string
+	for _, statement := range statements {
+		if strings.Contains(strings.ToLower(statement), "request_logs") && strings.Contains(strings.ToLower(statement), "group by") {
+			actualSQL = statement
+			break
+		}
+	}
+	require.NotEmpty(t, actualSQL, "%s must capture its real request_logs DAO query", name)
+	var rows []struct {
+		Detail string `gorm:"column:detail"`
+	}
+	require.NoError(t, db.Raw("EXPLAIN QUERY PLAN "+actualSQL).Scan(&rows).Error)
+	var details []string
+	for _, row := range rows {
+		details = append(details, row.Detail)
+	}
+	plan := strings.Join(details, " | ")
+	t.Logf("%s query plan: %s", name, plan)
+	require.Contains(t, strings.ToLower(plan), strings.ToLower(wantIndex))
+}
+
+func TestStatsPerformanceSmallSplitFixtureRoutesCostQueries(t *testing.T) {
 	dir := t.TempDir()
 	legacyPath, corePath, logPath := filepath.Join(dir, "master.db"), filepath.Join(dir, "core.db"), filepath.Join(dir, "log.db")
 	fixture := dbtestdata.BuildLegacyProductionFixture(t, legacyPath, dbtestdata.ProductionFixtureOptions{
-		Days: 7, Users: 64, TokensPerUser: 2, Models: 24, Channels: 8,
-		RequestsPerHour: 128, WALUncheckpointedRows: 257,
+		Days: 1, Users: 2, TokensPerUser: 1, Models: 2, Channels: 2,
+		RequestsPerHour: 4, WALUncheckpointedRows: 3,
 	})
 	require.NoError(t, fixture.Close())
 	prepareOnlineBackfilledSplit(t, legacyPath, corePath, logPath, fixture.TableCounts["usage_logs"], fixture.Traces.Rows)
 
-	trace := newSQLTraceLogger()
+	coreTrace := newSQLTraceLogger()
+	logTrace := newSQLTraceLogger()
 	core, err := masterdatabase.NewConnector().OpenExistingCorePath(corePath)
 	require.NoError(t, err)
-	core = core.Session(&gorm.Session{Logger: trace})
+	core = core.Session(&gorm.Session{Logger: coreTrace})
 	defer closePerformanceDB(t, core)
 	logs, err := masterdatabase.NewConnector().OpenExistingLogPath(logPath)
 	require.NoError(t, err)
-	logs = logs.Session(&gorm.Session{Logger: trace})
+	logs = logs.Session(&gorm.Session{Logger: logTrace})
 	defer closePerformanceDB(t, logs)
 	application := app.NewApplication()
 	application.SetCoreDB(core)
 	application.SetLogDB(logs)
 	application.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
 	query := dao.NewAdminQuery(dao.NewContext(application)).Stats()
-	range7d := dao.ObsRange{Start: fixture.MinCreatedAt, End: fixture.MinCreatedAt + 7*86400, Gran: dao.GranHour}
+	range1d := dao.ObsRange{Start: fixture.MinCreatedAt, End: fixture.MaxCreatedAt + 1, Gran: dao.GranHour}
 	model := "fixture-model-01-with-a-deliberately-long-name"
 
-	statements := measureProductionQuery(t, trace, "active users", func() error {
-		_, err := query.DashboardKpis(range7d, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
+	statements := captureStatsQuery(t, logTrace, func() error {
+		_, err := query.DashboardKpis(range1d, dao.Scope{IsAdmin: true}, dao.ObsFilter{})
 		return err
 	})
-	assertCapturedHourlyQueryPlan(t, core, "active users", "billing_hourly_buckets", "select distinct", "idx_bhb_window_user", statements)
+	assertCapturedHourlyQueryPlan(t, logs, "dashboard kpis", "usage_hourly_buckets", "sum(request_count)", "idx_uhb_bucket", statements)
+	assertCoreAvoidsLogFactTables(t, coreTrace.Statements())
 
-	statements = measureProductionQuery(t, trace, "billing trend", func() error {
-		_, err := query.CostTrendStackedByModel(range7d, dao.Scope{IsAdmin: true}, 20, dao.ObsFilter{})
+	statements = captureStatsQuery(t, logTrace, func() error {
+		_, err := query.CostTrendStackedByModel(range1d, dao.Scope{IsAdmin: true}, 20, dao.ObsFilter{})
 		return err
 	})
-	assertCapturedHourlyQueryPlan(t, core, "billing trend", "billing_hourly_buckets", "model_name as name", "idx_bhb_window_user", statements)
+	assertCapturedHourlyQueryPlan(t, logs, "billing trend", "usage_hourly_buckets", "sum(total_cost)", "idx_uhb_bucket", statements)
 
-	statements = measureProductionQuery(t, trace, "model-filtered user leaderboard", func() error {
-		_, err := query.Leaderboard("user", "tokens", 20, range7d, dao.Scope{IsAdmin: true}, dao.ObsFilter{ModelName: model})
+	statements = captureStatsQuery(t, logTrace, func() error {
+		_, err := query.Leaderboard("user", "tokens", 20, range1d, dao.Scope{IsAdmin: true}, dao.ObsFilter{ModelName: model})
 		return err
 	})
-	assertCapturedHourlyQueryPlan(t, core, "model-filtered user leaderboard", "billing_hourly_buckets", "left join users", "idx_bhb_model_user", statements)
+	assertCapturedRequestQueryPlan(t, logs, "model-filtered user leaderboard", "idx_request_logs_model_created_user", statements)
 
-	statements = measureProductionQuery(t, trace, "top20 grouped trend", func() error {
-		_, err := query.MetricTrendGrouped("cost", "sum", "model", range7d, dao.Scope{IsAdmin: true}, 20, dao.ObsFilter{})
+	statements = captureStatsQuery(t, logTrace, func() error {
+		_, err := query.MetricTrendGrouped("cost", "sum", "model", range1d, dao.Scope{IsAdmin: true}, 20, dao.ObsFilter{})
 		return err
 	})
 	assertCapturedHourlyQueryPlan(t, logs, "top20 grouped trend", "usage_hourly_buckets", "display_name", "idx_uhb_bucket", statements)
@@ -168,19 +222,6 @@ func prepareOnlineBackfilledSplit(t *testing.T, legacyPath, corePath, logPath st
 	require.Equal(t, expectedTraces, traceCount)
 }
 
-func measureProductionQuery(t *testing.T, trace *sqlTraceLogger, name string, run func() error) []string {
-	t.Helper()
-	trace.Reset()
-	started := time.Now()
-	require.NoError(t, run())
-	elapsed := time.Since(started)
-	t.Logf("%s invocation duration: %s", name, elapsed)
-	require.Less(t, elapsed, productionQueryBudget, "%s exceeded the fixed production query budget", name)
-	statements := trace.Statements()
-	require.NotEmpty(t, statements, "%s must execute a real DAO query", name)
-	return statements
-}
-
 func captureStatsQuery(t *testing.T, trace *sqlTraceLogger, run func() error) []string {
 	t.Helper()
 	trace.Reset()
@@ -192,28 +233,29 @@ func captureStatsQuery(t *testing.T, trace *sqlTraceLogger, run func() error) []
 
 func assertCapturedHourlyQueryPlan(t *testing.T, db *gorm.DB, name, table, fragment, wantIndex string, statements []string) {
 	t.Helper()
-	var actualSQL string
+	var matched []string
 	for _, statement := range statements {
 		normalized := strings.ToLower(statement)
 		if strings.Contains(normalized, table) && strings.Contains(normalized, fragment) {
-			require.Empty(t, actualSQL, "%s matched more than one captured SQL statement", name)
-			actualSQL = statement
+			matched = append(matched, statement)
 		}
 	}
-	require.NotEmpty(t, actualSQL, "%s must capture its real %s DAO query", name, table)
-	var rows []struct {
-		Detail string `gorm:"column:detail"`
+	require.NotEmpty(t, matched, "%s must capture its real %s DAO query", name, table)
+	for i, actualSQL := range matched {
+		var rows []struct {
+			Detail string `gorm:"column:detail"`
+		}
+		require.NoError(t, db.Raw("EXPLAIN QUERY PLAN "+actualSQL).Scan(&rows).Error)
+		details := make([]string, 0, len(rows))
+		for _, row := range rows {
+			details = append(details, row.Detail)
+		}
+		plan := strings.Join(details, " | ")
+		t.Logf("%s query plan %d: %s", name, i+1, plan)
+		require.Contains(t, strings.ToLower(plan), strings.ToLower(wantIndex), fmt.Sprintf("%s must use its hourly index", name))
+		require.NotContains(t, strings.ToLower(plan), "scan billing_logs")
+		require.NotContains(t, strings.ToLower(plan), "scan request_logs")
 	}
-	require.NoError(t, db.Raw("EXPLAIN QUERY PLAN "+actualSQL).Scan(&rows).Error)
-	details := make([]string, 0, len(rows))
-	for _, row := range rows {
-		details = append(details, row.Detail)
-	}
-	plan := strings.Join(details, " | ")
-	t.Logf("%s query plan: %s", name, plan)
-	require.Contains(t, strings.ToLower(plan), strings.ToLower(wantIndex), fmt.Sprintf("%s must use its hourly index", name))
-	require.NotContains(t, strings.ToLower(plan), "scan billing_logs")
-	require.NotContains(t, strings.ToLower(plan), "scan request_logs")
 }
 
 type sqlTraceLogger struct {

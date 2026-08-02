@@ -26,6 +26,7 @@ type Config struct {
 	Agent    AgentConfig    `mapstructure:"agent"`
 	Relay    RelayConfig    `mapstructure:"relay"`
 	EventBus EventBusConfig `mapstructure:"eventbus"`
+	Metrics  MetricsConfig  `mapstructure:"metrics"`
 }
 
 type MasterConfig struct {
@@ -88,6 +89,11 @@ type EventBusConfig struct {
 	NatsURL string `mapstructure:"nats_url"`
 }
 
+type MetricsConfig struct {
+	Listen string `mapstructure:"listen"`
+	Token  string `mapstructure:"token"`
+}
+
 type RuntimeConfig struct {
 	RelayTimeout        int `mapstructure:"relay_timeout"`
 	FullSyncInterval    int `mapstructure:"full_sync_interval"`
@@ -102,6 +108,7 @@ type FileConfig struct {
 	Agent    AgentConfig   `mapstructure:"agent"`
 	Runtime  RuntimeConfig `mapstructure:"runtime"`
 	Relay    RelayConfig   `mapstructure:"relay"`
+	Metrics  MetricsConfig `mapstructure:"metrics"`
 }
 
 type MasterRuntimeConfig struct {
@@ -110,6 +117,7 @@ type MasterRuntimeConfig struct {
 	Agent    AgentConfig
 	Runtime  RuntimeConfig
 	Relay    RelayConfig
+	Metrics  MetricsConfig
 }
 
 type AgentRuntimeConfig struct {
@@ -117,6 +125,7 @@ type AgentRuntimeConfig struct {
 	Agent    AgentConfig
 	Runtime  RuntimeConfig
 	Relay    RelayConfig
+	Metrics  MetricsConfig
 }
 
 type MasterRuntimeProvider interface {
@@ -147,6 +156,7 @@ func (c *MasterRuntimeConfig) ToMasterRuntimeConfig() *MasterRuntimeConfig {
 		Agent:    c.Agent,
 		Runtime:  runtimeCfg,
 		Relay:    normalizeRelayConfig(c.Relay),
+		Metrics:  c.Metrics,
 	}
 }
 
@@ -177,6 +187,7 @@ func (c *Config) ToMasterRuntimeConfig() *MasterRuntimeConfig {
 		Agent:    c.Agent,
 		Runtime:  runtimeCfg,
 		Relay:    normalizeRelayConfig(c.Relay),
+		Metrics:  c.Metrics,
 	}
 }
 
@@ -196,6 +207,7 @@ func (c *AgentRuntimeConfig) ToAgentRuntimeConfig() *AgentRuntimeConfig {
 		Agent:    agentCfg,
 		Runtime:  runtimeCfg,
 		Relay:    normalizeRelayConfig(c.Relay),
+		Metrics:  c.Metrics,
 	}
 }
 
@@ -222,6 +234,7 @@ func (c *Config) ToAgentRuntimeConfig() *AgentRuntimeConfig {
 		Agent:    agentCfg,
 		Runtime:  runtimeCfg,
 		Relay:    normalizeRelayConfig(c.Relay),
+		Metrics:  c.Metrics,
 	}
 }
 
@@ -291,6 +304,7 @@ func LoadMaster(path string) (*MasterRuntimeConfig, error) {
 		Agent:    cfg.Agent,
 		Runtime:  cfg.Runtime,
 		Relay:    normalizeRelayConfig(cfg.Relay),
+		Metrics:  cfg.Metrics,
 	}
 
 	if err := validateMaster(runtimeCfg); err != nil {
@@ -315,6 +329,7 @@ func LoadAgent(path string) (*AgentRuntimeConfig, error) {
 		Agent:    cfg.Agent,
 		Runtime:  cfg.Runtime,
 		Relay:    normalizeRelayConfig(cfg.Relay),
+		Metrics:  cfg.Metrics,
 	}
 
 	if err := validateAgent(runtimeCfg); err != nil {
@@ -439,7 +454,48 @@ func validateMaster(cfg *MasterRuntimeConfig) error {
 		}
 		seen[o] = struct{}{}
 	}
+	return validateMetrics(cfg.Metrics, cfg.Master.Listen)
+}
+
+func validateMetrics(cfg MetricsConfig, businessListen string) error {
+	if cfg.Token == "" {
+		if cfg.Listen != "" {
+			return fmt.Errorf("metrics.token is required when metrics.listen is configured")
+		}
+		return nil
+	}
+	if len(cfg.Token) < 32 {
+		return fmt.Errorf("metrics.token must be at least 32 ASCII characters")
+	}
+	if cfg.Token[0] == '=' {
+		return fmt.Errorf("metrics.token has invalid padding")
+	}
+
+	padding := false
+	for i := 0; i < len(cfg.Token); i++ {
+		ch := cfg.Token[i]
+		if ch == '=' {
+			padding = true
+			continue
+		}
+		if padding {
+			return fmt.Errorf("metrics.token has invalid padding")
+		}
+		if !isB64TokenCharacter(ch) {
+			return fmt.Errorf("metrics.token must use RFC6750 b64token ASCII characters")
+		}
+	}
+	if cfg.Listen != "" && cfg.Listen == businessListen {
+		return fmt.Errorf("metrics.listen must differ from the business listen address")
+	}
 	return nil
+}
+
+func isB64TokenCharacter(ch byte) bool {
+	return ch >= 'A' && ch <= 'Z' ||
+		ch >= 'a' && ch <= 'z' ||
+		ch >= '0' && ch <= '9' ||
+		ch == '-' || ch == '.' || ch == '_' || ch == '~' || ch == '+' || ch == '/'
 }
 
 func prepareMasterDatabaseConfig(cfg *MasterConfig) error {
@@ -677,7 +733,7 @@ func validateAgent(cfg *AgentRuntimeConfig) error {
 	if !hasValidCredentialsFile(cfg.Agent.CredentialsFile) && strings.TrimSpace(cfg.Agent.EnrollmentToken) == "" {
 		return fmt.Errorf("agent.enrollment_token is required when credentials_file is missing or invalid")
 	}
-	return nil
+	return validateMetrics(cfg.Metrics, cfg.Agent.Listen)
 }
 
 func normalizeRuntimeConfig(cfg RuntimeConfig) RuntimeConfig {

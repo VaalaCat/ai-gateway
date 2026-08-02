@@ -2,17 +2,22 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { TokensChart } from "./byok-trend-charts";
+import { BYOKTrendCharts, TokensChart } from "./byok-trend-charts";
+import { chartColorForSeries } from "@/lib/chart-colors";
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
 }));
 
+vi.mock("@/hooks/use-mobile", () => ({
+  useIsMobile: () => false,
+}));
+
 vi.mock("recharts", () => ({
   CartesianGrid: () => null,
   LineChart: ({ children }: React.PropsWithChildren) => <div>{children}</div>,
-  Line: ({ dataKey, hide }: { dataKey: string; hide?: boolean }) => (
-    <div data-testid={`line-${dataKey}`} data-hidden={String(Boolean(hide))} />
+  Line: ({ dataKey, hide, stroke, strokeDasharray }: { dataKey: string; hide?: boolean; stroke?: string; strokeDasharray?: string }) => (
+    <div data-testid={`line-${dataKey}`} data-hidden={String(Boolean(hide))} data-stroke={stroke} data-has-dash={String(strokeDasharray !== undefined)} />
   ),
   XAxis: () => null,
   YAxis: () => null,
@@ -72,6 +77,15 @@ describe("TokensChart", () => {
     }
   });
 
+  it("passes color-hash colors and no dash pattern to every token line", () => {
+    const chart = renderTokensChart();
+    for (const key of ["prompt_tokens", "completion_tokens", "cache_read_tokens", "cache_write_tokens"]) {
+      const line = chart.getByTestId(`line-${key}`);
+      expect(line).toHaveAttribute("data-stroke", chartColorForSeries(key));
+      expect(line).toHaveAttribute("data-has-dash", "false");
+    }
+  });
+
   it("hides a series on click and restores it on the next click", async () => {
     const user = userEvent.setup();
     const chart = renderTokensChart();
@@ -100,5 +114,23 @@ describe("TokensChart", () => {
 
     await user.click(buttons.at(-1)!);
     expect(chart.getByText("chartAllHidden")).toBeInTheDocument();
+  });
+});
+
+describe("BYOKTrendCharts", () => {
+  it("renders every request, token, and cost line with no dash pattern", () => {
+    render(<BYOKTrendCharts items={[ITEM]} loading={false} />);
+
+    for (const key of [
+      "request_count",
+      "prompt_tokens",
+      "completion_tokens",
+      "cache_read_tokens",
+      "cache_write_tokens",
+      "input_cost",
+      "output_cost",
+    ]) {
+      expect(screen.getByTestId(`line-${key}`)).toHaveAttribute("data-has-dash", "false");
+    }
   });
 });

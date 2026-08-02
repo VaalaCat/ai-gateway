@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useBillingInsights } from "./billing-insights";
-import { useMarketShare, useMetricTrend } from "./dashboard";
+import { useDashboard, useMarketShare, useMetricTrend } from "./dashboard";
 import { useModelDistribution } from "./stats";
 import { createTestQueryClient, queryClientWrapper } from "@/test/render";
 
@@ -25,6 +25,23 @@ const metricResponse = (metric: "ttft" | "tps", stat: "avg" | "p95" | "p5") => (
 beforeEach(() => apiGet.mockReset());
 
 describe("chart API query contracts", () => {
+  it("sends dashboard top n through both the URL and query identity", async () => {
+    apiGet.mockResolvedValueOnce({});
+    const client = createTestQueryClient();
+    const params = { start: 100, end: 200, gran: "hour" as const, top_n: 20 as const };
+    const { result } = renderHook(() => useDashboard(params), {
+      wrapper: queryClientWrapper(client),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(apiGet).toHaveBeenCalledWith(
+      "/stats/dashboard?start=100&end=200&gran=hour&top_n=20",
+    );
+    expect(client.getQueryCache().getAll()[0]?.queryKey).toEqual([
+      "dashboard", params, 0,
+    ]);
+  });
+
   it("sends billing token and top n using the backend query names", async () => {
     apiGet.mockResolvedValueOnce({ trend: [], cost_trend_stacked: { buckets: [], series_order: [] }, cache_saving: {} });
     const client = createTestQueryClient();

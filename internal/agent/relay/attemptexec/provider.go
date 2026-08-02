@@ -8,7 +8,12 @@ import (
 )
 
 type ResilientRunner interface {
-	Run(*state.RelayContext, state.Attempt, func() state.AttemptResult) state.AttemptResult
+	Run(*state.RelayContext, state.Attempt, func() DispatchResult) state.AttemptResult
+}
+
+type DispatchResult struct {
+	Outcome            state.AttemptResult
+	ProviderDispatched bool
 }
 
 type ProviderResult struct {
@@ -58,21 +63,21 @@ func (e *Executor) Execute(rctx *state.RelayContext, attempt state.Attempt) Prov
 	}
 
 	var writtenResult *state.AttemptResult
-	dispatch := func() state.AttemptResult {
+	dispatch := func() DispatchResult {
 		if writtenResult != nil {
-			return *writtenResult
+			return DispatchResult{Outcome: *writtenResult}
 		}
 		if err := requestContextError(rctx); err != nil {
-			return state.AttemptResult{Err: err}
+			return DispatchResult{Outcome: state.AttemptResult{Err: err}}
 		}
 		if rctx != nil && rctx.State != nil && rctx.State.Recorder != nil {
 			rctx.State.Recorder.ResetAttempt()
 		}
 		if err := installAttemptBody(rctx); err != nil {
-			return state.AttemptResult{Err: err}
+			return DispatchResult{Outcome: state.AttemptResult{Err: err}}
 		}
 		if err := requestContextError(rctx); err != nil {
-			return state.AttemptResult{Err: err}
+			return DispatchResult{Outcome: state.AttemptResult{Err: err}}
 		}
 		result.Dispatches++
 		result.ProviderDispatched = true
@@ -80,11 +85,11 @@ func (e *Executor) Execute(rctx *state.RelayContext, attempt state.Attempt) Prov
 		if outcome.Written {
 			writtenResult = &outcome
 		}
-		return outcome
+		return DispatchResult{Outcome: outcome, ProviderDispatched: true}
 	}
 
 	if e.Resilience == nil {
-		result.Outcome = dispatch()
+		result.Outcome = dispatch().Outcome
 	} else {
 		result.Outcome = e.Resilience.Run(rctx, attempt, dispatch)
 	}

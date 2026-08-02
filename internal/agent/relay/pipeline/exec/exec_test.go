@@ -590,10 +590,10 @@ func TestExecutor_DefaultFallback_SleepsBetween(t *testing.T) {
 // stubRunner 把 dispatch 调用计数，并可选地重试 N 次再返回最终结果。
 type stubRunner struct{ retries int }
 
-func (s stubRunner) Run(_ *state.RelayContext, _ state.Attempt, dispatch func() state.AttemptResult) state.AttemptResult {
+func (s stubRunner) Run(_ *state.RelayContext, _ state.Attempt, dispatch func() attemptexec.DispatchResult) state.AttemptResult {
 	var res state.AttemptResult
 	for i := 0; i <= s.retries; i++ {
-		res = dispatch()
+		res = dispatch().Outcome
 		if res.Err == nil {
 			break
 		}
@@ -1060,6 +1060,34 @@ func TestExecutorRemoteWireDispatchesFoldIntoSingleAttemptRetries(t *testing.T) 
 
 	require.Len(t, rctx.State.Execution.History, 1)
 	require.Equal(t, 2, rctx.State.Execution.History[0].Retries)
+}
+
+func TestExecutorMergesOnlyRemoteAutoDisableTriggers(t *testing.T) {
+	trigger := attemptwire.ChannelAutoDisableTrigger{
+		Source: attemptwire.SourceAdmin, ChannelID: 7, Revision: 4,
+		Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	t.Run("remote outcome merges into entry relay state", func(t *testing.T) {
+		rctx := portExecutorContext(portAttempt(1))
+		outcome := successfulPortOutcome("target-a")
+		outcome.Path = app.RoutePathDirect
+		outcome.AutoDisableTriggers = []attemptwire.ChannelAutoDisableTrigger{trigger}
+
+		(&Executor{SourceAgentID: "source"}).recordOutcome(rctx, 0, portAttempt(1), remotePortRoute(false, "target-a"), outcome)
+
+		require.Equal(t, []attemptwire.ChannelAutoDisableTrigger{trigger}, rctx.State.AutoDisableTriggers)
+	})
+
+	t.Run("local runner state is not appended again", func(t *testing.T) {
+		rctx := portExecutorContext(portAttempt(1))
+		rctx.State.AutoDisableTriggers = []attemptwire.ChannelAutoDisableTrigger{trigger}
+		outcome := successfulPortOutcome("source")
+		outcome.Path = app.RoutePathLocal
+
+		(&Executor{SourceAgentID: "source"}).recordOutcome(rctx, 0, portAttempt(1), localPortRoute(), outcome)
+
+		require.Equal(t, []attemptwire.ChannelAutoDisableTrigger{trigger}, rctx.State.AutoDisableTriggers)
+	})
 }
 
 // behavior change: direct-to-relay path fallback remains one channel attempt

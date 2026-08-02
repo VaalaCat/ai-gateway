@@ -10,19 +10,32 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
 
-// ProjectUsageEntry 把当前 rctx 投影成一条 UsageLogEntry——"请求当前形状"的唯一事实源。
-// publish 结算末尾调它落库；inflight 在阶段边界调它得"进行中的 usage_log"。
-// 纯函数无副作用（不含 affinity 记录，那是 publish 专属，见 Publisher.Publish）。
+// ProjectUsageEntry 把当前 rctx 投影成最终结算使用的 UsageLogEntry。
+// 内部自动禁用触发事实只随最终 usage 上报，不进入 inflight 视图。
 func ProjectUsageEntry(rctx *state.RelayContext) protocol.UsageLogEntry {
+	return projectEntry(rctx, true)
+}
+
+// ProjectInflightEntry 把当前 rctx 投影成对外诊断使用的进行中 UsageLogEntry。
+func ProjectInflightEntry(rctx *state.RelayContext) protocol.UsageLogEntry {
+	return projectEntry(rctx, false)
+}
+
+// projectEntry 是 final usage 与 inflight 两个消费者共享的纯投影实现。
+func projectEntry(rctx *state.RelayContext, includeAutoDisableTriggers bool) protocol.UsageLogEntry {
 	if rctx == nil || rctx.State == nil {
 		return protocol.UsageLogEntry{}
 	}
 	e := projectBase(rctx)
 	projectAgentRoute(&e, rctx)
 	projectByPhase(&e, rctx)
+	if includeAutoDisableTriggers {
+		projectAutoDisableTriggers(&e, rctx.State.AutoDisableTriggers)
+	}
 	attachTraceData(&e, rctx.State.Recorder)
 	if rl := rctx.State.RateLimit; rl != nil {
 		e.RateLimitDecision = rl.Decision
@@ -31,6 +44,20 @@ func ProjectUsageEntry(rctx *state.RelayContext) protocol.UsageLogEntry {
 		e.RateLimitHits = rl.Hits
 	}
 	return e
+}
+
+func projectAutoDisableTriggers(e *protocol.UsageLogEntry, triggers []attemptproxy.ChannelAutoDisableTrigger) {
+	if e == nil || len(triggers) == 0 {
+		return
+	}
+	seen := make(map[attemptproxy.ChannelAutoDisableTrigger]struct{}, len(triggers))
+	for _, trigger := range triggers {
+		if _, ok := seen[trigger]; ok {
+			continue
+		}
+		seen[trigger] = struct{}{}
+		e.AutoDisableTriggers = append(e.AutoDisableTriggers, trigger)
+	}
 }
 
 func projectAgentRoute(e *protocol.UsageLogEntry, rctx *state.RelayContext) {

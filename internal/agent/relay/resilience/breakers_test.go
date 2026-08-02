@@ -67,3 +67,51 @@ func TestRegistry_SweepEvictsIdle(t *testing.T) {
 		t.Fatalf("idle breaker should be evicted, got %d", r.Len())
 	}
 }
+
+func TestRegistry_ReplacesBreakerWhenThresholdChanges(t *testing.T) {
+	r := NewRegistry()
+	firstCfg := testCfg()
+	firstCfg.BreakerThreshold = 5
+	first := r.Get(adminKey(7), firstCfg)
+	first.RecordFailure()
+
+	secondCfg := firstCfg
+	secondCfg.BreakerThreshold = 2
+	second := r.Get(adminKey(7), secondCfg)
+	if first == second {
+		t.Fatal("threshold change must replace the breaker")
+	}
+	second.RecordFailure()
+	if second.IsOpen() {
+		t.Fatal("replacement breaker opened before new threshold")
+	}
+	second.RecordFailure()
+	if !second.IsOpen() {
+		t.Fatal("replacement breaker must use threshold=2")
+	}
+}
+
+func TestRegistry_ReplacesBreakerWhenCooldownOrEnabledChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "cooldown", mutate: func(cfg *Config) { cfg.BreakerCooldownMs++ }},
+		{name: "enabled", mutate: func(cfg *Config) { cfg.BreakerEnabled = !cfg.BreakerEnabled }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := NewRegistry()
+			cfg := testCfg()
+			first := r.Get(adminKey(7), cfg)
+			test.mutate(&cfg)
+			second := r.Get(adminKey(7), cfg)
+			if first == second {
+				t.Fatal("changed breaker config must replace the breaker")
+			}
+			if !second.IsClosed() {
+				t.Fatal("replacement breaker must start closed")
+			}
+		})
+	}
+}

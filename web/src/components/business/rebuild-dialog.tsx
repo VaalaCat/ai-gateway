@@ -14,7 +14,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
-import { DateRangeInputs, isDateRangeValid } from "@/components/business/date-range-inputs";
+import {
+  DateRangePicker,
+  type DateRangeValue,
+  isDateRangeValid,
+} from "@/components/business/date-picker/date-range-picker";
 import {
   useInvalidateBillingCaches,
   useRebuildBillingJob,
@@ -55,6 +59,7 @@ function RebuildDialogSession({
   initialJobId,
 }: RebuildDialogProps) {
   const t = useTranslations("billing");
+  const tb = useTranslations("billing");
   const tc = useTranslations("common");
 
   const [startDate, setStartDate] = useState("");
@@ -96,7 +101,7 @@ function RebuildDialogSession({
   const job = useRebuildBillingJob(trackedJobId);
 
   const hasDate = !!(startDate || endDate);
-  const validRange = isDateRangeValid(startDate, endDate);
+  const validRange = isDateRangeValid({ startDate, endDate });
   const isRunning = job.data?.status === "running";
 
   // View resolution: 1) bound to a specific job → progress; 2) running jobs
@@ -106,6 +111,14 @@ function RebuildDialogSession({
   const showForm = !showProgress && !showPicker;
 
   const canSubmit = showForm && hasDate && validRange && !submit.isPending;
+
+  const handleDateRangeChange = ({
+    startDate: nextStartDate,
+    endDate: nextEndDate,
+  }: DateRangeValue) => {
+    setStartDate(nextStartDate);
+    setEndDate(nextEndDate);
+  };
 
   const reset = () => {
     setStartDate("");
@@ -202,11 +215,10 @@ function RebuildDialogSession({
         {showForm && (
           <>
             <p className="text-sm text-muted-foreground">{t("rebuildHint")}</p>
-            <DateRangeInputs
-              startDate={startDate}
-              endDate={endDate}
-              onStartDateChange={setStartDate}
-              onEndDateChange={setEndDate}
+            <DateRangePicker
+              label={tb("dateRange")}
+              value={{ startDate, endDate }}
+              onValueChange={handleDateRangeChange}
             />
             {!hasDate && (
               <p className="text-sm text-muted-foreground">{t("rebuildDateRequired")}</p>

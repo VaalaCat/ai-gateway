@@ -299,12 +299,14 @@ it("uses wrapping containers and break-all paths for narrow viewports", () => {
   expect(screen.getByTestId("storage-database-grid")).toHaveClass("min-w-0");
 });
 
-it("shows all three databases and every queue health field", () => {
+it("keeps operational databases and queue visible while grouping legacy data in migration", () => {
   render(<LogStorageStatus storage={STORAGE} />);
 
-  expect(screen.getByText("/data/core.db")).toBeInTheDocument();
-  expect(screen.getByText("/data/log.db")).toBeInTheDocument();
-  expect(screen.getAllByText(LONG_LEGACY_PATH).length).toBeGreaterThan(0);
+  const operationalDatabases = screen.getByTestId("storage-database-grid");
+  expect(within(operationalDatabases).getByText("/data/core.db")).toBeInTheDocument();
+  expect(within(operationalDatabases).getByText("/data/log.db")).toBeInTheDocument();
+  expect(within(operationalDatabases).queryByText(LONG_LEGACY_PATH)).not.toBeInTheDocument();
+  expect(within(screen.getByTestId("storage-migration")).getAllByText(LONG_LEGACY_PATH).length).toBeGreaterThan(0);
   expect(screen.getByText("database is locked")).toBeInTheDocument();
   for (const value of ["9", "3", "1", "4.0 KB", "1m 1s", "2", "write failed"]) {
     expect(screen.getAllByText(value).length).toBeGreaterThan(0);

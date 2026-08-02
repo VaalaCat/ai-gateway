@@ -25,7 +25,7 @@ export function ResponsiveChartFrame({
       data-testid="responsive-chart-frame"
       data-slot="responsive-chart-frame"
       className={cn(
-        "flex min-w-0 flex-col gap-3",
+        "flex min-w-0 flex-col gap-3 font-mono tabular-nums",
         legendPlacement === "responsive-side" && "lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(12rem,0.9fr)] lg:items-center",
         className,
       )}

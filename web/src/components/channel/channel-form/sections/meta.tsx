@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { FieldTip } from "@/components/business/field-tip";
 import type { ChannelTypeMeta } from "@/lib/types";
 import { ChannelForm } from "../types";
+import { getPublicDisplayNameValidationError } from "../utils";
 
 function formatTypeName(name: string, i18nKey: string, t: ReturnType<typeof useTranslations<"channels">>): string {
   if (i18nKey) { try { return t(i18nKey as never); } catch { /* fallback */ } }
@@ -61,6 +62,27 @@ export function MetaSection<Entity>({ form, setForm, channelTypes, hiddenFields,
         <Label>{tc("name")}</Label>
         <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
       </div>
+      {!hiddenFields?.has("public_display_name") && (
+        <div className="space-y-2">
+          <Label htmlFor="public_display_name">{t("publicDisplayName")}</Label>
+          <Input
+            id="public_display_name"
+            value={form.public_display_name}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (getPublicDisplayNameValidationError(value)) return;
+              setForm({ ...form, public_display_name: value });
+            }}
+          />
+          {form.public_display_name.trim() ? (
+            <p className="text-xs text-muted-foreground">
+              {t("publicDisplayNamePreview", { name: form.public_display_name })}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">{t("publicDisplayNameAutoPreview")}</p>
+          )}
+        </div>
+      )}
       <div className="space-y-2">
         <Label>{t("apiKey")}</Label>
         <Input value={form.key} onChange={(e) => setForm({ ...form, key: e.target.value })} />

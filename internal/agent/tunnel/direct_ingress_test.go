@@ -52,8 +52,9 @@ func TestDirectIngressAuthenticatesAndCompletesHandshake(t *testing.T) {
 
 func TestDirectIngressRejectsAuthenticationBeforeUpgrade(t *testing.T) {
 	fixture := newDirectIngressFixture(t)
-	_, server := fixture.start(t)
 	expires := fixture.now.Add(time.Hour)
+	fixture.ingressNow = func() time.Time { return expires }
+	_, server := fixture.start(t)
 	other := newDirectIngressFixture(t)
 	tests := []struct {
 		name   string
@@ -69,7 +70,6 @@ func TestDirectIngressRejectsAuthenticationBeforeUpgrade(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture.now = expires
 			request, err := http.NewRequest(http.MethodGet, server.URL+DirectTunnelPath+"?target_agent_id=target-a", nil)
 			require.NoError(t, err)
 			if test.ticket != "" {

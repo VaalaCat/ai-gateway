@@ -39,7 +39,9 @@ func computeRequestID(c *gin.Context) string {
 // Build 把 *gin.Context 装配成 RelayContext.Input 的 8 个字段。
 // 中间任何失败 return error；不写 UsageLog、不写 HTTP 响应——延后到 Handler 主流程兜底。
 func Build(rctx *state.RelayContext) error {
-	rctx.Input.StartTime = time.Now()
+	if rctx.Input.StartTime.IsZero() {
+		rctx.Input.StartTime = time.Now()
+	}
 	rctx.Input.RequestID = computeRequestID(rctx.Context)
 	if err := buildRoutingInput(rctx); err != nil {
 		return err

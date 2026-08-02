@@ -22,6 +22,11 @@ import { ENTITY_ADAPTERS, type EntityName } from "./registry";
 import type { AdminScope, EntityAdapter } from "./types";
 
 const PAGE_SIZE = 50;
+const PICKER_HEIGHTS = {
+  xs: "h-7",
+  sm: "h-8",
+  default: "h-full",
+} as const;
 
 interface EntityPickerProps {
   entity: EntityName;
@@ -30,8 +35,8 @@ interface EntityPickerProps {
   placeholder?: string;
   className?: string;
   disabled?: boolean;
-  /** sm = 工具栏紧凑档(h-8);默认档保持 h-full 拉伸行为不变。 */
-  size?: "sm" | "default";
+  /** Compact toolbar sizes: xs = h-7, sm = h-8; default preserves h-full stretching. */
+  size?: keyof typeof PICKER_HEIGHTS;
   /** Token 等 owner-scoped entity 的显式所有者；设置后优先于 self/all scope。 */
   ownerUserId?: number;
 }
@@ -86,7 +91,7 @@ export function EntityPicker({
             disabled={disabled}
             className={cn(
               "w-full justify-between font-normal text-body",
-              size === "sm" ? "h-8" : "h-full",
+              PICKER_HEIGHTS[size],
             )}
           >
             <span

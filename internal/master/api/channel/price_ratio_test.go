@@ -1,6 +1,9 @@
 package channel
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestValidatePriceRatio(t *testing.T) {
 	cases := []struct {
@@ -15,6 +18,9 @@ func TestValidatePriceRatio(t *testing.T) {
 		{"upper bound ok", 1000, false},
 		{"negative rejected", -0.1, true},
 		{"over max rejected", 1000.1, true},
+		{"nan rejected", math.NaN(), true},
+		{"positive infinity rejected", math.Inf(1), true},
+		{"negative infinity rejected", math.Inf(-1), true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

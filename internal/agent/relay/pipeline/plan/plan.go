@@ -39,7 +39,7 @@ func NewSolver(aff *affinity.Engine) Solver {
 		Sorter:       priorityWeightedSorter{},
 		Picker:       defaultModePicker{},
 		Affinity:     aff,
-		Filters:      []CandidateFilter{byokOnlyFilter{}, quotaFilter{}},
+		Filters:      defaultCandidateFilters(),
 	}
 }
 

@@ -1,6 +1,10 @@
 package private_channel
 
 import (
+	"encoding/json"
+	"errors"
+	"math"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -8,6 +12,10 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // seedBYOKChannelDaily 往 channel_daily_billings 写一条 BYOK 行（owner_type='private'），
@@ -15,18 +23,67 @@ import (
 // pchanID/ownerID 由调用方负责保证 private_channels 已 seed。
 func seedBYOKChannelDaily(t *testing.T, h *Handler, pchanID uint, log *models.UsageLog) {
 	t.Helper()
-	q := dao.NewAdminMutation(dao.NewContext(h.App))
 	log.PrivateChannelID = pchanID
 	log.OwnerType = "private"
 	if log.CreatedAt == 0 {
 		log.CreatedAt = time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC).Unix()
 	}
-	if err := q.Billing().UpsertChannelDaily(log); err != nil {
-		t.Fatalf("upsert channel daily: %v", err)
+	success, failed := int64(0), int64(1)
+	if log.Status == 1 {
+		success, failed = 1, 0
 	}
+	daily := models.ChannelDailyBilling{
+		Date: time.Unix(log.CreatedAt, 0).UTC().Format("2006-01-02"), PrivateChannelID: pchanID,
+		OwnerType: "private", RequestCount: 1, SuccessCount: success, FailedCount: failed,
+		PromptTokens: int64(log.PromptTokens), CompletionTokens: int64(log.CompletionTokens),
+		CacheReadTokens: int64(log.CacheReadTokens), CacheWriteTokens: int64(log.CacheWriteTokens),
+		InputCost: log.InputCost, OutputCost: log.OutputCost, TotalCost: log.TotalCost,
+		RawCost: log.RawTotal(), LastUsedAt: log.CreatedAt,
+	}
+	db := billingLogTestDB(t, h)
+	var existing models.ChannelDailyBilling
+	err := db.Where("date = ? AND channel_id = ? AND private_channel_id = ?", daily.Date, daily.ChannelID, daily.PrivateChannelID).First(&existing).Error
+	if err == nil {
+		existing.RequestCount += daily.RequestCount
+		existing.SuccessCount += daily.SuccessCount
+		existing.FailedCount += daily.FailedCount
+		existing.PromptTokens += daily.PromptTokens
+		existing.CompletionTokens += daily.CompletionTokens
+		existing.CacheReadTokens += daily.CacheReadTokens
+		existing.CacheWriteTokens += daily.CacheWriteTokens
+		existing.InputCost += daily.InputCost
+		existing.OutputCost += daily.OutputCost
+		existing.TotalCost += daily.TotalCost
+		existing.RawCost += daily.RawCost
+		existing.LastUsedAt = daily.LastUsedAt
+		err = db.Save(&existing).Error
+	} else if errors.Is(err, gorm.ErrRecordNotFound) {
+		err = db.Create(&daily).Error
+	}
+	if err != nil {
+		t.Fatalf("seed channel daily: %v", err)
+	}
+	q := dao.NewAdminMutation(dao.NewContext(h.App))
 	if err := q.UsageLog().Create(log); err != nil {
 		t.Fatalf("create usage_log: %v", err)
 	}
+}
+
+func billingLogTestDB(t *testing.T, h *Handler) *gorm.DB {
+	t.Helper()
+	if db := h.App.GetLogDB(); db != nil {
+		return db
+	}
+	path := filepath.Join(t.TempDir(), "billing-log.db")
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	require.NoError(t, models.MigrateLogDB(db))
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	h.App.SetLogDB(db)
+	h.App.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	return db
 }
 
 // uniqLog 给 usage_log 填一个唯一 request_id，避免 uniqueIndex 冲突。
@@ -353,3 +410,136 @@ func TestBillingByModel_BYOK_SplitsTokenAndCost(t *testing.T) {
 		t.Fatalf("total_tokens semantic = prompt+completion = %d, want 1200", item.TotalTokens)
 	}
 }
+
+func TestBillingTokenUnitsAndRawCostExtendBYOKResponsesWithoutChangingTotalTokens(t *testing.T) {
+	h, ctx, db := newHandlerTestCtx(t)
+	require.NoError(t, db.Create(&models.PrivateChannel{Name: "key", OwnerID: 1, ChannelCore: models.ChannelCore{Type: 1}}).Error)
+	seedBYOKChannelDaily(t, h, 1, &models.UsageLog{
+		UserID: 1, ModelName: "gpt-4o", Status: 1, RequestID: "token-units",
+		PromptTokens: 1_000, CompletionTokens: 200, CacheReadTokens: 500, CacheWriteTokens: 50,
+		RawInputCost: int64PointerForBillingTest(100), RawOutputCost: int64PointerForBillingTest(200),
+		RawCacheReadCost: int64PointerForBillingTest(30), RawCacheWriteCost: int64PointerForBillingTest(40),
+		InputCost: 10, OutputCost: 20, CacheReadCost: 3, CacheWriteCost: 4, TotalCost: 37,
+	})
+
+	overview, err := h.BillingOverview(ctx, BillingRangeRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int64(1_200), overview.TotalTokens, "legacy total_tokens must remain prompt+completion")
+	require.Equal(t, int64(1_750), overview.TotalTokenUnits)
+	require.Equal(t, int64PointerForBillingTest(370), overview.ReferenceCost)
+	require.Equal(t, int64(1_750), overview.DailySeries[0].TotalTokenUnits)
+	require.Equal(t, int64PointerForBillingTest(370), overview.DailySeries[0].ReferenceCost)
+
+	byChannel, err := h.BillingByChannel(ctx, BillingRangeRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int64(1_200), byChannel.Items[0].TotalTokens)
+	require.Equal(t, int64(1_750), byChannel.Items[0].TotalTokenUnits)
+	require.Equal(t, int64PointerForBillingTest(370), byChannel.Items[0].ReferenceCost)
+
+	byModel, err := h.BillingByModel(ctx, BillingRangeRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int64(1_200), byModel.Items[0].TotalTokens)
+	require.Equal(t, int64(1_750), byModel.Items[0].TotalTokenUnits)
+	require.Equal(t, int64PointerForBillingTest(370), byModel.Items[0].ReferenceCost)
+
+	payload, err := json.Marshal(byModel.Items[0])
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+		"model_name":"gpt-4o","request_count":1,"success_count":1,"failed_count":0,"success_rate":1,
+		"total_tokens":1200,"total_token_units":1750,"prompt_tokens":1000,"completion_tokens":200,
+		"cache_read_tokens":500,"cache_write_tokens":50,"input_cost":10,"output_cost":20,
+		"total_cost":37,"reference_cost":370
+	}`, string(payload))
+}
+
+func TestBillingReferenceCostIsNullForLegacyBYOKFacts(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		gatewayCost int64
+	}{
+		{name: "free legacy row", gatewayCost: 0},
+		{name: "service fee legacy row", gatewayCost: 7},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, ctx, db := newHandlerTestCtx(t)
+			require.NoError(t, db.Create(&models.PrivateChannel{Name: "legacy", OwnerID: 1, ChannelCore: models.ChannelCore{Type: 1}}).Error)
+			seedBYOKChannelDaily(t, h, 1, &models.UsageLog{
+				UserID: 1, ModelName: "gpt-4o", Status: 1, RequestID: "legacy",
+				PromptTokens: 1, TotalCost: tt.gatewayCost,
+			})
+
+			overview, err := h.BillingOverview(ctx, BillingRangeRequest{})
+			require.NoError(t, err)
+			require.Nil(t, overview.ReferenceCost)
+			require.Nil(t, overview.DailySeries[0].ReferenceCost)
+			require.Equal(t, tt.gatewayCost, overview.TotalCost, "gateway charge stays known")
+
+			byChannel, err := h.BillingByChannel(ctx, BillingRangeRequest{})
+			require.NoError(t, err)
+			require.Nil(t, byChannel.Items[0].ReferenceCost)
+			require.Equal(t, tt.gatewayCost, byChannel.Items[0].TotalCost)
+
+			byModel, err := h.BillingByModel(ctx, BillingRangeRequest{})
+			require.NoError(t, err)
+			require.Nil(t, byModel.Items[0].ReferenceCost)
+			payload, err := json.Marshal(byModel.Items[0])
+			require.NoError(t, err)
+			require.Contains(t, string(payload), `"reference_cost":null`)
+		})
+	}
+}
+
+func TestBillingHandlersPropagateTokenAndReferenceOverflow(t *testing.T) {
+	t.Run("overview four bucket overflow", func(t *testing.T) {
+		h, ctx, core := newHandlerTestCtx(t)
+		require.NoError(t, core.Create(&models.PrivateChannel{Name: "overflow", OwnerID: 1, ChannelCore: models.ChannelCore{Type: 1}}).Error)
+		logDB := billingLogTestDB(t, h)
+		require.NoError(t, logDB.Create(&models.ChannelDailyBilling{
+			Date: "2026-05-17", PrivateChannelID: 1, OwnerType: "private", RequestCount: 1,
+			PromptTokens: math.MaxInt64, CompletionTokens: 1,
+		}).Error)
+
+		got, err := h.BillingOverview(ctx, BillingRangeRequest{})
+
+		require.Equal(t, BillingOverviewResponse{}, got)
+		require.ErrorContains(t, err, "overflow")
+	})
+
+	t.Run("by channel cross row reference overflow", func(t *testing.T) {
+		h, ctx, core := newHandlerTestCtx(t)
+		require.NoError(t, core.Create(&models.PrivateChannel{Name: "overflow", OwnerID: 1, ChannelCore: models.ChannelCore{Type: 1}}).Error)
+		seedBYOKChannelDaily(t, h, 1, &models.UsageLog{
+			UserID: 1, ModelName: "gpt-4o", Status: 1, RequestID: "max",
+			RawInputCost: int64PointerForBillingTest(math.MaxInt64),
+			CreatedAt:    time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC).Unix(),
+		})
+		seedBYOKChannelDaily(t, h, 1, &models.UsageLog{
+			UserID: 1, ModelName: "gpt-4o", Status: 1, RequestID: "one",
+			RawInputCost: int64PointerForBillingTest(1),
+			CreatedAt:    time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC).Unix(),
+		})
+
+		got, err := h.BillingByChannel(ctx, BillingRangeRequest{})
+
+		require.Equal(t, ByChannelResponse{}, got)
+		require.ErrorContains(t, err, "overflow")
+	})
+
+	t.Run("by model four bucket overflow", func(t *testing.T) {
+		h, ctx, core := newHandlerTestCtx(t)
+		require.NoError(t, core.Create(&models.PrivateChannel{Name: "overflow", OwnerID: 1, ChannelCore: models.ChannelCore{Type: 1}}).Error)
+		logDB := billingLogTestDB(t, h)
+		require.NoError(t, logDB.Create(&models.RequestLog{
+			RequestID: "model-overflow", OwnerType: "private", PrivateChannelID: 1,
+			ModelName: "gpt-4o", PromptTokens: int(math.MaxInt64), CompletionTokens: 1,
+			RawInputCost: int64PointerForBillingTest(0), CreatedAt: time.Now().Unix(),
+		}).Error)
+
+		got, err := h.BillingByModel(ctx, BillingRangeRequest{})
+
+		require.Equal(t, ByModelResponse{}, got)
+		require.ErrorContains(t, err, "overflow")
+	})
+}
+
+func int64PointerForBillingTest(value int64) *int64 { return &value }

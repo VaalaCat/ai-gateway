@@ -264,18 +264,18 @@ test("wires raw system setting units to human-readable number hints", () => {
   const handleSaveStart = systemPageSource.indexOf(
     "const handleSaveSettings =",
   );
-  const handlePreviewStart = systemPageSource.indexOf(
-    "const handlePreview =",
+  const saveActionStart = systemPageSource.indexOf(
+    "const saveAction:",
     handleSaveStart,
   );
   assert.ok(handleSaveStart >= 0, "handleSaveSettings should exist");
   assert.ok(
-    handlePreviewStart > handleSaveStart,
-    "handlePreview should follow handleSaveSettings",
+    saveActionStart > handleSaveStart,
+    "saveAction should follow handleSaveSettings",
   );
   const handleSaveSettings = systemPageSource.slice(
     handleSaveStart,
-    handlePreviewStart,
+    saveActionStart,
   );
   const compactHandleSaveSettings = handleSaveSettings
     .replace(/,\s*\)/g, ")")

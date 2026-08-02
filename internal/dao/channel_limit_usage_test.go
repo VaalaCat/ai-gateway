@@ -1,13 +1,18 @@
 package dao
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/stretchr/testify/require"
 )
 
 func TestChannelWindowUsage(t *testing.T) {
-	ctx, db := setupAdminContext(t)
+	core, db := setupStrictSplitDBs(t)
+	forbidCoreBillingFactQueries(t, core)
+	ctx := NewContext(&testApp{db: core, logDB: db, layoutMode: app.DatabaseLayoutSplit})
 	q := NewAdminQuery(ctx).Channel()
 
 	// channel 5: 三天数据(raw_cost 与 total_cost 不同,模拟折扣/免费);channel 6 / BYOK 行: 干扰
@@ -63,4 +68,13 @@ func TestChannelWindowUsage(t *testing.T) {
 			t.Fatalf("calls=%d billed=%d raw=%d want 0/0/0", u.Calls, u.BilledCost, u.RawCost)
 		}
 	})
+}
+
+func TestChannelWindowUsageReturnsLogDatabaseUnavailable(t *testing.T) {
+	core, _ := setupStrictSplitDBs(t)
+	q := NewAdminQuery(NewContext(&testApp{db: core, layoutMode: app.DatabaseLayoutSplit})).Channel()
+
+	_, err := q.ChannelWindowUsage(1, WindowFilter{Kind: "all"})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrLogDatabaseUnavailable))
 }

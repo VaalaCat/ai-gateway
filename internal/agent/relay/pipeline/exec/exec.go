@@ -248,6 +248,7 @@ func (e *Executor) recordOutcome(
 	out.AgentRouteID = route.AgentRouteID
 	out.AgentRouteKind = string(route.Kind)
 	out.AgentRoutePath = outcome.Path
+	rctx.State.AutoDisableTriggers = append(rctx.State.AutoDisableTriggers, outcome.AutoDisableTriggers...)
 	record := buildAttemptRecord(idx+1, attempt, route, outcome)
 	if rctx.State.Recorder != nil {
 		recordAttemptTrace(rctx.State.Recorder, outcome)

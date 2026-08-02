@@ -5,8 +5,99 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
+
+func TestPrivateChannelAutoDisableRequiresEnabledMatchingRevision(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		autoBan    int
+		revision   uint64
+		triggerRev uint64
+		wantUpdate bool
+	}{
+		{name: "matching enabled channel", status: 1, autoBan: 1, revision: 7, triggerRev: 7, wantUpdate: true},
+		{name: "stale revision", status: 1, autoBan: 1, revision: 8, triggerRev: 7},
+		{name: "auto ban disabled", status: 1, autoBan: 0, revision: 7, triggerRev: 7},
+		{name: "historical non-binary auto ban", status: 1, autoBan: 2, revision: 7, triggerRev: 7},
+		{name: "already disabled", status: 0, autoBan: 1, revision: 7, triggerRev: 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, db := setupTestApp(t)
+			channel := &models.PrivateChannel{ChannelCore: models.ChannelCore{
+				Name: tt.name, Type: 1, Status: 1, AutoBan: tt.autoBan, AutoBanRevision: tt.revision,
+			}, OwnerID: 42}
+			require.NoError(t, db.Create(channel).Error)
+			require.NoError(t, db.Model(channel).UpdateColumns(map[string]any{
+				"status": tt.status, "auto_ban": tt.autoBan, "updated_at": int64(1),
+			}).Error)
+
+			state := models.ChannelDisableState{Tripped: true, Reason: "consecutive_errors", TrippedAt: 123}
+			result, err := NewAdminMutation(NewContext(a)).PrivateChannel().AutoDisable(channel.ID, tt.triggerRev, state)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantUpdate, result.Updated)
+			if tt.wantUpdate {
+				require.Equal(t, uint(42), result.OwnerID)
+			} else {
+				require.Zero(t, result.OwnerID)
+			}
+
+			got, err := NewAdminQuery(NewContext(a)).PrivateChannel().GetByID(channel.ID)
+			require.NoError(t, err)
+			if tt.wantUpdate {
+				require.Zero(t, got.Status)
+				require.Equal(t, state, got.AutoBanState.Data())
+				require.Greater(t, got.UpdatedAt, int64(1))
+			} else {
+				require.Equal(t, tt.status, got.Status)
+				require.False(t, got.AutoBanState.Data().Tripped)
+				require.Equal(t, int64(1), got.UpdatedAt)
+			}
+			require.Equal(t, tt.revision, got.AutoBanRevision)
+		})
+	}
+}
+
+func TestPrivateChannelAutoDisableUnknownIDIsNoop(t *testing.T) {
+	a, _ := setupTestApp(t)
+	result, err := NewAdminMutation(NewContext(a)).PrivateChannel().AutoDisable(9999, 0, models.ChannelDisableState{Tripped: true})
+	require.NoError(t, err)
+	require.False(t, result.Updated)
+	require.Zero(t, result.OwnerID)
+}
+
+func TestPrivateChannelAutoDisableReadsOwnerBeforeMutation(t *testing.T) {
+	a, db := setupTestApp(t)
+	channel := &models.PrivateChannel{ChannelCore: models.ChannelCore{
+		Name: "owner ordering", Type: 1, Status: 1, AutoBan: 1, AutoBanRevision: 2,
+	}, OwnerID: 42}
+	require.NoError(t, db.Create(channel).Error)
+
+	var operations []string
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:auto_disable_owner_query", func(tx *gorm.DB) {
+		if tx.Statement.Table == "private_channels" {
+			operations = append(operations, "query")
+		}
+	}))
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:auto_disable_update", func(tx *gorm.DB) {
+		if tx.Statement.Table == "private_channels" {
+			operations = append(operations, "update")
+		}
+	}))
+
+	result, err := NewAdminMutation(NewContext(a)).PrivateChannel().AutoDisable(
+		channel.ID, 2, models.ChannelDisableState{Tripped: true},
+	)
+	require.NoError(t, err)
+	require.True(t, result.Updated)
+	require.Equal(t, uint(42), result.OwnerID)
+	require.Equal(t, []string{"query", "update"}, operations)
+}
 
 func TestPrivateChannel_GetByID(t *testing.T) {
 	a, db := setupTestApp(t)

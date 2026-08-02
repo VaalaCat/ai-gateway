@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/glebarez/sqlite"
@@ -121,6 +122,101 @@ func TestLogBatchWriterTraceConflictIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestLogBatchWriterMaintainsDailyBilling(t *testing.T) {
+	db := newLogTestDB(t)
+	writer := LogBatchWriter{DBFinder: func() *gorm.DB { return db }}
+	logs := dailyBillingFixture()
+
+	for _, log := range logs {
+		batch := BuildRequestAggregateBatch(log)
+		require.NoError(t, writer.Write(t.Context(), []LogBatch{batch}))
+	}
+
+	var token models.TokenDailyBilling
+	require.NoError(t, db.Where("date = ? AND user_id = ? AND token_id = ?", "2026-07-24", 7, 70).First(&token).Error)
+	require.Equal(t, "renamed-free-token", token.TokenName, "the newest request snapshot wins")
+	require.EqualValues(t, 2, token.RequestCount)
+	require.EqualValues(t, 1, token.SuccessCount)
+	require.EqualValues(t, 1, token.FailedCount)
+	require.EqualValues(t, 23, token.PromptTokens)
+	require.EqualValues(t, 12, token.CompletionTokens)
+	require.EqualValues(t, 7, token.CacheReadTokens)
+	require.EqualValues(t, 3, token.CacheWriteTokens)
+	require.EqualValues(t, 150, token.InputCost)
+	require.EqualValues(t, 90, token.OutputCost)
+	require.EqualValues(t, 240, token.TotalCost)
+	require.EqualValues(t, time.Date(2026, 7, 24, 11, 0, 0, 0, time.UTC).Unix(), token.LastUsedAt)
+
+	var admin models.ChannelDailyBilling
+	require.NoError(t, db.Where("date = ? AND channel_id = ? AND private_channel_id = ?", "2026-07-24", 10, 0).First(&admin).Error)
+	require.Equal(t, "admin-renamed-free", admin.ChannelName)
+	require.Equal(t, 2, admin.ChannelType)
+	require.Equal(t, "admin", admin.OwnerType)
+	require.EqualValues(t, 2, admin.RequestCount)
+	require.EqualValues(t, 1, admin.SuccessCount)
+	require.EqualValues(t, 1, admin.FailedCount)
+	require.EqualValues(t, 240, admin.TotalCost)
+	require.EqualValues(t, 900, admin.RawCost)
+
+	var private models.ChannelDailyBilling
+	require.NoError(t, db.Where("date = ? AND channel_id = ? AND private_channel_id = ?", "2026-07-24", 0, 30).First(&private).Error)
+	require.Equal(t, "private", private.OwnerType)
+	require.Equal(t, "byok", private.ChannelName)
+	require.Equal(t, 9, private.ChannelType)
+	require.EqualValues(t, 1, private.RequestCount)
+	require.EqualValues(t, 120, private.TotalCost)
+	require.EqualValues(t, 300, private.RawCost)
+}
+
+func TestLogBatchWriterDailyBillingFailureRollsBackAllRows(t *testing.T) {
+	for _, target := range []struct {
+		name  string
+		model any
+	}{
+		{name: "token daily", model: &models.TokenDailyBilling{}},
+		{name: "channel daily", model: &models.ChannelDailyBilling{}},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			db := newLogTestDB(t)
+			require.NoError(t, db.Migrator().DropTable(target.model))
+			batch := completeTestBatch("daily-rollback-" + target.name)
+			batch.TokenDaily = []models.TokenDailyBilling{{Date: "2026-07-24", UserID: 7, TokenID: 70, RequestCount: 1}}
+			batch.ChannelDaily = []models.ChannelDailyBilling{{Date: "2026-07-24", ChannelID: 10, RequestCount: 1}}
+
+			err := (&LogBatchWriter{DBFinder: func() *gorm.DB { return db }}).Write(t.Context(), []LogBatch{batch})
+
+			require.Error(t, err)
+			requireCounts(t, db, map[any]int64{
+				&models.RequestLog{}: 0, &models.RequestTrace{}: 0,
+				&models.UsageHourlyBucket{}: 0, &models.UsageDurationHistogram{}: 0,
+				&models.UsageTTFTHistogram{}: 0, &models.UsageTPSHistogram{}: 0,
+				&models.UsageUserTTFTHistogram{}: 0, &models.UsageUserTPSHistogram{}: 0,
+			})
+			if target.name == "token daily" {
+				requireCounts(t, db, map[any]int64{&models.ChannelDailyBilling{}: 0})
+			} else {
+				requireCounts(t, db, map[any]int64{&models.TokenDailyBilling{}: 0})
+			}
+		})
+	}
+}
+
+func TestLogBatchWriterDailyBillingDuplicateRequestIsExactlyOnce(t *testing.T) {
+	db := newLogTestDB(t)
+	writer := LogBatchWriter{DBFinder: func() *gorm.DB { return db }}
+	batch := BuildRequestAggregateBatch(dailyBillingFixture()[0])
+
+	require.NoError(t, writer.Write(t.Context(), []LogBatch{batch}))
+	require.NoError(t, writer.Write(t.Context(), []LogBatch{batch}))
+
+	var token models.TokenDailyBilling
+	require.NoError(t, db.First(&token).Error)
+	require.EqualValues(t, 1, token.RequestCount)
+	var channel models.ChannelDailyBilling
+	require.NoError(t, db.First(&channel).Error)
+	require.EqualValues(t, 1, channel.RequestCount)
+}
+
 func newLogTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -143,6 +239,32 @@ func completeTestBatch(requestID string) LogBatch {
 		TPS:      []models.UsageTPSHistogram{{Date: "2026-07-23", Hour: 7, ChannelID: 2, ModelName: "gpt-test", AgentID: "a", H3: 1, MaxTps: 30}},
 		UserTTFT: []models.UsageUserTTFTHistogram{{Date: "2026-07-23", Hour: 7, UserID: 7, ModelName: "gpt-test", H1: 1, MaxFirstResponseMs: 10}},
 		UserTPS:  []models.UsageUserTPSHistogram{{Date: "2026-07-23", Hour: 7, UserID: 7, ModelName: "gpt-test", H3: 1, MaxTps: 30}},
+	}
+}
+
+func dailyBillingFixture() []models.UsageLog {
+	paidAt := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC).Unix()
+	freeAt := time.Date(2026, 7, 24, 11, 0, 0, 0, time.UTC).Unix()
+	byokAt := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC).Unix()
+	paidRawInput, paidRawOutput := int64(300), int64(300)
+	freeRawInput, freeRawOutput := int64(150), int64(150)
+	byokRawInput, byokRawOutput := int64(100), int64(200)
+	return []models.UsageLog{
+		{
+			RequestID: "daily-paid", UserID: 7, TokenID: 70, TokenName: "paid-token", ChannelID: 10, OwnerType: "admin", ChannelName: "admin", ChannelType: 1,
+			Status: 1, PromptTokens: 20, CompletionTokens: 10, CacheReadTokens: 6, CacheWriteTokens: 2, InputCost: 150, OutputCost: 90, TotalCost: 240,
+			RawInputCost: &paidRawInput, RawOutputCost: &paidRawOutput, CreatedAt: paidAt,
+		},
+		{
+			RequestID: "daily-free", UserID: 7, TokenID: 70, TokenName: "renamed-free-token", ChannelID: 10, OwnerType: "admin", ChannelName: "admin-renamed-free", ChannelType: 2,
+			Free: true, Status: 0, PromptTokens: 3, CompletionTokens: 2, CacheReadTokens: 1, CacheWriteTokens: 1,
+			RawInputCost: &freeRawInput, RawOutputCost: &freeRawOutput, CreatedAt: freeAt,
+		},
+		{
+			RequestID: "daily-byok", UserID: 8, TokenID: 80, TokenName: "byok-token", PrivateChannelID: 30, OwnerType: "private", ChannelName: "byok", ChannelType: 9,
+			Free: true, Status: 1, PromptTokens: 4, CompletionTokens: 1, CacheReadTokens: 2, CacheWriteTokens: 1, InputCost: 80, OutputCost: 40, TotalCost: 120,
+			RawInputCost: &byokRawInput, RawOutputCost: &byokRawOutput, CreatedAt: byokAt,
+		},
 	}
 }
 

@@ -46,9 +46,10 @@ import { EntityLabel } from "@/components/business/entity-label";
 import { TokenDetailPanel } from "@/components/business/token-detail-panel";
 import { TokenTraceBadge, TokenTraceFields } from "@/components/business/token-trace-fields";
 import {
-  DateRangeInputs,
+  DateRangePicker,
+  type DateRangeValue,
   isDateRangeValid,
-} from "@/components/business/date-range-inputs";
+} from "@/components/business/date-picker/date-range-picker";
 import { DateTimePicker } from "@/components/business/date-picker/date-time-picker";
 
 import { useBillingOverview, useTokenBilling } from "@/lib/api/billing";
@@ -102,7 +103,7 @@ function TokensPageContent() {
   const tTpl = useTranslations("tokenTemplates");
 
   const { user, isAdmin, loading } = useAuth();
-  const capabilities = useCapabilities();
+  const capabilities = useCapabilities(user?.user_id);
   const canEditModelWhitelist =
     capabilities.data?.token.can_edit_model_whitelist === true;
 
@@ -148,8 +149,17 @@ function TokensPageContent() {
   const [billingPageSize, setBillingPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
   const [billingStartDate, setBillingStartDate] = useState("");
   const [billingEndDate, setBillingEndDate] = useState("");
-  const billingDateValid = isDateRangeValid(billingStartDate, billingEndDate);
+  const billingDateValid = isDateRangeValid({
+    startDate: billingStartDate,
+    endDate: billingEndDate,
+  });
   const showBillingView = !loading && !isAdmin;
+
+  const handleBillingRangeChange = ({ startDate, endDate }: DateRangeValue) => {
+    setBillingStartDate(startDate);
+    setBillingEndDate(endDate);
+    setBillingPage(1);
+  };
 
   const { data, isLoading } = useTokens({
     page,
@@ -521,17 +531,10 @@ function TokensPageContent() {
             <p className="text-body text-muted-foreground">{t("billingDescription")}</p>
           </div>
 
-          <DateRangeInputs
-            startDate={billingStartDate}
-            endDate={billingEndDate}
-            onStartDateChange={(d) => {
-              setBillingStartDate(d);
-              setBillingPage(1);
-            }}
-            onEndDateChange={(d) => {
-              setBillingEndDate(d);
-              setBillingPage(1);
-            }}
+          <DateRangePicker
+            label={tb("dateRange")}
+            value={{ startDate: billingStartDate, endDate: billingEndDate }}
+            onValueChange={handleBillingRangeChange}
           />
 
           <div className="grid gap-3 md:grid-cols-4">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Loader2, MoreHorizontal, Search, SlidersHorizontal } from "lucide-react";
@@ -27,10 +27,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { FilterField } from "@/components/business/filter-bar";
-import { DatePicker, parseDateStr } from "@/components/business/date-picker/date-picker";
+import { DateRangePicker } from "@/components/business/date-picker/date-range-picker";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useAuth } from "@/lib/auth";
-import { tsToDateStr, dateStrToTs } from "@/lib/utils/date-range";
+import {
+  buildCompleteDateRange,
+  dateStrToTs,
+  isFiniteUnixSeconds,
+  tsToDateStr,
+} from "@/lib/utils/date-range";
 
 import type { FilterSpec, FilterValues, FilterContext } from "./filter-spec";
 import type { ToolbarAction } from "./toolbar-actions";
@@ -71,8 +76,6 @@ export function FilterableToolbar({
 
   const secondary = secondaryActions ?? [];
   const shouldCollapse = secondary.length >= SECONDARY_COLLAPSE_THRESHOLD;
-  const hasActions = primaryAction !== undefined || secondary.length > 0 || secondaryContent !== undefined;
-
   const entries = Object.entries(spec).filter(
     ([, def]) => !def.visible || def.visible(ctx),
   );
@@ -81,15 +84,21 @@ export function FilterableToolbar({
   const activeAdvancedCount = advanced.filter(([key]) =>
     isActiveFilterValue(value[key]),
   ).length;
+  const hasActions =
+    advanced.length > 0 ||
+    primaryAction !== undefined ||
+    secondary.length > 0 ||
+    secondaryContent !== undefined;
+  const fitsTwoMobileRows = primary.length <= 3;
 
   return (
-    <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-end md:justify-between md:gap-4">
-      {entries.length > 0 && (
+    <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:flex-wrap sm:items-end sm:justify-between sm:gap-3 md:gap-4">
+      {primary.length > 0 && (
         <div
           data-slot="toolbar-filters"
           className={cn(
-            "flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end",
-            filtersOnOwnRow ? "sm:gap-2 md:basis-full" : "sm:gap-3 md:flex-1",
+            "contents min-w-0 flex-1 sm:flex sm:flex-row sm:flex-wrap sm:items-end",
+            filtersOnOwnRow ? "sm:gap-2 md:basis-full" : "sm:gap-3",
           )}
         >
           {primary.map(([key, def]) => (
@@ -101,6 +110,19 @@ export function FilterableToolbar({
               onChange={onChange}
             />
           ))}
+        </div>
+      )}
+
+      {hasActions && (
+        <div
+          data-slot="toolbar-actions"
+          className={cn(
+            "flex min-w-0 shrink-0 self-end flex-wrap items-center justify-end gap-2 sm:col-auto sm:row-auto",
+            fitsTwoMobileRows && primary.length > 0 && "col-start-2 row-start-2",
+            primary.length === 0 && "col-span-2",
+            (filtersOnOwnRow || entries.length === 0) && "md:ml-auto",
+          )}
+        >
           {advanced.length > 0 && (
             <AdvancedFiltersPopover
               entries={advanced}
@@ -110,17 +132,6 @@ export function FilterableToolbar({
               label={tc("filters")}
             />
           )}
-        </div>
-      )}
-
-      {hasActions && (
-        <div
-          data-slot="toolbar-actions"
-          className={cn(
-            "flex flex-wrap items-center gap-2 md:shrink-0",
-            (filtersOnOwnRow || entries.length === 0) && "md:ml-auto",
-          )}
-        >
           {secondaryContent}
           {secondary.length > 0 && (
             <div className="sm:hidden">
@@ -159,7 +170,8 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
       <TimeRangeFilter
         value={value}
         onChange={onChange}
-        labels={{ start: tb("startDate"), end: tb("endDate") }}
+        label={tb("dateRange")}
+        maxDays={def.maxHourDays}
         fullWidth={fullWidth}
       />
     );
@@ -167,14 +179,18 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
   if (def.kind === "picker") {
     const label = def.label ?? def.placeholder ?? tep(`label.${def.entity}` as never) ?? fieldKey;
     return (
-      <FilterField label={label} className={fullWidth ? "w-full" : undefined}>
+      <FilterField label={label} className="w-full sm:w-auto">
         <EntityPicker
+          key={def.entity}
           entity={def.entity}
           size="sm"
           value={String(value[fieldKey] ?? "")}
           onChange={(v) => onChange({ [fieldKey]: v })}
           placeholder={tc("all")}
-          className={cn("w-full", !fullWidth && "sm:w-40")}
+          className={cn(
+            "w-full [&_button[role=combobox]]:h-9 sm:[&_button[role=combobox]]:h-8",
+            !fullWidth && "sm:w-40",
+          )}
         />
       </FilterField>
     );
@@ -184,14 +200,14 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
     const includeAll = def.includeAll !== false;
     const label = def.label ?? def.placeholder ?? fieldKey;
     return (
-      <FilterField label={label} className={fullWidth ? "w-full" : undefined}>
+      <FilterField label={label} className="w-full sm:w-auto">
         <Select
           value={current || "__all__"}
           onValueChange={(v) =>
             onChange({ [fieldKey]: v === "__all__" ? "" : v })
           }
         >
-          <SelectTrigger size="sm" className={cn("w-full", !fullWidth && "sm:w-40")}>
+          <SelectTrigger size="sm" className={cn("!h-9 w-full sm:!h-8", !fullWidth && "sm:w-40")}>
             <SelectValue placeholder={def.placeholder} />
           </SelectTrigger>
           <SelectContent>
@@ -213,7 +229,7 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
   return (
     <FilterField
       label={def.label ?? def.placeholder ?? fieldKey}
-      className={fullWidth ? "w-full" : undefined}
+      className="w-full sm:w-auto"
     >
       <DebouncedTextFilter
         placeholder={def.placeholder}
@@ -229,48 +245,39 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
 interface TimeRangeFilterProps {
   value: FilterValues;
   onChange: (next: Partial<FilterValues>) => void;
-  labels: { start: string; end: string };
+  label: string;
+  maxDays?: number;
   fullWidth?: boolean;
 }
 
-function TimeRangeFilter({ value, onChange, labels, fullWidth }: TimeRangeFilterProps) {
-  // 复用 date-range-inputs.tsx 非紧凑档惯例:Label 已经表达字段含义,
-  // DatePicker placeholder 用通用「选择日期」,避免与 FilterField label 重复文案。
-  const tc = useTranslations("common");
-  const start = Number(value.start ?? 0);
-  const end = Number(value.end ?? 0);
-  const startStr = tsToDateStr(start);
-  const endStr = end > 0 ? tsToDateStr(end - 86400) : "";
-  const startParsed = parseDateStr(startStr);
-  const endParsed = parseDateStr(endStr);
+function TimeRangeFilter({ value, onChange, label, maxDays, fullWidth }: TimeRangeFilterProps) {
+  const displayRange = buildCompleteDateRange(
+    isFiniteUnixSeconds(value.start) ? tsToDateStr(value.start) : "",
+    isFiniteUnixSeconds(value.end) ? tsToDateStr(value.end) : "",
+    maxDays,
+  );
 
   return (
-    <>
-      <FilterField label={labels.start} className={fullWidth ? "w-full" : undefined}>
-        <DatePicker
-          size="sm"
-          value={startStr}
-          onChange={(s) => onChange({ start: dateStrToTs(s, false) })}
-          placeholder={tc("selectDate")}
-          disabledRange={endParsed ? { after: endParsed } : undefined}
-          className={cn(
-            fullWidth && "w-full sm:[&_[data-slot=popover-trigger]]:w-full",
-          )}
-        />
-      </FilterField>
-      <FilterField label={labels.end} className={fullWidth ? "w-full" : undefined}>
-        <DatePicker
-          size="sm"
-          value={endStr}
-          onChange={(s) => onChange({ end: dateStrToTs(s, true) })}
-          placeholder={tc("selectDate")}
-          disabledRange={startParsed ? { before: startParsed } : undefined}
-          className={cn(
-            fullWidth && "w-full sm:[&_[data-slot=popover-trigger]]:w-full",
-          )}
-        />
-      </FilterField>
-    </>
+    <FilterField label={label} className="w-full sm:w-auto">
+      <DateRangePicker
+        value={displayRange}
+        onValueChange={({ startDate, endDate }) => {
+          const completeRange = buildCompleteDateRange(startDate, endDate, maxDays);
+          // behavior change: update both URL bounds atomically.
+          onChange({
+            start: dateStrToTs(completeRange.startDate, false),
+            end: dateStrToTs(completeRange.endDate, true),
+          });
+        }}
+        placeholder={label}
+        maxDays={maxDays}
+        size="sm"
+        className={cn(
+          "[&_[data-slot=date-range-trigger]]:h-9 sm:[&_[data-slot=date-range-trigger]]:h-8",
+          fullWidth && "w-full sm:w-full",
+        )}
+      />
+    </FilterField>
   );
 }
 
@@ -290,6 +297,10 @@ function DebouncedTextFilter({
   fullWidth,
 }: DebouncedTextProps) {
   const [draft, setDraft] = useState(() => ({ baseline: value, value }));
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
   const currentDraft = useMemo(
     () => draft.baseline === value ? draft : { baseline: value, value },
     [draft, value],
@@ -298,9 +309,9 @@ function DebouncedTextFilter({
 
   useEffect(() => {
     if (debounced.baseline === value && debounced.value !== value) {
-      onChange(debounced.value);
+      onChangeRef.current(debounced.value);
     }
-  }, [debounced, onChange, value]);
+  }, [debounced, value]);
 
   return (
     <div className={cn("relative w-full", !fullWidth && "sm:w-56")}>
@@ -309,7 +320,7 @@ function DebouncedTextFilter({
         placeholder={placeholder}
         value={currentDraft.value}
         onChange={(e) => setDraft({ baseline: value, value: e.target.value })}
-        className="h-8 pl-8"
+        className="h-9 pl-8 sm:h-8"
       />
     </div>
   );
@@ -385,7 +396,7 @@ function ToolbarActionsMenu({ actions, label }: { actions: ToolbarAction[]; labe
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="text-body">
+        <Button variant="outline" size="sm" className="h-9 text-body sm:h-8">
           <MoreHorizontal data-icon="inline-start" />
           <span>{label}</span>
         </Button>
@@ -413,11 +424,18 @@ function AdvancedFiltersPopover({ entries, value, onChange, count, label }: Adva
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="outline" size="sm" className="text-body">
+        <Button
+          variant="outline"
+          size="sm"
+          className="relative size-9 overflow-visible px-0 text-body sm:h-8 sm:w-auto sm:px-3"
+        >
           <SlidersHorizontal data-icon="inline-start" />
-          <span>{label}</span>
+          <span className="sr-only sm:not-sr-only">{label}</span>
           {count > 0 && (
-            <Badge variant="secondary" className="h-5 min-w-5 rounded-full px-1.5 text-xs">
+            <Badge
+              variant="secondary"
+              className="absolute -right-1 -top-1 h-4 min-w-4 rounded-full px-1 text-[10px] leading-none sm:static sm:h-5 sm:min-w-5 sm:px-1.5 sm:text-xs"
+            >
               {count}
             </Badge>
           )}

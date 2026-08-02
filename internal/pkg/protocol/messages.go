@@ -7,6 +7,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 )
 
 const (
@@ -200,6 +201,9 @@ type UsageLogEntry struct {
 	RateLimitWaitMs   int                   `json:"rate_limit_wait_ms,omitempty"`
 	RateLimitReason   string                `json:"rate_limit_reason,omitempty"`
 	RateLimitHits     []models.RateLimitHit `json:"rate_limit_hits,omitempty"`
+
+	// AutoDisableTriggers is internal Agent-to-Master transport state.
+	AutoDisableTriggers []attemptproxy.ChannelAutoDisableTrigger `json:"auto_disable_triggers,omitempty"`
 }
 
 type HeartbeatParams struct {

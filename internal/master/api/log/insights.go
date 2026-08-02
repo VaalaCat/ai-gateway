@@ -22,6 +22,20 @@ func parseInsightsRange(start, end int64) dao.ObsRange {
 	return dao.ObsRange{Start: start, End: end, Gran: dao.GranHour}
 }
 
+// validateLogsInsightsRange allows up to seven complete local calendar days.
+// The HTTP range has no timezone, so a DST fallback window can be one hour longer;
+// accept durations before the next whole-day boundary while the frontend clamps to seven days.
+func validateLogsInsightsRange(r dao.ObsRange) error {
+	if r.End <= r.Start {
+		return r.Validate()
+	}
+	const secondsPerDay = int64(86_400)
+	if r.End-r.Start >= int64(dao.MaxHourRangeDays+1)*secondsPerDay {
+		return dao.ErrRangeOutOfBounds
+	}
+	return nil
+}
+
 func toDaoScope(s *middleware.RequestScope) dao.Scope {
 	if s == nil {
 		return dao.Scope{}
@@ -33,10 +47,10 @@ func toDaoScope(s *middleware.RequestScope) dao.Scope {
 //  1. totals: total/failed/p95/最慢请求 + 三条 24h spark;
 //  2. error_by_stage: 失败请求按 stage 分布 (admin-only;user scope 该字段为空)。
 //
-// 窗口超过 ObsRange.Validate() 上限时返回 400 RangeOutOfBounds (gran=hour 上限 7 天)。
+// 窗口超过 logs insights 的本地日容差时返回 400 RangeOutOfBounds (gran=hour 上限 7 天)。
 func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsResponse, error) {
 	r := parseInsightsRange(req.Start, req.End)
-	if err := r.Validate(); err != nil {
+	if err := validateLogsInsightsRange(r); err != nil {
 		return InsightsResponse{}, api.ErrorWithCode(400, "RangeOutOfBounds",
 			"range exceeds max days for granularity",
 			map[string]any{"gran": string(r.Gran)})

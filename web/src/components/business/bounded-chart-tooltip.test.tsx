@@ -8,16 +8,18 @@ vi.mock("recharts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("recharts")>();
   return {
     ...actual,
-    Tooltip: ({ wrapperStyle, allowEscapeViewBox, offset }: {
+    Tooltip: ({ wrapperStyle, allowEscapeViewBox, offset, cursor }: {
       wrapperStyle?: React.CSSProperties;
       allowEscapeViewBox?: unknown;
       offset?: unknown;
+      cursor?: unknown;
     }) => (
       <div
         data-testid="recharts-tooltip-props"
         data-wrapper-style={JSON.stringify(wrapperStyle)}
         data-allow-escape={JSON.stringify(allowEscapeViewBox)}
         data-offset={JSON.stringify(offset)}
+        data-cursor={JSON.stringify(cursor)}
       />
     ),
   };
@@ -49,8 +51,10 @@ describe("BoundedChartTooltip", () => {
     renderTooltip(longName);
     const tooltip = screen.getByRole("tooltip");
     expect(tooltip).toHaveClass(
-      "max-w-[min(20rem,calc(100vw-2rem),calc(100cqw-5rem))]",
-      "max-h-[min(50vh,9rem)]",
+      "max-w-[min(12rem,calc(100vw-4rem),calc(100cqw-4rem))]",
+      "sm:max-w-[min(20rem,calc(100vw-2rem),calc(100cqw-5rem))]",
+      "max-h-[min(40vh,7rem)]",
+      "sm:max-h-[min(50vh,9rem)]",
       "overflow-y-auto",
       "overscroll-contain",
       "touch-pan-y",
@@ -87,7 +91,7 @@ describe("BoundedChartTooltip", () => {
     expect(container.querySelector('[role="tooltip"]')).toBeNull();
   });
 
-  it("passes a real interactive 16px collision box to Recharts without escaping the plot", () => {
+  it("keeps the tooltip bounded and disables the full-plot cursor highlight", () => {
     render(<ChartTooltip />);
 
     const tooltip = screen.getByTestId("recharts-tooltip-props");
@@ -99,6 +103,7 @@ describe("BoundedChartTooltip", () => {
       pointerEvents: "auto",
     });
     expect(JSON.parse(tooltip.dataset.allowEscape ?? "null")).toEqual({ x: false, y: false });
+    expect(JSON.parse(tooltip.dataset.cursor ?? "null")).toBe(false);
   });
 
   it("keeps a Top 20 payload in one scrollable tooltip surface", () => {

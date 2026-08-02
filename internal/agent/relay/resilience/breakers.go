@@ -1,6 +1,7 @@
 package resilience
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,8 +19,9 @@ const idleTTL = time.Hour
 const maxBreakers = 10000
 
 type breakerEntry struct {
-	cb  circuitbreaker.CircuitBreaker[state.AttemptResult]
-	exp atomic.Int64 // unix nano,访问时续期
+	cb     circuitbreaker.CircuitBreaker[state.AttemptResult]
+	config Config
+	exp    atomic.Int64 // unix nano,访问时续期
 }
 
 // BreakerKey 唯一标识一个熔断器。必须带 Source:admin 的 Channel.ID 与 BYOK
@@ -32,10 +34,20 @@ type BreakerKey struct {
 
 // Registry 是进程内、每 channel 一个熔断器的注册表(跨请求复用同实例)。
 type Registry struct {
-	m utils.SyncMap[BreakerKey, *breakerEntry]
+	mu sync.Mutex
+	m  utils.SyncMap[BreakerKey, *breakerEntry]
 }
 
 func NewRegistry() *Registry { return &Registry{} }
+
+type RuntimeRegistries struct {
+	Breakers *Registry
+	AutoBan  *AutoBanTracker
+}
+
+func NewRuntimeRegistries() *RuntimeRegistries {
+	return &RuntimeRegistries{Breakers: NewRegistry(), AutoBan: NewAutoBanTracker()}
+}
 
 // Get 取(或按 cfg 首次创建)key 对应的 breaker,并续期。
 func (r *Registry) Get(key BreakerKey, cfg Config) circuitbreaker.CircuitBreaker[state.AttemptResult] {
@@ -43,21 +55,35 @@ func (r *Registry) Get(key BreakerKey, cfg Config) circuitbreaker.CircuitBreaker
 		r.sweep(time.Now())
 	}
 	now := time.Now().UnixNano()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if e, ok := r.m.Load(key); ok {
-		e.exp.Store(now + int64(idleTTL))
-		return e.cb
+		if e.config == cfg {
+			e.exp.Store(now + int64(idleTTL))
+			return e.cb
+		}
 	}
-	e := &breakerEntry{cb: buildBreaker(cfg)}
+	e := &breakerEntry{cb: buildBreaker(cfg), config: cfg}
 	e.exp.Store(now + int64(idleTTL))
-	// LoadOrStore 处理并发首访:输者丢弃自己 build 的(无副作用),用赢者的。
-	actual, _ := r.m.LoadOrStore(key, e)
-	return actual.cb
+	r.m.Store(key, e)
+	return e.cb
 }
 
 func (r *Registry) Len() int { return r.m.Len() }
 
+func (r *Registry) Delete(key BreakerKey) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.m.Delete(key)
+	r.mu.Unlock()
+}
+
 // sweep 删除已过 idleTTL 的 entry。Range 回调内重新 Load 防误删刚续期的。
 func (r *Registry) sweep(now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	cutoff := now.UnixNano()
 	r.m.Range(func(k BreakerKey, _ *breakerEntry) bool {
 		if cur, ok := r.m.Load(k); ok && cur.exp.Load() <= cutoff {

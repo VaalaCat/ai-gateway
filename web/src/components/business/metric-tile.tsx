@@ -108,7 +108,7 @@ export function MetricTile({
       <div className="px-3 text-label text-muted-foreground">{label}</div>
       <div
         className={cn(
-          "px-3 text-display tabular-nums",
+          "px-3 font-mono text-display tabular-nums",
           valueColor,
         )}
       >

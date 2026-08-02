@@ -20,15 +20,6 @@ type lifecycleWorkerOwner struct {
 
 func TestBillingWorkersConcurrentStartCloseUseOneLifecycleGate(t *testing.T) {
 	factories := map[string]func() lifecycleWorkerOwner{
-		"aggregator": func() lifecycleWorkerOwner {
-			owner := NewAggregator(nil, zap.NewNop(), AggregatorOptions{FlushEvery: time.Hour})
-			return lifecycleWorkerOwner{
-				start:  func() { owner.Start(context.Background()) },
-				close:  owner.Close,
-				done:   owner.Done,
-				counts: owner.ResourceCounts,
-			}
-		},
 		"limit evaluator": func() lifecycleWorkerOwner {
 			owner := NewLimitEvaluator(nil, nil, zap.NewNop(), time.Hour)
 			return lifecycleWorkerOwner{

@@ -33,6 +33,7 @@ import {
 } from "@/lib/api/system";
 import type { DatabaseStatus, HistoryCursorStatus, StorageStatus } from "@/lib/types";
 import { formatFileSize, formatUptime } from "@/lib/utils/format";
+import { shouldShowStorageMigration } from "./log-storage-visibility";
 
 type Translator = ReturnType<typeof useTranslations<"system.logStorage">>;
 
@@ -186,12 +187,12 @@ export function LogStorageStatus({ storage }: { storage?: StorageStatus }) {
   const queue = storage.log_delivery_queue;
   const history = storage.history_backfill;
   const artifact = storage.legacy_artifact;
+  const showMigration = shouldShowStorageMigration(storage);
   const historyTerminal = history.state === "completed" || history.state === "source_deleted" || history.state === "";
   const logsSkipped = history.requests.skipped && history.traces.skipped;
   const databases = [
     { key: "core", title: t("coreDatabase"), data: storage.core_db },
     { key: "log", title: t("logDatabase"), data: storage.log_db },
-    { key: "legacy", title: t("legacyDatabase"), data: storage.legacy_db },
   ];
 
   return (
@@ -256,52 +257,11 @@ export function LogStorageStatus({ storage }: { storage?: StorageStatus }) {
       </CardHeader>
 
       <CardContent className="flex min-w-0 flex-col gap-5">
-        <div data-testid="storage-database-grid" className="grid min-w-0 gap-4 md:grid-cols-3">
+        <div data-testid="storage-database-grid" className="grid min-w-0 gap-4 md:grid-cols-2">
           {databases.map(({ key, title, data }) => (
             <DatabaseStatusPanel key={key} title={title} data={data} t={t} />
           ))}
         </div>
-
-        <section className="flex min-w-0 flex-col gap-3 border-t pt-4">
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-            <h3 className="text-sm font-medium">{t("legacyArtifact")}</h3>
-            <Badge variant={!artifact.available ? "destructive" : artifact.exists ? "secondary" : "outline"}>
-              {t(!artifact.available ? "unavailable" : artifact.exists ? "exists" : "missing")}
-            </Badge>
-          </div>
-          {artifact.path && (
-            <dl className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
-              <StatusValue label={t("path")} value={<PathValue path={artifact.path} />} />
-              <StatusValue label={t("size")} value={formatFileSize(artifact.size_bytes)} />
-              <StatusValue label={t("artifactUse")} value={t(artifact.in_use ? "inUse" : "notInUse")} />
-            </dl>
-          )}
-          {artifact.last_error && <p className="break-words text-xs text-destructive">{artifact.last_error}</p>}
-          {artifact.delete_error && <p className="break-words text-xs text-destructive">{artifact.delete_error}</p>}
-          {artifact.available && artifact.exists && (
-            <div className="flex flex-wrap">
-              <DeleteConfirmationDialog
-                triggerLabel={t("deleteLegacyArtifact")}
-                title={t("confirmDeleteArtifactTitle")}
-                description={t("confirmDeleteArtifactDescription")}
-                targetPath={artifact.path}
-                targetSize={artifact.size_bytes}
-                targetLabel={t("path")}
-                sizeLabel={t("size")}
-                inputID="delete-legacy-artifact-confirmation"
-                inputLabel={t("deleteArtifactConfirmation")}
-                confirmLabel={t("confirmDeleteLegacyArtifact")}
-                cancelLabel={t("cancel")}
-                disabled={!artifact.can_delete}
-                pending={deleteLegacyArtifact.isPending}
-                onDelete={() => deleteLegacyArtifact.mutate({ confirmation: "DELETE" }, {
-                  onSuccess: () => toast.success(t("deleteLegacyArtifactSuccess")),
-                  onError: () => toast.error(t("deleteLegacyArtifactError")),
-                })}
-              />
-            </div>
-          )}
-        </section>
 
         <section className="flex min-w-0 flex-col gap-3 border-t pt-4">
           <h3 className="text-sm font-medium">{t("queue")}</h3>
@@ -316,7 +276,53 @@ export function LogStorageStatus({ storage }: { storage?: StorageStatus }) {
           </dl>
         </section>
 
-        {history.state && (
+        {showMigration && (
+          <section data-testid="storage-migration" className="flex min-w-0 flex-col gap-5 border-t pt-4">
+            <h3 className="text-sm font-medium">{t("migration")}</h3>
+            <DatabaseStatusPanel title={t("legacyDatabase")} data={storage.legacy_db} t={t} />
+
+            <section className="flex min-w-0 flex-col gap-3 border-t pt-4">
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-medium">{t("legacyArtifact")}</h3>
+                <Badge variant={!artifact.available ? "destructive" : artifact.exists ? "secondary" : "outline"}>
+                  {t(!artifact.available ? "unavailable" : artifact.exists ? "exists" : "missing")}
+                </Badge>
+              </div>
+              {artifact.path && (
+                <dl className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
+                  <StatusValue label={t("path")} value={<PathValue path={artifact.path} />} />
+                  <StatusValue label={t("size")} value={formatFileSize(artifact.size_bytes)} />
+                  <StatusValue label={t("artifactUse")} value={t(artifact.in_use ? "inUse" : "notInUse")} />
+                </dl>
+              )}
+              {artifact.last_error && <p className="break-words text-xs text-destructive">{artifact.last_error}</p>}
+              {artifact.delete_error && <p className="break-words text-xs text-destructive">{artifact.delete_error}</p>}
+              {artifact.available && artifact.exists && (
+                <div className="flex flex-wrap">
+                  <DeleteConfirmationDialog
+                    triggerLabel={t("deleteLegacyArtifact")}
+                    title={t("confirmDeleteArtifactTitle")}
+                    description={t("confirmDeleteArtifactDescription")}
+                    targetPath={artifact.path}
+                    targetSize={artifact.size_bytes}
+                    targetLabel={t("path")}
+                    sizeLabel={t("size")}
+                    inputID="delete-legacy-artifact-confirmation"
+                    inputLabel={t("deleteArtifactConfirmation")}
+                    confirmLabel={t("confirmDeleteLegacyArtifact")}
+                    cancelLabel={t("cancel")}
+                    disabled={!artifact.can_delete}
+                    pending={deleteLegacyArtifact.isPending}
+                    onDelete={() => deleteLegacyArtifact.mutate({ confirmation: "DELETE" }, {
+                      onSuccess: () => toast.success(t("deleteLegacyArtifactSuccess")),
+                      onError: () => toast.error(t("deleteLegacyArtifactError")),
+                    })}
+                  />
+                </div>
+              )}
+            </section>
+
+            {history.state && (
           <section data-testid="history-backfill" className="flex min-w-0 flex-col gap-4 border-t pt-4">
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -442,6 +448,8 @@ export function LogStorageStatus({ storage }: { storage?: StorageStatus }) {
               <CursorStatus label={t("historyTraces")} cursor={history.traces} t={t} />
             </div>
             {history.last_error && <p className="break-words text-xs text-destructive">{history.last_error}</p>}
+          </section>
+            )}
           </section>
         )}
       </CardContent>

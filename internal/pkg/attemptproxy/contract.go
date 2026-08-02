@@ -7,11 +7,12 @@ import (
 )
 
 const (
-	EndpointPath       = "/internal/agent/attempt"
-	HeaderMode         = "X-Vaala-Attempt-Mode"
-	ModeControl        = "control"
-	ModeResponse       = "response"
-	MaxResultWireBytes = 48 * 1024
+	EndpointPath                    = "/internal/agent/attempt"
+	HeaderMode                      = "X-Vaala-Attempt-Mode"
+	ModeControl                     = "control"
+	ModeResponse                    = "response"
+	MaxResultWireBytes              = 48 * 1024
+	MaxAutoDisableTriggersPerResult = 1
 )
 
 type ChannelSource string
@@ -21,6 +22,8 @@ type ResultKind string
 const (
 	SourceAdmin   ChannelSource = "admin"
 	SourcePrivate ChannelSource = "private"
+
+	ChannelAutoDisableReasonConsecutiveErrors = "consecutive_errors"
 
 	ModeNative      ExecutionMode = "native"
 	ModePassthrough ExecutionMode = "passthrough"
@@ -34,6 +37,13 @@ const (
 	ResultCommitUncertain      ResultKind = "commit_uncertain"
 	ResultCanceled             ResultKind = "canceled"
 )
+
+type ChannelAutoDisableTrigger struct {
+	Source    ChannelSource `json:"source"`
+	ChannelID uint          `json:"channel_id"`
+	Revision  uint64        `json:"revision"`
+	Reason    string        `json:"reason"`
+}
 
 type ChannelRef struct {
 	Source ChannelSource `json:"source"`
@@ -74,25 +84,26 @@ type AttemptTraceBodyWire struct {
 }
 
 type AttemptProxyResult struct {
-	Kind                ResultKind        `json:"kind"`
-	PromptTokens        int               `json:"prompt_tokens,omitempty"`
-	CompletionTokens    int               `json:"completion_tokens,omitempty"`
-	CacheReadTokens     int               `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens    int               `json:"cache_write_tokens,omitempty"`
-	FirstResponseMs     int               `json:"first_response_ms,omitempty"`
-	UpstreamModel       string            `json:"upstream_model,omitempty"`
-	TokenSource         string            `json:"token_source,omitempty"`
-	Dispatches          int               `json:"dispatches,omitempty"`
-	ProviderDispatched  bool              `json:"provider_dispatched,omitempty"`
-	ProviderResultKnown bool              `json:"provider_result_known,omitempty"`
-	Written             bool              `json:"written,omitempty"`
-	PlanAdvanceAllowed  bool              `json:"plan_advance_allowed,omitempty"`
-	ResponseStarted     bool              `json:"response_started,omitempty"`
-	HTTPStatus          int               `json:"http_status,omitempty"`
-	ErrorType           string            `json:"error_type,omitempty"`
-	ReasonCode          string            `json:"reason_code,omitempty"`
-	ErrorMessage        string            `json:"error_message,omitempty"`
-	Trace               *AttemptTraceWire `json:"trace,omitempty"`
+	Kind                ResultKind                  `json:"kind"`
+	PromptTokens        int                         `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int                         `json:"completion_tokens,omitempty"`
+	CacheReadTokens     int                         `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens    int                         `json:"cache_write_tokens,omitempty"`
+	FirstResponseMs     int                         `json:"first_response_ms,omitempty"`
+	UpstreamModel       string                      `json:"upstream_model,omitempty"`
+	TokenSource         string                      `json:"token_source,omitempty"`
+	Dispatches          int                         `json:"dispatches,omitempty"`
+	ProviderDispatched  bool                        `json:"provider_dispatched,omitempty"`
+	ProviderResultKnown bool                        `json:"provider_result_known,omitempty"`
+	Written             bool                        `json:"written,omitempty"`
+	PlanAdvanceAllowed  bool                        `json:"plan_advance_allowed,omitempty"`
+	ResponseStarted     bool                        `json:"response_started,omitempty"`
+	HTTPStatus          int                         `json:"http_status,omitempty"`
+	ErrorType           string                      `json:"error_type,omitempty"`
+	ReasonCode          string                      `json:"reason_code,omitempty"`
+	ErrorMessage        string                      `json:"error_message,omitempty"`
+	Trace               *AttemptTraceWire           `json:"trace,omitempty"`
+	AutoDisableTriggers []ChannelAutoDisableTrigger `json:"auto_disable_triggers,omitempty"`
 }
 
 type metaKey struct{}
@@ -110,6 +121,18 @@ func MetaFromContext(ctx context.Context) (AttemptProxyMeta, bool) {
 }
 
 var ErrInvalidContract = errors.New("attempt proxy contract invalid")
+
+func (trigger ChannelAutoDisableTrigger) Validate() error {
+	if trigger.ChannelID == 0 || trigger.Reason != ChannelAutoDisableReasonConsecutiveErrors {
+		return ErrInvalidContract
+	}
+	switch trigger.Source {
+	case SourceAdmin, SourcePrivate:
+		return nil
+	default:
+		return ErrInvalidContract
+	}
+}
 
 func (ref ChannelRef) Validate() error {
 	if ref.ID == 0 {
@@ -145,6 +168,14 @@ func (meta AttemptProxyMeta) Validate() error {
 func (result AttemptProxyResult) Validate() error {
 	if result.Dispatches < 0 || (result.Dispatches > 0 && !result.ProviderDispatched) {
 		return ErrInvalidContract
+	}
+	if len(result.AutoDisableTriggers) > MaxAutoDisableTriggersPerResult {
+		return ErrInvalidContract
+	}
+	for _, trigger := range result.AutoDisableTriggers {
+		if trigger.Validate() != nil {
+			return ErrInvalidContract
+		}
 	}
 	switch result.Kind {
 	case ResultSucceeded, ResultProviderFailed, ResultExecutionRejected,

@@ -156,7 +156,29 @@ export function formatPrice(price: number): string {
 
 // 只输出金额数值($X.XX);单位($ / 1M)由调用方放表头,避免每格重复刷屏。
 export function formatPriceValue(price: number): string {
-  return `$${price.toFixed(2)}`;
+  if (!Number.isFinite(price) || price < 0) return "—";
+  if (price === 0) return "$0.00";
+  const decimals = Math.abs(price) < 0.0001 ? 6 : Math.abs(price) < 0.01 ? 4 : 2;
+  return `$${price.toFixed(decimals)}`;
+}
+
+export function formatPercentValue(percent: number, decimals = 2): string {
+  if (!Number.isFinite(percent) || percent < 0 || percent > 100) return "—";
+  return `${percent.toFixed(decimals)}%`;
+}
+
+export function formatPercentAxis(percent: number): string {
+  return Number.isFinite(percent) && percent >= 0 && percent <= 100
+    ? `${percent.toFixed(0)}%`
+    : "—";
+}
+
+export function formatTpsValue(value: number): string {
+  return Number.isFinite(value) && value >= 0 ? `${value.toFixed(1)} tok/s` : "—";
+}
+
+export function formatTpsAxis(value: number): string {
+  return Number.isFinite(value) && value >= 0 ? value.toFixed(0) : "—";
 }
 
 /** 计费倍率 → 简洁字符串(最多 4 位小数,去尾零)。×倍率 展示用,避免 float 噪声如 0.30000000000004。 */

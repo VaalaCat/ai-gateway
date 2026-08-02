@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { ColumnDef, Row } from "@tanstack/react-table";
-import { ChevronRight, CircleAlert, KeyRound, RefreshCw } from "lucide-react";
+import { ChevronRight, CircleAlert, KeyRound, RefreshCw, TimerReset } from "lucide-react";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
@@ -24,10 +24,17 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 import { DateCell } from "@/components/business/date-cell";
 import { CostDetailCell } from "@/components/business/cost-cell";
@@ -39,8 +46,17 @@ import { FallbackChain } from "@/components/business/fallback-chain";
 import { RateLimitSection } from "@/components/business/rate-limit-section";
 import { EntityLabel } from "@/components/business/entity-label";
 import { KpiGrid } from "@/components/business/kpi-grid";
+import { ObservabilityHeader } from "@/components/business/observability-header";
+import { ColumnVisibility } from "@/components/data-table/column-visibility";
 
 import { formatDuration, formatFactor, formatMoneyCompact } from "@/lib/utils/format";
+import {
+  buildCompleteDateRange,
+  dateStrToExclusiveEndTs,
+  dateStrToTs,
+  isFiniteUnixSeconds,
+  tsToDateStr,
+} from "@/lib/utils/date-range";
 import { useLogs } from "@/lib/api/logs";
 import { useLogsInsights } from "@/lib/api/logs-insights";
 import { ApiError } from "@/lib/api/client";
@@ -94,7 +110,6 @@ function LogsPageContent() {
   const hasOwnBYOK = (ownBYOKQuery.data?.data?.length ?? 0) > 0;
 
   const filterSpec = useMemo(() => ({
-    time: { kind: "time", defaultDays: 7, maxHourDays: 7 },
     user_id: { kind: "picker", entity: "user", advanced: true, visible: (ctx: { isAdmin: boolean }) => ctx.isAdmin },
     token_id: { kind: "picker", entity: "token", advanced: true },
     channel_id: { kind: "picker", entity: "channel", advanced: true, visible: (ctx: { isAdmin: boolean }) => ctx.isAdmin },
@@ -116,29 +131,50 @@ function LogsPageContent() {
     },
   } satisfies FilterSpec), [t]);
 
-  const [filterValues, setFilterValues] = useFilterState(filterSpec);
+  const urlFilterSpec = useMemo(() => ({
+    time: { kind: "time", defaultDays: 7, maxHourDays: 7 },
+    ...filterSpec,
+  } satisfies FilterSpec), [filterSpec]);
+  const [filterValues, setFilterValues] = useFilterState(urlFilterSpec);
+  const selectedRange = useMemo(() => {
+    const startDate = isFiniteUnixSeconds(filterValues.start)
+      ? tsToDateStr(filterValues.start)
+      : "";
+    const endDate = isFiniteUnixSeconds(filterValues.end)
+      ? tsToDateStr(filterValues.end)
+      : "";
+    if (!startDate && !endDate) return undefined;
+
+    const range = buildCompleteDateRange(startDate, endDate, 7);
+    return {
+      start: dateStrToTs(range.startDate, false),
+      end: dateStrToExclusiveEndTs(range.endDate),
+    };
+  }, [filterValues.start, filterValues.end]);
 
   const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.LOGS);
   const [rawLog, setRawLog] = useState<UsageLog | null>(null);
 
   // 自动刷新间隔(ms);null=关。用户级持久化,多账号不串扰。
   const [autoRefreshMs, setAutoRefreshMs] = useUserPref<number | null>("logs-auto-refresh", null);
+  const autoRefreshLabel = autoRefreshMs === null
+    ? t("autoRefreshOff")
+    : t("autoRefreshEvery", { seconds: autoRefreshMs / 1000 });
 
   const [now] = useState(() => Math.floor(Date.now() / 1000));
   const defaultStart = now - 7 * 86_400;
+  const headerRange = selectedRange
+    ? { start: selectedRange.start, end: selectedRange.end - 1, gran: "day" as const }
+    : { start: defaultStart, end: now, gran: "day" as const };
   const insights = useLogsInsights(
-    {
-      start: filterValues.start ? Number(filterValues.start) : defaultStart,
-      end: filterValues.end ? Number(filterValues.end) : now,
-    },
+    selectedRange ?? { start: defaultStart, end: now },
   );
 
   const { data, error, isError, isLoading, isFetching, refetch } = useLogs(
     {
       page,
       page_size: pageSize,
-      ...(filterValues.start ? { start: Number(filterValues.start) } : {}),
-      ...(filterValues.end ? { end: Number(filterValues.end) } : {}),
+      ...(selectedRange ?? {}),
       ...(filterValues.user_id ? { user_id: Number(filterValues.user_id) } : {}),
       ...(filterValues.token_id ? { token_id: Number(filterValues.token_id) } : {}),
       ...(filterValues.channel_id ? { channel_id: Number(filterValues.channel_id) } : {}),
@@ -173,8 +209,8 @@ function LogsPageContent() {
     setPagination(newPageSize !== pageSize ? 1 : newPage, newPageSize);
   };
 
-  const handleRefresh = () => {
-    void refetch();
+  const handlePageRefresh = () => {
+    void Promise.all([refetch(), insights.refetch()]);
   };
 
   const rawLogText = useMemo(() => {
@@ -549,10 +585,16 @@ function LogsPageContent() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
+      <ObservabilityHeader
+        title={t("title")}
+        subtitle={t("description")}
+        range={headerRange}
+        onRangeChange={({ start, end }) => setFilterValues({ start, end })}
+        onRefresh={handlePageRefresh}
+        refreshing={isFetching || insights.isFetching}
+        showGranularity={false}
+        maxDays={7}
+      />
 
       {loadError ? (
         <Alert variant="destructive" role="alert">
@@ -636,39 +678,48 @@ function LogsPageContent() {
         storageKey="logs"
         getRowId={(row) => String(row.id)}
         renderExpandedRow={renderExpandedRow}
-        toolbar={
+        toolbar={(table) => (
           <FilterableToolbar
             spec={filterSpec}
             value={filterValues}
             onChange={setFilterValues}
             context={{ hasOwnBYOK }}
-            filtersOnOwnRow
             secondaryContent={
-              <Select
-                value={autoRefreshMs === null ? "off" : String(autoRefreshMs)}
-                onValueChange={(v) => setAutoRefreshMs(v === "off" ? null : Number(v))}
-              >
-                <SelectTrigger className="w-40" size="sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="off">{t("autoRefreshOff")}</SelectItem>
-                  <SelectItem value="5000">{t("autoRefreshEvery", { seconds: 5 })}</SelectItem>
-                  <SelectItem value="10000">{t("autoRefreshEvery", { seconds: 10 })}</SelectItem>
-                  <SelectItem value="30000">{t("autoRefreshEvery", { seconds: 30 })}</SelectItem>
-                </SelectContent>
-              </Select>
+              <TooltipProvider>
+                <Tooltip>
+                  <Select
+                    value={autoRefreshMs === null ? "off" : String(autoRefreshMs)}
+                    onValueChange={(v) => setAutoRefreshMs(v === "off" ? null : Number(v))}
+                  >
+                    <TooltipTrigger asChild>
+                      <SelectTrigger
+                        data-slot="logs-auto-refresh"
+                        aria-label={autoRefreshLabel}
+                        className="!size-9 justify-center gap-0 overflow-hidden px-0 sm:!h-8 sm:!w-40 sm:justify-between sm:gap-2 sm:overflow-visible sm:px-3 [&_[data-slot=select-icon]]:hidden sm:[&_[data-slot=select-icon]]:block"
+                        size="sm"
+                      >
+                        <TimerReset className="size-4 sm:hidden" />
+                        <span className="sr-only sm:not-sr-only">
+                          <SelectValue />
+                        </span>
+                      </SelectTrigger>
+                    </TooltipTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="off">{t("autoRefreshOff")}</SelectItem>
+                        <SelectItem value="5000">{t("autoRefreshEvery", { seconds: 5 })}</SelectItem>
+                        <SelectItem value="10000">{t("autoRefreshEvery", { seconds: 10 })}</SelectItem>
+                        <SelectItem value="30000">{t("autoRefreshEvery", { seconds: 30 })}</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <TooltipContent>{autoRefreshLabel}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             }
-            secondaryActions={[
-              {
-                label: isFetching ? t("refreshing") : t("refresh"),
-                icon: <RefreshCw className={isFetching ? "animate-spin" : ""} />,
-                onClick: handleRefresh,
-                disabled: isFetching,
-              },
-            ]}
+            primaryAction={<ColumnVisibility table={table} />}
           />
-        }
+        )}
       />}
 
       <Dialog open={!!rawLog} onOpenChange={(open) => { if (!open) setRawLog(null); }}>

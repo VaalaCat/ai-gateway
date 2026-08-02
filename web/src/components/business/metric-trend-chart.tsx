@@ -2,9 +2,13 @@
 
 import { useMemo, useState, type JSX, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
+import { ListFilter } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 
 import { ChartCard } from "@/components/business/chart-card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { StackedAreaBody } from "@/components/business/stacked-area-chart";
 import { ChartOptionSelect } from "@/components/business/chart-option-select";
 import {
@@ -18,7 +22,10 @@ import {
   ChartTooltip,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { chartColorForSeries, chartDashForSeries } from "@/lib/chart-colors";
+import {
+  CHART_LINE_ACTIVE_DOT,
+  chartColorForSeries,
+} from "@/lib/chart-colors";
 import {
   formatDuration,
   formatMoneyCompact,
@@ -95,7 +102,9 @@ export interface MetricTrendChartProps {
   loading?: boolean;
   empty?: boolean;
   className?: string;
-  headerExtra?: ReactNode;
+  scopeControls?: ReactNode;
+  scopeActiveCount?: number;
+  displayExtra?: ReactNode;
   /** percentile 等只存在于 grouped response 的统计禁止回退为 total 平均曲线。 */
   groupedOnly?: boolean;
   /** 日志库降级时保留 core 趋势，同时在卡内说明性能指标暂不可用。 */
@@ -145,7 +154,9 @@ export function MetricTrendChart({
   loading,
   empty,
   className,
-  headerExtra,
+  scopeControls,
+  scopeActiveCount = 0,
+  displayExtra,
   groupedOnly = false,
   logUnavailable = false,
 }: MetricTrendChartProps) {
@@ -222,8 +233,8 @@ export function MetricTrendChart({
   const isEmpty = empty ?? (groupedOnly ? !loading && !breakdown : buckets.length === 0);
   const performanceUnavailable = logUnavailable && LOG_BACKED_METRICS.has(metric);
 
-  const action = (
-    <div className="flex flex-wrap items-center justify-end gap-2">
+  const displayControls = (
+    <>
       {showDimToggle && (
         <ChartOptionSelect
           value={dim}
@@ -258,7 +269,56 @@ export function MetricTrendChart({
           options={availableViews.map((v) => ({ value: v, label: t(`view.${v}`) }))}
         />
       )}
-      {headerExtra}
+      {displayExtra}
+    </>
+  );
+
+  const action = (
+    <div
+      data-slot="chart-control-rail"
+      className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2"
+    >
+      {scopeControls && (
+        <>
+          <div
+            data-slot="chart-scope-controls"
+            className="hidden min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex [&_[data-slot=select-trigger]]:h-8 [&_[data-slot=button]]:h-8"
+          >
+            {scopeControls}
+          </div>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-9 sm:hidden"
+                aria-label={t("trend.scopeFilters")}
+              >
+                <ListFilter data-icon="inline-start" />
+                {t("trend.scopeFilters")}
+                {scopeActiveCount > 0 && <Badge variant="secondary">{scopeActiveCount}</Badge>}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              className="w-[min(20rem,calc(100vw-2rem))]"
+            >
+              <div
+                data-slot="chart-scope-popover-controls"
+                className="flex flex-col gap-2 [&>*]:w-full [&_button[role=combobox]]:h-9 [&_[data-slot=button]]:h-9 [&_[data-slot=button]]:w-full [&_[data-slot=select-trigger]]:h-9 [&_[data-slot=select-trigger]]:w-full"
+              >
+                {scopeControls}
+              </div>
+            </PopoverContent>
+          </Popover>
+        </>
+      )}
+      <div
+        data-slot="chart-display-controls"
+        className="flex shrink-0 flex-wrap items-center gap-2 [&_[data-slot=select-trigger]]:h-9 sm:[&_[data-slot=select-trigger]]:h-8"
+      >
+        {displayControls}
+      </div>
     </div>
   );
 
@@ -361,8 +421,8 @@ function TotalBody({
           dataKey={METRIC_FIELD[metric]}
           stroke={`var(--color-${metric})`}
           strokeWidth={2}
-          strokeDasharray={chartDashForSeries(metric)}
           dot={false}
+          activeDot={CHART_LINE_ACTIVE_DOT}
         />
       </LineChart>
     </ChartContainer>
@@ -460,8 +520,8 @@ function LinesBody({
             dataKey={key}
             stroke={config[key]?.color ?? chartColorForSeries(`${key}-${i}`)}
             strokeWidth={2}
-            strokeDasharray={chartDashForSeries(key)}
             dot={false}
+            activeDot={CHART_LINE_ACTIVE_DOT}
             hide={hidden.has(key)}
           />
         ))}

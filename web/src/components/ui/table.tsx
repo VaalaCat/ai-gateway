@@ -4,11 +4,21 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+type TableContainerProps = React.ComponentProps<"div"> & {
+  "data-testid"?: string
+}
+
+type TableProps = React.ComponentProps<"table"> & {
+  containerProps?: TableContainerProps
+}
+
+function Table({ className, containerProps, ...props }: TableProps) {
+  const { className: containerClassName, ...restContainerProps } = containerProps ?? {}
   return (
     <div
+      {...restContainerProps}
       data-slot="table-container"
-      className="relative w-full overflow-x-auto"
+      className={cn("relative w-full overflow-x-auto", containerClassName)}
     >
       <table
         data-slot="table"

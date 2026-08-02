@@ -19,6 +19,7 @@ func (h *Handler) PortalList(c *app.Context, req ListRequest) (api.PaginatedResp
 	uid := c.UserInfo.UserID
 	req.Scope = models.RoutingScopeUser // 强制 scope=user
 	req.UserID = &uid                   // 锁定到自己
+	req.TokenID = nil                   // portal 忽略管理员列表专用的 token owner filter
 	return h.List(c, req)
 }
 

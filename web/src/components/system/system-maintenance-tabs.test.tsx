@@ -1,7 +1,20 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, it, vi } from "vitest";
 
 import { SystemMaintenanceTabs } from "./system-maintenance-tabs";
+
+const navigation = vi.hoisted(() => ({
+  pathname: "/system",
+  query: "",
+  replace: vi.fn(),
+}));
+
+vi.mock("next/navigation", () => ({
+  usePathname: () => navigation.pathname,
+  useRouter: () => ({ replace: navigation.replace }),
+  useSearchParams: () => new URLSearchParams(navigation.query),
+}));
 
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) =>
@@ -15,17 +28,34 @@ vi.mock("next-intl", () => ({
     })[key] ?? key,
 }));
 
-function renderTabs() {
-  return render(
+function tabsContent() {
+  return (
     <SystemMaintenanceTabs
       overview={<div>Overview content</div>}
       requestPath={<div>Request path content</div>}
       policyBilling={<div>Policy content</div>}
       byok={<input aria-label="BYOK draft" defaultValue="" />}
       dataMaintenance={<div>Data content</div>}
-    />,
+    />
   );
 }
+
+function renderTabs() {
+  return render(tabsContent());
+}
+
+beforeEach(() => {
+  navigation.pathname = "/system";
+  navigation.query = "";
+  navigation.replace.mockReset();
+  navigation.replace.mockImplementation((url: string) => {
+    navigation.query = url.split("?")[1] ?? "";
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
 
 it("renders the approved tab order with overview active by default", () => {
   renderTabs();
@@ -42,6 +72,28 @@ it("renders the approved tab order with overview active by default", () => {
   expect(
     tabs.slice(1).every((tab) => tab.getAttribute("data-state") === "inactive"),
   ).toBe(true);
+});
+
+it("uses a legal section query value and falls back to overview for an invalid one", () => {
+  navigation.query = "section=data-maintenance";
+  const { rerender } = renderTabs();
+  expect(screen.getByRole("tab", { name: "Data maintenance" })).toHaveAttribute("data-state", "active");
+
+  navigation.query = "section=unknown";
+  rerender(tabsContent());
+  expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("data-state", "active");
+});
+
+it("persists a tab switch while preserving unrelated query parameters", async () => {
+  navigation.query = "model=gpt-5&view=compact";
+  renderTabs();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Data maintenance" }));
+
+  expect(navigation.replace).toHaveBeenCalledWith(
+    "/system?model=gpt-5&view=compact&section=data-maintenance",
+    { scroll: false },
+  );
 });
 
 it("keeps the mobile tab strip inside its own horizontal scroll boundary", () => {
@@ -76,8 +128,9 @@ it("scrolls the focused mobile tab into view", () => {
   });
 });
 
-it("force-mounts every panel and preserves an unsaved BYOK draft across tab switches", () => {
-  renderTabs();
+it("force-mounts every panel and preserves an unsaved BYOK draft across tab switches", async () => {
+  const { rerender } = renderTabs();
+  const user = userEvent.setup();
 
   for (const content of [
     "Overview content",
@@ -94,11 +147,14 @@ it("force-mounts every panel and preserves an unsaved BYOK draft across tab swit
     expect(panel).toHaveClass("min-w-0", "data-[state=inactive]:hidden");
   }
 
-  fireEvent.click(screen.getByRole("tab", { name: "BYOK" }));
+  await user.click(screen.getByRole("tab", { name: "BYOK" }));
+  rerender(tabsContent());
   const draft = screen.getByRole("textbox", { name: "BYOK draft" });
   fireEvent.change(draft, { target: { value: "unsaved" } });
-  fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
-  fireEvent.click(screen.getByRole("tab", { name: "BYOK" }));
+  await user.click(screen.getByRole("tab", { name: "Overview" }));
+  rerender(tabsContent());
+  await user.click(screen.getByRole("tab", { name: "BYOK" }));
+  rerender(tabsContent());
 
   expect(screen.getByRole("textbox", { name: "BYOK draft" })).toHaveValue(
     "unsaved",

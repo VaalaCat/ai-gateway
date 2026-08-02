@@ -189,7 +189,7 @@ func adminChannelToFile(channel models.Channel) (channelfile.AdminChannel, error
 		}
 	}
 	return channelfile.AdminChannel{
-		Name: channel.Name, Status: channel.Status, Type: channel.Type, Key: channel.Key,
+		Name: channel.Name, PublicDisplayName: channel.PublicDisplayName, Status: channel.Status, Type: channel.Type, Key: channel.Key,
 		BaseURL: channel.BaseURL, Models: splitModels(channel.Models), ModelMapping: mapping,
 		Weight: channel.Weight, Priority: channel.Priority, ProxyURL: channel.ProxyURL,
 		HeaderOverride: channel.HeaderOverride, SupportedAPITypes: channel.SupportedAPITypes,
@@ -253,7 +253,7 @@ func previewAdminChannelImport(
 
 func adminFileToCreateInput(file channelfile.AdminChannel, name string) AdminChannelCreateInput {
 	return AdminChannelCreateInput{
-		Name: name, Status: file.Status, Type: file.Type, Key: file.Key, BaseURL: file.BaseURL,
+		Name: name, PublicDisplayName: file.PublicDisplayName, Status: file.Status, Type: file.Type, Key: file.Key, BaseURL: file.BaseURL,
 		Models: append([]string(nil), file.Models...), ModelMapping: nonNilMap(file.ModelMapping),
 		Weight: file.Weight, Priority: file.Priority, ProxyURL: file.ProxyURL,
 		HeaderOverride: file.HeaderOverride, SupportedAPITypes: file.SupportedAPITypes,

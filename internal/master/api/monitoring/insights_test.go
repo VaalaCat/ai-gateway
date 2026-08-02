@@ -300,10 +300,9 @@ func TestMonitoringInsights_UserScope_Forbidden(t *testing.T) {
 func TestMonitoringInsights_RangeOutOfBounds_Returns400(t *testing.T) {
 	h, _, application := newMonitoringTestCtx(t)
 	now := time.Now().UTC().Unix()
-	// gran=day max 365 天;给 400 天必越界。
-	start := now - 400*86400
+	start := now - 8*86400
 	ctx := makeMonitoringCtx(t, application, 1, true)
-	_, err := h.Insights(ctx, InsightsRequest{Start: start, End: now, Gran: "day"})
+	_, err := h.Insights(ctx, InsightsRequest{Start: start, End: now, Gran: "hour"})
 	if err == nil {
 		t.Fatalf("expected 400 RangeOutOfBounds, got nil")
 	}
@@ -317,8 +316,23 @@ func TestMonitoringInsights_RangeOutOfBounds_Returns400(t *testing.T) {
 	if apiErr.Code != "RangeOutOfBounds" {
 		t.Fatalf("Code = %q, want RangeOutOfBounds", apiErr.Code)
 	}
-	if got, _ := apiErr.Details["gran"].(string); got != "day" {
-		t.Fatalf("Details.gran = %q, want day", got)
+	if got, _ := apiErr.Details["gran"].(string); got != "hour" {
+		t.Fatalf("Details.gran = %q, want hour", got)
+	}
+}
+
+func TestMonitoringInsights_LongDayRange_IsAllowed(t *testing.T) {
+	h, _, application := newMonitoringTestCtx(t)
+	h.MonitoringDataFinder = func(app.Application, context.Context) MonitoringDataFinder {
+		return monitoringFailingFinder{}
+	}
+	now := time.Now().UTC().Unix()
+	ctx := makeMonitoringCtx(t, application, 1, true)
+
+	_, err := h.Insights(ctx, InsightsRequest{Start: now - 400*86400, End: now, Gran: "day"})
+
+	if err != nil {
+		t.Fatalf("Insights long day range: %v", err)
 	}
 }
 

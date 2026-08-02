@@ -151,6 +151,10 @@ func TestAttemptResponseReceiverInterruptedResultNeverReplays(t *testing.T) {
 	result := attemptwire.AttemptProxyResult{
 		Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true,
 		Dispatches: 2, PromptTokens: 17, ResponseStarted: true,
+		AutoDisableTriggers: []attemptwire.ChannelAutoDisableTrigger{{
+			Source: attemptwire.SourceAdmin, ChannelID: 7, Revision: 4,
+			Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+		}},
 	}
 
 	outcome := receiver.FinishWithResult(
@@ -164,9 +168,29 @@ func TestAttemptResponseReceiverInterruptedResultNeverReplays(t *testing.T) {
 	require.True(t, outcome.ProviderResultKnown)
 	require.Equal(t, 2, outcome.Dispatches)
 	require.Equal(t, 17, outcome.Result.PromptTokens)
+	require.Equal(t, result.AutoDisableTriggers, outcome.AutoDisableTriggers)
 	require.ErrorIs(t, outcome.Result.Err, interrupted)
 	require.Equal(t, agentproxy.CodeRelayResponseInterrupted, outcome.ReasonCode)
 	require.Equal(t, ActionStop, nextAttemptAction(AttemptDecisionInput{HasNextAttempt: true, Outcome: outcome}))
+}
+
+func TestAttemptResponseReceiverRejectsInvalidAutoDisableTriggerResult(t *testing.T) {
+	trigger := attemptwire.ChannelAutoDisableTrigger{
+		Source: attemptwire.SourceAdmin, ChannelID: 7,
+		Reason: attemptwire.ChannelAutoDisableReasonConsecutiveErrors,
+	}
+	receiver := newAttemptResponseReceiver(httptest.NewRecorder())
+	receiver.Header().Set(attemptwire.HeaderMode, attemptwire.ModeControl)
+	receiver.WriteHeader(http.StatusOK)
+	result := attemptwire.AttemptProxyResult{
+		Kind: attemptwire.ResultProviderFailed, ProviderResultKnown: true,
+		AutoDisableTriggers: []attemptwire.ChannelAutoDisableTrigger{trigger, trigger},
+	}
+
+	outcome := receiver.FinishWithResult("target-a", app.RoutePathRelay, tunnel.Committed, result, "", nil)
+
+	require.Equal(t, AttemptCommitUncertain, outcome.Kind)
+	require.Empty(t, outcome.AutoDisableTriggers, "invalid trigger payload must not enter trusted outcome state")
 }
 
 func TestAttemptResponseReceiverInvalidOrMissingResultUsesTransportStage(t *testing.T) {

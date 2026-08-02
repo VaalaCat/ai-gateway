@@ -1,7 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { UseQueryOptions } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
-import type { ChannelTestResponse, PaginatedResponse, PaginatedParams } from "@/lib/types";
+import type {
+  ChannelDisableState,
+  ChannelTestResponse,
+  PaginatedResponse,
+  PaginatedParams,
+} from "@/lib/types";
 
 // === Types ===
 
@@ -32,6 +37,7 @@ export interface BYOKChannelDetail {
   remark: string;
   test_model: string;
   auto_ban: number;
+  auto_ban_state?: ChannelDisableState;
   status_code_mapping: string;
   other_settings: string;
   affinity?: {

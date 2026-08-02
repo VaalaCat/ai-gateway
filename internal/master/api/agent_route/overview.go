@@ -1,6 +1,9 @@
 package agent_route
 
 import (
+	"fmt"
+	"strconv"
+
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -8,18 +11,26 @@ import (
 
 type OverviewRequest struct {
 	api.PaginationQuery
+	Query      string `form:"q"`
 	SourceType string `form:"source_type"`
+	SourceID   string `form:"source_id"`
+	Model      string `form:"model"`
+	AgentID    string `form:"agent_id"`
 }
 
 func (h *Handler) Overview(c *app.Context, req OverviewRequest) (api.PaginatedResponse[OverviewItem], error) {
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
+	filter, err := req.Filter()
+	if err != nil {
+		return api.PaginatedResponse[OverviewItem]{}, err
+	}
 
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
 
-	routes, total, err := q.AgentRoute().List(
+	routes, total, err := q.AgentRoute().ListOverview(
 		dao.ListOptions{Page: page, PageSize: pageSize},
-		dao.AgentRouteListFilter{SourceType: req.SourceType},
+		filter,
 	)
 	if err != nil {
 		return api.PaginatedResponse[OverviewItem]{}, api.InternalError("list agent routes failed", err)
@@ -27,37 +38,42 @@ func (h *Handler) Overview(c *app.Context, req OverviewRequest) (api.PaginatedRe
 
 	items := make([]OverviewItem, len(routes))
 	for i, r := range routes {
-		item := OverviewItem{
+		items[i] = OverviewItem{
 			ID:         r.ID,
 			SourceType: r.SourceType,
 			SourceID:   r.SourceID,
+			SourceName: r.SourceName,
 			Model:      r.Model,
 			AgentID:    r.AgentID,
+			AgentName:  r.AgentName,
 			AgentTag:   r.AgentTag,
 			Priority:   r.Priority,
 			CreatedAt:  r.CreatedAt,
 			UpdatedAt:  r.UpdatedAt,
 		}
-
-		switch r.SourceType {
-		case "token":
-			if t, err := q.Token().GetByID(r.SourceID); err == nil {
-				item.SourceName = t.Name
-			}
-		case "channel":
-			if ch, err := q.Channel().GetByID(r.SourceID); err == nil {
-				item.SourceName = ch.Name
-			}
-		}
-
-		if r.AgentID != "" {
-			if a, err := q.Agent().GetByAgentID(r.AgentID); err == nil {
-				item.AgentName = a.Name
-			}
-		}
-
-		items[i] = item
 	}
 
 	return api.PaginatedResponse[OverviewItem]{Data: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (r OverviewRequest) Filter() (dao.AgentRouteOverviewFilter, error) {
+	filter := dao.AgentRouteOverviewFilter{
+		Query: r.Query, SourceType: r.SourceType, Model: r.Model, AgentID: r.AgentID,
+	}
+	if r.SourceType != "" && r.SourceType != "token" && r.SourceType != "channel" {
+		return filter, api.BadRequestError("source_type must be token or channel", nil)
+	}
+	if r.SourceID == "" {
+		return filter, nil
+	}
+	if r.SourceType == "" {
+		return filter, api.BadRequestError("source_id requires source_type", nil)
+	}
+	id, err := strconv.ParseUint(r.SourceID, 10, 64)
+	if err != nil || id == 0 || uint64(uint(id)) != id {
+		return filter, api.BadRequestError("source_id must be a positive integer", fmt.Errorf("invalid source_id %q", r.SourceID))
+	}
+	sourceID := uint(id)
+	filter.SourceID = &sourceID
+	return filter, nil
 }

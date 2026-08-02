@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	gosync "sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,15 +187,47 @@ func TestHeartbeatTracker_Flush(t *testing.T) {
 	require.Error(t, tr.Flush())
 	require.Equal(t, callsBefore+1, len(fake.calls), "失败仍发起 1 次调用")
 
-	// invariant: dirty 在失败后已清空（不重试），所以下一次 Flush 无新调用
+	// failure: 失败 snapshot 会回并 dirty，下一次 Flush 重试原值
 	fake.err = nil
 	require.NoError(t, tr.Flush())
-	require.Equal(t, callsBefore+1, len(fake.calls), "失败后 dirty 已清，下次 Flush 不发起调用")
+	require.Equal(t, callsBefore+2, len(fake.calls), "失败 snapshot 必须在下次 Flush 重试")
+	require.Equal(t, int64(300), fake.calls[len(fake.calls)-1]["c"])
 
-	// success: Touch 后再次 Flush 能落库（验证 dirty 重新工作）
-	tr.Touch("c", 400)
+	// boundary: 重试成功后 dirty 再次清空，不重复持久化
 	require.NoError(t, tr.Flush())
-	require.Equal(t, int64(400), fake.calls[len(fake.calls)-1]["c"])
+	require.Equal(t, callsBefore+2, len(fake.calls))
+}
+
+func TestHeartbeatTrackerFailedFlushMergesSnapshotWithoutOverwritingNewerTouch(t *testing.T) {
+	tr := newTrackerForTest(t)
+	flushEntered := make(chan struct{})
+	releaseFlush := make(chan struct{})
+	tr.SetLastSeenPersistContextFn(func(context.Context, map[string]int64) error {
+		close(flushEntered)
+		<-releaseFlush
+		return assert.AnError
+	})
+	tr.Touch("updated-during-flush", 100)
+	tr.Touch("unchanged-during-flush", 300)
+
+	flushDone := make(chan error, 1)
+	go func() { flushDone <- tr.FlushContext(t.Context()) }()
+	<-flushEntered
+	tr.Touch("updated-during-flush", 200)
+	tr.Touch("added-during-flush", 400)
+	close(releaseFlush)
+	require.ErrorIs(t, <-flushDone, assert.AnError)
+
+	fake := &fakeAgentMutator{}
+	tr.SetLastSeenPersistFn(fake.record)
+	require.NoError(t, tr.Flush())
+	require.Equal(t, []map[string]int64{{
+		"added-during-flush":     400,
+		"updated-during-flush":   200,
+		"unchanged-during-flush": 300,
+	}}, fake.snapshotCalls())
+	require.NoError(t, tr.Flush())
+	require.Equal(t, 1, fake.callCount(), "成功重试后不应重复持久化")
 }
 
 func TestHeartbeatTracker_TickerFlushesPeriodically(t *testing.T) {
@@ -342,6 +375,39 @@ func TestHeartbeatTrackerCloseDeadlineCancelsFinalFlushAndRejectsRestart(t *test
 	if got := tr.ResourceCounts(); got != (app.ResourceCounts{}) {
 		t.Fatalf("Start after Close created resources: %+v", got)
 	}
+}
+
+func TestHeartbeatTrackerCloseRetriesAndReturnsFinalFlushError(t *testing.T) {
+	tr := NewHeartbeatTracker(nil, zap.NewNop(), 0)
+	finalErr := errors.New("final heartbeat flush failed")
+	var attempts atomic.Int64
+	tr.SetLastSeenPersistContextFn(func(context.Context, map[string]int64) error {
+		attempts.Add(1)
+		return finalErr
+	})
+	tr.Touch("agent-a", 123)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := tr.Close(ctx)
+
+	require.ErrorIs(t, err, finalErr)
+	require.Equal(t, int64(3), attempts.Load(), "final flush retries must be bounded")
+	select {
+	case <-tr.Done():
+	default:
+		t.Fatal("Done remained open after bounded final flush failure")
+	}
+	require.ErrorIs(t, tr.Close(context.Background()), finalErr, "later Close callers must observe the same final error")
+	require.Equal(t, app.ResourceCounts{}, tr.ResourceCounts())
+
+	persisted := make(chan map[string]int64, 1)
+	tr.SetLastSeenPersistContextFn(func(_ context.Context, updates map[string]int64) error {
+		persisted <- updates
+		return nil
+	})
+	require.NoError(t, tr.Flush())
+	require.Equal(t, map[string]int64{"agent-a": 123}, <-persisted)
 }
 
 func TestHeartbeatTrackerConcurrentStartCloseUsesOneLifecycleGate(t *testing.T) {

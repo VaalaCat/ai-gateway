@@ -22,8 +22,8 @@ type RebuildResponse struct {
 	TotalSlices int64  `json:"total_slices"`
 }
 
-// Rebuild submits an async rebuild job and returns immediately. Runner.Submit
-// validates the date range and computes total slices (24 per day).
+// Rebuild submits an async rebuild job after Runner.Submit fixes the actual
+// request-log date list and progress denominator.
 func (h *Handler) Rebuild(c *app.Context, req RebuildRequest) (RebuildResponse, error) {
 	if h.Runner == nil {
 		return RebuildResponse{}, api.InternalError("rebuild runner not configured", nil)
@@ -39,8 +39,9 @@ func (h *Handler) Rebuild(c *app.Context, req RebuildRequest) (RebuildResponse, 
 		}
 		return RebuildResponse{}, api.BadRequestError(err.Error(), nil)
 	}
+	snapshot := job.Snapshot()
 	return RebuildResponse{
-		JobID:       job.ID,
-		TotalSlices: job.TotalSlices,
+		JobID:       snapshot.ID,
+		TotalSlices: snapshot.TotalSlices,
 	}, nil
 }

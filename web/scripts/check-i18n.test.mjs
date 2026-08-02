@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { flattenKeys } from "./check-i18n.mjs";
+import { checkRequiredRuntimeKeys, flattenKeys } from "./check-i18n.mjs";
 
 test("log storage: required runtime keys exist and are non-empty", async () => {
   const { checkRequiredRuntimeKeys } = await import("./check-i18n.mjs");
@@ -59,6 +59,25 @@ test("TPS metric labels describe avg/p5 rather than avg/p95", () => {
       assert.doesNotMatch(value, /p95/i);
     }
   }
+});
+
+test("billing facts risk describes retained-window evidence and short-term deduplication", () => {
+  const zh = JSON.parse(readFileSync("src/i18n/zh.json", "utf8"));
+  const en = JSON.parse(readFileSync("src/i18n/en.json", "utf8"));
+  const zhRisk = zh.system?.cleanup?.billingFactsRisk;
+  const enRisk = en.system?.cleanup?.billingFactsRisk;
+
+  assert.match(zhRisk, /逐请求费用凭证/);
+  assert.match(zhRisk, /保留窗口内/);
+  assert.match(zhRisk, /短期 request_id 去重能力/);
+  assert.match(zhRisk, /余额不会回滚/);
+  assert.doesNotMatch(zhRisk, /重建|永久/);
+
+  assert.match(enRisk, /per-request cost evidence/i);
+  assert.match(enRisk, /within the retention window/i);
+  assert.match(enRisk, /short-term request_id deduplication/i);
+  assert.match(enRisk, /balances are not rolled back/i);
+  assert.doesNotMatch(enRisk, /rebuild|permanent/i);
 });
 
 import { findPlaceholderValues } from "./check-i18n.mjs";

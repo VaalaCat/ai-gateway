@@ -43,10 +43,10 @@ func TestBillingTokenScope(t *testing.T) {
 	srv.DB.Create(&models.Token{ID: 3, UserID: uint(aliceUserID), Key: "sk-alice-2", Name: "alice-secondary", Status: 1, ExpiredAt: -1})
 	srv.DB.Create(&models.Token{ID: 4, UserID: uint(bobUserID), Key: "sk-bob-1", Name: "bob-primary", Status: 1, ExpiredAt: -1})
 
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(aliceUserID), TokenID: 2, TokenName: "alice-primary", RequestCount: 3, SuccessCount: 3, TotalCost: 300, LastUsedAt: 1711933200})
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-02", UserID: uint(aliceUserID), TokenID: 2, TokenName: "alice-primary", RequestCount: 2, SuccessCount: 1, FailedCount: 1, TotalCost: 200, LastUsedAt: 1712019600})
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(aliceUserID), TokenID: 3, TokenName: "alice-secondary", RequestCount: 1, SuccessCount: 1, TotalCost: 50, LastUsedAt: 1711933200})
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(bobUserID), TokenID: 4, TokenName: "bob-primary", RequestCount: 7, SuccessCount: 7, TotalCost: 700, LastUsedAt: 1711933200})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(aliceUserID), TokenID: 2, TokenName: "alice-primary", RequestCount: 3, SuccessCount: 3, TotalCost: 300, LastUsedAt: 1711933200})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-02", UserID: uint(aliceUserID), TokenID: 2, TokenName: "alice-primary", RequestCount: 2, SuccessCount: 1, FailedCount: 1, TotalCost: 200, LastUsedAt: 1712019600})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(aliceUserID), TokenID: 3, TokenName: "alice-secondary", RequestCount: 1, SuccessCount: 1, TotalCost: 50, LastUsedAt: 1711933200})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(bobUserID), TokenID: 4, TokenName: "bob-primary", RequestCount: 7, SuccessCount: 7, TotalCost: 700, LastUsedAt: 1711933200})
 
 	w := doAlice("GET", "/api/billing/tokens", nil)
 	if w.Code != 200 {
@@ -120,8 +120,8 @@ func TestBillingOverview(t *testing.T) {
 
 	srv.DB.Create(&models.Token{ID: 2, UserID: uint(userID), Key: "sk-overview-1", Name: "overview-primary", Status: 1, ExpiredAt: -1})
 	srv.DB.Create(&models.Token{ID: 3, UserID: uint(userID), Key: "sk-overview-2", Name: "overview-secondary", Status: 1, ExpiredAt: -1})
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(userID), TokenID: 2, TokenName: "overview-primary", RequestCount: 3, SuccessCount: 2, FailedCount: 1, TotalCost: 300, LastUsedAt: 1711933200})
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-02", UserID: uint(userID), TokenID: 3, TokenName: "overview-secondary", RequestCount: 2, SuccessCount: 2, FailedCount: 0, TotalCost: 150, LastUsedAt: 1712019600})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(userID), TokenID: 2, TokenName: "overview-primary", RequestCount: 3, SuccessCount: 2, FailedCount: 1, TotalCost: 300, LastUsedAt: 1711933200})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-02", UserID: uint(userID), TokenID: 3, TokenName: "overview-secondary", RequestCount: 2, SuccessCount: 2, FailedCount: 0, TotalCost: 150, LastUsedAt: 1712019600})
 
 	w = doUser("GET", "/api/billing/overview", nil)
 	if w.Code != 200 {
@@ -173,8 +173,8 @@ func TestBillingTokenDailyOwnership(t *testing.T) {
 
 	srv.DB.Create(&models.Token{ID: 2, UserID: uint(aliceUserID), Key: "sk-daily-alice", Name: "alice-primary", Status: 1, ExpiredAt: -1})
 	srv.DB.Create(&models.Token{ID: 3, UserID: uint(bobUserID), Key: "sk-daily-bob", Name: "bob-primary", Status: 1, ExpiredAt: -1})
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(aliceUserID), TokenID: 2, TokenName: "alice-primary", RequestCount: 3, SuccessCount: 3, TotalCost: 300, LastUsedAt: 1711933200})
-	srv.DB.Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(bobUserID), TokenID: 3, TokenName: "bob-primary", RequestCount: 2, SuccessCount: 2, TotalCost: 200, LastUsedAt: 1711933200})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(aliceUserID), TokenID: 2, TokenName: "alice-primary", RequestCount: 3, SuccessCount: 3, TotalCost: 300, LastUsedAt: 1711933200})
+	srv.App.GetLogDB().Create(&models.TokenDailyBilling{Date: "2026-04-01", UserID: uint(bobUserID), TokenID: 3, TokenName: "bob-primary", RequestCount: 2, SuccessCount: 2, TotalCost: 200, LastUsedAt: 1711933200})
 
 	w := doAlice("GET", "/api/billing/tokens/2/daily", nil)
 	if w.Code != 200 {
@@ -214,7 +214,7 @@ func TestBillingChannelScope(t *testing.T) {
 		return reqHelper(srv, userToken, method, path, body)
 	}
 
-	srv.DB.Create(&models.ChannelDailyBilling{
+	srv.App.GetLogDB().Create(&models.ChannelDailyBilling{
 		Date:         "2026-04-01",
 		ChannelID:    11,
 		ChannelName:  "openai-primary",
@@ -225,7 +225,7 @@ func TestBillingChannelScope(t *testing.T) {
 		TotalCost:    400,
 		LastUsedAt:   1711933200,
 	})
-	srv.DB.Create(&models.ChannelDailyBilling{
+	srv.App.GetLogDB().Create(&models.ChannelDailyBilling{
 		Date:         "2026-04-02",
 		ChannelID:    11,
 		ChannelName:  "openai-primary",
@@ -235,7 +235,7 @@ func TestBillingChannelScope(t *testing.T) {
 		TotalCost:    200,
 		LastUsedAt:   1712019600,
 	})
-	srv.DB.Create(&models.ChannelDailyBilling{
+	srv.App.GetLogDB().Create(&models.ChannelDailyBilling{
 		Date:         "2026-04-01",
 		ChannelID:    12,
 		ChannelName:  "anthropic-primary",
@@ -289,9 +289,8 @@ func TestBillingChannelScope(t *testing.T) {
 
 func TestBillingChannelRebuild(t *testing.T) {
 	srv := setupTestMaster(t)
-	// Production default is 1s inter-slice sleep (billing.rebuild_slice_sleep_ms);
-	// disable it here so this test's 24-slice rebuild finishes well within its
-	// 10s poll deadline instead of testing unrelated sleep timing.
+	// Disable the production inter-date sleep so the single-date rebuild stays
+	// within the test deadline instead of testing unrelated timing.
 	srv.RebuildRunner.SetSliceSleep(0)
 	srv.RebuildRunner.Start(context.Background())
 	srv.InitAdminUser("admin", "admin123")
@@ -316,7 +315,7 @@ func TestBillingChannelRebuild(t *testing.T) {
 	userID := createUser("billing-rebuild-user")
 	require.NoError(t, srv.DB.Create(&models.Token{ID: 2, UserID: uint(userID), Key: "sk-rebuild", Name: "rebuild-key", Status: 1, ExpiredAt: -1}).Error)
 	require.NoError(t, srv.DB.Create(&models.Channel{ChannelCore: models.ChannelCore{ID: 21, Name: "rebuild-channel", Type: 1, Status: 1}, Key: "sk-upstream"}).Error)
-	require.NoError(t, srv.DB.Create(&models.BillingLog{
+	require.NoError(t, srv.App.GetLogDB().Create(&models.RequestLog{
 		RequestID:        "req-rebuild-1",
 		UserID:           uint(userID),
 		TokenID:          2,
@@ -332,7 +331,7 @@ func TestBillingChannelRebuild(t *testing.T) {
 		Status:           1,
 		CreatedAt:        time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC).Unix(),
 	}).Error)
-	require.NoError(t, srv.DB.Create(&models.BillingLog{
+	require.NoError(t, srv.App.GetLogDB().Create(&models.RequestLog{
 		RequestID:        "req-rebuild-2",
 		UserID:           uint(userID),
 		TokenID:          2,
@@ -365,8 +364,8 @@ func TestBillingChannelRebuild(t *testing.T) {
 		if jobID == "" {
 			t.Fatalf("submit rebuild: missing job_id in %v", resp)
 		}
-		if total, _ := resp["total_slices"].(float64); int(total) != 24 {
-			t.Fatalf("submit rebuild: total_slices = %v, want 24", resp["total_slices"])
+		if total, _ := resp["total_slices"].(float64); int(total) != 1 {
+			t.Fatalf("submit rebuild: total_slices = %v, want 1", resp["total_slices"])
 		}
 		return jobID
 	}
@@ -398,6 +397,9 @@ func TestBillingChannelRebuild(t *testing.T) {
 	// Second pass should be idempotent (hour 0 of each day resets daily
 	// rollups; replay re-derives identical totals).
 	waitJobSucceeded(submitRebuild())
+	var rebuilt models.ChannelDailyBilling
+	require.NoError(t, srv.App.GetLogDB().Where("channel_id = ? AND date = ?", 21, "2026-04-01").First(&rebuilt).Error)
+	require.Equal(t, int64(80), rebuilt.TotalCost)
 
 	w := doAdmin("GET", "/api/admin/billing/channels?start_date=2026-04-01&end_date=2026-04-01", nil)
 	if w.Code != 200 {

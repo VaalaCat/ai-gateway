@@ -6,9 +6,10 @@ import (
 
 type ListRequest struct {
 	api.PaginationQuery
-	Scope  string `form:"scope"`
-	UserID *uint  `form:"user_id"`
-	Q      string `form:"q"`
+	Scope   string `form:"scope"`
+	UserID  *uint  `form:"user_id"`
+	TokenID *uint  `form:"token_id"`
+	Q       string `form:"q"`
 }
 
 type CreateRequest struct {

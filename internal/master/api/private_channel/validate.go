@@ -48,6 +48,8 @@ var byokValidators = []validatorFn{
 	validateBYOKEnabledForUserCtx,
 	validateUserUnderChannelLimitCtx,
 	validateFieldLengthsCtx,
+	validateStatusCtx,
+	validateAutoBanCtx,
 	validateNameUniquenessCtx,
 	validateBaseURLAllowlistCtx,
 	validateEndpointsCtx,
@@ -94,6 +96,34 @@ func RunValidators(c ValidatorCtx) error {
 }
 
 // --- ValidatorCtx-based validator implementations ---
+
+func validateStatusCtx(c ValidatorCtx) error {
+	if !c.IsDirty("status") {
+		return nil
+	}
+	value, present := c.Req["status"]
+	if !present {
+		return nil
+	}
+	if err := api.ValidateStatusValue(value); err != nil {
+		return api.BadRequestError(err.Error(), err)
+	}
+	return nil
+}
+
+func validateAutoBanCtx(c ValidatorCtx) error {
+	if !c.IsDirty("auto_ban") {
+		return nil
+	}
+	value, present := c.Req["auto_ban"]
+	if !present {
+		return nil
+	}
+	if err := api.ValidateAutoBanValue(value); err != nil {
+		return api.BadRequestError(err.Error(), err)
+	}
+	return nil
+}
 
 func validateBYOKEnabledForUserCtx(c ValidatorCtx) error {
 	if c.OwnerID == 0 {

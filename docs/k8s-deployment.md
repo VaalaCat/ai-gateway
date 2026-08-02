@@ -305,7 +305,66 @@ spec:
 
 ---
 
-## 6. 升级与回滚
+## 6. Prometheus metrics（可选）
+
+metrics 默认完全关闭。配置 `metrics.token` 后，`/metrics` 才会启用，并要求 `Authorization: Bearer <token>`：
+
+- 只配置 `token`：共享业务监听端口，master 抓取 `8140`，agent 抓取 `8139`。
+- 同时配置 `listen: ":9091"`：使用独立监听端口；业务端口不再注册 `/metrics`。
+
+独立模式可在 Pod 中增加端口，但不要把它加入上面的公网 Ingress：
+
+```yaml
+metrics:
+  token: "replace-with-at-least-32-random-bytes"
+  listen: ":9091"
+
+# Deployment container ports
+ports:
+  - name: http
+    containerPort: 8140
+  - name: metrics
+    containerPort: 9091
+```
+
+为独立端口创建仅供集群内部使用的 Service：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gateway-master-metrics
+  namespace: ai-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: ai-gateway-master
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: metrics
+```
+
+把同一个 token 存入 Kubernetes Secret，并在 Prometheus Pod 中以文件方式挂载。Prometheus 抓取配置使用 `credentials_file`，避免把 token 直接写进抓取配置：
+
+```yaml
+scrape_configs:
+  - job_name: ai-gateway-master
+    scheme: http
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - ai-gateway-master-metrics.ai-gateway.svc.cluster.local:9091
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/ai-gateway-metrics/token
+```
+
+共享模式将 target 改为 `ai-gateway-master.ai-gateway.svc.cluster.local:8140`。Gateway 自身的 `metrics.token` 也应由同一个 Secret 渲染进配置文件，不要提交真实 token。
+
+---
+
+## 7. 升级与回滚
 
 ### 升级镜像
 
@@ -322,27 +381,27 @@ kubectl -n ai-gateway rollout undo deploy/ai-gateway-master
 
 ---
 
-## 7. 常见问题与排查
+## 8. 常见问题与排查
 
-### 7.1 Agent 未注册
+### 8.1 Agent 未注册
 
 - 检查 master 是否可达：`kubectl -n ai-gateway logs deploy/ai-gateway-agent`
 - 检查 token 是否过期
 - 检查 `agent.master_url` 是否为集群内可访问地址
 
-### 7.2 SQLite 文件权限问题
+### 8.2 SQLite 文件权限问题
 
 - 确认 `/data` 挂载正常
 - 确认容器运行用户对挂载目录有写权限
 
-### 7.3 WebSocket 连接不稳定
+### 8.3 WebSocket 连接不稳定
 
 - 检查集群网络策略
 - 检查 Ingress/网关超时配置（如果通过网关转发 WS）
 
 ---
 
-## 8. 生产建议
+## 9. 生产建议
 
 - 将 `master.jwt_secret` 与管理员密码改为 Secret 注入
 - 给 API 配置 TLS（Ingress + cert-manager）

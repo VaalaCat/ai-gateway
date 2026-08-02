@@ -10,18 +10,62 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func seedBillingHourlyBucket(t *testing.T, db *gorm.DB, row models.BillingHourlyBucket) {
 	t.Helper()
-	require.NoError(t, db.Create(&row).Error)
+	ts := time.Date(mustYear(row.Date), mustMonth(row.Date), mustDay(row.Date), row.Hour, 0, 0, 0, time.UTC).Unix()
+	for i := int64(0); i < row.RequestCount; i++ {
+		request := models.UsageLog{
+			RequestID: fmt.Sprintf("stats-%s-%d-%d-%d-%d-%s", row.Date, row.Hour, row.UserID, row.TokenID, i, row.ModelName),
+			UserID:    row.UserID, TokenID: row.TokenID, ChannelID: row.ChannelID, PrivateChannelID: row.PrivateChannelID,
+			OwnerType: row.OwnerType, ModelName: row.ModelName, ChannelName: row.ChannelName, ChannelType: row.ChannelType,
+			Status: 1, CreatedAt: ts + i,
+		}
+		if i == 0 {
+			request.PromptTokens = int(row.PromptTokens)
+			request.CompletionTokens = int(row.CompletionTokens)
+			request.CacheReadTokens = int(row.CacheReadTokens)
+			request.CacheWriteTokens = int(row.CacheWriteTokens)
+			request.TotalCost = row.TotalCost
+		}
+		require.NoError(t, db.Select("*").Create(&request).Error)
+	}
+	hourly := models.UsageHourlyBucket{
+		Date: row.Date, Hour: row.Hour, ChannelID: row.ChannelID, PrivateChannelID: row.PrivateChannelID,
+		OwnerType: row.OwnerType, ModelName: row.ModelName, ChannelName: row.ChannelName, ChannelType: row.ChannelType,
+		RequestCount: row.RequestCount, SuccessCount: row.SuccessCount, FailedCount: row.FailedCount,
+		PromptTokens: row.PromptTokens, CompletionTokens: row.CompletionTokens, CacheReadTokens: row.CacheReadTokens,
+		CacheWriteTokens: row.CacheWriteTokens, TotalCost: row.TotalCost,
+	}
+	require.NoError(t, db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "date"}, {Name: "hour"}, {Name: "channel_id"}, {Name: "private_channel_id"}, {Name: "model_name"}, {Name: "agent_id"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"request_count":      gorm.Expr("request_count + ?", hourly.RequestCount),
+			"success_count":      gorm.Expr("success_count + ?", hourly.SuccessCount),
+			"failed_count":       gorm.Expr("failed_count + ?", hourly.FailedCount),
+			"prompt_tokens":      gorm.Expr("prompt_tokens + ?", hourly.PromptTokens),
+			"completion_tokens":  gorm.Expr("completion_tokens + ?", hourly.CompletionTokens),
+			"cache_read_tokens":  gorm.Expr("cache_read_tokens + ?", hourly.CacheReadTokens),
+			"cache_write_tokens": gorm.Expr("cache_write_tokens + ?", hourly.CacheWriteTokens),
+			"total_cost":         gorm.Expr("total_cost + ?", hourly.TotalCost),
+		}),
+	}).Create(&hourly).Error)
 }
+
+func mustYear(date string) int { value, _ := time.Parse("2006-01-02", date); return value.Year() }
+func mustMonth(date string) time.Month {
+	value, _ := time.Parse("2006-01-02", date)
+	return value.Month()
+}
+func mustDay(date string) int { value, _ := time.Parse("2006-01-02", date); return value.Day() }
 
 func setupBillingStatsQuery(t *testing.T) (*adminStatsQuery, *gorm.DB) {
 	t.Helper()
-	core, logDB := setupStrictSplitDBs(t)
-	ctx := NewContext(&testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit})
-	return NewAdminQuery(ctx).Stats().(*adminStatsQuery), core
+	db := setupTestDB(t)
+	ctx := NewContext(&testApp{db: db, logDB: db, layoutMode: app.DatabaseLayoutLegacySingle})
+	return NewAdminQuery(ctx).Stats().(*adminStatsQuery), db
 }
 
 func TestActiveUsersUsesBillingHourlyAndExcludesAnonymous(t *testing.T) {
@@ -116,6 +160,7 @@ func TestSplitStatsQueriesReadLogDatabase(t *testing.T) {
 	r := ObsRange{Start: now.Add(-time.Hour).Unix(), End: now.Add(time.Hour).Unix(), Gran: GranHour}
 	require.NoError(t, core.Create(&models.UsageHourlyBucket{Date: date, Hour: now.Hour(), ChannelID: 7, ModelName: "core", RequestCount: 99}).Error)
 	require.NoError(t, logDB.Create(&models.UsageHourlyBucket{Date: date, Hour: now.Hour(), ChannelID: 7, ModelName: "log", RequestCount: 3, FailedCount: 3}).Error)
+	require.NoError(t, logDB.Exec("CREATE TABLE request_logs AS SELECT * FROM usage_logs WHERE 0").Error)
 	q := NewAdminQuery(NewContext(&testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit})).Stats()
 	rows, err := q.ChannelModelBreakdown(7, r)
 	require.NoError(t, err)
@@ -124,7 +169,6 @@ func TestSplitStatsQueriesReadLogDatabase(t *testing.T) {
 	totals, err := q.LogsTotals(r, Scope{IsAdmin: true})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), totals.Total)
-	require.NoError(t, logDB.Exec("CREATE TABLE request_logs AS SELECT * FROM usage_logs WHERE 0").Error)
 	request := models.UsageLog{RequestID: "request-log", UserID: 42, Status: 0, CreatedAt: now.Unix()}
 	require.NoError(t, logDB.Table("request_logs").Create(&request).Error)
 	userTotals, err := q.LogsTotals(r, Scope{UserID: 42})
@@ -401,6 +445,10 @@ func TestLeaderboard_ByUser_AdminOnly(t *testing.T) {
 	require.NoError(t, db.Create(&models.User{Username: "bob"}).Error)   // id=2
 	seedTokenDaily(t, db, "2026-05-20", 1, 1, "tok-a", 10, 100, 100, 500)
 	seedTokenDaily(t, db, "2026-05-20", 2, 2, "tok-b", 20, 200, 200, 1500)
+	seedUsageLogRow(t, db, 1, time.Date(2026, 5, 20, 1, 0, 0, 0, time.UTC).Unix(), 100, 100)
+	seedUsageLogRow(t, db, 2, time.Date(2026, 5, 20, 2, 0, 0, 0, time.UTC).Unix(), 200, 200)
+	require.NoError(t, db.Model(&models.UsageLog{}).Where("user_id = ?", 1).Update("total_cost", 500).Error)
+	require.NoError(t, db.Model(&models.UsageLog{}).Where("user_id = ?", 2).Update("total_cost", 1500).Error)
 
 	r := ObsRange{
 		Start: time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC).Unix(),
@@ -476,7 +524,7 @@ func TestSpeedCompare_ByModel_OrderedByTTFTAsc(t *testing.T) {
 	// claude-3: TTFT=510, TPS = 31*1000/1000 = 31
 	seedHourlyBucketSpeed(t, db, "claude-3", 510, 1000, 31)
 
-	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, ObsFilter{})
+	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, 10, ObsFilter{})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	require.Equal(t, "gpt-4o", got[0].Name)
@@ -501,7 +549,7 @@ func TestSpeedCompare_NoStreamData_RowSkipped(t *testing.T) {
 		// StreamRequestCount default 0
 	}).Error)
 
-	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, ObsFilter{})
+	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, 10, ObsFilter{})
 	require.NoError(t, err)
 	require.Empty(t, got, "non-stream models filtered out")
 }
@@ -509,7 +557,7 @@ func TestSpeedCompare_NoStreamData_RowSkipped(t *testing.T) {
 func TestSpeedCompare_UnknownDimension_ReturnsError(t *testing.T) {
 	ctx, _ := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
-	_, err := q.Stats().SpeedCompare("garbage", todayRangeDay(t), Scope{IsAdmin: true}, ObsFilter{})
+	_, err := q.Stats().SpeedCompare("garbage", todayRangeDay(t), Scope{IsAdmin: true}, 10, ObsFilter{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "garbage")
 }
@@ -517,7 +565,7 @@ func TestSpeedCompare_UnknownDimension_ReturnsError(t *testing.T) {
 func TestSpeedCompare_UserScope_ReturnsNil(t *testing.T) {
 	ctx, _ := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
-	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: false, UserID: 1}, ObsFilter{})
+	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: false, UserID: 1}, 10, ObsFilter{})
 	require.NoError(t, err)
 	require.Nil(t, got)
 }
@@ -639,6 +687,19 @@ func TestStatsDAO(t *testing.T) {
 			t.Fatalf("expected total cost 100, got %d", total)
 		}
 	})
+}
+
+func TestStatsOverviewSplitReadsOnlyRequestLogs(t *testing.T) {
+	core, logDB := setupStrictSplitDBs(t)
+	require.NoError(t, core.Create(&models.BillingLog{RequestID: "core", TotalCost: 11}).Error)
+	require.NoError(t, logDB.Create(&models.RequestLog{RequestID: "log", TotalCost: 99}).Error)
+	q := NewAdminQuery(NewContext(&testApp{db: core, logDB: logDB, layoutMode: app.DatabaseLayoutSplit})).Stats()
+
+	got, err := q.GetOverview()
+
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.UsageLogCount)
+	require.Equal(t, int64(99), got.TotalCost)
 }
 
 // ---- Task 2.5: ChannelMetrics / AgentMetrics ----
@@ -922,6 +983,38 @@ func TestStageLatencyP95_NoData_AllZero(t *testing.T) {
 
 // ---- Task 2.9: DashboardKpis ----
 
+func TestDashboardKpis_LongRangeUsesDailySpark(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+	start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	seedHourlyBucketModel(t, db, "2026-05-01", 1, "gpt-4o", 10, 100)
+	seedHourlyBucketModel(t, db, "2026-05-01", 2, "gpt-4o", 20, 200)
+	seedHourlyBucketModel(t, db, "2026-05-09", 1, "gpt-4o", 30, 300)
+
+	got, err := q.Stats().DashboardKpis(ObsRange{
+		Start: start.Unix(), End: start.Add(9 * 24 * time.Hour).Unix(), Gran: GranDay,
+	}, Scope{IsAdmin: true}, ObsFilter{})
+
+	require.NoError(t, err)
+	require.Equal(t, []int64{30, 30}, got.Requests.Spark)
+	require.Equal(t, []int64{30, 30}, got.SuccessRate.Spark)
+}
+
+func TestDashboardKpis_SevenDayBoundaryKeepsHourlySpark(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+	start := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	seedHourlyBucketModel(t, db, "2026-05-01", 1, "gpt-4o", 10, 100)
+	seedHourlyBucketModel(t, db, "2026-05-01", 2, "gpt-4o", 20, 200)
+
+	got, err := q.Stats().DashboardKpis(ObsRange{
+		Start: start.Unix(), End: start.Add(7 * 24 * time.Hour).Unix(), Gran: GranDay,
+	}, Scope{IsAdmin: true}, ObsFilter{})
+
+	require.NoError(t, err)
+	require.Equal(t, []int64{10, 20}, got.Requests.Spark)
+}
+
 func TestDashboardKpis_AdminCase(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
@@ -1014,13 +1107,7 @@ func TestStageLatencyP95_OnlyFailedRows_AllZero(t *testing.T) {
 	}
 }
 
-// TestHourlyTrend_GranDay_BoundaryOverlap 验证 hourlyTrendFromBuckets 在 gran=day 时
-// 用区间重叠语义过滤,而非简单 ts < r.Start 单点判定。
-//
-// 复现场景: r.Start 是当天 07:09 UTC,数据在同一天 04:55 UTC。day bucket 的 ts
-// 是当天 00:00 UTC,< r.Start;旧逻辑会丢掉整个 day。新逻辑判 bucketEnd > r.Start
-// → 该 day 仍包含。
-func TestHourlyTrend_GranDay_BoundaryOverlap_DataBeforeStartSameDay(t *testing.T) {
+func TestHourlyTrend_GranDay_StrictBoundaryExcludesEarlierSameDayFacts(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
 	// 数据落在 2026-05-19 04:00 (UTC),早于 r.Start 但同一天
@@ -1033,8 +1120,8 @@ func TestHourlyTrend_GranDay_BoundaryOverlap_DataBeforeStartSameDay(t *testing.T
 		Gran:  GranDay,
 	}, Scope{IsAdmin: true}, ObsFilter{})
 	require.NoError(t, err)
-	require.Len(t, got, 1, "包含同一天,即使 day 起点早于 r.Start")
-	require.Equal(t, int64(4), got[0].Requests, "聚合该天所有 hour")
+	require.Len(t, got, 1)
+	require.Equal(t, int64(3), got[0].Requests, "只聚合 strict [start,end) 内的事实")
 }
 
 // failure case: 数据落在完全早于 r.Start 的前一天 → 不应包含
@@ -1088,7 +1175,7 @@ func TestKpiSuccessRate_HourBoundary_EarlyOfDayExcluded(t *testing.T) {
 	hourR := r
 	hourR.Gran = GranHour
 
-	got, err := kpiSuccessRate(db, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
+	got, err := kpiSuccessRate(db, &models.UsageLog{}, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
 	require.NoError(t, err)
 	require.Equal(t, int64(3), got.Value, "只算 07:09 之后的成功 count,04:55 的 hour 不计入")
 }
@@ -1107,9 +1194,40 @@ func TestKpiSuccessRate_HourBoundary_AllInRange(t *testing.T) {
 	hourR := r
 	hourR.Gran = GranHour
 
-	got, err := kpiSuccessRate(db, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
+	got, err := kpiSuccessRate(db, &models.UsageLog{}, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
 	require.NoError(t, err)
 	require.Equal(t, int64(5), got.Value)
+}
+
+func TestKpiSuccessRate_DayGranularityFiltersPartialBoundaryDaysBeforeAggregating(t *testing.T) {
+	_, db := setupAdminContext(t)
+	seedHourlyBucket(t, db, "2026-05-01", 6, 5, 100)
+	seedHourlyBucket(t, db, "2026-05-01", 7, 11, 100)
+	seedHourlyBucket(t, db, "2026-05-01", 8, 2, 100)
+	seedHourlyBucket(t, db, "2026-05-02", 1, 3, 100)
+	seedHourlyBucket(t, db, "2026-05-02", 2, 4, 100)
+	seedHourlyBucket(t, db, "2026-05-10", 7, 4, 100)
+	seedHourlyBucket(t, db, "2026-05-10", 8, 9, 100)
+	// The final rollup hour intersects the range only for 30 minutes. Seed its
+	// exact request facts so the test locks boundary merging, not whole-hour inclusion.
+	for i := 0; i < 4; i++ {
+		require.NoError(t, db.Create(&models.UsageLog{
+			RequestID: fmt.Sprintf("partial-end-%d", i), Status: 1,
+			CreatedAt: time.Date(2026, 5, 10, 7, i, 0, 0, time.UTC).Unix(),
+		}).Error)
+	}
+
+	r := ObsRange{
+		Start: time.Date(2026, 5, 1, 7, 30, 0, 0, time.UTC).Unix(),
+		End:   time.Date(2026, 5, 10, 7, 30, 0, 0, time.UTC).Unix(),
+		Gran:  GranDay,
+	}
+
+	got, err := kpiSuccessRate(db, &models.UsageLog{}, r, r, Scope{IsAdmin: true}, ObsFilter{})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(13), got.Value)
+	require.Equal(t, []int64{2, 7, 4}, got.Spark)
 }
 
 // boundary: hour 正好等于 hourR.Start → 包含 (>= 而非 >)
@@ -1126,19 +1244,18 @@ func TestKpiSuccessRate_HourBoundary_ExactStartHourIncluded(t *testing.T) {
 	hourR := r
 	hourR.Gran = GranHour
 
-	got, err := kpiSuccessRate(db, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
+	got, err := kpiSuccessRate(db, &models.UsageLog{}, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
 	require.NoError(t, err)
 	require.Equal(t, int64(4), got.Value, "ts == hourR.Start 的 hour 应被包含")
 }
 
-// TestHourlyTrend_GranHour_BoundaryOverlap_NonIntegerStart 锁定 hour 粒度下区间重叠语义:
-// 当 r.Start 非整点 (07:09) 时,07:00 那个 hour bucket 与 [07:09, ...) 仍有重叠,
-// 应被包含 —— 这是相比旧版 (ts < r.Start) 的预期行为改进。
-func TestHourlyTrend_GranHour_BoundaryOverlap_NonIntegerStart(t *testing.T) {
+func TestHourlyTrend_GlobalPartialBoundaryUsesRequestFacts(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
-	seedHourlyBucket(t, db, "2026-05-19", 7, 4, 800)  // 07:00 bucket
 	seedHourlyBucket(t, db, "2026-05-19", 8, 6, 1200) // 08:00 bucket
+	base := time.Date(2026, 5, 19, 7, 0, 0, 0, time.UTC).Unix()
+	seedUsageLogModel(t, db, 1, base+60, "outside", 4, 4, 0, 0)
+	seedUsageLogModel(t, db, 1, base+10*60, "inside", 5, 5, 0, 0)
 
 	got, err := q.Stats().HourlyTrend(ObsRange{
 		Start: time.Date(2026, 5, 19, 7, 9, 0, 0, time.UTC).Unix(), // 07:09
@@ -1146,9 +1263,30 @@ func TestHourlyTrend_GranHour_BoundaryOverlap_NonIntegerStart(t *testing.T) {
 		Gran:  GranHour,
 	}, Scope{IsAdmin: true}, ObsFilter{})
 	require.NoError(t, err)
-	require.Len(t, got, 2, "07:00 bucket 与 [07:09, ...) 重叠也应包含,加上 08:00")
-	require.Equal(t, int64(4), got[0].Requests)
+	require.Len(t, got, 2)
+	require.Equal(t, int64(1), got[0].Requests)
 	require.Equal(t, int64(6), got[1].Requests)
+}
+
+func TestHourlyTrend_UserDayTokenFilterUsesRequestFacts(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx)
+	ts := time.Date(2026, 5, 19, 7, 0, 0, 0, time.UTC).Unix()
+	for _, row := range []models.UsageLog{
+		{RequestID: "token-1", UserID: 7, TokenID: 1, ModelName: "m", PromptTokens: 3, TotalCost: 10, CreatedAt: ts},
+		{RequestID: "token-2", UserID: 7, TokenID: 2, ModelName: "m", PromptTokens: 30, TotalCost: 100, CreatedAt: ts},
+	} {
+		require.NoError(t, db.Select("*").Create(&row).Error)
+	}
+	got, err := q.Stats().HourlyTrend(
+		ObsRange{Start: ts, End: ts + 86400, Gran: GranDay},
+		Scope{UserID: 7}, ObsFilter{TokenID: 1},
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, int64(1), got[0].Requests)
+	require.Equal(t, int64(3), got[0].Tokens)
+	require.Equal(t, int64(10), got[0].Cost)
 }
 
 // ---- Task 4: CacheSaving ReadTokens / WriteTokens ----
@@ -1156,9 +1294,9 @@ func TestHourlyTrend_GranHour_BoundaryOverlap_NonIntegerStart(t *testing.T) {
 // seedHourlyBucketCache 插入一条含 cache token 字段的 billing_hourly_bucket 行。
 func seedHourlyBucketCache(t *testing.T, db *gorm.DB, date string, prompt, cacheRead, cacheWrite, inputCost int64) {
 	t.Helper()
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+	require.NoError(t, db.Create(&models.UsageHourlyBucket{
 		Date: date, Hour: 10,
-		ChannelID: 5, ModelName: "gpt-4o",
+		ChannelID: 5, ModelName: "gpt-4o", AgentID: "cache",
 		OwnerType:        "admin",
 		RequestCount:     1,
 		SuccessCount:     1,
@@ -1242,7 +1380,7 @@ func TestKpiSuccessRate_HourBoundary_ExactEndHourExcluded(t *testing.T) {
 	hourR := r
 	hourR.Gran = GranHour
 
-	got, err := kpiSuccessRate(db, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
+	got, err := kpiSuccessRate(db, &models.UsageLog{}, r, hourR, Scope{IsAdmin: true}, ObsFilter{})
 	require.NoError(t, err)
 	require.Equal(t, int64(0), got.Value, "ts == hourR.End 的 hour 不应计入 (右开区间)")
 }
@@ -1338,6 +1476,7 @@ func TestLeaderboard_ByUser_TokensIncludeCache(t *testing.T) {
 		PromptTokens: 100, CompletionTokens: 200, CacheReadTokens: 30, CacheWriteTokens: 40,
 		TotalCost: 10,
 	}).Error)
+	seedUsageLogModel(t, db, 1, time.Date(2026, 5, 20, 1, 0, 0, 0, time.UTC).Unix(), "gpt-4o", 100, 200, 30, 40)
 	got, err := q.Stats().Leaderboard("user", "tokens", 10, ObsRange{
 		Start: time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC).Unix(),
 		End:   time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC).Unix(),
@@ -1364,8 +1503,13 @@ func seedUsageLogModel(t *testing.T, db *gorm.DB, userID uint, ts int64, model s
 func TestHourlyTrend_ModelFilter_Admin(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
-	seedHourlyBucketModel(t, db, "2026-05-20", 13, "gpt-4o", 100, 1000)
-	seedHourlyBucketModel(t, db, "2026-05-20", 13, "claude-3", 40, 400)
+	ts := time.Date(2026, 5, 20, 13, 0, 0, 0, time.UTC).Unix()
+	for i := 0; i < 100; i++ {
+		seedUsageLogModel(t, db, 1, ts+int64(i), "gpt-4o", 5, 5, 0, 0)
+	}
+	for i := 0; i < 40; i++ {
+		seedUsageLogModel(t, db, 1, ts+int64(100+i), "claude-3", 5, 5, 0, 0)
+	}
 	got, err := q.Stats().HourlyTrend(ObsRange{
 		Start: time.Date(2026, 5, 20, 13, 0, 0, 0, time.UTC).Unix(),
 		End:   time.Date(2026, 5, 20, 14, 0, 0, 0, time.UTC).Unix(),
@@ -1633,8 +1777,9 @@ func TestHourlyTrend_TokenDailyPath_CacheHitRate_TTFTZero(t *testing.T) {
 func TestDistribution_ModelFilter_Admin(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
-	seedHourlyBucketModel(t, db, "2026-05-20", 13, "gpt-4o", 80, 800)
-	seedHourlyBucketModel(t, db, "2026-05-20", 13, "claude-3", 20, 200)
+	ts := time.Date(2026, 5, 20, 13, 0, 0, 0, time.UTC).Unix()
+	seedUsageLogModel(t, db, 1, ts, "gpt-4o", 8, 8, 0, 0)
+	seedUsageLogModel(t, db, 1, ts+1, "claude-3", 2, 2, 0, 0)
 	got, err := q.Stats().Distribution("model", ObsRange{
 		Start: time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC).Unix(),
 		End:   time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC).Unix(),
@@ -1669,8 +1814,9 @@ func TestDistribution_AdminUserFilter_UsesUsageLog(t *testing.T) {
 func TestLeaderboard_ByModel_ModelFilter(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
-	seedHourlyBucketModel(t, db, "2026-05-20", 13, "gpt-4o", 30, 300)
-	seedHourlyBucketModel(t, db, "2026-05-20", 13, "claude-3", 50, 500)
+	ts := time.Date(2026, 5, 20, 13, 0, 0, 0, time.UTC).Unix()
+	seedUsageLogModel(t, db, 1, ts, "gpt-4o", 15, 15, 0, 0)
+	seedUsageLogModel(t, db, 1, ts+1, "claude-3", 25, 25, 0, 0)
 	got, err := q.Stats().Leaderboard("model", "cost", 10, ObsRange{
 		Start: time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC).Unix(),
 		End:   time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC).Unix(),
@@ -1760,18 +1906,17 @@ func TestCostTrendStacked_AdminUserFilter_UsesBillingHourly(t *testing.T) {
 
 // ---- Task 7: CacheSaving per-user + SpeedCompare model filter ----
 
-func TestCacheSaving_AdminUserFilter_UsesBillingFacts(t *testing.T) {
+func TestCacheSaving_AdminUserFilter_UsesRequestFacts(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
 	// 用户 7:prompt=100, cache_read=100 → hit_ratio = 100/200 = 0.5
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
-		Date: "2026-05-20", Hour: 9, UserID: 7, TokenID: 7, ModelName: "gpt-4o",
-		PromptTokens: 100, CacheReadTokens: 100, InputCost: 50, RequestCount: 1,
-	}).Error)
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
-		Date: "2026-05-20", Hour: 9, UserID: 8, TokenID: 8, ModelName: "gpt-4o",
-		PromptTokens: 100, CacheReadTokens: 0, InputCost: 50, RequestCount: 1,
-	}).Error)
+	for _, userID := range []uint{7, 8} {
+		row := models.UsageLog{RequestID: fmt.Sprintf("cache-%d", userID), UserID: userID, TokenID: userID, ModelName: "gpt-4o", PromptTokens: 100, InputCost: 50, CreatedAt: time.Date(2026, 5, 20, 9, 0, 0, 0, time.UTC).Unix()}
+		if userID == 7 {
+			row.CacheReadTokens = 100
+		}
+		require.NoError(t, db.Select("*").Create(&row).Error)
+	}
 	got, err := q.Stats().CacheSaving(ObsRange{
 		Start: time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC).Unix(),
 		End:   time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC).Unix(),
@@ -1787,7 +1932,7 @@ func TestSpeedCompare_ModelFilter(t *testing.T) {
 	q := NewAdminQuery(ctx)
 	seedHourlyBucketSpeed(t, db, "gpt-4o", 100, 1000, 500)
 	seedHourlyBucketSpeed(t, db, "claude-3", 200, 1000, 500)
-	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, ObsFilter{ModelName: "gpt-4o"})
+	got, err := q.Stats().SpeedCompare("model", todayRangeDay(t), Scope{IsAdmin: true}, 10, ObsFilter{ModelName: "gpt-4o"})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, "gpt-4o", got[0].Name)
@@ -1836,15 +1981,12 @@ func TestDashboardKpis_UserFilter_RequestsFollow(t *testing.T) {
 func TestDashboardKpis_ModelFilter_SuccessAndActiveUsers(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx)
-	// success_rate 走 usage_hourly_buckets(有 model_name + success_count)
-	seedHourlyBucketModel(t, db, "2026-05-20", 9, "gpt-4o", 1, 10)   // success_count=1
-	seedHourlyBucketModel(t, db, "2026-05-20", 9, "claude-3", 1, 10) // 不该计入
-	// success-rate 的现有路径仍读取 usage logs/hourly；active-users 改读 billing hourly。
 	ts := time.Date(2026, 5, 20, 9, 0, 0, 0, time.UTC).Unix()
 	seedUsageLogModel(t, db, 7, ts, "gpt-4o", 1, 1, 0, 0)
 	seedUsageLogModel(t, db, 8, ts, "claude-3", 1, 1, 0, 0)
-	seedBillingHourlyBucket(t, db, models.BillingHourlyBucket{Date: "2026-05-20", Hour: 9, UserID: 7, TokenID: 7, ChannelID: 5, ModelName: "gpt-4o", RequestCount: 1})
-	seedBillingHourlyBucket(t, db, models.BillingHourlyBucket{Date: "2026-05-20", Hour: 9, UserID: 8, TokenID: 8, ChannelID: 5, ModelName: "claude-3", RequestCount: 1})
+	var wantedRequests int64
+	require.NoError(t, db.Model(&models.UsageLog{}).Where("model_name = ? AND status = 1", "gpt-4o").Count(&wantedRequests).Error)
+	require.Equal(t, int64(1), wantedRequests)
 	r := ObsRange{
 		Start: time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC).Unix(),
 		End:   time.Date(2026, 5, 21, 0, 0, 0, 0, time.UTC).Unix(),
@@ -1853,9 +1995,9 @@ func TestDashboardKpis_ModelFilter_SuccessAndActiveUsers(t *testing.T) {
 	got, err := q.Stats().DashboardKpis(r, Scope{IsAdmin: true}, ObsFilter{ModelName: "gpt-4o"})
 	require.NoError(t, err)
 	require.NotNil(t, got.SuccessRate)
-	require.Equal(t, int64(1), got.SuccessRate.Value, "uhb 里只算 gpt-4o 的 success_count")
+	require.Equal(t, int64(1), got.SuccessRate.Value, "request facts 里只算 gpt-4o 的成功请求")
 	require.NotNil(t, got.Users)
-	require.Equal(t, int64(1), got.Users.Active, "billing hourly 里用 gpt-4o 的 distinct user = 仅 user 7")
+	require.Equal(t, int64(1), got.Users.Active, "request facts 里用 gpt-4o 的 distinct user = 仅 user 7")
 }
 
 func seedUsageLogTotals(t *testing.T, db *gorm.DB, reqID string, userID uint, status, duration int, ts int64) {
@@ -2021,23 +2163,23 @@ func TestMarketShareTrend_ByModel_TwoBucketsTwoModels(t *testing.T) {
 	q := NewAdminQuery(ctx)
 
 	// hour 13: gpt-4o=150 tokens, claude-3=50 tokens
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+	require.NoError(t, db.Create(&models.UsageHourlyBucket{
 		Date: "2026-05-20", Hour: 13, ChannelID: 5, ModelName: "gpt-4o",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 100, CompletionTokens: 50,
 	}).Error)
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+	require.NoError(t, db.Create(&models.UsageHourlyBucket{
 		Date: "2026-05-20", Hour: 13, ChannelID: 5, ModelName: "claude-3",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 40, CompletionTokens: 10,
 	}).Error)
 	// hour 14: gpt-4o=30 tokens, claude-3=300 tokens → claude-3 wins overall (350 > 180)
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+	require.NoError(t, db.Create(&models.UsageHourlyBucket{
 		Date: "2026-05-20", Hour: 14, ChannelID: 5, ModelName: "gpt-4o",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 20, CompletionTokens: 10,
 	}).Error)
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+	require.NoError(t, db.Create(&models.UsageHourlyBucket{
 		Date: "2026-05-20", Hour: 14, ChannelID: 5, ModelName: "claude-3",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 200, CompletionTokens: 100,
@@ -2068,13 +2210,13 @@ func TestMarketShareTrend_ByChannel_UsesChannelNameWithFallback(t *testing.T) {
 	q := NewAdminQuery(ctx)
 
 	// channel 5 has a name → series uses it.
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+	require.NoError(t, db.Create(&models.UsageHourlyBucket{
 		Date: "2026-05-20", Hour: 10, ChannelID: 5, ChannelName: "openai-shared", ModelName: "gpt-4o",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 60, CompletionTokens: 40,
 	}).Error)
 	// channel 7 has no name recorded → fallback to the channel_id string.
-	require.NoError(t, db.Create(&models.BillingHourlyBucket{
+	require.NoError(t, db.Create(&models.UsageHourlyBucket{
 		Date: "2026-05-20", Hour: 10, ChannelID: 7, ModelName: "claude-3",
 		OwnerType: "admin", RequestCount: 1, SuccessCount: 1,
 		PromptTokens: 25, CompletionTokens: 15,

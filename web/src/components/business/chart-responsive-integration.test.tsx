@@ -73,8 +73,10 @@ it("keeps long tooltip content inside a bounded scrollable surface", () => {
   );
 
   expect(screen.getByRole("tooltip")).toHaveClass(
-    "max-h-[min(50vh,9rem)]",
-    "max-w-[min(20rem,calc(100vw-2rem),calc(100cqw-5rem))]",
+    "max-h-[min(40vh,7rem)]",
+    "max-w-[min(12rem,calc(100vw-4rem),calc(100cqw-4rem))]",
+    "sm:max-h-[min(50vh,9rem)]",
+    "sm:max-w-[min(20rem,calc(100vw-2rem),calc(100cqw-5rem))]",
     "overflow-y-auto",
   );
 });

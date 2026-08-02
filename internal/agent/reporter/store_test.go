@@ -4,10 +4,19 @@ package reporter
 import (
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+func autoDisableTrigger() attemptproxy.ChannelAutoDisableTrigger {
+	return attemptproxy.ChannelAutoDisableTrigger{
+		Source: attemptproxy.SourcePrivate, ChannelID: 9, Revision: 4,
+		Reason: attemptproxy.ChannelAutoDisableReasonConsecutiveErrors,
+	}
+}
 
 func entry(id string) protocol.UsageLogEntry {
 	return protocol.UsageLogEntry{RequestID: id}
@@ -35,6 +44,22 @@ func TestMemStore_AppendPeekAck(t *testing.T) {
 	if len(rest) != 1 || rest[0].RequestID != "c" {
 		t.Fatalf("rest = %+v, want [c]", rest)
 	}
+}
+
+func TestMemStoreAppendPeekAckPreservesAutoDisableTrigger(t *testing.T) {
+	trigger := autoDisableTrigger()
+	store := NewMemPendingUsageStore(10, zap.NewNop())
+	want := protocol.UsageLogEntry{RequestID: "triggered", AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger}}
+	store.Append([]protocol.UsageLogEntry{want, entry("other")})
+
+	peeked := store.PeekBatch(1)
+	require.Len(t, peeked, 1)
+	require.Equal(t, want.AutoDisableTriggers, peeked[0].AutoDisableTriggers)
+	store.Ack(peeked)
+
+	rest := store.PeekBatch(10)
+	require.Len(t, rest, 1)
+	require.Equal(t, "other", rest[0].RequestID)
 }
 
 func TestMemStore_OverflowDropsOldest(t *testing.T) {

@@ -1,9 +1,10 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { ObsRange, ObsGranularity } from "@/lib/types/observability";
+import { switchLongRangeToDay } from "@/lib/utils/observability-range";
 
 const ONE_DAY = 86_400;
 
@@ -18,13 +19,13 @@ function resolveRange(
   sp: URLSearchParams | ReturnType<typeof useSearchParams>,
   nowSec: number,
   granDefault?: ObsGranularity,
-): ObsRange {
+): { range: ObsRange; adjusted: boolean } {
   const endParam = Number(sp.get("end"));
   const end = endParam || nowSec;
   const startParam = Number(sp.get("start"));
   const start = startParam || end - ONE_DAY;
   const gran = (sp.get("gran") as ObsGranularity) || granDefault || "day";
-  return { start, end, gran };
+  return switchLongRangeToDay({ start, end, gran });
 }
 
 export function useObsRange(defaults?: Partial<ObsRange>): UseObsRange {
@@ -40,10 +41,18 @@ export function useObsRange(defaults?: Partial<ObsRange>): UseObsRange {
   // 派生 — URL 变(浏览器后退/外链跳转)立即同步,不再用 useState 镜像。
   // 依赖只取稳定值(sp / 捕获的 nowSec / 原始 gran),不依赖 defaults 对象身份,
   // 否则内联的 {gran:"day"} 每次渲染都是新引用会让 memo 失效。
-  const range = useMemo(
+  const resolved = useMemo(
     () => resolveRange(sp, nowSec, granDefault),
     [sp, nowSec, granDefault],
   );
+  const range = resolved.range;
+
+  useEffect(() => {
+    if (!resolved.adjusted) return;
+    const next = new URLSearchParams(sp.toString());
+    next.set("gran", "day");
+    router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+  }, [pathname, resolved.adjusted, router, sp]);
 
   const setRange = useCallback(
     (r: ObsRange) => {

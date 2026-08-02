@@ -19,6 +19,7 @@ import {
   Route,
   ScrollText,
   Server,
+  Store,
   Ticket,
   Wallet,
   UserCircle,
@@ -28,6 +29,10 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { usePublicConfig } from "@/lib/api/system";
+import {
+  isModelMarketplaceVisible,
+  useCapabilities,
+} from "@/lib/api/capabilities";
 import {
   Sidebar,
   SidebarContent,
@@ -110,12 +115,16 @@ function AdminSection({
 export function AppSidebar() {
   const pathname = usePathname();
   const t = useTranslations("nav");
-  const { isAdmin } = useAuth();
+  const { user, isAdmin } = useAuth();
   const { data: publicConfig } = usePublicConfig();
+  const { data: capabilities } = useCapabilities(user?.user_id);
 
   const userItems: Item[] = [
     { label: t("dashboard"), icon: LayoutDashboard, href: "/dashboard" },
     { label: t("tokens"), icon: Key, href: "/tokens" },
+    ...(isModelMarketplaceVisible(capabilities, isAdmin)
+      ? [{ label: t("modelMarketplace"), icon: Store, href: "/model-marketplace" }]
+      : []),
     { label: t("logs"), icon: ScrollText, href: "/logs" },
     { label: t("billing"), icon: Wallet, href: "/billing" },
     { label: t("playground"), icon: MessageSquare, href: "/playground" },

@@ -3,6 +3,7 @@ package attemptproxy
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 )
 
 var ErrResultTooLarge = errors.New("attempt proxy result too large")
@@ -92,6 +93,7 @@ func marshalResultJSON(result AttemptProxyResult, maxBytes int) ([]byte, error) 
 }
 
 func cloneResultTrace(result AttemptProxyResult) AttemptProxyResult {
+	result.AutoDisableTriggers = slices.Clone(result.AutoDisableTriggers)
 	if result.Trace == nil {
 		return result
 	}

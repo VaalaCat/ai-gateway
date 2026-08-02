@@ -6,6 +6,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DataTable } from "./data-table";
 
+vi.mock("./column-visibility", () => ({
+  ColumnVisibility: ({ table }: { table: unknown }) => (
+    <div data-testid="column-visibility" data-has-table={String(Boolean(table))} />
+  ),
+}));
+
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string, values?: { from?: number; to?: number; total?: number }) => {
     if (key === "paginationInfo") return `${values?.from}-${values?.to}/${values?.total}`;
@@ -108,5 +114,50 @@ describe("DataTable", () => {
 
     expect(container.querySelector("[data-slot=table]")).not.toHaveClass("table-fixed");
     expect(container.querySelector("colgroup")).not.toBeInTheDocument();
+  });
+
+  it("keeps a standalone column visibility control for a ReactNode toolbar", () => {
+    render(
+      <DataTable
+        columns={[nameColumn]}
+        data={[]}
+        toolbar={<div>plain-toolbar</div>}
+        defaultColumnVisibility={{}}
+      />,
+    );
+
+    expect(screen.getByText("plain-toolbar")).toBeInTheDocument();
+    expect(screen.getByTestId("column-visibility")).toHaveAttribute("data-has-table", "true");
+  });
+
+  it("passes the TanStack table to a render-function toolbar", () => {
+    const renderToolbar = vi.fn((_table: unknown) => <div>render-toolbar</div>);
+
+    render(
+      <DataTable
+        columns={[nameColumn]}
+        data={[]}
+        toolbar={renderToolbar}
+        defaultColumnVisibility={{}}
+      />,
+    );
+
+    expect(screen.getByText("render-toolbar")).toBeInTheDocument();
+    expect(renderToolbar).toHaveBeenCalledOnce();
+    expect(renderToolbar.mock.calls[0][0]).toMatchObject({ getVisibleLeafColumns: expect.any(Function) });
+  });
+
+  it("does not duplicate column visibility for a render-function toolbar", () => {
+    render(
+      <DataTable
+        columns={[nameColumn]}
+        data={[]}
+        toolbar={(table) => <div data-testid="custom-column-visibility">{String(Boolean(table))}</div>}
+        defaultColumnVisibility={{}}
+      />,
+    );
+
+    expect(screen.getByTestId("custom-column-visibility")).toHaveTextContent("true");
+    expect(screen.queryByTestId("column-visibility")).not.toBeInTheDocument();
   });
 });

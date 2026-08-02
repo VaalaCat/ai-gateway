@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -23,7 +23,7 @@ const dashboardFixture = {
     leaderboard: { users: [], models: [], channels: [], available_metrics: [] },
     speed_compare: {
       by_model: [{ name: "gpt-5", ttft_ms: 100, tps: 20, ttft_p95_ms: 150, tps_p5: 10 }],
-      by_channel: [],
+      by_channel: [{ name: "channel-us", ttft_ms: 80, tps: 25, ttft_p95_ms: 120, tps_p5: 15 }],
     },
   },
   data_status: { log_db: "available" },
@@ -39,10 +39,12 @@ const calls = vi.hoisted(() => ({
   donut: vi.fn(),
   metricChart: vi.fn(),
   kpi: vi.fn(),
+  speedRanking: vi.fn(),
   metricResponse: undefined as undefined | Record<string, unknown>,
   metricLoading: false,
   dashboardResponse: undefined as DashboardResponse | undefined,
   isAdmin: true,
+  range: { start: 1_700_000_000, end: 1_700_604_800, gran: "day" as const },
 }));
 
 vi.mock("next-intl", () => ({ useTranslations: () => (key: string) => key }));
@@ -55,11 +57,11 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { user_id: 7 }, isAdmin: calls.isAdmin }),
 }));
 vi.mock("@/lib/hooks/use-chart-top-n", () => ({
-  useChartTopN: () => [10, vi.fn()],
+  useChartTopN: () => useState(10),
 }));
 vi.mock("@/lib/hooks/use-obs-range", () => ({
   useObsRange: () => ({
-    range: { start: 1_700_000_000, end: 1_700_604_800, gran: "day" },
+    range: calls.range,
     setRange: vi.fn(),
     refresh: vi.fn(),
     refreshKey: 0,
@@ -86,7 +88,7 @@ vi.mock("@/lib/api/stats", () => ({
   },
 }));
 vi.mock("@/components/business/observability-header", () => ({
-  ObservabilityHeader: ({ extraFilters }: { extraFilters?: ReactNode }) => <div>{extraFilters}</div>,
+  ObservabilityHeader: ({ scopeControls }: { scopeControls?: ReactNode }) => <div>{scopeControls}</div>,
 }));
 vi.mock("@/components/business/kpi-grid", () => ({
   KpiGrid: (props: unknown) => {
@@ -105,11 +107,31 @@ vi.mock("@/components/business/market-share-chart", () => ({ MarketShareChart: (
   return null;
 } }));
 vi.mock("@/components/business/leaderboard", () => ({ Leaderboard: () => null }));
-vi.mock("@/components/business/speed-ranking", () => ({ SpeedRanking: () => null }));
+vi.mock("@/components/business/speed-ranking", () => ({ SpeedRanking: (props: {
+  rows: Array<{ name: string }>;
+  entity: "model" | "channel";
+  metric: "ttft" | "tps";
+  title: string;
+  topN: number;
+}) => {
+  calls.speedRanking(props);
+  return (
+    <section data-testid={`speed-ranking-${props.metric}`} data-entity={props.entity} data-top-n={props.topN}>
+      <h2>{props.title}</h2>
+      {props.rows.map((row) => <span key={row.name}>{row.name}</span>)}
+    </section>
+  );
+} }));
 vi.mock("@/components/business/model-name", () => ({
   ModelName: ({ name }: { name: string }) => <span>{name}</span>,
 }));
-vi.mock("@/components/business/entity-picker/entity-picker", () => ({ EntityPicker: () => null }));
+vi.mock("@/components/business/entity-picker/entity-picker", () => ({ EntityPicker: ({
+  entity,
+  size,
+}: {
+  entity: string;
+  size?: string;
+}) => <div data-testid={`entity-picker-${entity}`} data-size={size} /> }));
 vi.mock("@/components/business/chart-option-select", () => ({
   ChartOptionSelect: ({ label, value, options, onValueChange }: {
     label: string;
@@ -122,7 +144,10 @@ vi.mock("@/components/business/chart-option-select", () => ({
       aria-label={label}
       data-value={value}
       data-options={options.map((option) => option.value).join(",")}
-      onClick={() => onValueChange(options[1]?.value ?? options[0]?.value)}
+      onClick={() => {
+        const current = options.findIndex((option) => option.value === value);
+        onValueChange(options[Math.min(current + 1, options.length - 1)]?.value ?? value);
+      }}
     >
       {value}
     </button>
@@ -131,7 +156,7 @@ vi.mock("@/components/business/chart-option-select", () => ({
 vi.mock("@/components/business/metric-trend-chart", () => ({
   MetricTrendChart: (props: {
     onMetricChange?: (metric: string) => void;
-    headerExtra?: ReactNode;
+    displayExtra?: ReactNode;
     buckets?: Array<Record<string, unknown>>;
   }) => {
     calls.metricChart(props);
@@ -139,7 +164,7 @@ vi.mock("@/components/business/metric-trend-chart", () => ({
       <div>
         <button type="button" onClick={() => props.onMetricChange?.("ttft")}>ttft</button>
         <button type="button" onClick={() => props.onMetricChange?.("tps")}>tps</button>
-        {props.headerExtra}
+        {props.displayExtra}
       </div>
     );
   },
@@ -155,10 +180,23 @@ beforeEach(() => {
   calls.donut.mockReset();
   calls.metricChart.mockReset();
   calls.kpi.mockReset();
+  calls.speedRanking.mockReset();
   calls.metricResponse = undefined;
   calls.metricLoading = false;
   calls.dashboardResponse = undefined;
   calls.isAdmin = true;
+  calls.range = { start: 1_700_000_000, end: 1_700_604_800, gran: "day" };
+});
+
+it("preserves an explicit single-day range in dashboard queries", () => {
+  calls.query = "start=1700000000&end=1700086399&gran=day";
+  calls.range = { start: 1_700_000_000, end: 1_700_086_399, gran: "day" };
+
+  render(<DashboardPage />);
+
+  expect(calls.dashboard.mock.calls.at(-1)?.[0]).toEqual(
+    expect.objectContaining({ start: 1_700_000_000, end: 1_700_086_399 }),
+  );
 });
 
 it("passes one page-level top n to every ranked dashboard chart query", () => {
@@ -174,6 +212,81 @@ it("passes one page-level top n to every ranked dashboard chart query", () => {
     othersLabel: "trend.others",
   }));
   expect(screen.getByRole("button", { name: "prefix.topN" })).toHaveAttribute("data-options", "5,10,20");
+});
+
+it("uses one model/channel dimension for both speed rankings without starting another dashboard request", () => {
+  render(<DashboardPage />);
+
+  const initialRankingProps = calls.speedRanking.mock.calls.slice(-2).map(([props]) => props);
+  expect(initialRankingProps).toEqual([
+    expect.objectContaining({
+      entity: "model",
+      metric: "ttft",
+      title: "speedRanking.ttftModelTitle",
+      topN: 10,
+    }),
+    expect.objectContaining({
+      entity: "model",
+      metric: "tps",
+      title: "speedRanking.tpsModelTitle",
+      topN: 10,
+    }),
+  ]);
+  expect(screen.getAllByText("gpt-5")).toHaveLength(2);
+  expect(screen.queryByText("channel-us")).not.toBeInTheDocument();
+  const initialDashboardRequests = new Set(
+    calls.dashboard.mock.calls.map(([params, options]) => JSON.stringify([params, options])),
+  );
+
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "speedRanking.channel" }), {
+    button: 0,
+    ctrlKey: false,
+  });
+
+  const channelRankingProps = calls.speedRanking.mock.calls.slice(-2).map(([props]) => props);
+  expect(channelRankingProps).toEqual([
+    expect.objectContaining({
+      entity: "channel",
+      metric: "ttft",
+      title: "speedRanking.ttftChannelTitle",
+      topN: 10,
+    }),
+    expect.objectContaining({
+      entity: "channel",
+      metric: "tps",
+      title: "speedRanking.tpsChannelTitle",
+      topN: 10,
+    }),
+  ]);
+  expect(screen.getAllByText("channel-us")).toHaveLength(2);
+  expect(screen.queryByText("gpt-5")).not.toBeInTheDocument();
+  expect(new Set(
+    calls.dashboard.mock.calls.map(([params, options]) => JSON.stringify([params, options])),
+  )).toEqual(initialDashboardRequests);
+});
+
+it("requests a new dashboard identity when the page-level top n changes", () => {
+  render(<DashboardPage />);
+
+  expect(calls.dashboard.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ top_n: 10 }));
+  fireEvent.click(screen.getByRole("button", { name: "prefix.topN" }));
+
+  expect(calls.dashboard.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ top_n: 20 }));
+  expect(calls.speedRanking.mock.calls.slice(-2).map(([props]) => props.topN)).toEqual([20, 20]);
+});
+
+it("forces the speed ranking segmented control to 32px", () => {
+  render(<DashboardPage />);
+
+  expect(screen.getByRole("tablist", { name: "speedRanking.dimension" })).toHaveClass("!h-8");
+});
+
+it("uses compact model and user pickers alongside the top n control", () => {
+  render(<DashboardPage />);
+
+  expect(screen.getByTestId("entity-picker-model")).toHaveAttribute("data-size", "sm");
+  expect(screen.getByTestId("entity-picker-user")).toHaveAttribute("data-size", "sm");
+  expect(screen.getByRole("button", { name: "prefix.topN" })).toBeInTheDocument();
 });
 
 it("offers avg and p95 for ttft and sends the selected statistic", () => {

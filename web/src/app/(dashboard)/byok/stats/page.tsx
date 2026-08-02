@@ -17,9 +17,10 @@ import { MetricTile } from "@/components/business/metric-tile";
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import {
-  DateRangeInputs,
+  DateRangePicker,
+  type DateRangeValue,
   isDateRangeValid,
-} from "@/components/business/date-range-inputs";
+} from "@/components/business/date-picker/date-range-picker";
 import { BreakdownPopover } from "@/components/business/breakdown-popover";
 import { BYOKTrendCharts } from "@/components/business/byok-trend-charts";
 import { CostDetailCell } from "@/components/business/cost-cell";
@@ -36,9 +37,18 @@ import {
 
 export default function BYOKStatsPage() {
   const t = useTranslations("byok.stats");
+  const tb = useTranslations("billing");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const dateValid = isDateRangeValid(startDate, endDate);
+  const dateValid = isDateRangeValid({ startDate, endDate });
+
+  const handleDateRangeChange = ({
+    startDate: nextStartDate,
+    endDate: nextEndDate,
+  }: DateRangeValue) => {
+    setStartDate(nextStartDate);
+    setEndDate(nextEndDate);
+  };
 
   const range = useMemo(
     () => ({
@@ -69,11 +79,10 @@ export default function BYOKStatsPage() {
       <p className="text-sm text-muted-foreground">{t("description")}</p>
 
       <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
-        <DateRangeInputs
-          startDate={startDate}
-          endDate={endDate}
-          onStartDateChange={setStartDate}
-          onEndDateChange={setEndDate}
+        <DateRangePicker
+          label={tb("dateRange")}
+          value={{ startDate, endDate }}
+          onValueChange={handleDateRangeChange}
         />
       </div>
 

@@ -16,6 +16,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -390,4 +391,29 @@ func TestConnectivityProbeTimingSettingsDefaultsValidationAndRefresh(t *testing.
 	}})
 	require.True(t, isBadRequest(err))
 	require.Equal(t, 1, refreshCalls, "rejected settings must not update the live scheduler")
+}
+
+func TestBillingLogRetentionSettingsDefaultAndRange(t *testing.T) {
+	got, err := (&Handler{}).GetSettings(newSettingsContext(t), GetSettingsRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "5", got.Settings[consts.SettingKeyBillingLogRetentionDays])
+
+	for _, value := range []string{"1", "5", "365"} {
+		t.Run("accept_"+value, func(t *testing.T) {
+			updated, updateErr := (&Handler{}).UpdateSettings(newSettingsContext(t), UpdateSettingsRequest{Settings: map[string]string{
+				consts.SettingKeyBillingLogRetentionDays: value,
+			}})
+			require.NoError(t, updateErr)
+			require.Equal(t, value, updated.Settings[consts.SettingKeyBillingLogRetentionDays])
+		})
+	}
+	for _, value := range []string{"0", "366", "not-a-number"} {
+		t.Run("reject_"+value, func(t *testing.T) {
+			_, updateErr := (&Handler{}).UpdateSettings(newSettingsContext(t), UpdateSettingsRequest{Settings: map[string]string{
+				consts.SettingKeyBillingLogRetentionDays: value,
+			}})
+			require.True(t, isBadRequest(updateErr), "error = %v", updateErr)
+		})
+	}
+	require.NotContains(t, settings.Defaults(), consts.SettingKeyBillingLogRetentionDays)
 }

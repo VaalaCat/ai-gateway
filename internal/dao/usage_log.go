@@ -1,8 +1,6 @@
 package dao
 
 import (
-	"time"
-
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"gorm.io/gorm"
@@ -25,8 +23,6 @@ type AdminUsageLogQuery interface {
 type AdminUsageLogMutation interface {
 	Create(log *models.UsageLog) error
 	CreateTrace(trace *models.UsageLogTrace) error
-	DeleteLogsBefore(cutoff time.Time) (int64, error)
-	DeleteTracesBefore(cutoff time.Time) (int64, error)
 }
 
 type usageLogQuery struct{ ctx *userContextImpl }
@@ -205,24 +201,6 @@ func (m *adminUsageLogMutation) CreateTrace(trace *models.UsageLogTrace) error {
 		return err
 	}
 	return WrapLogDatabaseError(db.Create(trace).Error)
-}
-
-func (m *adminUsageLogMutation) DeleteLogsBefore(cutoff time.Time) (int64, error) {
-	db, err := requestLogDB(m.ctx)
-	if err != nil {
-		return 0, err
-	}
-	result := db.Where("created_at < ?", cutoff.Unix()).Delete(nil)
-	return result.RowsAffected, WrapLogDatabaseError(result.Error)
-}
-
-func (m *adminUsageLogMutation) DeleteTracesBefore(cutoff time.Time) (int64, error) {
-	db, err := requestTraceDB(m.ctx)
-	if err != nil {
-		return 0, err
-	}
-	result := db.Where("created_at < ?", cutoff.Unix()).Delete(nil)
-	return result.RowsAffected, WrapLogDatabaseError(result.Error)
 }
 
 func requestLogDB(ctx *baseContext) (*gorm.DB, error) {

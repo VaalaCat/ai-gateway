@@ -5,20 +5,34 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { ColumnDef, Row } from "@tanstack/react-table";
+import { Ellipsis } from "lucide-react";
 import { toast } from "sonner";
 
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { DateCell } from "@/components/business/date-cell";
 import { DebouncedSearchInput } from "@/components/business/debounced-search-input";
 import { FilterBar, FilterField } from "@/components/business/filter-bar";
@@ -32,6 +46,7 @@ import { normalize0to100 } from "@/lib/utils/normalize";
 import {
   useBillingOverview,
   useChannelBilling,
+  useRebuildBillingJobs,
   useTokenBilling,
 } from "@/lib/api/billing";
 import { useBillingInsights } from "@/lib/api/billing-insights";
@@ -42,6 +57,7 @@ import { useAuth } from "@/lib/auth";
 import { useObsRange } from "@/lib/hooks/use-obs-range";
 import { useChartTopN } from "@/lib/hooks/use-chart-top-n";
 import { tsToDateStr } from "@/lib/utils/date-range";
+import { applySevenDayDefaultRange } from "@/lib/utils/observability-range";
 import { PAGE_SIZES } from "@/lib/constants";
 import { formatMoneyCompact, formatSuccessRate, formatTokensCompact } from "@/lib/utils/format";
 import { MoneyCell } from "@/components/business/money-cell";
@@ -82,6 +98,10 @@ function BillingPageContent() {
 
   const [tab, setTab] = useState("token");
   const [rebuildOpen, setRebuildOpen] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+  const rebuildJobs = useRebuildBillingJobs();
+  const hasRunningRebuild =
+    rebuildJobs.data?.jobs?.some((job) => job.status === "running") ?? false;
 
   const [tokenPage, setTokenPage] = useState(1);
   const [tokenPageSize, setTokenPageSize] = useState<number>(PAGE_SIZES.DEFAULT);
@@ -130,12 +150,10 @@ function BillingPageContent() {
   const { range: rawRange, setRange, refresh, refreshKey } = useObsRange({
     gran: "day",
   });
+  const hasExplicitStart = searchParams.has("start");
   const range = useMemo(
-    () =>
-      rawRange.end - rawRange.start <= 86400
-        ? { ...rawRange, start: rawRange.end - 7 * 86400 }
-        : rawRange,
-    [rawRange],
+    () => applySevenDayDefaultRange(rawRange, hasExplicitStart),
+    [rawRange, hasExplicitStart],
   );
 
   const startDateStr = tsToDateStr(range.start);
@@ -394,7 +412,7 @@ function BillingPageContent() {
   const overviewValue: BillingOverviewResponse | undefined = overview.data;
 
   const tokenFilters = (
-    <FilterBar>
+    <FilterBar className="gap-2">
       <FilterField label={t("filterLabelToken")}>
         <EntityPicker
           entity="token"
@@ -402,7 +420,7 @@ function BillingPageContent() {
           value={tokenId}
           onChange={setTokenIdFilter}
           placeholder={t("filterTokenPick")}
-          className="w-40"
+          className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
         />
       </FilterField>
       <FilterField label={t("filterLabelSearch")}>
@@ -410,7 +428,7 @@ function BillingPageContent() {
           value={search}
           onCommit={setSearch}
           placeholder={t("filterSearchToken")}
-          className="h-8 w-56"
+          className="h-9 w-full sm:h-8 sm:w-56"
         />
       </FilterField>
       <FilterField label={t("filterMinTokens")}>
@@ -420,14 +438,14 @@ function BillingPageContent() {
           value={minTokens}
           onChange={(e) => setMinTokens(e.target.value)}
           placeholder={t("filterMinTokens")}
-          className="h-8 w-36"
+          className="h-9 w-full sm:h-8 sm:w-36"
         />
       </FilterField>
     </FilterBar>
   );
 
   const channelFilters = (
-    <FilterBar>
+    <FilterBar className="gap-2">
       <FilterField label={t("filterLabelChannel")}>
         <EntityPicker
           entity="channel"
@@ -435,7 +453,7 @@ function BillingPageContent() {
           value={channelId}
           onChange={setChannelIdFilter}
           placeholder={t("channelId")}
-          className="w-40"
+          className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
         />
       </FilterField>
       <FilterField label={t("filterChannelType")}>
@@ -443,16 +461,18 @@ function BillingPageContent() {
           value={channelType || "all"}
           onValueChange={(v) => setChannelType(v === "all" ? "" : v)}
         >
-          <SelectTrigger size="sm" className="w-40">
+          <SelectTrigger size="sm" className="h-9 w-full sm:h-8 sm:w-40">
             <SelectValue placeholder={t("filterAllTypes")} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">{t("filterAllTypes")}</SelectItem>
-            {(channelTypes.data ?? []).map((ct) => (
-              <SelectItem key={ct.id} value={String(ct.id)}>
-                {ct.name}
-              </SelectItem>
-            ))}
+            <SelectGroup>
+              <SelectItem value="all">{t("filterAllTypes")}</SelectItem>
+              {(channelTypes.data ?? []).map((ct) => (
+                <SelectItem key={ct.id} value={String(ct.id)}>
+                  {ct.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
           </SelectContent>
         </Select>
       </FilterField>
@@ -461,7 +481,7 @@ function BillingPageContent() {
           value={search}
           onCommit={setSearch}
           placeholder={t("filterSearchChannel")}
-          className="h-8 w-56"
+          className="h-9 w-full sm:h-8 sm:w-56"
         />
       </FilterField>
       <FilterField label={t("filterMinTokens")}>
@@ -471,7 +491,7 @@ function BillingPageContent() {
           value={minTokens}
           onChange={(e) => setMinTokens(e.target.value)}
           placeholder={t("filterMinTokens")}
-          className="h-8 w-36"
+          className="h-9 w-full sm:h-8 sm:w-36"
         />
       </FilterField>
     </FilterBar>
@@ -495,35 +515,59 @@ function BillingPageContent() {
         onRefresh={refresh}
         refreshing={insights.isFetching || overview.isFetching}
         showGranularity
-        extraFilters={
-          <>
-            <ChartOptionSelect
-              value={String(topN) as "5" | "10" | "20"}
-              onValueChange={(value) => setTopN(Number(value) as ChartTopN)}
-              label={tcf("prefix.topN")}
-              options={[
-                { value: "5", label: "5" },
-                { value: "10", label: "10" },
-                { value: "20", label: "20" },
-              ]}
-            />
-            {isAdmin && (
-              <EntityPicker
-                entity="user"
-                value={userId}
-                onChange={setUserFilter}
-                placeholder={tcf("filter.user")}
-                className="w-44"
-              />
-            )}
-          </>
-        }
+        scopeLabel={isAdmin ? tc("filters") : undefined}
+        scopeControls={isAdmin ? (
+          <EntityPicker
+            entity="user"
+            size="sm"
+            value={userId}
+            onChange={setUserFilter}
+            placeholder={tcf("filter.user")}
+            className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
+          />
+        ) : undefined}
+        headerActions={isAdmin ? (
+          <DropdownMenu open={headerMenuOpen} onOpenChange={setHeaderMenuOpen}>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      className="size-9 sm:size-8"
+                      aria-label={tc("more")}
+                      data-running={hasRunningRebuild || undefined}
+                    >
+                      <Ellipsis />
+                      {hasRunningRebuild && (
+                        <span
+                          data-slot="rebuild-running-indicator"
+                          aria-hidden
+                          className="pointer-events-none absolute right-1 top-1 size-1.5 rounded-full bg-primary"
+                        />
+                      )}
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent>{tc("more")}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            <DropdownMenuContent align="end">
+              <DropdownMenuGroup>
+                <RebuildButton
+                  placement="menu"
+                  hasRunning={hasRunningRebuild}
+                  onClick={() => {
+                    setHeaderMenuOpen(false);
+                    setRebuildOpen(true);
+                  }}
+                />
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : undefined}
       />
-      {isAdmin && (
-        <div className="flex justify-end">
-          <RebuildButton onClick={() => setRebuildOpen(true)} />
-        </div>
-      )}
 
       {(() => {
         const noData = !overviewValue || (overviewValue.request_count ?? 0) === 0;
@@ -580,7 +624,8 @@ function BillingPageContent() {
         defaultMetric="tokens"
         title={t("usageTrend")}
         loading={insights.isLoading}
-        headerExtra={
+        scopeActiveCount={(model ? 1 : 0) + (trendTokenId ? 1 : 0) + (topN !== 5 ? 1 : 0)}
+        scopeControls={
           <>
             <EntityPicker
               entity="model"
@@ -588,7 +633,7 @@ function BillingPageContent() {
               value={model}
               onChange={setModel}
               placeholder={tcf("filter.model")}
-              className="w-40"
+              className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
             />
             <EntityPicker
               entity="token"
@@ -597,7 +642,18 @@ function BillingPageContent() {
               onChange={setTrendTokenId}
               {...(selectedUserId ? { ownerUserId: selectedUserId } : {})}
               placeholder={t("filterTokenPick")}
-              className="w-40"
+              className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
+            />
+            <ChartOptionSelect
+              value={String(topN) as "5" | "10" | "20"}
+              onValueChange={(value) => setTopN(Number(value) as ChartTopN)}
+              label={tcf("prefix.topN")}
+              options={[
+                { value: "5", label: "5" },
+                { value: "10", label: "10" },
+                { value: "20", label: "20" },
+              ]}
+              className="h-9 w-full sm:h-8 sm:w-auto"
             />
           </>
         }

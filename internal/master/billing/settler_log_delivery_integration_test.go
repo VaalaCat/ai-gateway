@@ -54,7 +54,7 @@ func TestCoreFactSettlerLogOutageKeepsCoreBillingAndRecoversWithoutDoubleCountin
 	})
 	require.NoError(t, worker.Start(t.Context()))
 	t.Cleanup(func() { _ = worker.Stop(context.Background()) })
-	settler := NewCoreFactSettler(application, eventbus.NewMemoryBus(), zap.NewNop(), noopCoreAggregator{}, worker)
+	settler := NewCoreFactSettler(application, eventbus.NewMemoryBus(), zap.NewNop(), worker)
 
 	entries := make([]protocol.UsageLogEntry, 0, 5)
 	for index := 1; index <= 5; index++ {

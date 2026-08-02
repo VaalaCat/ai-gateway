@@ -37,10 +37,12 @@ import (
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sourcegraph/conc"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -163,6 +165,84 @@ type blockingSubscribeBus struct {
 type lifecycleUsageUploadResult struct {
 	report protocol.UsageReport
 	err    error
+}
+
+func TestAgentIndependentMetricsServesOnlyAuthenticatedGetAndReleasesListeners(t *testing.T) {
+	const token = "abcdefghijklmnopqrstuvwxyz012345"
+	srv := newLifecycleStandaloneServer(t)
+	srv.Cfg.Metrics = config.MetricsConfig{Listen: "127.0.0.1:0", Token: token}
+	srv.RelayMetrics.IncRouteTelemetryDropped()
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run() }()
+
+	businessAddr, metricsAddr := waitForAgentListeners(t, srv)
+	assertAgentHTTPStatus(t, http.MethodGet, "http://"+businessAddr+"/metrics", "", http.StatusNotFound)
+	assertAgentHTTPStatus(t, http.MethodGet, "http://"+metricsAddr+"/anything", token, http.StatusNotFound)
+	assertAgentHTTPStatus(t, http.MethodPost, "http://"+metricsAddr+"/metrics", token, http.StatusNotFound)
+	assertAgentHTTPStatus(t, http.MethodGet, "http://"+metricsAddr+"/metrics", "", http.StatusUnauthorized)
+	request, err := http.NewRequest(http.MethodGet, "http://"+metricsAddr+"/metrics", nil)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Contains(t, string(body), "agent_route_telemetry_dropped_total")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, srv.Shutdown(shutdownCtx))
+	require.Error(t, <-runDone)
+	for _, address := range []string{businessAddr, metricsAddr} {
+		listener, err := net.Listen("tcp", address)
+		require.NoError(t, err)
+		require.NoError(t, listener.Close())
+	}
+}
+
+func TestAgentIndependentMetricsBindFailureRollsBackBusinessListener(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupied.Close()
+	srv := newLifecycleStandaloneServer(t)
+	srv.Cfg.Metrics = config.MetricsConfig{Listen: occupied.Addr().String(), Token: "abcdefghijklmnopqrstuvwxyz012345"}
+	require.ErrorContains(t, srv.Run(), "listen metrics")
+	require.Nil(t, srv.Listener)
+	require.Nil(t, srv.MetricsListener)
+	require.Nil(t, srv.httpSrv)
+	require.Nil(t, srv.metricsHTTPServer)
+	require.NoError(t, srv.Shutdown(t.Context()))
+}
+
+func waitForAgentListeners(t *testing.T, srv *Server) (string, string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.lifecycleMu.Lock()
+		business, metrics := srv.Listener, srv.MetricsListener
+		srv.lifecycleMu.Unlock()
+		if business != nil && metrics != nil {
+			return business.Addr().String(), metrics.Addr().String()
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("agent listeners were not published")
+	return "", ""
+}
+
+func assertAgentHTTPStatus(t *testing.T, method, target, token string, want int) {
+	t.Helper()
+	request, err := http.NewRequest(method, target, nil)
+	require.NoError(t, err)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, want, response.StatusCode)
 }
 
 func newLifecycleUsageUploadBarrier(results chan<- lifecycleUsageUploadResult, release <-chan struct{}) http.Handler {
@@ -1895,6 +1975,18 @@ func newLifecycleEmbeddedServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("NewEmbedded: %v", err)
 	}
+	return srv
+}
+
+func newLifecycleStandaloneServer(t *testing.T) *Server {
+	t.Helper()
+	srv := newLifecycleEmbeddedServer(t)
+	registry := prometheus.NewRegistry()
+	srv.MetricsRegistry = registry
+	srv.RelayMetrics = pkgmetrics.NewAgentRelayMetrics(registry, registry)
+	srv.Cfg.Agent.Listen = "127.0.0.1:0"
+	srv.Router = gin.New()
+	srv.setupRoutes()
 	return srv
 }
 

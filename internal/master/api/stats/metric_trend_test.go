@@ -56,9 +56,9 @@ func TestMetricTrend_NonAdmin_IsLockedToSelf(t *testing.T) {
 	h, db, application := newDashboardTestCtx(t)
 	start, end := dayRange()
 	date := time.Unix(start, 0).UTC().Format("2006-01-02")
-	for _, log := range []models.UsageLog{
-		{RequestID: "self", UserID: 1, ModelName: "self-model", Status: 1, TotalCost: 11, CreatedAt: start + 1},
-		{RequestID: "other", UserID: 2, ModelName: "other-model", Status: 1, TotalCost: 99, CreatedAt: start + 1},
+	for _, log := range []models.RequestLog{
+		models.RequestLog(models.UsageLog{RequestID: "self", UserID: 1, ModelName: "self-model", Status: 1, TotalCost: 11, CreatedAt: start + 1}),
+		models.RequestLog(models.UsageLog{RequestID: "other", UserID: 2, ModelName: "other-model", Status: 1, TotalCost: 99, CreatedAt: start + 1}),
 	} {
 		if err := db.Create(&log).Error; err != nil {
 			t.Fatal(err)
@@ -84,9 +84,9 @@ func TestMetricTrend_AdminUserCacheKeysAreIsolated(t *testing.T) {
 	h, db, application := newDashboardTestCtx(t)
 	h.Cache = dao.NewStatsCache()
 	start, end := dayRange()
-	for _, log := range []models.UsageLog{
-		{RequestID: "user-one", UserID: 1, ModelName: "model-one", Status: 1, TotalCost: 11, CreatedAt: start + 1},
-		{RequestID: "user-two", UserID: 2, ModelName: "model-two", Status: 1, TotalCost: 22, CreatedAt: start + 1},
+	for _, log := range []models.RequestLog{
+		models.RequestLog(models.UsageLog{RequestID: "user-one", UserID: 1, ModelName: "model-one", Status: 1, TotalCost: 11, CreatedAt: start + 1}),
+		models.RequestLog(models.UsageLog{RequestID: "user-two", UserID: 2, ModelName: "model-two", Status: 1, TotalCost: 22, CreatedAt: start + 1}),
 	} {
 		if err := db.Create(&log).Error; err != nil {
 			t.Fatal(err)
