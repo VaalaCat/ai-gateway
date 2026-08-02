@@ -110,6 +110,7 @@ export default function ChannelsPage() {
   useEffect(() => {
     if (isLoading || isFetching || !data) return;
     const currentPageIDs = new Set(data.data.map((channel) => channel.id));
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- selection belongs to the current list parameters
     setRowSelection((current) => {
       const selected = Object.entries(current)
         .filter(([, isSelected]) => isSelected)

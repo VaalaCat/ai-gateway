@@ -226,6 +226,7 @@ export function ChannelBatchEditDialog({
   useEffect(() => {
     if (!open) {
       generationRef.current += 1;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- internal form state must reset when the controlled dialog closes
       reset();
     }
   }, [open]);
