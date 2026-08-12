@@ -85,6 +85,11 @@ import (
 
 var _ app.MasterServer = (*Server)(nil)
 
+const (
+	staticImmutableCacheControl  = "public, max-age=31536000, immutable"
+	staticRevalidateCacheControl = "public, max-age=0, must-revalidate"
+)
+
 var (
 	errMasterServerClosing = errors.New("master server: shutting down")
 	ErrAlreadyRunning      = errors.New("master server: already running")
@@ -1058,6 +1063,8 @@ func (s *Server) setupStaticRoutesFromFS(assets fs.FS) {
 			return
 		}
 
+		c.Header(consts.HeaderCacheControl, staticCacheControl(assets, path))
+
 		// Next export outputs route HTML under <route>/index.html.
 		if !strings.Contains(path, ".") {
 			routePath := strings.Trim(path, "/")
@@ -1074,6 +1081,20 @@ func (s *Server) setupStaticRoutesFromFS(assets fs.FS) {
 		}
 		fileServer.ServeHTTP(c.Writer, c.Request)
 	})
+}
+
+func staticCacheControl(assets fs.FS, path string) string {
+	// Next.js fingerprints files under /_next/static, so every deployment gives
+	// changed content a new URL. Other export files keep stable URLs and must be
+	// revalidated so HTML and RSC data cannot pin an old deployment in a browser
+	// or shared CDN cache.
+	if strings.HasPrefix(path, "/_next/static/") {
+		assetPath := strings.TrimPrefix(path, "/")
+		if info, err := fs.Stat(assets, assetPath); err == nil && !info.IsDir() {
+			return staticImmutableCacheControl
+		}
+	}
+	return staticRevalidateCacheControl
 }
 
 // warnIfPlaintextAgentChannel 检查 public_base_urls 是否含 http:// 项。
