@@ -231,26 +231,6 @@ It builds upon the work of the following:
 
 - **[datatype](https://github.com/franktisellano/datatype)** by [@franktisellano](https://github.com/franktisellano) — variable OpenType font (SIL OFL 1.1) used for inline sparklines in the UI. See `web/public/fonts/OFL.txt`.
 
-## Contract Test (optional)
-
-`test/contract/` 包含跨语言一致性测试,默认不跑,需要时手动:
-
-```bash
-# 1) 启动 master
-./ai-gateway --config config.yaml &
-
-# 2) 取 admin token
-TOKEN=$(curl -s -X POST http://localhost:8140/api/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"change-this-password"}' \
-  | jq -r '.data.token')
-
-# 3) 跑测试
-AIGW_ADMIN_TOKEN=$TOKEN go test -tags=contract ./test/contract/
-```
-
-测试内容: 扫 `web/src/lib/api/*.ts` 中所有 `/...` 路径字面量,逐个发请求,验证后端没有返回 404 (即不存在路由漂移)。
-
 ## License
 
 [MIT](LICENSE)

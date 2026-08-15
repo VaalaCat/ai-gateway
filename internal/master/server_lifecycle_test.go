@@ -1159,6 +1159,18 @@ func TestRunDoesNotServeBeforeEmbeddedSyncSubscriptionsReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	sqlDB, err := srv.DB.DB()
+	if err != nil {
+		t.Fatalf("get memory database: %v", err)
+	}
+	// Keep the shared in-memory database alive if shutdown cancellation causes
+	// the worker connection to be discarded and replaced.
+	sqlDB.SetMaxOpenConns(2)
+	memoryKeeper, err := sqlDB.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("keep memory database alive: %v", err)
+	}
+	t.Cleanup(func() { _ = memoryKeeper.Close() })
 	startupBus := &blockingEmbeddedStartupBus{
 		entered: make(chan struct{}), release: make(chan struct{}), topics: make(map[string]int),
 	}
