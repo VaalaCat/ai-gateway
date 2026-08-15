@@ -8,6 +8,7 @@ import {
   emptyRouteFormValues,
   headerRowsObject,
   hydrateRouteFormValues,
+  requestExampleByteLength,
   routeFieldsForSubmit,
   routeFormReducer,
   validateRouteFormValues,
@@ -113,6 +114,49 @@ describe("APIRouteForm state", () => {
     expect(headerRowsObject(rows)).toEqual({ "X-Trace": "first", "x-trace": "second" });
     expect(validateRouteFormValues({ ...emptyRouteFormValues(), path: "forecast", target }, rows)).toContain("invalidHeaderOverride");
   });
+
+  it("rejects unsafe enabled request examples without constraining disabled drafts", () => {
+    const invalidExample = {
+      method: "DELETE",
+      subpath: "../private",
+      query: "",
+      headers: { Authorization: "secret" },
+      body: "x".repeat(64 * 1024),
+    };
+    const values = { ...emptyRouteFormValues(), path: "create-item", target: { mode: "existing" as const, backend_id: 12 }, allowedMethods: ["POST"], exampleEnabled: true, exampleRequest: invalidExample };
+    expect(validateRouteFormValues(values)).toEqual(expect.arrayContaining(["invalidExampleMethod", "invalidExamplePath", "invalidExampleHeader", "bodyTooLarge"]));
+    expect(validateRouteFormValues({ ...values, exampleEnabled: false })).toEqual([]);
+  });
+
+  it("accepts TRACE examples and reports unsafe query input separately", () => {
+    const values = {
+      ...emptyRouteFormValues(),
+      path: "trace-request",
+      target: { mode: "existing" as const, backend_id: 12 },
+      exampleEnabled: true,
+      exampleRequest: { method: "TRACE", subpath: "", query: "debug=#fragment", headers: {}, body: "" },
+    };
+
+    expect(validateRouteFormValues(values)).not.toContain("invalidExampleMethod");
+    expect(validateRouteFormValues(values)).toContain("invalidExampleQuery");
+    expect(validateRouteFormValues(values)).not.toContain("invalidExamplePath");
+  });
+
+  it("accepts an example at 64 KiB and rejects the next byte", () => {
+    const example = { method: "POST", subpath: "", query: "", headers: {}, body: "" };
+    const bodyBytes = 64 * 1024 - requestExampleByteLength(example);
+    const values = {
+      ...emptyRouteFormValues(),
+      path: "bounded-request",
+      target: { mode: "existing" as const, backend_id: 12 },
+      exampleEnabled: true,
+      exampleRequest: { ...example, body: "x".repeat(bodyBytes) },
+    };
+
+    expect(requestExampleByteLength(values.exampleRequest)).toBe(64 * 1024);
+    expect(validateRouteFormValues(values)).not.toContain("bodyTooLarge");
+    expect(validateRouteFormValues({ ...values, exampleRequest: { ...values.exampleRequest, body: `${values.exampleRequest.body}x` } })).toContain("bodyTooLarge");
+  });
 });
 
 describe("APIRouteForm page", () => {
@@ -129,6 +173,69 @@ describe("APIRouteForm page", () => {
     previewQuery.error = null;
     previewQuery.refetch.mockReset();
     previewInput.current = undefined;
+  });
+
+  it("reveals an optional request example and persists its generic HTTP fields with the Route", async () => {
+    mutations.create.mockResolvedValue({ id: 9 });
+    const user = userEvent.setup();
+    render(<APIRouteForm mode={createMode()} />);
+    await selectExistingTarget(user);
+    await user.type(screen.getByLabelText("path"), "create-item");
+
+    expect(screen.queryByLabelText("exampleMethod")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "configureRequestExample" }));
+    await user.click(screen.getByLabelText("exampleMethod"));
+    await user.click(screen.getByRole("option", { name: "POST" }));
+    await user.type(screen.getByLabelText("exampleQuery"), "dry_run=true");
+    await user.type(screen.getByLabelText("exampleBody"), '{{"name":"example"}');
+    await waitForSaveReady();
+    await user.click(screen.getByRole("button", { name: "save" }));
+
+    expect(mutations.create).toHaveBeenCalledWith(expect.objectContaining({
+      example_request: {
+        method: "POST",
+        subpath: "",
+        query: "dry_run=true",
+        headers: {},
+        body: '{"name":"example"}',
+      },
+    }));
+  }, 10_000);
+
+  it("shows an inline error for an unsafe example query", async () => {
+    const user = userEvent.setup();
+    render(<APIRouteForm mode={createMode()} />);
+    await selectExistingTarget(user);
+    await user.type(screen.getByLabelText("path"), "inspect-request");
+    await user.click(screen.getByRole("checkbox", { name: "configureRequestExample" }));
+    await user.type(screen.getByLabelText("exampleQuery"), "debug=#fragment");
+
+    expect(screen.getByText("invalidExampleQuery")).toBeVisible();
+    expect(screen.getByRole("button", { name: "save" })).toBeDisabled();
+  });
+
+  it("persists safe request headers and clears the saved example when configuration is unchecked", async () => {
+    routeQuery.current = { data: route(), isLoading: false };
+    mutations.update.mockResolvedValue({ status: "ok" });
+    const user = userEvent.setup();
+    render(<APIRouteForm mode={editMode()} />);
+
+    expect(screen.getByRole("checkbox", { name: "configureRequestExample" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "addHeader" }));
+    await user.clear(screen.getByLabelText("headerName 2"));
+    await user.type(screen.getByLabelText("headerName 2"), "X-Request-Mode");
+    await user.type(screen.getByLabelText("headerValue 2"), "preview");
+    await user.click(screen.getByRole("checkbox", { name: "configureRequestExample" }));
+    expect(screen.queryByLabelText("exampleMethod")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "configureRequestExample" }));
+    expect(screen.getByLabelText("headerValue 2")).toHaveValue("preview");
+    await user.click(screen.getByRole("checkbox", { name: "configureRequestExample" }));
+    await waitForSaveReady();
+    await user.click(screen.getByRole("button", { name: "save" }));
+
+    expect(mutations.update).toHaveBeenCalledWith(expect.objectContaining({
+      example_request: { method: "", subpath: "", query: "", headers: {}, body: "" },
+    }));
   });
 
   it("shows one editable path and uses Preview final URLs without rebuilding Endpoint paths", async () => {
@@ -173,7 +280,7 @@ describe("APIRouteForm page", () => {
     ]));
   });
 
-  it("segments only the Route path when an edit Preview excludes the stored sample subpath", async () => {
+  it("sends the configured sample subpath to an edit Preview", async () => {
     routeQuery.current = { data: route({ forward_subpath: true }), isLoading: false };
     previewQuery.data = { endpoints: [
       { upstream_id: 3, upstream_name: "primary", status: 1, priority: 0, weight: 1, final_url: "https://edge.test/forecast/base/forecast" },
@@ -187,10 +294,9 @@ describe("APIRouteForm page", () => {
     });
     expect(endpointURL).toBeDefined();
     if (!endpointURL) throw new Error("missing Endpoint Preview URL");
-    expect(within(endpointURL).getByText("/forecast")).toHaveAttribute("aria-describedby");
-    expect(within(endpointURL).queryByText("today")).not.toBeInTheDocument();
+    expect(previewInput.current?.sample).toEqual(exampleRequest);
     const segmentedParts = [...endpointURL.querySelectorAll("[aria-describedby]")].map((node) => node.textContent);
-    expect(segmentedParts).toEqual(["https://edge.test/forecast/base", "/forecast"]);
+    expect(segmentedParts).toEqual(["https://edge.test/forecast/base/forecast"]);
   });
 
   it.each(["https://edge.test/base#fragment", "https://edge.test/%zz"])("shows a local Preview error and no fabricated final URL for unsafe Endpoint input %s", async (baseURL) => {
@@ -233,7 +339,7 @@ describe("APIRouteForm page", () => {
     expect(navigation.push).toHaveBeenCalledWith("/api-services/detail?id=7&route_search=forecast&route=9");
   });
 
-  it("uses an empty-safe mapping sample while preserving an edit route example on submit", async () => {
+  it("uses and preserves the configured request example while editing a Route", async () => {
     routeQuery.current = { data: route({ forward_subpath: true }), isLoading: false };
     backendQuery.current = { data: { id: 12, api_service_id: 7, name: "Primary Target" }, isLoading: false, error: null, refetch: vi.fn() };
     previewQuery.data = { endpoints: [
@@ -243,12 +349,11 @@ describe("APIRouteForm page", () => {
     const user = userEvent.setup();
     render(<APIRouteForm mode={editMode()} />);
     await waitForSaveReady();
-    expect(previewInput.current?.sample).toEqual({ method: "", subpath: "", query: "", headers: {}, body: "" });
+    expect(previewInput.current?.sample).toEqual(exampleRequest);
     expect(screen.getAllByTestId("segmented-url-text").map((node) => node.textContent)).toEqual([
       "http://localhost:3000/v1/api/weather/forecast/…",
       "https://edge.test/base/forecast/…",
     ]);
-    expect(screen.queryByText(/today/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "save" }));
 
     expect(mutations.update).toHaveBeenCalledWith(expect.objectContaining({ id: 9, example_request: exampleRequest, slug: "forecast", upstream_path: "forecast", forward_subpath: true }));

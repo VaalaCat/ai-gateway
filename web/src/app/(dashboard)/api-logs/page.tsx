@@ -40,7 +40,7 @@ import { useAuth } from "@/lib/auth";
 import { useUserPref } from "@/hooks/use-user-pref";
 import { PAGE_SIZES } from "@/lib/constants";
 import { parseNonNegativeDecimal, parsePositiveDecimal } from "@/lib/utils/decimal";
-import { dateStrToExclusiveEndTs, dateStrToTs, tsToDateStr } from "@/lib/utils/date-range";
+import { dateStrToExclusiveEndTs, tsToDateStr } from "@/lib/utils/date-range";
 import { defaultLogColumnVisibility, useLogColumns } from "./_components/log-columns";
 import { APIRequestDetails } from "./_components/request-details";
 
@@ -60,10 +60,10 @@ function statusCode(value: FilterValues[string]) {
 }
 
 function defaultLogTimeWindow(): FilterValues {
-  const mountedLocalDate = tsToDateStr(Math.floor(Date.now() / 1_000));
+  const end = Math.floor(Date.now() / 1_000);
   return {
-    start: dateStrToTs(mountedLocalDate, false),
-    end: dateStrToExclusiveEndTs(mountedLocalDate),
+    start: end - 7 * 86_400,
+    end,
   };
 }
 
@@ -154,10 +154,10 @@ export default function APILogsPage() {
     } : {}),
   }) satisfies FilterSpec, [isAdmin, t]);
   const urlFilterSpec = useMemo(() => ({
-    time: { kind: "time", defaultDays: 1, maxHourDays: 365, showGran: false },
+    time: { kind: "time", defaultDays: 7, maxHourDays: 365, showGran: false },
     ...filterSpec,
   }) satisfies FilterSpec, [filterSpec]);
-  // behavior change: an empty URL reads one fixed local calendar day without persisting defaults.
+  // behavior change: an empty URL reads one fixed rolling seven-day range without persisting defaults.
   const [defaultFilters] = useState(defaultLogTimeWindow);
   const [filters, setFilters] = useFilterState(urlFilterSpec, {
     defaults: defaultFilters,

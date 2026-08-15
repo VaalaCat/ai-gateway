@@ -1,5 +1,6 @@
 import type { APIProtocol, APIRequestExample, APIRoute, APIRouteFields, APIRouteTargetCommand } from "@/lib/api/api-services";
 import { isRouteSlug } from "../route-slug";
+import { isStandardRouteHTTPMethod, STANDARD_ROUTE_HTTP_METHODS } from "../route-editor/standard-http-methods";
 import { credentialComplete } from "../upstream-credential";
 
 export interface RouteFormValues {
@@ -10,6 +11,9 @@ export interface RouteFormValues {
   websocketSubprotocols: string[];
   target: APIRouteTargetCommand;
   forwardSubpath: boolean;
+  exampleEnabled: boolean;
+  exampleRequest: APIRequestExample;
+  exampleHeaderRows: ExampleHeaderRow[];
   enabled: boolean;
 }
 
@@ -23,7 +27,6 @@ export function headerRowsObject(rows: HeaderOverrideRow[]) {
   return Object.fromEntries(rows.map((row) => [row.name.trim(), row.value]));
 }
 
-// Kept only until the superseded staged editor is removed in Task 8.
 export const exampleHeadersObject = headerRowsObject;
 
 export function requestExampleByteLength(example: APIRequestExample) {
@@ -41,6 +44,44 @@ export function unsafeExampleHeader(name: string) {
     || lower.startsWith("x-forwarded-")
     || /(^|-)(auth|authorization|credential|secret|password|passwd|cookie|signature|token)(-|$)/.test(lower)
     || /(apikey|accesskey|accesstoken|refreshtoken|idtoken)/.test(lower.replaceAll("-", ""));
+}
+
+export function invalidExampleHeader(row: ExampleHeaderRow, rows: ExampleHeaderRow[]) {
+  const name = row.name.trim();
+  return !name
+    || !headerNamePattern.test(name)
+    || !validHeaderValue(row.value)
+    || unsafeExampleHeader(name)
+    || rows.some((candidate) => candidate.id !== row.id && candidate.name.trim().toLowerCase() === name.toLowerCase());
+}
+
+export function safeExampleSubpath(raw: string) {
+  if (!raw) return true;
+  if (/[\\\x00\r\n?#]/.test(raw) || raw.startsWith("//") || /^[A-Za-z][A-Za-z\d+.-]*:/.test(raw)) return false;
+  return raw.split("/").every((part) => {
+    let segment = part;
+    for (let layer = 0; layer < 4; layer += 1) {
+      if (segment === "." || segment === ".." || /[/\\\x00\r\n?#]/.test(segment) || /%(2f|5c|00)/i.test(segment)) return false;
+      try {
+        const decoded = decodeURIComponent(segment);
+        if (decoded === segment) return true;
+        segment = decoded;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  });
+}
+
+export function safeExampleQuery(raw: string) {
+  if (/[\x00\r\n#]/.test(raw)) return false;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (raw[index] !== "%") continue;
+    if (!/^[\da-f]{2}$/i.test(raw.slice(index + 1, index + 3))) return false;
+    index += 2;
+  }
+  return true;
 }
 
 function validHeaderValue(value: string) {
@@ -97,6 +138,9 @@ export function emptyRouteFormValues(): RouteFormValues {
     websocketSubprotocols: [],
     target: { mode: "existing", backend_id: 0 },
     forwardSubpath: false,
+    exampleEnabled: false,
+    exampleRequest: emptyExample,
+    exampleHeaderRows: [],
     enabled: true,
   };
 }
@@ -141,10 +185,22 @@ export function validateRouteFormValues(values: RouteFormValues, targetHeaderRow
   if (values.target.mode === "create" && values.target.first_upstream.proxy_url && invalidURL(values.target.first_upstream.proxy_url)) errors.push("invalidProxyUrl");
   if (values.target.mode === "create" && !credentialComplete(values.target.first_upstream.auth_type, values.target.first_upstream.credential)) errors.push("credentialRequired");
   if (values.target.mode === "create" && targetHeaderRows.some((row) => invalidOverrideHeader(row, targetHeaderRows))) errors.push("invalidHeaderOverride");
+  if (values.exampleEnabled) {
+    const example = { ...values.exampleRequest, headers: exampleHeadersObject(values.exampleHeaderRows) };
+    const allowedMethods: readonly string[] = values.allowedMethods.length ? values.allowedMethods : STANDARD_ROUTE_HTTP_METHODS;
+    if (!isStandardRouteHTTPMethod(example.method) || !allowedMethods.includes(example.method)) errors.push("invalidExampleMethod");
+    if (!safeExampleSubpath(example.subpath)) errors.push("invalidExamplePath");
+    if (!safeExampleQuery(example.query)) errors.push("invalidExampleQuery");
+    const headerRows = values.exampleHeaderRows.length
+      ? values.exampleHeaderRows
+      : Object.entries(values.exampleRequest.headers).map(([name, value], index) => ({ id: `example-header-${index}`, name, value }));
+    if (headerRows.some((row) => invalidExampleHeader(row, headerRows))) errors.push("invalidExampleHeader");
+    if (requestExampleByteLength(example) > 64 * 1024) errors.push("bodyTooLarge");
+  }
   return errors;
 }
 
-export function routeFieldsForSubmit(values: RouteFormValues, existingExample = emptyExample): APIRouteFields {
+export function routeFieldsForSubmit(values: RouteFormValues): APIRouteFields {
   const path = normalizeRoutePath(values.path);
   return {
     slug: path,
@@ -152,7 +208,7 @@ export function routeFieldsForSubmit(values: RouteFormValues, existingExample = 
     allowed_methods: values.methodMode === "all" ? [] : values.allowedMethods,
     upstream_path: path,
     forward_subpath: values.forwardSubpath,
-    example_request: existingExample,
+    example_request: values.exampleEnabled ? { ...values.exampleRequest, headers: exampleHeadersObject(values.exampleHeaderRows) } : emptyExample,
     websocket_subprotocols: values.protocols.includes("websocket") ? values.websocketSubprotocols : [],
     status: values.enabled ? 1 : 0,
   };
@@ -167,6 +223,9 @@ export function hydrateRouteFormValues(route: APIRoute): RouteFormValues {
     websocketSubprotocols: route.websocket_subprotocols ?? [],
     target: { mode: "existing", backend_id: route.backend_id },
     forwardSubpath: route.forward_subpath,
+    exampleEnabled: Object.values(route.example_request).some((value) => typeof value === "object" ? Object.keys(value).length > 0 : value !== ""),
+    exampleRequest: { ...route.example_request, headers: { ...route.example_request.headers } },
+    exampleHeaderRows: Object.entries(route.example_request.headers).map(([name, value], index) => ({ id: `example-header-${index}`, name, value })),
     enabled: route.status === 1,
   };
 }

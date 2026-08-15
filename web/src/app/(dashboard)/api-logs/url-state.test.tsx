@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { dateStrToExclusiveEndTs, dateStrToTs, tsToDateStr } from "@/lib/utils/date-range";
+import { tsToDateStr } from "@/lib/utils/date-range";
 import APILogsPage from "./page";
 
 const state = vi.hoisted(() => ({
@@ -139,21 +139,19 @@ describe("API Logs URL state", () => {
     expect(state.logQueries.at(-1)).toMatchObject({ request_id: requestID });
   });
 
-  it("uses one fixed local calendar day by default without writing it to the URL", () => {
+  it("uses one fixed rolling seven-day range by default without writing it to the URL", () => {
     const mountedAt = new Date(2026, 6, 20, 12, 34, 56);
     vi.setSystemTime(mountedAt);
-    const localDate = tsToDateStr(Math.floor(mountedAt.getTime() / 1_000));
-    const start = dateStrToTs(localDate, false);
-    const end = dateStrToExclusiveEndTs(localDate);
+    const end = Math.floor(mountedAt.getTime() / 1_000);
+    const start = end - 7 * 86_400;
 
     const view = render(<APILogsPage />);
 
     expect(state.logQueries.at(-1)).toMatchObject({ start, end });
-    expect(tsToDateStr(end - 1)).toBe(localDate);
     expect(state.replace).not.toHaveBeenCalled();
 
     openAdvancedFilters();
-    expect(state.dateRangeValue).toEqual({ startDate: localDate, endDate: localDate });
+    expect(state.dateRangeValue).toEqual({ startDate: tsToDateStr(start), endDate: tsToDateStr(end - 1) });
 
     vi.setSystemTime(new Date(2026, 6, 21, 12, 0, 0));
     view.rerender(<APILogsPage />);
@@ -239,12 +237,11 @@ describe("API Logs URL state", () => {
     );
   });
 
-  it("restores the fixed default day after an explicit URL range is cleared", () => {
+  it("restores the fixed default seven-day range after an explicit URL range is cleared", () => {
     const mountedAt = new Date(2026, 6, 20, 12, 0, 0);
     vi.setSystemTime(mountedAt);
-    const localDate = tsToDateStr(Math.floor(mountedAt.getTime() / 1_000));
-    const defaultStart = dateStrToTs(localDate, false);
-    const defaultEnd = dateStrToExclusiveEndTs(localDate);
+    const defaultEnd = Math.floor(mountedAt.getTime() / 1_000);
+    const defaultStart = defaultEnd - 7 * 86_400;
     state.query = "start=1000&end=2000";
     const view = render(<APILogsPage />);
     expect(state.logQueries.at(-1)).toMatchObject({ start: 1_000, end: 2_000 });

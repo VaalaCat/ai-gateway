@@ -118,6 +118,8 @@ describe("apiServices runtime messages", () => {
       "noAvailableUpstream", "confirmDisableEndpointTitle", "confirmDisableEndpoint",
       "confirmDeleteLastEndpointTitle", "confirmDeleteEndpoint", "headerOverride",
       "invalidHeaderOverride", "targetsLoadFailed", "targetNotFound",
+      "configureRequestExample", "requestExampleDescription", "exampleMethod", "exampleSubpath",
+      "exampleQuery", "exampleBody", "clearRequestExample", "invalidExampleQuery",
       "targetServiceMismatch", "targetRoutesLoading", "targetRoutesLoadFailed", "targetRoutesLoadFailedDescription",
       "endpointPreviewRequired", "endpointPreviewInvalid", "endpointPreviewPreparing", "endpointPreviewLoading", "endpointPreviewFailed", "endpointPreviewFailedDescription",
       "retryEndpointPreview", "endpointPreviewEmpty", "endpointPreviewEmptyDescription",

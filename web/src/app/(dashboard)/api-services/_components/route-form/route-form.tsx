@@ -14,6 +14,7 @@ import { apiServiceErrorMessage } from "../../api-service-error";
 import { FormPageSkeleton } from "../form-entry";
 import { RoutePathMapping } from "../route-editor/route-path-mapping";
 import { RouteRequestPolicy } from "../route-editor/route-request-policy";
+import { RouteRequestExample } from "../route-editor/route-request-example";
 import { RouteTargetPicker } from "../route-editor/route-target-picker";
 import { emptyRouteFormValues, hydrateRouteFormValues, routeFieldsForSubmit, routeFormReducer, routeTargetForRequest, validateRouteFormValues, type RouteFormAction, type RouteFormValues } from "./route-form-state";
 import { RouteLivePreviewView, useRouteLivePreview, type RouteLivePreviewState, type RoutePreviewStatus } from "./route-live-preview";
@@ -40,6 +41,7 @@ function RouteFormFields({ mode, values, targetHeaderRows, preview, sampleSubpat
     <RoutePathMapping serviceSlug={mode.serviceSlug} origin={publicOrigin()} path={values.path} forwardSubpath={values.forwardSubpath} sampleSubpath={sampleSubpath} target={values.target} preview={preview} onPathChange={(path) => patch({ path })} pathError={errorKeys.includes("invalidRouteSlug") ? "invalidRouteSlug" : undefined} t={t} />
     <RouteTargetPicker target={values.target} headerRows={targetHeaderRows} serviceId={mode.serviceId} onTargetChange={(target) => dispatch({ type: "target", target })} onHeaderRowsChange={onTargetHeaderRowsChange} validationErrors={errorKeys} existingTargetLookup={existingTargetLookup} t={t} />
     <RouteRequestPolicy values={values} onChange={patch} validationErrors={errorKeys} t={t} />
+    <RouteRequestExample values={values} onChange={patch} t={t} />
   </div>;
 }
 
@@ -94,7 +96,7 @@ function APIRouteFormSession({ mode }: { mode: APIRouteFormMode }) {
     event.preventDefault();
     clearError();
     if (errorKeys.length || previewBlocksSave || targetLookupBlocksSave) return reportError(t(errorKeys[0] ?? (existingTargetState === "missing" ? "targetNotFound" : existingTargetState === "service-mismatch" ? "targetServiceMismatch" : "targetLoadFailed")));
-    const fields = routeFieldsForSubmit(values, mode.kind === "edit" ? route.data?.example_request : undefined);
+    const fields = routeFieldsForSubmit(values);
     const target = routeTargetForRequest(values, targetHeaderRows);
     try {
       const routeID = mode.kind === "edit"
