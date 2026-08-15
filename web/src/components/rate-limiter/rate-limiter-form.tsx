@@ -13,11 +13,13 @@ import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { FieldTip } from "@/components/business/field-tip";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
 import { BindingEditor } from "@/components/rate-limiter/binding-editor";
 
 import {
@@ -26,6 +28,7 @@ import {
   useUpdateRateLimiter,
 } from "@/lib/api/rate-limiters";
 import { formatErrorToast } from "@/lib/api/error-toast";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 import type {
   RequestLimiter,
   LimiterMetric,
@@ -46,6 +49,7 @@ const KEY_BYS: LimiterKeyBy[] = [
 ];
 const ACTIONS: LimiterAction[] = ["reject", "wait"];
 const CHANNEL_SCOPES: LimiterChannelScope[] = ["admin", "private", "all"];
+const API_ONLY_SCOPE_VALUE = "__api_only__";
 
 // channelKeyed 报告该 key_by 是否依赖具体渠道，决定 channel_scope 字段是否有意义。
 function channelKeyed(keyBy: LimiterKeyBy): boolean {
@@ -84,8 +88,10 @@ function actionOptionKey(a: LimiterAction): "actionReject" | "actionWait" {
 
 function scopeOptionKey(
   s: LimiterChannelScope,
-): "scopeAdmin" | "scopePrivate" | "scopeAll" {
+): "scopeAdmin" | "scopePrivate" | "scopeAll" | "scopeAPIOnly" {
   switch (s) {
+    case "":
+      return "scopeAPIOnly";
     case "private":
       return "scopePrivate";
     case "all":
@@ -93,6 +99,14 @@ function scopeOptionKey(
     default:
       return "scopeAdmin";
   }
+}
+
+function channelScopeSelectValue(scope: LimiterChannelScope): string {
+  return scope === "" ? API_ONLY_SCOPE_VALUE : scope;
+}
+
+function channelScopeFromSelectValue(value: string): LimiterChannelScope {
+  return value === API_ONLY_SCOPE_VALUE ? "" : (value as LimiterChannelScope);
 }
 
 // 配置区的小标签，复用脚本表单的开发者气质。
@@ -152,7 +166,7 @@ export function RateLimiterForm({ mode }: { mode: Mode }) {
       setCapacity(String(existing.capacity));
       setWindowMs(String(existing.window_ms || 60000));
       setKeyBy(existing.key_by);
-      setChannelScope(existing.channel_scope || "admin");
+      setChannelScope(existing.channel_scope);
       setAction(existing.action);
       setQueueSize(String(existing.queue_size));
       setQueueTimeMs(String(existing.queue_time_ms));
@@ -184,7 +198,7 @@ export function RateLimiterForm({ mode }: { mode: Mode }) {
       capacity: capacityNum,
       window_ms: showWindow ? Number(windowMs) || 0 : 0,
       key_by: keyBy,
-      channel_scope: showChannelScope ? channelScope : "admin",
+      channel_scope: channelScope,
       action,
       queue_size: showQueue ? Number(queueSize) || 0 : 0,
       queue_time_ms: showQueue ? Number(queueTimeMs) || 0 : 0,
@@ -274,18 +288,14 @@ export function RateLimiterForm({ mode }: { mode: Mode }) {
           {showWindow ? (
             <div className="grid gap-1.5">
               <FieldLabel tip={t("windowMsHint")}>{t("windowMs")}</FieldLabel>
-              <div className="relative">
-                <Input
-                  type="number"
-                  min={0}
-                  value={windowMs}
-                  onChange={(e) => setWindowMs(e.target.value)}
-                  className="pr-12 font-mono tabular-nums"
-                />
-                <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center font-mono text-xs text-muted-foreground">
-                  {t("fieldMsSuffix")}
-                </span>
-              </div>
+              <NumberUnitInput
+                type="number"
+                min={0}
+                value={windowMs}
+                unit={t("fieldMsSuffix")}
+                humanReadable={humanizeNumberUnit(windowMs, "milliseconds")}
+                onChange={(e) => setWindowMs(e.target.value)}
+              />
             </div>
           ) : null}
 
@@ -294,7 +304,13 @@ export function RateLimiterForm({ mode }: { mode: Mode }) {
             <FieldLabel>{t("keyBy")}</FieldLabel>
             <Select
               value={keyBy}
-              onValueChange={(v) => setKeyBy(v as LimiterKeyBy)}
+              onValueChange={(v) => {
+                const nextKeyBy = v as LimiterKeyBy;
+                setKeyBy(nextKeyBy);
+                if (channelKeyed(nextKeyBy) && channelScope === "") {
+                  setChannelScope("admin");
+                }
+              }}
             >
               <SelectTrigger>
                 <SelectValue />
@@ -309,26 +325,30 @@ export function RateLimiterForm({ mode }: { mode: Mode }) {
             </Select>
           </div>
 
-          {/* 作用渠道范围 channel_scope —— 仅 key_by ∈ {per_channel, per_channel_user}；
-              其它 KeyBy 该字段无意义，置灰禁用 */}
+          {/* LLM 渠道范围或 Generic API-only 模式。Radix SelectItem 不能用空 value，
+              因此 UI 使用非空 sentinel，提交前映射回后端契约的空字符串。 */}
           <div className="grid gap-1.5">
             <FieldLabel tip={t("channelScopeHint")}>
               {t("channelScope")}
             </FieldLabel>
             <Select
-              value={channelScope}
-              onValueChange={(v) => setChannelScope(v as LimiterChannelScope)}
-              disabled={!showChannelScope}
+              value={channelScopeSelectValue(channelScope)}
+              onValueChange={(v) => setChannelScope(channelScopeFromSelectValue(v))}
             >
-              <SelectTrigger className={showChannelScope ? "" : "opacity-50"}>
+              <SelectTrigger aria-label={t("channelScope")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {CHANNEL_SCOPES.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {t(scopeOptionKey(s))}
+                <SelectGroup>
+                  {CHANNEL_SCOPES.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {t(scopeOptionKey(s))}
+                    </SelectItem>
+                  ))}
+                  <SelectItem value={API_ONLY_SCOPE_VALUE} disabled={showChannelScope}>
+                    {t(scopeOptionKey(""))}
                   </SelectItem>
-                ))}
+                </SelectGroup>
               </SelectContent>
             </Select>
           </div>
@@ -372,18 +392,14 @@ export function RateLimiterForm({ mode }: { mode: Mode }) {
                 <FieldLabel tip={t("queueTimeMsHint")}>
                   {t("queueTimeMs")}
                 </FieldLabel>
-                <div className="relative">
-                  <Input
-                    type="number"
-                    min={0}
-                    value={queueTimeMs}
-                    onChange={(e) => setQueueTimeMs(e.target.value)}
-                    className="pr-12 font-mono tabular-nums"
-                  />
-                  <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center font-mono text-xs text-muted-foreground">
-                    {t("fieldMsSuffix")}
-                  </span>
-                </div>
+                <NumberUnitInput
+                  type="number"
+                  min={0}
+                  value={queueTimeMs}
+                  unit={t("fieldMsSuffix")}
+                  humanReadable={humanizeNumberUnit(queueTimeMs, "milliseconds")}
+                  onChange={(e) => setQueueTimeMs(e.target.value)}
+                />
               </div>
             </>
           ) : null}
@@ -413,15 +429,18 @@ export function RateLimiterForm({ mode }: { mode: Mode }) {
       </div>
 
       {/* 作用到谁：绑定管理。仅编辑态可用（需要已落库的 limiter id）。
-          绑定校验在后端用的是 DB 里已落库的 key_by，这里就必须喂同一个口径
-          （existing.key_by），否则下拉会把表单未保存的 key_by 当真，
-          管理员选出来的目标类型提交时被后端用旧 key_by 拒掉。表单 keyBy 与
-          已落库的 key_by 不一致时（policyDirty），让绑定区 disable 并提示先保存。 */}
+          候选类型跟随 draft policy 即时变化；只要 key_by / channel_scope 任一项
+          尚未保存，policyDirty 就会禁用新增 binding，避免提交时与后端 DB 口径打架。 */}
       {mode.kind === "edit" ? (
         <BindingEditor
           limiterId={mode.id}
-          keyBy={existing?.key_by ?? keyBy}
-          policyDirty={existing != null && existing.key_by !== keyBy}
+          keyBy={keyBy}
+          channelScope={channelScope}
+          policyDirty={
+            existing != null &&
+            (existing.key_by !== keyBy ||
+              existing.channel_scope !== channelScope)
+          }
         />
       ) : (
         <div className="rounded-lg border border-dashed bg-muted/20 p-4">

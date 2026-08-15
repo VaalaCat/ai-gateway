@@ -9,6 +9,7 @@ import (
 
 type UsageQueueOpParams struct {
 	Op         string   `json:"op"`
+	QueueIDs   []string `json:"queue_ids"`
 	RequestIDs []string `json:"request_ids,omitempty"`
 	Level      int      `json:"level,omitempty"`
 }
@@ -36,7 +37,7 @@ func HandleUsageQueueOp(rep *reporter.Reporter, params json.RawMessage) (any, er
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	n, err := rep.QueueOp(p.Op, p.RequestIDs, p.Level)
+	n, err := rep.QueueOp(p.Op, reporter.QueueOpTargets{QueueIDs: p.QueueIDs, RequestIDs: p.RequestIDs}, p.Level)
 	if err != nil {
 		return nil, err
 	}

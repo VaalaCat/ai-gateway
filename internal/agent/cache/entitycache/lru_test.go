@@ -201,6 +201,87 @@ func TestLRUCache_LoaderErrorTransparent(t *testing.T) {
 	}
 }
 
+func TestLRUCacheInvalidateDuringColdLoadRejectsAndDoesNotStoreOldResult(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(context.Context, string) (int, error) {
+		close(entered)
+		<-release
+		return 42, nil
+	}}
+	cache, err := NewLRUCache(Config[string, int]{Capacity: 4, Loader: loader})
+	require.NoError(t, err)
+	type result struct {
+		value int
+		found bool
+		err   error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		value, found, err := cache.Get(context.Background(), "role-set")
+		resultCh <- result{value: value, found: found, err: err}
+	}()
+	<-entered
+	cache.Delete("role-set")
+	close(release)
+
+	got := <-resultCh
+	require.ErrorIs(t, got.err, ErrLoadInvalidated)
+	require.False(t, got.found)
+	require.Zero(t, got.value)
+	_, cached := cache.Peek("role-set")
+	require.False(t, cached)
+}
+
+func TestLRUCacheClearPurgesPositiveNegativeAndInflightLoads(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	loader := &stubLoader[string, int]{fn: func(_ context.Context, key string) (int, error) {
+		switch key {
+		case "missing":
+			return 0, ErrNotFound
+		case "blocked":
+			close(entered)
+			<-release
+			return 42, nil
+		default:
+			return 0, fmt.Errorf("unexpected key %q", key)
+		}
+	}}
+	cache, err := NewLRUCache(Config[string, int]{Capacity: 4, Loader: loader, NegativeTTL: time.Hour})
+	require.NoError(t, err)
+	cache.Set("positive", 7)
+	_, _, err = cache.Get(context.Background(), "missing")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	type result struct {
+		value int
+		found bool
+		err   error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		value, found, err := cache.Get(context.Background(), "blocked")
+		resultCh <- result{value: value, found: found, err: err}
+	}()
+	<-entered
+	epoch := cache.MutationEpoch()
+	cache.Clear()
+	require.Greater(t, cache.MutationEpoch(), epoch)
+	require.Zero(t, cache.Len())
+	_, positive := cache.Peek("positive")
+	require.False(t, positive)
+	close(release)
+
+	got := <-resultCh
+	require.ErrorIs(t, got.err, ErrLoadInvalidated)
+	require.False(t, got.found)
+	require.Zero(t, got.value)
+	_, resurrected := cache.Peek("blocked")
+	require.False(t, resurrected)
+	require.Empty(t, cache.mutations, "completed invalidated flights must not leak generations")
+}
+
 func TestLRUCacheLifecycleJoinsDetachedColdLoadAfterCallerCancel(t *testing.T) {
 	lifecycle := NewLifecycle()
 	entered := make(chan struct{})

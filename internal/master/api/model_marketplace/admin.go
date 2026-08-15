@@ -18,6 +18,7 @@ const (
 )
 
 type AdminListRequest struct {
+	api.PaginationQuery
 	TokenID  *uint                `form:"token_id"`
 	Search   string               `form:"search"`
 	Provider string               `form:"provider"`
@@ -48,9 +49,12 @@ type AdminMarketplaceFiltersDTO struct {
 }
 
 type AdminMarketplaceListResponse struct {
-	View    AdminMarketplaceViewDTO    `json:"view"`
-	Models  []AdminMarketplaceModelDTO `json:"models"`
-	Filters AdminMarketplaceFiltersDTO `json:"filters"`
+	View     AdminMarketplaceViewDTO    `json:"view"`
+	Models   []AdminMarketplaceModelDTO `json:"models"`
+	Filters  AdminMarketplaceFiltersDTO `json:"filters"`
+	Total    int64                      `json:"total"`
+	Page     int                        `json:"page"`
+	PageSize int                        `json:"page_size"`
 }
 
 type AdminModelDetailResponse struct {
@@ -273,11 +277,19 @@ func (h *Handler) AdminList(c *app.Context, req AdminListRequest) (AdminMarketpl
 	if err := validateListKind(req.Kind); err != nil {
 		return AdminMarketplaceListResponse{}, err
 	}
-	composed, err := h.compose(c.RequestContext(), viewer, UsageWindow24Hours, true)
+	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
+	directory, err := h.buildMarketplaceDirectory(c.RequestContext(), viewer, viewer.AdminGlobal)
 	if err != nil {
 		return AdminMarketplaceListResponse{}, err
 	}
-	return mapAdminList(composed, req), nil
+	filters := adminMarketplaceFilters(directory.real)
+	userLikeRequest := ListRequest{Search: req.Search, Provider: req.Provider, Kind: req.Kind}
+	pageData, total := filterAndPageMarketplaceDirectory(directory, userLikeRequest, page, pageSize)
+	pageData, err = h.enrichMarketplacePerformance(c.RequestContext(), pageData, UsageWindow24Hours)
+	if err != nil {
+		return AdminMarketplaceListResponse{}, err
+	}
+	return mapAdminList(pageData, filters, total, page, pageSize), nil
 }
 
 func (h *Handler) AdminDetail(c *app.Context, req AdminDetailRequest) (AdminModelDetailResponse, error) {
@@ -293,7 +305,7 @@ func (h *Handler) AdminDetail(c *app.Context, req AdminDetailRequest) (AdminMode
 	if modelName == "" {
 		return AdminModelDetailResponse{}, api.BadRequestError("marketplace model is required", nil)
 	}
-	composed, err := h.compose(c.RequestContext(), viewer, window, true)
+	composed, err := h.compose(c.RequestContext(), viewer, window, viewer.AdminGlobal)
 	if err != nil {
 		return AdminModelDetailResponse{}, err
 	}
@@ -334,29 +346,28 @@ func (h *Handler) AdminDetail(c *app.Context, req AdminDetailRequest) (AdminMode
 	return AdminModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
 }
 
-func mapAdminList(composed composedMarketplace, req AdminListRequest) AdminMarketplaceListResponse {
+func mapAdminList(
+	pageData composedMarketplace,
+	filters AdminMarketplaceFiltersDTO,
+	total int64,
+	page int,
+	pageSize int,
+) AdminMarketplaceListResponse {
 	response := AdminMarketplaceListResponse{
-		View: adminMarketplaceView(composed.viewer), Models: []AdminMarketplaceModelDTO{},
-		Filters: adminMarketplaceFilters(composed.real),
+		View: adminMarketplaceView(pageData.viewer), Models: []AdminMarketplaceModelDTO{},
+		Filters: filters, Total: total, Page: page, PageSize: pageSize,
 	}
-	userLikeRequest := ListRequest{Search: req.Search, Provider: req.Provider, Kind: req.Kind}
-	for _, model := range composed.real {
-		if matchesRealListRequest(model, userLikeRequest) {
-			response.Models = append(response.Models, mapAdminRealModel(model))
-		}
+	for _, model := range pageData.real {
+		response.Models = append(response.Models, mapAdminRealModel(model))
 	}
-	for _, model := range composed.routing {
-		if matchesRoutingListRequest(model, userLikeRequest) {
-			response.Models = append(response.Models, mapAdminRoutingModel(model))
-		}
+	for _, model := range pageData.routing {
+		response.Models = append(response.Models, mapAdminRoutingModel(model))
 	}
 	sort.Slice(response.Models, func(i, j int) bool {
-		left := adminMarketplaceModelName(response.Models[i])
-		right := adminMarketplaceModelName(response.Models[j])
-		if left != right {
-			return left < right
-		}
-		return response.Models[i].Kind < response.Models[j].Kind
+		return marketplaceModelOrderLess(
+			adminMarketplaceModelName(response.Models[i]), response.Models[i].Kind,
+			adminMarketplaceModelName(response.Models[j]), response.Models[j].Kind,
+		)
 	})
 	return response
 }

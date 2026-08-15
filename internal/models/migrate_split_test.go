@@ -94,6 +94,30 @@ func TestMigrateLogDBOwnsOnlyLogTables(t *testing.T) {
 	assertNoForeignKeys(t, db)
 }
 
+func TestAPICoreAndLogModelsMigrate(t *testing.T) {
+	// This catches an accidental split-boundary regression where generic API
+	// authorization state leaks into logs, or request logs leak into core.
+	core, logDB := openSplitTestDB(t), openSplitTestDB(t)
+	require.NoError(t, MigrateCoreDB(core))
+	require.NoError(t, MigrateLogDB(logDB))
+
+	for _, model := range []any{
+		&APIService{}, &APIBackend{}, &APIRoute{}, &APIUpstream{}, &Role{}, &Permission{}, &RolePermission{}, &RoleBinding{},
+	} {
+		require.Truef(t, core.Migrator().HasTable(model), "core table for %T missing", model)
+		require.Falsef(t, logDB.Migrator().HasTable(model), "core table for %T leaked into log DB", model)
+	}
+	require.True(t, core.Migrator().HasColumn(&APIRoute{}, "backend_id"))
+	require.True(t, core.Migrator().HasColumn(&APIRoute{}, "example_request"))
+	require.True(t, core.Migrator().HasColumn(&APIUpstream{}, "backend_id"))
+	require.False(t, core.Migrator().HasColumn(&APIUpstream{}, "api_service_id"))
+	for _, model := range []any{&APIRequestLog{}, &APIRequestTrace{}} {
+		require.Truef(t, logDB.Migrator().HasTable(model), "log table for %T missing", model)
+		require.Falsef(t, core.Migrator().HasTable(model), "log table for %T leaked into core DB", model)
+	}
+	require.False(t, logDB.Migrator().HasTable(&UsageLog{}), "legacy usage_logs must not return to the log DB")
+}
+
 func TestMigrateLogDBCreatesDailyBillingBackfillSchema(t *testing.T) {
 	db := openSplitTestDB(t)
 	require.NoError(t, MigrateLogDB(db))
@@ -529,7 +553,7 @@ func TestBillingLogSchemaAndRawTotal(t *testing.T) {
 	}
 	for _, column := range []string{
 		"duration", "first_response_ms", "inbound_protocol", "agent_id", "error_message",
-		"rate_limit_decision", "has_trace",
+		"rate_limit_decision", "has_trace", "trace_retention_status",
 	} {
 		require.Falsef(t, db.Migrator().HasColumn(&BillingLog{}, column), "log-only column %s leaked", column)
 	}
@@ -557,6 +581,7 @@ func TestRequestLogAndTraceSchemaIndexes(t *testing.T) {
 	assertSameFieldAndGORMTags(t, reflect.TypeOf(UsageLogTrace{}), reflect.TypeOf(RequestTrace{}))
 	require.NoError(t, MigrateLogDB(db))
 	require.False(t, db.Migrator().HasTable("usage_logs"))
+	require.True(t, db.Migrator().HasColumn(&RequestLog{}, "trace_retention_status"))
 
 	log := RequestLog{RequestID: "request-duplicate"}
 	require.NoError(t, db.Create(&log).Error)

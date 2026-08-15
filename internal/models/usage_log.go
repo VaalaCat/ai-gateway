@@ -2,6 +2,8 @@ package models
 
 import "gorm.io/datatypes"
 
+// UsageLog is the legacy mixed-database LLM log shape retained for transitional
+// compatibility. New split-layout LLM persistence uses RequestLog instead.
 type UsageLog struct {
 	ID                 uint   `gorm:"primaryKey" json:"id"`
 	UserID             uint   `gorm:"index" json:"user_id"`
@@ -65,6 +67,8 @@ type UsageLog struct {
 	UpstreamDispatchMs int                                `json:"upstream_dispatch_ms"`
 	UpstreamDecodeMs   int                                `json:"upstream_decode_ms"`
 	ClientEncodeMs     int                                `json:"client_encode_ms"`
+
+	TraceRetentionStatus TraceRetentionStatus `gorm:"size:24" json:"trace_retention_status"`
 
 	// 请求级限流决策快照：Decision(allow|queued|rejected) / 累计等待 / 人话原因 / 命中明细。
 	RateLimitDecision string                            `gorm:"size:16;index" json:"rate_limit_decision"`

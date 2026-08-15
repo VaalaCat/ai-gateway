@@ -4,7 +4,7 @@ import type { AgentRoute, AgentRouteOverviewItem, PaginatedResponse, PaginatedPa
 
 export interface AgentRouteOverviewParams extends PaginatedParams {
   q?: string;
-  source_type?: "token" | "channel";
+  source_type?: "token" | "channel" | "api_service" | "api_route";
   source_id?: number;
   model?: string;
   agent_id?: string;

@@ -16,7 +16,7 @@ import (
 // 的字段(entry/attempts/degrade),bytes 恢复时靠 entrySize 重算,nextAt 恢复时靠
 // retryBackoff(attempts) 重算(不落零值远古时间,见 Restore)。
 type retrySnapshotItem struct {
-	Entry    protocol.UsageLogEntry `json:"entry"`
+	Entry    protocol.ReportedUsage `json:"entry"`
 	Attempts int                    `json:"attempts"`
 	Degrade  int                    `json:"degrade"`
 }
@@ -25,9 +25,23 @@ type retrySnapshotItem struct {
 type backlogSnapshot struct {
 	Version  int                      `json:"version"`
 	SavedAt  int64                    `json:"saved_at"`
-	Store    []protocol.UsageLogEntry `json:"store"`
+	Store    []protocol.ReportedUsage `json:"store"`
 	Retry    []retrySnapshotItem      `json:"retry"`
-	Inflight []protocol.UsageLogEntry `json:"inflight"`
+	Inflight []protocol.ReportedUsage `json:"inflight"`
+}
+
+type legacyRetrySnapshotItem struct {
+	Entry    protocol.UsageLogEntry `json:"entry"`
+	Attempts int                    `json:"attempts"`
+	Degrade  int                    `json:"degrade"`
+}
+
+type legacyBacklogSnapshot struct {
+	Version  int                       `json:"version"`
+	SavedAt  int64                     `json:"saved_at"`
+	Store    []protocol.UsageLogEntry  `json:"store"`
+	Retry    []legacyRetrySnapshotItem `json:"retry"`
+	Inflight []protocol.UsageLogEntry  `json:"inflight"`
 }
 
 // Snapshotter 把 Store/旁路重试队列/旁路在飞条目周期性落盘成一个 gzip 文件,agent
@@ -79,8 +93,8 @@ func (s *Snapshotter) signature() string {
 // WriteNow 原子写(tmp+rename);store/retry/inflight 全空时删掉旧文件而不是写一个
 // 空信封——避免 Restore 每次启动都要多解一层 gzip/JSON 才发现什么都没有。
 func (s *Snapshotter) WriteNow() error {
-	snap := backlogSnapshot{Version: 1, SavedAt: time.Now().Unix(),
-		Store:    s.Store.PeekBatch(1 << 30), // 全量拷贝
+	snap := backlogSnapshot{Version: 2, SavedAt: time.Now().Unix(),
+		Store:    s.Store.PeekReportedBatch(1<<30, true), // 全量拷贝
 		Inflight: s.Uploader.inflightEntries()}
 	for _, it := range s.Uploader.retry.snapshotAll() {
 		snap.Retry = append(snap.Retry, retrySnapshotItem{Entry: it.entry, Attempts: it.attempts, Degrade: it.degrade})
@@ -102,14 +116,17 @@ func (s *Snapshotter) Restore() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if snap.Version != 1 {
+	if snap.Version == 1 {
+		return s.restoreLegacySnapshot()
+	}
+	if snap.Version != 2 {
 		if renameErr := deliveryqueue.QuarantineSnapshot(s.Path); renameErr != nil {
 			return 0, fmt.Errorf("unsupported backlog snapshot version %d; quarantine: %w", snap.Version, renameErr)
 		}
 		return 0, fmt.Errorf("unsupported backlog snapshot version %d, quarantined", snap.Version)
 	}
-	s.Store.Append(snap.Store)
-	s.Store.Append(snap.Inflight) // 在飞状态未知,按未投递处理;重复由 master 去重吸收
+	s.Store.AppendReported(snap.Store)
+	s.Store.AppendReported(snap.Inflight) // 在飞状态未知,按未投递处理;重复由 master 去重吸收
 	now := time.Now()
 	for _, it := range snap.Retry {
 		s.Uploader.retry.pushItem(retryItem{entry: it.Entry, attempts: it.Attempts,
@@ -119,5 +136,33 @@ func (s *Snapshotter) Restore() (int, error) {
 	n := len(snap.Store) + len(snap.Inflight) + len(snap.Retry)
 	s.Logger.Info("restored pending usage backlog from snapshot",
 		zap.Int("entries", n), zap.Int64("saved_at", snap.SavedAt))
+	return n, nil
+}
+
+func (s *Snapshotter) restoreLegacySnapshot() (int, error) {
+	var legacy legacyBacklogSnapshot
+	if err := deliveryqueue.ReadGzipJSON(s.Path, &legacy); err != nil {
+		return 0, err
+	}
+	wrap := func(entries []protocol.UsageLogEntry) []protocol.ReportedUsage {
+		out := make([]protocol.ReportedUsage, 0, len(entries))
+		for i := range entries {
+			entry := entries[i]
+			out = append(out, protocol.ReportedUsage{LLM: &entry})
+		}
+		return out
+	}
+	s.Store.AppendReported(wrap(legacy.Store))
+	s.Store.AppendReported(wrap(legacy.Inflight))
+	now := time.Now()
+	for _, item := range legacy.Retry {
+		entry := item.Entry
+		reported := protocol.ReportedUsage{LLM: &entry}
+		s.Uploader.retry.pushItem(retryItem{entry: reported, attempts: item.Attempts,
+			degrade: item.Degrade, bytes: entrySize(reported),
+			nextAt: now.Add(s.Uploader.retryBackoff(item.Attempts))})
+	}
+	n := len(legacy.Store) + len(legacy.Inflight) + len(legacy.Retry)
+	s.Logger.Info("restored legacy pending usage backlog from snapshot", zap.Int("entries", n), zap.Int64("saved_at", legacy.SavedAt))
 	return n, nil
 }

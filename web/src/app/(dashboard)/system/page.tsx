@@ -10,6 +10,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -27,15 +28,23 @@ import {
 import { toast } from "sonner";
 import { BYOKSettingsCard } from "@/components/system/byok-settings";
 import { AgentRelaySettings } from "@/components/system/agent-relay-settings";
-import { SettingNumberInput } from "@/components/system/setting-number-input";
+import {
+  buildGenericAPISettingUpdates,
+  currentGenericAPISettingValues,
+  genericAPISettingDefinitions,
+  type GenericAPISettingDraft,
+  type GenericAPISettingKey,
+  type GenericAPISettingValues,
+} from "@/components/system/generic-api-settings";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
 import { LogStorageStatus } from "@/components/system/log-storage-status";
 import { DataCleanupStats } from "@/components/system/data-cleanup-stats";
 import { SystemMaintenanceTabs } from "@/components/system/system-maintenance-tabs";
 import { formatFileSize, formatUptime } from "@/lib/utils/format";
 import {
-  humanizeSettingNumber,
-  type SettingNumberKind,
-} from "@/lib/utils/system-setting-number";
+  humanizeNumberUnit,
+  type NumberUnitKind,
+} from "@/lib/utils/number-unit";
 import type { SystemInfo } from "@/lib/types";
 
 // SettingsGroup 是设置卡内的一个语义小节:小标题 + 内容。
@@ -100,14 +109,14 @@ function NumField({
   max: number;
   step?: number;
   unit?: string;
-  humanizeAs?: SettingNumberKind;
+  humanizeAs?: NumberUnitKind;
   onChange: (v: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
       <Label>{label}</Label>
       <p className="text-label text-muted-foreground">{desc}</p>
-      <SettingNumberInput
+      <NumberUnitInput
         type="number"
         min={min}
         max={max}
@@ -117,7 +126,7 @@ function NumField({
         className="w-full sm:w-[160px]"
         unit={unit}
         humanReadable={
-          humanizeAs ? humanizeSettingNumber(value, humanizeAs) : undefined
+          humanizeAs ? humanizeNumberUnit(value, humanizeAs) : undefined
         }
       />
     </div>
@@ -255,6 +264,10 @@ interface RequestPathSettingsDraft {
   affinityEnabled: BooleanSettingInput;
   affinityTTL: TextSettingInput;
   proxyUrl: TextSettingInput;
+  genericAPI: {
+    values: GenericAPISettingValues;
+    change: (key: GenericAPISettingKey, value: string) => void;
+  };
   imageInlineFetchTimeoutSec: TextSettingInput;
   imageInlineMaxBytes: TextSettingInput;
   imageInlineConcurrency: TextSettingInput;
@@ -423,6 +436,31 @@ function RequestPathSettingsContent({
             onChange={(event) => draft.proxyUrl.change(event.target.value)}
             className="w-full max-w-md"
           />
+        </div>
+      </SettingsGroup>
+      <Separator />
+      <SettingsGroup title={t("secGenericAPI")}>
+        <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+          {genericAPISettingDefinitions.map((definition) => {
+            const numberHintProps = "kind" in definition
+              ? { unit: "ms", humanizeAs: definition.kind }
+              : {};
+            return (
+              <NumField
+                key={definition.key}
+                label={t(definition.labelKey)}
+                desc={t(definition.descriptionKey)}
+                value={draft.genericAPI.values[definition.key]}
+                min={definition.min}
+                max={definition.max}
+                step={1}
+                {...numberHintProps}
+                onChange={(value) =>
+                  draft.genericAPI.change(definition.key, value)
+                }
+              />
+            );
+          })}
         </div>
       </SettingsGroup>
       <Separator />
@@ -673,6 +711,21 @@ export default function SystemMaintenancePage() {
   const { data: stats, refetch, isLoading } = useSystemStats();
   const { data: settings } = useSettings();
   const updateSettings = useUpdateSettings();
+  const [genericAPISettingDraft, setGenericAPISettingDraft] =
+    useState<GenericAPISettingDraft>({});
+
+  const currentGenericAPISettings = currentGenericAPISettingValues(
+    settings?.settings ?? {},
+  );
+  const displayGenericAPISettings = {
+    ...currentGenericAPISettings,
+    ...genericAPISettingDraft,
+  };
+  const genericAPISettingsHaveChanges = genericAPISettingDefinitions.some(
+    ({ key }) =>
+      genericAPISettingDraft[key] !== undefined &&
+      genericAPISettingDraft[key] !== currentGenericAPISettings[key],
+  );
 
   const [traceMaxBodyKB, setTraceMaxBodyKB] = useState<number | null>(null);
   const [proxyUrlInput, setProxyUrlInput] = useState<string | null>(null);
@@ -989,6 +1042,7 @@ export default function SystemMaintenancePage() {
     displayImageInlineHostAllowlist !== currentImageInlineHostAllowlist;
 
   const hasChanges =
+    genericAPISettingsHaveChanges ||
     traceHasChanges ||
     proxyHasChanges ||
     registrationHasChanges ||
@@ -1024,6 +1078,17 @@ export default function SystemMaintenancePage() {
 
   const handleSaveSettings = () => {
     const updates: Record<string, string> = {};
+    if (genericAPISettingsHaveChanges) {
+      const genericAPIUpdates = buildGenericAPISettingUpdates(
+        currentGenericAPISettings,
+        genericAPISettingDraft,
+      );
+      if (!genericAPIUpdates.ok) {
+        toast.error(t("apiUsageSettingRangeError"));
+        return;
+      }
+      Object.assign(updates, genericAPIUpdates.updates);
+    }
     if (traceHasChanges) {
       updates.trace_max_body_size = String(displayKB * 1024);
     }
@@ -1239,6 +1304,7 @@ export default function SystemMaintenancePage() {
           setImageInlineConcurrencyInput(null);
           setImageInlineSsrfGuardInput(null);
           setImageInlineHostAllowlistInput(null);
+          setGenericAPISettingDraft({});
         },
         onError: () => {
           toast.error(t("settingsSaveFailed"));
@@ -1296,6 +1362,14 @@ export default function SystemMaintenancePage() {
     },
     affinityTTL: { value: displayAffinityTTL, change: setAffinityTTLInput },
     proxyUrl: { value: displayProxyUrl, change: setProxyUrlInput },
+    genericAPI: {
+      values: displayGenericAPISettings,
+      change: (key, value) =>
+        setGenericAPISettingDraft((current) => ({
+          ...current,
+          [key]: value,
+        })),
+    },
     imageInlineFetchTimeoutSec: {
       value: displayImageInlineFetchTimeoutSec,
       change: setImageInlineFetchTimeoutSecInput,
@@ -1370,9 +1444,9 @@ export default function SystemMaintenancePage() {
     },
   };
   return (
-    <div className="flex min-w-0 flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
+    <PageLayout
+      title={t("title")}
+      actions={
         <Button variant="outline" size="sm" onClick={() => refetch()}>
           <RefreshCw
             data-icon="inline-start"
@@ -1380,7 +1454,10 @@ export default function SystemMaintenancePage() {
           />
           {t("refresh")}
         </Button>
-      </div>
+      }
+      maxWidth="full"
+    >
+      <div className="flex min-w-0 flex-col gap-6">
 
       <SystemMaintenanceTabs
         overview={<SystemInfoCard system={stats?.system} t={t} />}
@@ -1406,6 +1483,7 @@ export default function SystemMaintenancePage() {
           </div>
         }
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

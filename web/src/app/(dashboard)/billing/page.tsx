@@ -66,6 +66,7 @@ import { EntityPicker } from "@/components/business/entity-picker/entity-picker"
 import { buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
 import { ChannelModelBreakdown } from "@/components/business/channel-model-breakdown";
 import { ChartOptionSelect } from "@/components/business/chart-option-select";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import type {
   BillingChannelRow,
   BillingOverviewResponse,
@@ -76,15 +77,21 @@ function logHref(params: Record<string, string | number | undefined>) {
   return `/logs${buildQuery(params)}`;
 }
 
+function BillingPageSkeleton() {
+  const t = useTranslations("billing");
+
+  return (
+    <PageLayoutSkeleton
+      title={t("title")}
+      description={t("description")}
+      maxWidth="full"
+    />
+  );
+}
+
 export default function BillingPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex items-center justify-center py-12 text-muted-foreground">
-          Loading...
-        </div>
-      }
-    >
+    <Suspense fallback={<BillingPageSkeleton />}>
       <BillingPageContent />
     </Suspense>
   );
@@ -498,11 +505,7 @@ function BillingPageContent() {
   );
 
   if (loading) {
-    return (
-      <div className="py-12 text-center text-muted-foreground">
-        {tc("loading")}
-      </div>
-    );
+    return <BillingPageSkeleton />;
   }
 
   return (

@@ -52,6 +52,50 @@ func TestFrameTypeValuesAreStable(t *testing.T) {
 	require.Equal(t, Type(11), FrameCancel)
 	require.Equal(t, Type(12), FrameReset)
 	require.Equal(t, Type(13), FrameWindowUpdate)
+	require.Equal(t, Type(14), FrameAPIResult)
+	require.Equal(t, Type(15), FrameWebSocketMessageStart)
+	require.Equal(t, Type(16), FrameWebSocketMessageData)
+	require.Equal(t, Type(17), FrameWebSocketMessageEnd)
+	require.Equal(t, Type(18), FrameWebSocketPing)
+	require.Equal(t, Type(19), FrameWebSocketPong)
+	require.Equal(t, Type(20), FrameWebSocketClose)
+}
+
+func TestWebSocketTunnelFrameLimitsSeparateDataAndControl(t *testing.T) {
+	limits := testLimits()
+	limits.MaxDataBytes = 4
+
+	data := Frame{Version: ProtocolVersion, Type: FrameWebSocketMessageData, StreamID: testStreamID(), Payload: make([]byte, 5)}
+	_, err := Encode(data, limits)
+	require.ErrorIs(t, err, ErrPayloadTooLarge)
+
+	control := Frame{Version: ProtocolVersion, Type: FrameWebSocketPing, StreamID: testStreamID(), Payload: make([]byte, MaxWebSocketControlPayloadBytes+1)}
+	_, err = Encode(control, limits)
+	require.ErrorIs(t, err, ErrPayloadTooLarge)
+
+	control.Payload = make([]byte, MaxWebSocketControlPayloadBytes)
+	raw, err := Encode(control, limits)
+	require.NoError(t, err)
+	got, err := Decode(raw, limits)
+	require.NoError(t, err)
+	require.Equal(t, control, got)
+}
+
+func TestAPIResultFrameUsesMetadataLimitAndRoundTrips(t *testing.T) {
+	limits := testLimits()
+	limits.MaxMetadataBytes = 128
+	frame := Frame{Version: ProtocolVersion, Type: FrameAPIResult, StreamID: StreamID{1}, Sequence: 9,
+		Payload: []byte(`{"provider_dispatch_known":true}`)}
+
+	encoded, err := Encode(frame, limits)
+	require.NoError(t, err)
+	got, err := Decode(encoded, limits)
+	require.NoError(t, err)
+	require.Equal(t, frame, got)
+
+	frame.Payload = make([]byte, 129)
+	_, err = Encode(frame, limits)
+	require.ErrorIs(t, err, ErrPayloadTooLarge)
 }
 
 func TestFrameRoundTripsEveryType(t *testing.T) {
@@ -71,6 +115,13 @@ func TestFrameRoundTripsEveryType(t *testing.T) {
 		FrameCancel,
 		FrameReset,
 		FrameWindowUpdate,
+		FrameAPIResult,
+		FrameWebSocketMessageStart,
+		FrameWebSocketMessageData,
+		FrameWebSocketMessageEnd,
+		FrameWebSocketPing,
+		FrameWebSocketPong,
+		FrameWebSocketClose,
 	}
 
 	for _, frameType := range frameTypes {
@@ -80,10 +131,12 @@ func TestFrameRoundTripsEveryType(t *testing.T) {
 
 			var payload []byte
 			switch frameType {
-			case FrameOpen, FrameReady, FrameHeaders, FrameAttemptResult, FrameEnd, FrameReset, FrameWindowUpdate:
+			case FrameOpen, FrameReady, FrameHeaders, FrameAttemptResult, FrameEnd, FrameReset, FrameWindowUpdate, FrameAPIResult, FrameWebSocketMessageStart:
 				payload = []byte(`{"value":"metadata"}`)
-			case FrameRequestData, FrameResponseData:
+			case FrameRequestData, FrameResponseData, FrameWebSocketMessageData:
 				payload = []byte{0x00, 0xff, 0x7f}
+			case FrameWebSocketPing, FrameWebSocketPong, FrameWebSocketClose:
+				payload = []byte{0x03, 0xe8}
 			}
 			want := Frame{
 				Version:  ProtocolVersion,

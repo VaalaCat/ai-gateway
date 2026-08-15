@@ -10,6 +10,7 @@ import { Gauge, MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { DataTable } from "@/components/data-table/data-table";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -259,16 +260,13 @@ export default function RateLimitersPage() {
   const isEmpty = !isLoading && limiters.length === 0;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("title")}</h1>
-          <p className="mt-1 text-muted-foreground">{t("description")}</p>
-        </div>
-        <Button onClick={() => router.push(`${RATE_LIMITER_EDIT_PATH}?id=new`)}>
-          {t("create")}
-        </Button>
-      </div>
+    <PageLayout
+      title={t("title")}
+      description={t("description")}
+      actions={<Button onClick={() => router.push(`${RATE_LIMITER_EDIT_PATH}?id=new`)}>{t("create")}</Button>}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       {isEmpty ? (
         <div className="flex flex-col items-center justify-center gap-4 py-24 text-center">
@@ -302,6 +300,7 @@ export default function RateLimitersPage() {
         onConfirm={handleDelete}
         description={t("deleteConfirm")}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

@@ -20,7 +20,11 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -83,6 +87,1144 @@ func loginAsAdmin(t *testing.T, srv *master.Server, user, pwd string) string {
 	var resp map[string]string
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	return resp["token"]
+}
+
+// behavior change: generic API management is an admin control plane. The new
+// path must reject anonymous/non-admin callers and the old portal path must be
+// gone instead of remaining as a compatibility alias.
+func TestAPIServiceRouteUsesAdminPathAndJSONBinder(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+
+	legacy := reqHelper(srv, "", http.MethodPost, "/api/api-services", map[string]any{
+		"slug": "weather", "name": "Weather",
+	})
+	require.Equal(t, http.StatusNotFound, legacy.Code, legacy.Body.String())
+
+	unauthenticated := reqHelper(srv, "", http.MethodPost, "/api/admin/api-services", map[string]any{
+		"slug": "weather", "name": "Weather",
+	})
+	require.Equal(t, http.StatusUnauthorized, unauthenticated.Code, unauthenticated.Body.String())
+
+	user := models.User{Username: "generic-api-control-plane-user", Role: consts.RoleUser, Status: consts.StatusEnabled, GroupID: 1}
+	require.NoError(t, srv.DB.Create(&user).Error)
+	userJWT, err := middleware.GenerateToken(srv.Cfg.Master.JWTSecret, user.ID, user.Role, user.Username, "", "")
+	require.NoError(t, err)
+	nonAdmin := reqHelper(srv, userJWT, http.MethodPost, "/api/admin/api-services", map[string]any{
+		"slug": "weather", "name": "Weather",
+	})
+	require.Equal(t, http.StatusForbidden, nonAdmin.Code, nonAdmin.Body.String())
+
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	invalid := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-services", map[string]any{
+		"slug": "weather",
+	})
+	require.Equal(t, http.StatusBadRequest, invalid.Code, invalid.Body.String())
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-services", map[string]any{
+		"slug": "weather", "name": "Weather",
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+}
+
+// Break caught: registering any Generic API management surface outside the
+// admin group can leave one resource anonymously reachable, invoke-authorized,
+// or accidentally available on its former portal path.
+func TestGenericAPIManagementRouteIsolationMatrix(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	require.NoError(t, srv.DB.AutoMigrate(&models.APIRequestLog{}, &models.APIRequestTrace{}))
+	srv.App.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
+	srv.App.SetLogDB(srv.DB)
+
+	service := models.APIService{Slug: "route-isolation", Name: "Route isolation", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "route-isolation"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	require.NoError(t, srv.DB.Create(&models.APIRequestLog{RequestID: "route-isolation", APIServiceID: service.ID}).Error)
+	require.NoError(t, srv.DB.Create(&models.APIRequestTrace{RequestID: "route-isolation"}).Error)
+
+	user := models.User{Username: "route-isolation-invoker", Role: consts.RoleUser, Status: consts.StatusEnabled, GroupID: 1}
+	require.NoError(t, srv.DB.Create(&user).Error)
+	role := models.Role{Key: "route-isolation-invoker", Name: "Route isolation invoker", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&role).Error)
+	permission := models.Permission{Resource: models.APIResourceService, ResourceID: service.ID, Action: models.APIPermissionInvoke}
+	require.NoError(t, srv.DB.Create(&permission).Error)
+	require.NoError(t, srv.DB.Create(&models.RolePermission{RoleID: role.ID, PermissionID: permission.ID}).Error)
+	require.NoError(t, srv.DB.Create(&models.RoleBinding{PrincipalType: models.APIPrincipalUser, PrincipalID: user.ID, RoleID: role.ID}).Error)
+	userJWT, err := middleware.GenerateToken(srv.Cfg.Master.JWTSecret, user.ID, user.Role, user.Username, "", "")
+	require.NoError(t, err)
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+
+	tests := []struct {
+		name             string
+		legacyPath       string
+		adminPath        string
+		legacyStatusCode int
+	}{
+		{name: "service", legacyPath: "/api/api-services", adminPath: "/api/admin/api-services", legacyStatusCode: http.StatusNotFound},
+		{name: "backend", legacyPath: fmt.Sprintf("/api/api-backends?api_service_id=%d", service.ID), adminPath: fmt.Sprintf("/api/admin/api-backends?api_service_id=%d", service.ID), legacyStatusCode: http.StatusNotFound},
+		{name: "route", legacyPath: fmt.Sprintf("/api/api-routes?api_service_id=%d", service.ID), adminPath: fmt.Sprintf("/api/admin/api-routes?api_service_id=%d", service.ID), legacyStatusCode: http.StatusNotFound},
+		{name: "upstream", legacyPath: fmt.Sprintf("/api/api-upstreams?backend_id=%d", backend.ID), adminPath: fmt.Sprintf("/api/admin/api-upstreams?backend_id=%d", backend.ID), legacyStatusCode: http.StatusNotFound},
+		// behavior change: request logs now have a separate authenticated, current-user scoped portal route.
+		{name: "request log", legacyPath: "/api/api-request-logs", adminPath: "/api/admin/api-request-logs", legacyStatusCode: http.StatusOK},
+		{name: "trace", legacyPath: "/api/api-request-traces?request_id=route-isolation", adminPath: "/api/admin/api-request-traces?request_id=route-isolation", legacyStatusCode: http.StatusNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			legacy := reqHelper(srv, adminJWT, http.MethodGet, test.legacyPath, nil)
+			require.Equal(t, test.legacyStatusCode, legacy.Code, legacy.Body.String())
+			anonymous := reqHelper(srv, "", http.MethodGet, test.adminPath, nil)
+			require.Equal(t, http.StatusUnauthorized, anonymous.Code, anonymous.Body.String())
+			invokeUser := reqHelper(srv, userJWT, http.MethodGet, test.adminPath, nil)
+			require.Equal(t, http.StatusForbidden, invokeUser.Code, invokeUser.Body.String())
+			admin := reqHelper(srv, adminJWT, http.MethodGet, test.adminPath, nil)
+			require.Equal(t, http.StatusOK, admin.Code, admin.Body.String())
+		})
+	}
+}
+
+// behavior change: an invoke grant does not expose the admin service list.
+func TestAPIServiceListIsAdminOnly(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	user := models.User{Username: "api-reader", Role: consts.RoleUser, Status: consts.StatusEnabled, GroupID: 1}
+	require.NoError(t, srv.DB.Create(&user).Error)
+	role := models.Role{Key: "api-reader", Name: "API Reader", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&role).Error)
+	permission := models.Permission{Resource: models.APIResourceService, ResourceID: service.ID, Action: models.APIPermissionInvoke}
+	require.NoError(t, srv.DB.Create(&permission).Error)
+	require.NoError(t, srv.DB.Create(&models.RolePermission{RoleID: role.ID, PermissionID: permission.ID}).Error)
+	require.NoError(t, srv.DB.Create(&models.RoleBinding{PrincipalType: models.APIPrincipalUser, PrincipalID: user.ID, RoleID: role.ID}).Error)
+
+	jwt, err := middleware.GenerateToken(srv.Cfg.Master.JWTSecret, user.ID, consts.RoleUser, user.Username, "", "")
+	require.NoError(t, err)
+	require.NoError(t, srv.DB.Migrator().DropTable(&models.RoleBinding{}))
+	unauthenticated := reqHelper(srv, "", http.MethodGet, "/api/admin/api-services", nil)
+	require.Equal(t, http.StatusUnauthorized, unauthenticated.Code, unauthenticated.Body.String())
+	forbidden := reqHelper(srv, jwt, http.MethodGet, "/api/admin/api-services", nil)
+	require.Equal(t, http.StatusForbidden, forbidden.Code, forbidden.Body.String())
+	response := reqHelper(srv, loginAsAdmin(t, srv, "admin", "admin123"), http.MethodGet, "/api/admin/api-services", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var body struct {
+		Data []models.APIService `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+	require.Equal(t, []models.APIService{service}, body.Data)
+}
+
+// Break caught: bypassing the model normalization in the management handler
+// would persist lower-case methods or a missing HTTP protocol; passing an
+// unknown protocol through would create a route Agents cannot execute.
+func TestAPIRouteCreateDefaultsProtocolsAndNormalizesMethods(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes", map[string]any{
+		"api_service_id": service.ID, "slug": "forecast", "allowed_methods": []string{"post", "get"},
+		"target": map[string]any{
+			"mode": "create", "backend": map[string]any{"name": "primary"},
+			"first_upstream": map[string]any{"name": "origin", "base_url": "https://upstream.example"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var route models.APIRoute
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &route))
+	require.Equal(t, []models.APIProtocol{models.APIProtocolHTTP}, []models.APIProtocol(route.Protocols))
+	require.Equal(t, []string{"GET", "POST"}, []string(route.AllowedMethods))
+
+	invalid := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes", map[string]any{
+		"api_service_id": service.ID, "slug": "broken", "protocols": []string{"smtp"},
+		"target": map[string]any{
+			"mode": "create", "backend": map[string]any{"name": "broken"},
+			"first_upstream": map[string]any{"name": "origin", "base_url": "https://upstream.example"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, invalid.Code, invalid.Body.String())
+}
+
+func TestRouteTargetCreateAndSwitchAreAtomic(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "routing", Name: "Routing", Status: consts.StatusEnabled}
+	otherService := models.APIService{Slug: "private", Name: "Private", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	require.NoError(t, srv.DB.Create(&otherService).Error)
+	foreign := models.APIBackend{APIServiceID: otherService.ID, Name: "foreign"}
+	require.NoError(t, srv.DB.Create(&foreign).Error)
+
+	create := func(slug, backendName, upstreamName string) *httptest.ResponseRecorder {
+		return reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes", map[string]any{
+			"api_service_id": service.ID, "slug": slug,
+			"target": map[string]any{
+				"mode": "create", "backend": map[string]any{"name": backendName},
+				"first_upstream": map[string]any{"name": upstreamName, "base_url": "https://origin.example"},
+			},
+		})
+	}
+
+	created := create("forecast", "primary", "origin-a")
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var route models.APIRoute
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &route))
+	var backend models.APIBackend
+	require.NoError(t, srv.DB.First(&backend, route.BackendID).Error)
+	require.Equal(t, service.ID, backend.APIServiceID)
+	var upstream models.APIUpstream
+	require.NoError(t, srv.DB.Where("backend_id = ?", backend.ID).First(&upstream).Error)
+	require.Equal(t, "origin-a", upstream.Name)
+
+	crossService := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes", map[string]any{
+		"api_service_id": service.ID, "slug": "denied", "target": map[string]any{"mode": "existing", "backend_id": foreign.ID},
+	})
+	require.Equal(t, http.StatusBadRequest, crossService.Code, crossService.Body.String())
+
+	duplicate := create("duplicate", "primary", "origin-b")
+	// behavior change: target.create reports the same stable conflict as the
+	// standalone backend create endpoint.
+	require.Equal(t, http.StatusConflict, duplicate.Code, duplicate.Body.String())
+	require.Equal(t, "backend_name_conflict", jsonBody(t, duplicate)["code"])
+	var duplicateRoutes, duplicateUpstreams int64
+	require.NoError(t, srv.DB.Model(&models.APIRoute{}).Where("api_service_id = ? AND slug = ?", service.ID, "duplicate").Count(&duplicateRoutes).Error)
+	require.Zero(t, duplicateRoutes)
+	require.NoError(t, srv.DB.Model(&models.APIUpstream{}).Where("name = ?", "origin-b").Count(&duplicateUpstreams).Error)
+	require.Zero(t, duplicateUpstreams)
+
+	switched := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-routes/%d", route.ID), map[string]any{
+		"target": map[string]any{
+			"mode": "create", "backend": map[string]any{"name": "secondary"},
+			"first_upstream": map[string]any{"name": "origin-b", "base_url": "https://secondary.example"},
+		},
+	})
+	require.Equal(t, http.StatusOK, switched.Code, switched.Body.String())
+	var switchedRoute models.APIRoute
+	require.NoError(t, srv.DB.First(&switchedRoute, route.ID).Error)
+	require.NotEqual(t, backend.ID, switchedRoute.BackendID)
+	var switchedUpstream models.APIUpstream
+	require.NoError(t, srv.DB.Where("backend_id = ?", switchedRoute.BackendID).First(&switchedUpstream).Error)
+	require.Equal(t, "origin-b", switchedUpstream.Name)
+}
+
+// Break caught: flattening route write errors into a generic 400 hides stable
+// validation codes and turns target conflicts or missing backends into the
+// wrong HTTP status for management clients.
+func TestAPIRouteWriteErrorsPreserveStatusAndCode(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "write-errors", Name: "Write Errors", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	route := models.APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "existing", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&route).Error)
+
+	create := func(slug string, target map[string]any, example map[string]any) *httptest.ResponseRecorder {
+		body := map[string]any{"api_service_id": service.ID, "slug": slug, "target": target}
+		if example != nil {
+			body["example_request"] = example
+		}
+		return reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes", body)
+	}
+	update := func(target map[string]any, example map[string]any) *httptest.ResponseRecorder {
+		body := make(map[string]any)
+		if target != nil {
+			body["target"] = target
+		}
+		if example != nil {
+			body["example_request"] = example
+		}
+		return reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-routes/%d", route.ID), body)
+	}
+	duplicateTarget := map[string]any{
+		"mode": "create", "backend": map[string]any{"name": "primary"},
+		"first_upstream": map[string]any{"name": "origin", "base_url": "https://upstream.example"},
+	}
+	missingTarget := map[string]any{"mode": "existing", "backend_id": 999_999}
+	invalidExample := map[string]any{"method": "GET", "subpath": "/../admin"}
+
+	for _, test := range []struct {
+		name       string
+		request    func() *httptest.ResponseRecorder
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "create invalid example", request: func() *httptest.ResponseRecorder {
+			return create("invalid-example", map[string]any{"mode": "existing", "backend_id": backend.ID}, invalidExample)
+		}, wantStatus: http.StatusBadRequest, wantCode: "invalid_example_subpath"},
+		{name: "update invalid example", request: func() *httptest.ResponseRecorder {
+			return update(nil, invalidExample)
+		}, wantStatus: http.StatusBadRequest, wantCode: "invalid_example_subpath"},
+		{name: "create duplicate backend", request: func() *httptest.ResponseRecorder {
+			return create("duplicate-backend", duplicateTarget, nil)
+		}, wantStatus: http.StatusConflict, wantCode: "backend_name_conflict"},
+		{name: "update duplicate backend", request: func() *httptest.ResponseRecorder {
+			return update(duplicateTarget, nil)
+		}, wantStatus: http.StatusConflict, wantCode: "backend_name_conflict"},
+		{name: "create missing backend", request: func() *httptest.ResponseRecorder {
+			return create("missing-backend", missingTarget, nil)
+		}, wantStatus: http.StatusNotFound},
+		{name: "update missing backend", request: func() *httptest.ResponseRecorder {
+			return update(missingTarget, nil)
+		}, wantStatus: http.StatusNotFound},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := test.request()
+			require.Equal(t, test.wantStatus, response.Code, response.Body.String())
+			if test.wantCode != "" {
+				require.Equal(t, test.wantCode, jsonBody(t, response)["code"])
+			}
+		})
+	}
+}
+
+// Break caught: ordinary encoding/json replaces raw invalid UTF-8 with U+FFFD,
+// so route examples could otherwise be mutated and persisted instead of being
+// rejected at the HTTP boundary.
+func TestAPIRouteHTTPRejectsInvalidUTF8BeforePersistence(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "strict-route-json", Name: "Strict Route JSON", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	route := models.APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "existing", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&route).Error)
+
+	doRawJSON := func(method, path string, payload []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(method, path, bytes.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+adminJWT)
+		srv.Router.ServeHTTP(response, request)
+		return response
+	}
+	invalidString := func(prefix, suffix string) []byte {
+		payload := append([]byte(prefix), 0xff)
+		return append(payload, []byte(suffix)...)
+	}
+
+	createPayload := invalidString(
+		fmt.Sprintf(`{"api_service_id":%d,"slug":"invalid-utf8","target":{"mode":"existing","backend_id":%d},"example_request":{"method":"GET","body":"`, service.ID, backend.ID),
+		`"}}`,
+	)
+	created := doRawJSON(http.MethodPost, "/api/admin/api-routes", createPayload)
+	require.Equal(t, http.StatusBadRequest, created.Code, created.Body.String())
+	var createdCount int64
+	require.NoError(t, srv.DB.Model(&models.APIRoute{}).Where("slug = ?", "invalid-utf8").Count(&createdCount).Error)
+	require.Zero(t, createdCount)
+
+	updatePayload := invalidString(`{"example_request":{"method":"GET","body":"`, `"}}`)
+	updated := doRawJSON(http.MethodPut, fmt.Sprintf("/api/admin/api-routes/%d", route.ID), updatePayload)
+	require.Equal(t, http.StatusBadRequest, updated.Code, updated.Body.String())
+	var persisted models.APIRoute
+	require.NoError(t, srv.DB.First(&persisted, route.ID).Error)
+	require.Equal(t, models.APIRequestExample{}, persisted.ExampleRequest.Data())
+}
+
+// Break caught: serializing model.APIUpstream directly would return ciphertext
+// or plaintext credentials. Omitted credentials on update must not erase the
+// existing encrypted value.
+func TestAPIUpstreamManagementNeverLeaksOrErasesOmittedCredentials(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	secret := "bearer-secret"
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{
+		"backend_id": backend.ID, "name": "primary", "base_url": "https://upstream.example",
+		"auth_type": "bearer", "credential": map[string]any{"bearer_token": secret},
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	require.NotContains(t, created.Body.String(), secret)
+	var response struct {
+		ID                   uint `json:"id"`
+		CredentialConfigured bool `json:"credential_configured"`
+	}
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &response))
+	require.True(t, response.CredentialConfigured)
+
+	updated := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), map[string]any{"name": "renamed"})
+	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
+	var stored models.APIUpstream
+	require.NoError(t, srv.DB.First(&stored, response.ID).Error)
+	require.NotEmpty(t, stored.CredentialCiphertext)
+	got := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), nil)
+	require.Equal(t, http.StatusOK, got.Code, got.Body.String())
+	require.NotContains(t, got.Body.String(), secret)
+	require.NotContains(t, got.Body.String(), stored.CredentialCiphertext)
+}
+
+// Break caught: splitting ordinary fields and secrets across writes leaves an
+// orphan/create or a partial update when credentials are invalid, and permits
+// auth_type changes whose resulting credential cannot be projected to Agents.
+func TestAPIUpstreamWriteIsAtomicAcrossSecretsAndAuthTransitions(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+
+	invalidCreate := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{
+		"backend_id": backend.ID, "name": "broken", "base_url": "https://upstream.example", "auth_type": "bearer",
+		"credential": map[string]any{"header_name": "X-Wrong", "header_value": "not-bearer"},
+	})
+	require.Equal(t, http.StatusBadRequest, invalidCreate.Code, invalidCreate.Body.String())
+	var count int64
+	require.NoError(t, srv.DB.Model(&models.APIUpstream{}).Where("name = ?", "broken").Count(&count).Error)
+	require.Zero(t, count)
+
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{
+		"backend_id": backend.ID, "name": "primary", "base_url": "https://upstream.example", "auth_type": "bearer",
+		"credential": map[string]any{"bearer_token": "valid-secret"},
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var response struct {
+		ID uint `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &response))
+
+	invalidUpdate := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), map[string]any{
+		"name": "must-not-persist", "credential": map[string]any{"header_name": "X-Wrong", "header_value": "not-bearer"},
+	})
+	require.Equal(t, http.StatusBadRequest, invalidUpdate.Code, invalidUpdate.Body.String())
+	var stored models.APIUpstream
+	require.NoError(t, srv.DB.First(&stored, response.ID).Error)
+	require.Equal(t, "primary", stored.Name)
+	require.Equal(t, models.APIUpstreamAuthBearer, stored.AuthType)
+	require.NotEmpty(t, stored.CredentialCiphertext)
+
+	transition := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), map[string]any{"auth_type": "none"})
+	require.Equal(t, http.StatusBadRequest, transition.Code, transition.Body.String())
+	require.NoError(t, srv.DB.First(&stored, response.ID).Error)
+	require.Equal(t, models.APIUpstreamAuthBearer, stored.AuthType)
+
+	cleared := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), map[string]any{
+		"auth_type": "none", "credential": map[string]any{},
+	})
+	require.Equal(t, http.StatusOK, cleared.Code, cleared.Body.String())
+	require.NoError(t, srv.DB.First(&stored, response.ID).Error)
+	require.Equal(t, models.APIUpstreamAuthNone, stored.AuthType)
+	require.Empty(t, stored.CredentialCiphertext)
+
+	transition = reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), map[string]any{"auth_type": "bearer"})
+	require.Equal(t, http.StatusBadRequest, transition.Code, transition.Body.String())
+	require.NoError(t, srv.DB.First(&stored, response.ID).Error)
+	require.Equal(t, models.APIUpstreamAuthNone, stored.AuthType)
+}
+
+func TestAPIUpstreamUpdateRejectsUnsafeTransportMetadataWithoutMutation(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "upstream-update-safety", Name: "Upstream Update Safety", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{
+		"backend_id": backend.ID, "name": "primary", "base_url": "https://upstream.example",
+		"header_override": map[string]any{"X-Tenant": "original"}, "proxy_url": "http://proxy.example:3128",
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var response struct {
+		ID uint `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &response))
+	var before models.APIUpstream
+	require.NoError(t, srv.DB.First(&before, response.ID).Error)
+
+	for _, test := range []struct {
+		name  string
+		patch map[string]any
+	}{
+		{name: "hop by hop header", patch: map[string]any{"header_override": map[string]any{"Connection": "close"}}},
+		{name: "forwarded header", patch: map[string]any{"header_override": map[string]any{"X-Forwarded-For": "127.0.0.1"}}},
+		{name: "gateway internal header", patch: map[string]any{"header_override": map[string]any{"X-Vaala-Trace": "internal"}}},
+		{name: "canonical duplicate header", patch: map[string]any{"header_override": map[string]any{"X-Tenant": "one", "x-tenant": "two"}}},
+		{name: "malformed proxy", patch: map[string]any{"proxy_url": "://bad"}},
+		{name: "proxy userinfo", patch: map[string]any{"proxy_url": "http://user:secret@proxy.example:3128"}},
+		{name: "non HTTP proxy", patch: map[string]any{"proxy_url": "socks5://proxy.example:1080"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			updated := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), test.patch)
+			require.Equal(t, http.StatusBadRequest, updated.Code, updated.Body.String())
+			var after models.APIUpstream
+			require.NoError(t, srv.DB.First(&after, response.ID).Error)
+			require.Equal(t, before.Name, after.Name)
+			require.Equal(t, before.HeaderOverride.Data(), after.HeaderOverride.Data())
+			require.Equal(t, before.ProxyURLCiphertext, after.ProxyURLCiphertext)
+		})
+	}
+	cleared := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), map[string]any{
+		"header_override": map[string]any{}, "proxy_url": "",
+	})
+	require.Equal(t, http.StatusOK, cleared.Code, cleared.Body.String())
+	var afterClear models.APIUpstream
+	require.NoError(t, srv.DB.First(&afterClear, response.ID).Error)
+	require.Empty(t, afterClear.HeaderOverride.Data())
+	require.Empty(t, afterClear.ProxyURLCiphertext)
+}
+
+func TestAPIUpstreamPostWriteFailuresRollback(t *testing.T) {
+	setup := func(t *testing.T) (*master.Server, string, models.APIBackend) {
+		t.Helper()
+		srv := setupTestMaster(t)
+		require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+		service := models.APIService{Slug: "rollback", Name: "Rollback", Status: consts.StatusEnabled}
+		require.NoError(t, srv.DB.Create(&service).Error)
+		backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+		require.NoError(t, srv.DB.Create(&backend).Error)
+		return srv, loginAsAdmin(t, srv, "admin", "admin123"), backend
+	}
+
+	t.Run("create rolls back row when secret update fails", func(t *testing.T) {
+		srv, jwt, backend := setup(t)
+		failure := errors.New("force secret update failure")
+		fired := false
+		const callbackName = "test:fail_api_upstream_create_secret_update"
+		processor := srv.DB.Callback().Update()
+		require.NoError(t, processor.Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+			if fired || testCallbackTableName(tx) != "api_upstreams" {
+				return
+			}
+			fired = true
+			_ = tx.AddError(failure)
+		}))
+		t.Cleanup(func() { require.NoError(t, processor.Remove(callbackName)) })
+
+		response := reqHelper(srv, jwt, http.MethodPost, "/api/admin/api-upstreams", map[string]any{
+			"backend_id": backend.ID, "name": "must-rollback", "base_url": "https://rollback.example",
+			"auth_type": "bearer", "credential": map[string]any{"bearer_token": "new-secret"},
+		})
+
+		require.True(t, fired)
+		require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+		var count int64
+		require.NoError(t, srv.DB.Model(&models.APIUpstream{}).
+			Where("backend_id = ? AND name = ?", backend.ID, "must-rollback").Count(&count).Error)
+		require.Zero(t, count)
+	})
+
+	t.Run("update rolls back fields when secret update fails", func(t *testing.T) {
+		srv, jwt, backend := setup(t)
+		created := reqHelper(srv, jwt, http.MethodPost, "/api/admin/api-upstreams", map[string]any{
+			"backend_id": backend.ID, "name": "original", "base_url": "https://rollback.example",
+			"auth_type": "bearer", "credential": map[string]any{"bearer_token": "old-secret"},
+		})
+		require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+		var createdBody struct {
+			ID uint `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(created.Body.Bytes(), &createdBody))
+		var before models.APIUpstream
+		require.NoError(t, srv.DB.First(&before, createdBody.ID).Error)
+
+		failure := errors.New("force second upstream update failure")
+		updates := 0
+		const callbackName = "test:fail_api_upstream_second_update"
+		processor := srv.DB.Callback().Update()
+		require.NoError(t, processor.Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+			if testCallbackTableName(tx) != "api_upstreams" {
+				return
+			}
+			updates++
+			if updates == 2 {
+				_ = tx.AddError(failure)
+			}
+		}))
+		t.Cleanup(func() { require.NoError(t, processor.Remove(callbackName)) })
+
+		response := reqHelper(srv, jwt, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", before.ID), map[string]any{
+			"name": "must-not-persist", "credential": map[string]any{"bearer_token": "new-secret"},
+		})
+
+		require.Equal(t, 2, updates)
+		require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+		var after models.APIUpstream
+		require.NoError(t, srv.DB.First(&after, before.ID).Error)
+		require.Equal(t, before.Name, after.Name)
+		require.Equal(t, before.CredentialCiphertext, after.CredentialCiphertext)
+	})
+}
+
+// behavior change: backend CRUD is guarded by the admin route group rather
+// than service-scoped read/manage permissions inside the Handler.
+func TestAPIBackendCRUDUsesAdminControlPlane(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	owned := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	foreign := models.APIService{Slug: "calendar", Name: "Calendar", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&owned).Error)
+	require.NoError(t, srv.DB.Create(&foreign).Error)
+	foreignBackend := models.APIBackend{APIServiceID: foreign.ID, Name: "private"}
+	require.NoError(t, srv.DB.Create(&foreignBackend).Error)
+
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-backends", map[string]any{"api_service_id": owned.ID, "name": "primary"})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var primary struct {
+		ID                   uint     `json:"id"`
+		APIServiceID         uint     `json:"api_service_id"`
+		RouteCount           int64    `json:"route_count"`
+		UpstreamCount        int64    `json:"upstream_count"`
+		EnabledUpstreamCount int64    `json:"enabled_upstream_count"`
+		EndpointHosts        []string `json:"endpoint_hosts"`
+	}
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &primary))
+	require.Equal(t, owned.ID, primary.APIServiceID)
+	require.Zero(t, primary.RouteCount)
+	require.Zero(t, primary.UpstreamCount)
+	require.Zero(t, primary.EnabledUpstreamCount)
+	require.Empty(t, primary.EndpointHosts)
+
+	duplicate := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-backends", map[string]any{"api_service_id": owned.ID, "name": "primary"})
+	require.Equal(t, http.StatusConflict, duplicate.Code, duplicate.Body.String())
+	require.Equal(t, "backend_name_conflict", jsonBody(t, duplicate)["code"])
+	updated := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-backends/%d", primary.ID), map[string]any{"name": "renamed"})
+	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
+	var persistedPrimary models.APIBackend
+	require.NoError(t, srv.DB.First(&persistedPrimary, primary.ID).Error)
+	require.Equal(t, "renamed", persistedPrimary.Name)
+
+	for _, path := range []string{
+		fmt.Sprintf("/api/admin/api-backends?api_service_id=%d", foreign.ID),
+		fmt.Sprintf("/api/admin/api-backends/%d", foreignBackend.ID),
+	} {
+		response := reqHelper(srv, adminJWT, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	}
+	for _, body := range []map[string]any{
+		{"api_service_id": foreign.ID, "name": "foreign-one"},
+		{"api_service_id": foreign.ID, "name": "foreign-two"},
+	} {
+		response := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-backends", body)
+		require.Equal(t, http.StatusCreated, response.Code, response.Body.String())
+	}
+
+	read := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-backends/%d", primary.ID), nil)
+	require.Equal(t, http.StatusOK, read.Code, read.Body.String())
+	additional := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-backends", map[string]any{"api_service_id": owned.ID, "name": "additional"})
+	require.Equal(t, http.StatusCreated, additional.Code, additional.Body.String())
+
+	linkedRoute := models.APIRoute{APIServiceID: owned.ID, BackendID: primary.ID, Slug: "forecast", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&linkedRoute).Error)
+	inUse := reqHelper(srv, adminJWT, http.MethodDelete, fmt.Sprintf("/api/admin/api-backends/%d", primary.ID), nil)
+	require.Equal(t, http.StatusConflict, inUse.Code, inUse.Body.String())
+	inUseBody := jsonBody(t, inUse)
+	require.Equal(t, "backend_in_use", inUseBody["code"])
+	require.Equal(t, float64(1), inUseBody["details"].(map[string]any)["route_count"])
+
+	removable := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-backends", map[string]any{"api_service_id": owned.ID, "name": "removable"})
+	require.Equal(t, http.StatusCreated, removable.Code, removable.Body.String())
+	var removableBody struct {
+		ID uint `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(removable.Body.Bytes(), &removableBody))
+	upstream := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{"backend_id": removableBody.ID, "name": "endpoint", "base_url": "https://api.example.com"})
+	require.Equal(t, http.StatusCreated, upstream.Code, upstream.Body.String())
+	deleted := reqHelper(srv, adminJWT, http.MethodDelete, fmt.Sprintf("/api/admin/api-backends/%d", removableBody.ID), nil)
+	require.Equal(t, http.StatusOK, deleted.Code, deleted.Body.String())
+	var count int64
+	require.NoError(t, srv.DB.Model(&models.APIBackend{}).Where("id = ?", removableBody.ID).Count(&count).Error)
+	require.Zero(t, count)
+	require.NoError(t, srv.DB.Model(&models.APIUpstream{}).Where("backend_id = ?", removableBody.ID).Count(&count).Error)
+	require.Zero(t, count)
+}
+
+func TestAPIBackendDeletePublishesEveryCommittedUpstream(t *testing.T) {
+	setup := func(t *testing.T) (*master.Server, string, models.APIBackend, []models.APIUpstream) {
+		t.Helper()
+		srv := setupTestMaster(t)
+		require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+		service := models.APIService{Slug: "delete", Name: "Delete", Status: consts.StatusEnabled}
+		require.NoError(t, srv.DB.Create(&service).Error)
+		backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+		require.NoError(t, srv.DB.Create(&backend).Error)
+		upstreams := []models.APIUpstream{
+			{BackendID: backend.ID, Name: "one", BaseURL: "https://one.example", Weight: 1, AuthType: models.APIUpstreamAuthNone},
+			{BackendID: backend.ID, Name: "two", BaseURL: "https://two.example", Weight: 1, AuthType: models.APIUpstreamAuthNone},
+			{BackendID: backend.ID, Name: "three", BaseURL: "https://three.example", Weight: 1, AuthType: models.APIUpstreamAuthNone},
+		}
+		for i := range upstreams {
+			require.NoError(t, srv.DB.Create(&upstreams[i]).Error)
+		}
+		return srv, loginAsAdmin(t, srv, "admin", "admin123"), backend, upstreams
+	}
+
+	t.Run("continues after a middle publish failure", func(t *testing.T) {
+		srv, jwt, backend, upstreams := setup(t)
+		published := make([]uint, 0, len(upstreams))
+		subscription, err := events.Subscribe(srv.Bus, events.APIUpstreamDeleteTopic, func(_ context.Context, payload protocol.SyncedAPIUpstream) error {
+			published = append(published, payload.ID)
+			if len(published) == 2 {
+				return errors.New("force middle publish failure")
+			}
+			return nil
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = subscription.Unsubscribe() })
+
+		response := reqHelper(srv, jwt, http.MethodDelete, fmt.Sprintf("/api/admin/api-backends/%d", backend.ID), nil)
+
+		require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+		require.Equal(t, "publish API upstream failed", jsonBody(t, response)["error"])
+		require.ElementsMatch(t, []uint{upstreams[0].ID, upstreams[1].ID, upstreams[2].ID}, published)
+	})
+
+	t.Run("publishes every upstream after success", func(t *testing.T) {
+		srv, jwt, backend, upstreams := setup(t)
+		published := make([]uint, 0, len(upstreams))
+		subscription, err := events.Subscribe(srv.Bus, events.APIUpstreamDeleteTopic, func(_ context.Context, payload protocol.SyncedAPIUpstream) error {
+			published = append(published, payload.ID)
+			return nil
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = subscription.Unsubscribe() })
+
+		response := reqHelper(srv, jwt, http.MethodDelete, fmt.Sprintf("/api/admin/api-backends/%d", backend.ID), nil)
+
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		require.ElementsMatch(t, []uint{upstreams[0].ID, upstreams[1].ID, upstreams[2].ID}, published)
+	})
+
+	t.Run("publishes nothing when delete transaction rolls back", func(t *testing.T) {
+		srv, jwt, backend, upstreams := setup(t)
+		published := make([]uint, 0, len(upstreams))
+		subscription, err := events.Subscribe(srv.Bus, events.APIUpstreamDeleteTopic, func(_ context.Context, payload protocol.SyncedAPIUpstream) error {
+			published = append(published, payload.ID)
+			return nil
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = subscription.Unsubscribe() })
+		const callbackName = "test:fail_api_backend_delete"
+		processor := srv.DB.Callback().Delete()
+		require.NoError(t, processor.Before("gorm:delete").Register(callbackName, func(tx *gorm.DB) {
+			if testCallbackTableName(tx) == "api_backends" {
+				_ = tx.AddError(errors.New("force API backend delete rollback"))
+			}
+		}))
+		t.Cleanup(func() { require.NoError(t, processor.Remove(callbackName)) })
+
+		response := reqHelper(srv, jwt, http.MethodDelete, fmt.Sprintf("/api/admin/api-backends/%d", backend.ID), nil)
+
+		require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+		require.Empty(t, published)
+		var backendCount, upstreamCount int64
+		require.NoError(t, srv.DB.Model(&models.APIBackend{}).Where("id = ?", backend.ID).Count(&backendCount).Error)
+		require.NoError(t, srv.DB.Model(&models.APIUpstream{}).Where("backend_id = ?", backend.ID).Count(&upstreamCount).Error)
+		require.EqualValues(t, 1, backendCount)
+		require.EqualValues(t, len(upstreams), upstreamCount)
+	})
+}
+
+func TestAPIBackendDeleteDoesNotMisclassifyUnrelatedDAOErrors(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	jwt := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "delete-error", Name: "Delete error", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	require.NoError(t, srv.DB.Create(&models.APIRoute{
+		APIServiceID: service.ID, BackendID: backend.ID, Slug: "attached", Status: consts.StatusEnabled,
+	}).Error)
+
+	fired := false
+	const callbackName = "test:fail_first_api_backend_route_count"
+	processor := srv.DB.Callback().Query()
+	require.NoError(t, processor.Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if fired || testCallbackTableName(tx) != "api_routes" {
+			return
+		}
+		fired = true
+		_ = tx.AddError(errors.New("force unrelated route count failure"))
+	}))
+	t.Cleanup(func() { require.NoError(t, processor.Remove(callbackName)) })
+
+	response := reqHelper(srv, jwt, http.MethodDelete, fmt.Sprintf("/api/admin/api-backends/%d", backend.ID), nil)
+
+	require.True(t, fired)
+	require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+	require.Equal(t, "delete API backend failed", jsonBody(t, response)["error"])
+}
+
+// Break caught: accepting the former api_service_id ownership input can create
+// an upstream detached from its actual target pool; backend reassignment would
+// silently change route behavior across a live configuration.
+func TestAPIUpstreamUsesBackendOwnershipContract(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	foreignService := models.APIService{Slug: "calendar", Name: "Calendar", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	require.NoError(t, srv.DB.Create(&foreignService).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	foreignBackend := models.APIBackend{APIServiceID: foreignService.ID, Name: "private"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	require.NoError(t, srv.DB.Create(&foreignBackend).Error)
+
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{
+		"backend_id": backend.ID, "name": "primary", "base_url": "https://api.example.com",
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var response struct {
+		ID        uint `json:"id"`
+		BackendID uint `json:"backend_id"`
+	}
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &response))
+	require.Equal(t, backend.ID, response.BackendID)
+
+	zero := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{"backend_id": 0, "name": "zero", "base_url": "https://api.example.com"})
+	require.Equal(t, http.StatusBadRequest, zero.Code, zero.Body.String())
+	missing := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{"backend_id": 999999, "name": "missing", "base_url": "https://api.example.com"})
+	require.Equal(t, http.StatusNotFound, missing.Code, missing.Body.String())
+
+	crossService := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-upstreams", map[string]any{"backend_id": foreignBackend.ID, "name": "foreign", "base_url": "https://api.example.com"})
+	require.Equal(t, http.StatusCreated, crossService.Code, crossService.Body.String())
+
+	update := reqHelper(srv, adminJWT, http.MethodPut, fmt.Sprintf("/api/admin/api-upstreams/%d", response.ID), map[string]any{"backend_id": foreignBackend.ID})
+	require.Equal(t, http.StatusBadRequest, update.Code, update.Body.String())
+	require.Equal(t, "backend_id_immutable", jsonBody(t, update)["code"])
+
+	list := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-upstreams?backend_id=%d", backend.ID), nil)
+	require.Equal(t, http.StatusOK, list.Code, list.Body.String())
+	var listBody struct {
+		Data []struct {
+			ID        uint `json:"id"`
+			BackendID uint `json:"backend_id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(list.Body.Bytes(), &listBody))
+	require.Equal(t, []uint{response.ID}, []uint{listBody.Data[0].ID})
+	require.Equal(t, backend.ID, listBody.Data[0].BackendID)
+}
+
+// Break caught: scoping the Upstream list by API Service instead of its
+// concrete Backend can mix independent target pools and prevents the client
+// from loading the exact Backend selected by a Route.
+func TestAPIUpstreamListUsesBackendScope(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+
+	ownedService := models.APIService{Slug: "owned-list", Name: "Owned List", Status: consts.StatusEnabled}
+	foreignService := models.APIService{Slug: "foreign-list", Name: "Foreign List", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&ownedService).Error)
+	require.NoError(t, srv.DB.Create(&foreignService).Error)
+	ownedBackend := models.APIBackend{APIServiceID: ownedService.ID, Name: "owned"}
+	siblingBackend := models.APIBackend{APIServiceID: ownedService.ID, Name: "sibling"}
+	foreignBackend := models.APIBackend{APIServiceID: foreignService.ID, Name: "foreign"}
+	require.NoError(t, srv.DB.Create(&ownedBackend).Error)
+	require.NoError(t, srv.DB.Create(&siblingBackend).Error)
+	require.NoError(t, srv.DB.Create(&foreignBackend).Error)
+	ownedUpstreams := []models.APIUpstream{
+		{BackendID: ownedBackend.ID, Name: "owned-a", BaseURL: "https://owned-a.example", Weight: 1, AuthType: models.APIUpstreamAuthNone, Status: consts.StatusEnabled},
+		{BackendID: ownedBackend.ID, Name: "owned-b", BaseURL: "https://owned-b.example", Weight: 1, AuthType: models.APIUpstreamAuthNone, Status: consts.StatusEnabled},
+	}
+	for i := range ownedUpstreams {
+		require.NoError(t, srv.DB.Create(&ownedUpstreams[i]).Error)
+	}
+	require.NoError(t, srv.DB.Create(&models.APIUpstream{
+		BackendID: siblingBackend.ID, Name: "sibling", BaseURL: "https://sibling.example", Weight: 1, AuthType: models.APIUpstreamAuthNone, Status: consts.StatusEnabled,
+	}).Error)
+
+	for _, path := range []string{
+		"/api/admin/api-upstreams",
+		"/api/admin/api-upstreams?backend_id=0",
+		"/api/admin/api-upstreams?api_service_id=0",
+	} {
+		response := reqHelper(srv, adminJWT, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+	}
+
+	missing := reqHelper(srv, adminJWT, http.MethodGet, "/api/admin/api-upstreams?backend_id=999999", nil)
+	require.Equal(t, http.StatusNotFound, missing.Code, missing.Body.String())
+	foreignList := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-upstreams?backend_id=%d", foreignBackend.ID), nil)
+	require.Equal(t, http.StatusOK, foreignList.Code, foreignList.Body.String())
+	bothMismatch := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-upstreams?api_service_id=%d&backend_id=%d", foreignService.ID, ownedBackend.ID), nil)
+	require.Equal(t, http.StatusBadRequest, bothMismatch.Code, bothMismatch.Body.String())
+
+	serviceList := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-upstreams?api_service_id=%d", ownedService.ID), nil)
+	require.Equal(t, http.StatusOK, serviceList.Code, serviceList.Body.String())
+	var serviceBody struct {
+		Data  []models.APIUpstream `json:"data"`
+		Total int64                `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(serviceList.Body.Bytes(), &serviceBody))
+	require.Equal(t, int64(3), serviceBody.Total)
+	require.ElementsMatch(t, []uint{ownedBackend.ID, ownedBackend.ID, siblingBackend.ID}, []uint{serviceBody.Data[0].BackendID, serviceBody.Data[1].BackendID, serviceBody.Data[2].BackendID})
+
+	listed := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-upstreams?backend_id=%d", ownedBackend.ID), nil)
+	require.Equal(t, http.StatusOK, listed.Code, listed.Body.String())
+	var body struct {
+		Data  []models.APIUpstream `json:"data"`
+		Total int64                `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(listed.Body.Bytes(), &body))
+	require.Equal(t, int64(2), body.Total)
+	require.Equal(t, []uint{ownedUpstreams[1].ID, ownedUpstreams[0].ID}, []uint{body.Data[0].ID, body.Data[1].ID})
+	for _, upstream := range body.Data {
+		require.Equal(t, ownedBackend.ID, upstream.BackendID)
+	}
+	matchingBoth := reqHelper(srv, adminJWT, http.MethodGet, fmt.Sprintf("/api/admin/api-upstreams?api_service_id=%d&backend_id=%d", ownedService.ID, ownedBackend.ID), nil)
+	require.Equal(t, http.StatusOK, matchingBoth.Code, matchingBoth.Body.String())
+	var matchingBody struct {
+		Data  []models.APIUpstream `json:"data"`
+		Total int64                `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(matchingBoth.Body.Bytes(), &matchingBody))
+	require.Equal(t, int64(2), matchingBody.Total)
+	for _, upstream := range matchingBody.Data {
+		require.Equal(t, ownedBackend.ID, upstream.BackendID)
+	}
+}
+
+func TestAPIRouteUpdateStrictArraysAndChildCreateRequiresParent(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	jwt := loginAsAdmin(t, srv, "admin", "admin123")
+	missingRoute := reqHelper(srv, jwt, http.MethodPost, "/api/admin/api-routes", map[string]any{"api_service_id": 999, "slug": "orphan"})
+	require.Equal(t, http.StatusBadRequest, missingRoute.Code, missingRoute.Body.String())
+	missingUpstream := reqHelper(srv, jwt, http.MethodPost, "/api/admin/api-upstreams", map[string]any{"backend_id": 999, "name": "orphan", "base_url": "https://upstream.example"})
+	require.Equal(t, http.StatusNotFound, missingUpstream.Code, missingUpstream.Body.String())
+	var routes, upstreams int64
+	require.NoError(t, srv.DB.Model(&models.APIRoute{}).Where("api_service_id = 999").Count(&routes).Error)
+	require.Zero(t, routes)
+	require.NoError(t, srv.DB.Model(&models.APIUpstream{}).Where("backend_id = 999").Count(&upstreams).Error)
+	require.Zero(t, upstreams)
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	route := models.APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "forecast", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&route).Error)
+	success := reqHelper(srv, jwt, http.MethodPut, fmt.Sprintf("/api/admin/api-routes/%d", route.ID), map[string]any{"websocket_subprotocols": []string{"chat", "events"}})
+	require.Equal(t, http.StatusOK, success.Code, success.Body.String())
+	invalid := reqHelper(srv, jwt, http.MethodPut, fmt.Sprintf("/api/admin/api-routes/%d", route.ID), map[string]any{"protocols": []any{"http", 7}})
+	require.Equal(t, http.StatusBadRequest, invalid.Code, invalid.Body.String())
+	invalid = reqHelper(srv, jwt, http.MethodPut, fmt.Sprintf("/api/admin/api-routes/%d", route.ID), map[string]any{"allowed_methods": []any{"get", false}})
+	require.Equal(t, http.StatusBadRequest, invalid.Code, invalid.Body.String())
+	invalid = reqHelper(srv, jwt, http.MethodPut, fmt.Sprintf("/api/admin/api-routes/%d", route.ID), map[string]any{"websocket_subprotocols": []any{"chat", 3}})
+	require.Equal(t, http.StatusBadRequest, invalid.Code, invalid.Body.String())
+}
+
+// SQLite cannot model a production FOR UPDATE race, but these serial boundary
+// cases pin the externally visible outcomes around the child-create/delete
+// interleaving: a child committed before delete is cleaned up; a child started
+// after delete cannot be created.
+func TestAPIServiceDeleteChildCreateSerialBoundaries(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	jwt := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+
+	route := models.APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "before-delete", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&route).Error)
+	createdUpstream := reqHelper(srv, jwt, http.MethodPost, "/api/admin/api-upstreams", map[string]any{"backend_id": backend.ID, "name": "before-delete", "base_url": "https://upstream.example"})
+	require.Equal(t, http.StatusCreated, createdUpstream.Code, createdUpstream.Body.String())
+	deleted := reqHelper(srv, jwt, http.MethodDelete, fmt.Sprintf("/api/admin/api-services/%d", service.ID), nil)
+	require.Equal(t, http.StatusOK, deleted.Code, deleted.Body.String())
+	var children int64
+	require.NoError(t, srv.DB.Model(&models.APIRoute{}).Where("api_service_id = ?", service.ID).Count(&children).Error)
+	require.Zero(t, children)
+
+	for _, child := range []struct {
+		path     string
+		body     map[string]any
+		wantHTTP int
+	}{
+		{path: "/api/admin/api-routes", body: map[string]any{"api_service_id": service.ID, "slug": "after-delete"}, wantHTTP: http.StatusBadRequest},
+		{path: "/api/admin/api-upstreams", body: map[string]any{"backend_id": backend.ID, "name": "after-delete", "base_url": "https://upstream.example"}, wantHTTP: http.StatusNotFound},
+	} {
+		response := reqHelper(srv, jwt, http.MethodPost, child.path, child.body)
+		require.Equal(t, child.wantHTTP, response.Code, response.Body.String())
+	}
+	require.NoError(t, srv.DB.Model(&models.APIRoute{}).Where("api_service_id = ?", service.ID).Count(&children).Error)
+	require.Zero(t, children)
+	require.NoError(t, srv.DB.Model(&models.APIUpstream{}).Where("backend_id = ?", backend.ID).Count(&children).Error)
+	require.Zero(t, children)
+}
+
+func TestAPIServiceListUsesAdminPagination(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	visible := models.APIService{Slug: "visible", Name: "Visible", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&visible).Error)
+	for _, slug := range []string{"newer-one", "newer-two"} {
+		require.NoError(t, srv.DB.Create(&models.APIService{Slug: slug, Name: slug, Status: consts.StatusEnabled}).Error)
+	}
+	user := models.User{Username: "paged-reader", Role: consts.RoleUser, Status: consts.StatusEnabled, GroupID: 1}
+	require.NoError(t, srv.DB.Create(&user).Error)
+	role := models.Role{Key: "paged-reader", Name: "Paged Reader", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&role).Error)
+	permission := models.Permission{Resource: models.APIResourceService, ResourceID: visible.ID, Action: models.APIPermissionInvoke}
+	require.NoError(t, srv.DB.Create(&permission).Error)
+	require.NoError(t, srv.DB.Create(&models.RolePermission{RoleID: role.ID, PermissionID: permission.ID}).Error)
+	require.NoError(t, srv.DB.Create(&models.RoleBinding{PrincipalType: models.APIPrincipalUser, PrincipalID: user.ID, RoleID: role.ID}).Error)
+	jwt, err := middleware.GenerateToken(srv.Cfg.Master.JWTSecret, user.ID, consts.RoleUser, user.Username, "", "")
+	require.NoError(t, err)
+	forbidden := reqHelper(srv, jwt, http.MethodGet, "/api/admin/api-services?page=1&page_size=2", nil)
+	require.Equal(t, http.StatusForbidden, forbidden.Code, forbidden.Body.String())
+	response := reqHelper(srv, loginAsAdmin(t, srv, "admin", "admin123"), http.MethodGet, "/api/admin/api-services?page=1&page_size=2", nil)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var body struct {
+		Data  []models.APIService `json:"data"`
+		Total int64               `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+	require.Len(t, body.Data, 2)
+	require.EqualValues(t, 3, body.Total)
+}
+
+// Break caught: publishing a delete before its database transaction commits
+// would make Agents drop a service that was rolled back locally. Conversely, a
+// successful commit must produce precisely one delete projection.
+func TestAPIServiceDeletePublishesOnlyAfterSuccessfulTransaction(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "weather", Name: "Weather", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	var published []uint
+	subscription, err := events.Subscribe(srv.Bus, events.APIServiceDeleteTopic, func(_ context.Context, payload protocol.SyncedAPIService) error {
+		published = append(published, payload.ID)
+		return nil
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+
+	callbackName := "test:fail_api_service_delete"
+	require.NoError(t, srv.DB.Callback().Delete().Before("gorm:delete").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "api_services" {
+			tx.AddError(errors.New("force API service delete rollback"))
+		}
+	}))
+	failed := reqHelper(srv, adminJWT, http.MethodDelete, fmt.Sprintf("/api/admin/api-services/%d", service.ID), nil)
+	require.GreaterOrEqual(t, failed.Code, http.StatusBadRequest, failed.Body.String())
+	require.Empty(t, published)
+	var retained models.APIService
+	require.NoError(t, srv.DB.First(&retained, service.ID).Error)
+	require.NoError(t, srv.DB.Callback().Delete().Remove(callbackName))
+
+	success := reqHelper(srv, adminJWT, http.MethodDelete, fmt.Sprintf("/api/admin/api-services/%d", service.ID), nil)
+	require.Equal(t, http.StatusOK, success.Code, success.Body.String())
+	require.Equal(t, []uint{service.ID}, published)
+}
+
+func TestRequestLimiterHTTPRejectsInvalidJSONTextBeforeNameReplacement(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminToken := loginAsAdmin(t, srv, "admin", "admin123")
+
+	doRawJSON := func(method, path string, payload []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(method, path, bytes.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+adminToken)
+		srv.Router.ServeHTTP(response, request)
+		return response
+	}
+	createPayload := func(nameJSON []byte) []byte {
+		payload := append([]byte(`{"name":"`), nameJSON...)
+		return append(payload, []byte(`","enabled":true,"metric":"rate","capacity":10,"window_ms":60000,"key_by":"shared","action":"reject"}`)...)
+	}
+
+	invalidNames := []struct {
+		name     string
+		nameJSON []byte
+	}{
+		{name: "raw invalid UTF-8", nameJSON: []byte{0xff}},
+		{name: "lone high surrogate", nameJSON: []byte(`\uD800`)},
+		{name: "low then high surrogate", nameJSON: []byte(`\uDC00\uD800`)},
+	}
+	for _, test := range invalidNames {
+		t.Run("create rejects "+test.name, func(t *testing.T) {
+			var before int64
+			require.NoError(t, srv.DB.Model(&models.RequestLimiter{}).Count(&before).Error)
+
+			response := doRawJSON(http.MethodPost, "/api/admin/rate-limiters", createPayload(test.nameJSON))
+
+			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+			var after int64
+			require.NoError(t, srv.DB.Model(&models.RequestLimiter{}).Count(&after).Error)
+			require.Equal(t, before, after, "strict JSON rejection must happen before persistence")
+		})
+	}
+
+	for _, test := range invalidNames {
+		t.Run("update rejects "+test.name, func(t *testing.T) {
+			limiter := models.RequestLimiter{
+				Name: "before", Enabled: true, Metric: models.LimiterMetricRate,
+				Capacity: 10, WindowMs: 60_000, KeyBy: models.LimiterKeyShared, Action: models.LimiterActionReject,
+			}
+			require.NoError(t, srv.DB.Create(&limiter).Error)
+
+			payload := append([]byte(`{"name":"`), test.nameJSON...)
+			payload = append(payload, []byte(`"}`)...)
+			response := doRawJSON(http.MethodPut, fmt.Sprintf("/api/admin/rate-limiters/%d", limiter.ID), payload)
+
+			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+			var reloaded models.RequestLimiter
+			require.NoError(t, srv.DB.First(&reloaded, limiter.ID).Error)
+			require.Equal(t, "before", reloaded.Name)
+		})
+	}
+
+	validNames := []struct {
+		name     string
+		nameJSON []byte
+		want     string
+	}{
+		{name: "raw Unicode", nameJSON: []byte("速率限制"), want: "速率限制"},
+		{name: "ordinary escapes", nameJSON: []byte(`quote:\" slash:\\ solidus:\/ unicode:\u0061`), want: `quote:" slash:\ solidus:/ unicode:a`},
+		{name: "surrogate pair", nameJSON: []byte(`emoji-\uD83D\uDE00`), want: "emoji-😀"},
+	}
+	for _, test := range validNames {
+		t.Run("create accepts "+test.name, func(t *testing.T) {
+			response := doRawJSON(http.MethodPost, "/api/admin/rate-limiters", createPayload(test.nameJSON))
+			require.Equal(t, http.StatusCreated, response.Code, response.Body.String())
+			var created models.RequestLimiter
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &created))
+			require.Equal(t, test.want, created.Name)
+		})
+	}
+
+	for _, test := range validNames {
+		t.Run("update accepts "+test.name, func(t *testing.T) {
+			limiter := models.RequestLimiter{
+				Name: "before", Enabled: true, Metric: models.LimiterMetricRate,
+				Capacity: 10, WindowMs: 60_000, KeyBy: models.LimiterKeyShared, Action: models.LimiterActionReject,
+			}
+			require.NoError(t, srv.DB.Create(&limiter).Error)
+			payload := append([]byte(`{"name":"`), test.nameJSON...)
+			payload = append(payload, []byte(`"}`)...)
+
+			response := doRawJSON(http.MethodPut, fmt.Sprintf("/api/admin/rate-limiters/%d", limiter.ID), payload)
+
+			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			var updated models.RequestLimiter
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &updated))
+			require.Equal(t, test.want, updated.Name)
+		})
+	}
 }
 
 func createChannelE2E(t *testing.T, srv *master.Server, jwt, name, baseURL, modelsCSV string) string {

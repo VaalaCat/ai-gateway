@@ -8,6 +8,8 @@ import { ChevronRight, MoreHorizontal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import {
   Tooltip,
   TooltipContent,
@@ -344,11 +346,8 @@ function AdminBYOKPageInner() {
   ];
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
+    <PageLayout title={t("title")} description={t("description")} maxWidth="full">
+      <div className="space-y-4">
 
       <DataTable
         columns={columns}
@@ -385,13 +384,14 @@ function AdminBYOKPageInner() {
           }
         }}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }
 
 function AdminBYOKFallback() {
-  const tc = useTranslations("common");
-  return <div className="py-6 text-muted-foreground">{tc("loading")}</div>;
+  const t = useTranslations("byok.admin");
+  return <PageLayoutSkeleton title={t("title")} description={t("description")} />;
 }
 
 export default function AdminBYOKPage() {

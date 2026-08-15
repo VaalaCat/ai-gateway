@@ -12,7 +12,29 @@ type AdminUserGroupQuery interface {
 	GetByName(name string) (*models.UserGroup, error)
 	FindIdentityAndAuthorizationForUser(userID uint) (*UserGroupIdentityAndAuthorization, error)
 	List(opts ListOptions, filter UserGroupListFilter) ([]models.UserGroup, int64, error)
+	MaxID() (uint, error)
+	ListKeyset(afterID, snapshotMaxID uint, limit int) ([]models.UserGroup, error)
+	CountThroughID(snapshotMaxID uint) (int64, error)
 	CountUsers(id uint) (int64, error)
+}
+
+func (q *adminUserGroupQuery) MaxID() (uint, error) {
+	var id uint
+	err := q.ctx.GetCoreDB().Model(&models.UserGroup{}).Select("COALESCE(MAX(id), 0)").Scan(&id).Error
+	return id, err
+}
+
+func (q *adminUserGroupQuery) ListKeyset(afterID, snapshotMaxID uint, limit int) ([]models.UserGroup, error) {
+	var rows []models.UserGroup
+	err := q.ctx.GetCoreDB().Where("id > ? AND id <= ?", afterID, snapshotMaxID).
+		Order("id ASC").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
+func (q *adminUserGroupQuery) CountThroughID(snapshotMaxID uint) (int64, error) {
+	var total int64
+	err := q.ctx.GetCoreDB().Model(&models.UserGroup{}).Where("id <= ?", snapshotMaxID).Count(&total).Error
+	return total, err
 }
 
 // UserGroupIdentityAndAuthorization separates the persisted group identity
@@ -27,7 +49,7 @@ type UserGroupIdentityAndAuthorization struct {
 type AdminUserGroupMutation interface {
 	Create(g *models.UserGroup) error
 	Update(id uint, updates map[string]any) error
-	DeleteAndReassign(id uint) (affectedUserIDs []uint, err error)
+	DeleteAndReassign(id uint) (affectedUserIDs []uint, deletedManagedRoleID uint, err error)
 }
 
 type adminUserGroupQuery struct{ ctx *baseContext }
@@ -111,20 +133,29 @@ func (m *adminUserGroupMutation) Update(id uint, updates map[string]any) error {
 	return m.ctx.GetCoreDB().Model(&models.UserGroup{}).Where("id = ?", id).Updates(updates).Error
 }
 
-func (m *adminUserGroupMutation) DeleteAndReassign(id uint) ([]uint, error) {
+func (m *adminUserGroupMutation) DeleteAndReassign(id uint) ([]uint, uint, error) {
 	if id == 1 {
-		return nil, errors.New("cannot delete default user group")
+		return nil, 0, errors.New("cannot delete default user group")
 	}
 	var affected []uint
+	var deletedManagedRoleID uint
 	err := RunInTx[Context](m.ctx, func(c Context) error {
 		tx := c.GetCoreDB()
-		if err := tx.Model(&models.User{}).Where("group_id = ?", id).Pluck("id", &affected).Error; err != nil {
+		if err := LockAPIPrincipal(tx, models.APIPrincipalUserGroup, id); err != nil {
+			return err
+		}
+		if err := tx.Model(&models.User{}).Where("group_id = ?", id).Order("id ASC").Pluck("id", &affected).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&models.User{}).Where("group_id = ?", id).Update("group_id", 1).Error; err != nil {
 			return err
 		}
+		var err error
+		deletedManagedRoleID, err = DeleteAPIPrincipalAccess(tx, models.APIPrincipalUserGroup, id)
+		if err != nil {
+			return err
+		}
 		return tx.Delete(&models.UserGroup{}, id).Error
 	})
-	return affected, err
+	return affected, deletedManagedRoleID, err
 }

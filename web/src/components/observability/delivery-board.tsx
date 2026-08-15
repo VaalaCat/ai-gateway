@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
-import { ChevronRight, RotateCcw, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronRight, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -37,7 +37,7 @@ import { queueAccentClass, queueHealth } from "@/components/business/attempt-sta
 import { useDeliveryBoard, useDeliveryOp } from "@/lib/api/observability";
 import { formatDuration, formatFileSize, formatRelativeTime } from "@/lib/utils/format";
 import { formatErrorToast } from "@/lib/api/error-toast";
-import type { AgentQueueRow, DeliveryOpRequest, DeliveryQueueItem } from "@/lib/types";
+import type { AgentQueueRow, DeliveryBoardResponse, DeliveryOpRequest, DeliveryQueueItem } from "@/lib/types";
 
 // 降级等级 → 徽章文案+着色。等级越高剥离越多，红色最扎眼。
 const DEGRADE_BADGE: Record<number, { label: string; cls: string }> = {
@@ -50,6 +50,28 @@ const DEGRADE_BADGE: Record<number, { label: string; cls: string }> = {
 interface DropTarget {
   agentId: number;
   item: DeliveryQueueItem;
+}
+
+export function deliveryQueueIdentity(item: DeliveryQueueItem): string {
+  return item.queue_id || item.request_id;
+}
+
+export function deliveryQueueOperationTarget(
+  item: DeliveryQueueItem,
+): Pick<DeliveryOpRequest, "queue_ids" | "request_ids"> {
+  return item.queue_id ? { queue_ids: [item.queue_id] } : { request_ids: [item.request_id] };
+}
+
+export function deliveryRiskSummary(data?: DeliveryBoardResponse) {
+  const agents = data?.agents ?? [];
+  const backlog = data?.log_backlog;
+  return {
+    sharedUsageDropped: agents.reduce((total, agent) => total + (agent.shared_usage_dropped ?? 0), 0),
+    apiTraceSlimmed: agents.reduce((total, agent) => total + (agent.api_trace_slimmed ?? 0), 0),
+    logQueued: (backlog?.pending ?? 0) + (backlog?.retry ?? 0) + (backlog?.inflight ?? 0),
+    logDropped: backlog?.dropped ?? 0,
+    logReady: backlog?.schema_ready ?? true,
+  };
 }
 
 function DegradeBadge({ level }: { level: number }) {
@@ -101,7 +123,7 @@ function ItemsTable({
       </TableHeader>
       <TableBody>
         {items.map((item) => (
-          <TableRow key={item.request_id}>
+          <TableRow key={deliveryQueueIdentity(item)}>
             <TableCell className="py-1.5 font-mono">
               <CopyableText text={item.request_id} />
             </TableCell>
@@ -122,7 +144,7 @@ function ItemsTable({
                   disabled={isPending}
                   title={t("delivery.retryOne")}
                   onClick={() =>
-                    onOp({ agent_id: agentId, op: "retry_now", request_ids: [item.request_id] })
+                    onOp({ agent_id: agentId, op: "retry_now", ...deliveryQueueOperationTarget(item) })
                   }
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
@@ -141,7 +163,7 @@ function ItemsTable({
                           onOp({
                             agent_id: agentId,
                             op: "degrade",
-                            request_ids: [item.request_id],
+                            ...deliveryQueueOperationTarget(item),
                             level,
                           })
                         }
@@ -206,9 +228,24 @@ export function DeliveryBoard() {
   const all = data?.agents ?? [];
   const rows = showAll ? all : all.filter((r) => r.store_len + r.retry_len > 0);
   const now = dataUpdatedAt;
+  const risk = deliveryRiskSummary(data);
 
   return (
     <div className="space-y-3">
+      <div className="flex flex-wrap gap-2" aria-label={t("delivery.healthSummary")}>
+		<Badge variant={risk.sharedUsageDropped > 0 ? "destructive" : "outline"}>
+		  {t("delivery.usageDropped", { n: risk.sharedUsageDropped })}
+        </Badge>
+		<Badge variant={risk.apiTraceSlimmed > 0 ? "secondary" : "outline"}>
+		  {t("delivery.traceSlimmed", { n: risk.apiTraceSlimmed })}
+        </Badge>
+        <Badge
+          variant={risk.logDropped > 0 || !risk.logReady ? "destructive" : risk.logQueued > 0 ? "secondary" : "outline"}
+        >
+          {!risk.logReady && <AlertTriangle className="mr-1 size-3" />}
+          {t("delivery.logBacklog", { queued: risk.logQueued, dropped: risk.logDropped })}
+        </Badge>
+      </div>
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs text-muted-foreground">
           {data?.failed_agents?.length
@@ -325,7 +362,7 @@ export function DeliveryBoard() {
                 runOp({
                   agent_id: dropTarget.agentId,
                   op: "drop",
-                  request_ids: [dropTarget.item.request_id],
+                  ...deliveryQueueOperationTarget(dropTarget.item),
                 });
                 setDropTarget(null);
               }}

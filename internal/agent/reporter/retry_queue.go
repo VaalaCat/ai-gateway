@@ -12,7 +12,7 @@ import (
 const retryIsolateAfterAttempts = 2
 
 type retryItem struct {
-	entry    protocol.UsageLogEntry
+	entry    protocol.ReportedUsage
 	attempts int
 	nextAt   time.Time
 	bytes    int
@@ -20,17 +20,22 @@ type retryItem struct {
 }
 
 type retryValue struct {
-	Entry   protocol.UsageLogEntry
+	Entry   protocol.ReportedUsage
 	Degrade int
 	Bytes   int
 }
 
 type retryQueue struct {
-	queue  *deliveryqueue.Queue[retryValue]
-	logger *zap.Logger
+	queue   *deliveryqueue.Queue[retryValue]
+	logger  *zap.Logger
+	metrics GenericAPIUsageMetrics
 }
 
-func newRetryQueue(limit int, logger *zap.Logger) *retryQueue {
+func newRetryQueue(limit int, logger *zap.Logger, metric ...GenericAPIUsageMetrics) *retryQueue {
+	var metrics GenericAPIUsageMetrics
+	if len(metric) > 0 {
+		metrics = metric[0]
+	}
 	return &retryQueue{
 		queue: deliveryqueue.New(
 			deliveryqueue.Limits{MaxEntries: limit},
@@ -42,24 +47,35 @@ func newRetryQueue(limit int, logger *zap.Logger) *retryQueue {
 			},
 			nil,
 		),
-		logger: logger,
+		logger: logger, metrics: metrics,
 	}
 }
 
-func (q *retryQueue) push(entries []protocol.UsageLogEntry, attempts int, nextAt time.Time) {
+func (q *retryQueue) pushReported(entries []protocol.ReportedUsage, attempts int, nextAt time.Time) {
 	if len(entries) == 0 {
 		return
 	}
-	before := q.queue.Stats().Dropped
+	dropped := 0
+	apiDropped := 0
 	for _, entry := range entries {
-		q.queue.Put(deliveryqueue.Item[retryValue]{
+		if !entry.Valid() {
+			q.logger.Error("invalid retry usage entry", zap.String("request_id", entry.RequestID()))
+			continue
+		}
+		_, evicted := q.queue.PutWithEvicted(deliveryqueue.Item[retryValue]{ID: entry.QueueID(),
 			Value: retryValue{Entry: entry}, Attempts: attempts, NextAttempt: nextAt,
 		}, deliveryqueue.Retry)
+		dropped += len(evicted)
+		for _, item := range evicted {
+			if item.Value.Entry.IsAPI() {
+				apiDropped++
+			}
+		}
 	}
-	q.logDrops(before)
+	q.logDrops(dropped, apiDropped)
 }
 
-func (q *retryQueue) due(now time.Time, max int) []retryItem {
+func (q *retryQueue) dueReported(now time.Time, max int, includeAPI bool) []retryItem {
 	if max <= 0 {
 		return nil
 	}
@@ -73,6 +89,9 @@ func (q *retryQueue) due(now time.Time, max int) []retryItem {
 		if item.NextAttempt.After(now) {
 			continue
 		}
+		if !includeAPI && item.Value.Entry.IsAPI() {
+			continue
+		}
 		due = append(due, retryItemFromQueue(item))
 		ids = append(ids, item.ID)
 	}
@@ -81,6 +100,19 @@ func (q *retryQueue) due(now time.Time, max int) []retryItem {
 		return nil
 	}
 	return due
+}
+
+func (q *retryQueue) push(entries []protocol.UsageLogEntry, attempts int, nextAt time.Time) {
+	reported := make([]protocol.ReportedUsage, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		reported = append(reported, protocol.ReportedUsage{LLM: &entry})
+	}
+	q.pushReported(reported, attempts, nextAt)
+}
+
+func (q *retryQueue) due(now time.Time, max int) []retryItem {
+	return q.dueReported(now, max, true)
 }
 
 func (q *retryQueue) drainAll() []retryItem {
@@ -101,21 +133,28 @@ func (q *retryQueue) drainAll() []retryItem {
 func (q *retryQueue) Len() int { return q.queue.Stats().Retry }
 
 func (q *retryQueue) pushItem(item retryItem) {
-	before := q.queue.Stats().Dropped
-	q.queue.Put(deliveryqueue.Item[retryValue]{
+	_, evicted := q.queue.PutWithEvicted(deliveryqueue.Item[retryValue]{ID: item.entry.QueueID(),
 		Value:       retryValue{Entry: item.entry, Degrade: item.degrade, Bytes: item.bytes},
 		Attempts:    item.attempts,
 		NextAttempt: item.nextAt,
 	}, deliveryqueue.Retry)
-	q.logDrops(before)
+	apiDropped := 0
+	for _, dropped := range evicted {
+		if dropped.Value.Entry.IsAPI() {
+			apiDropped++
+		}
+	}
+	q.logDrops(len(evicted), apiDropped)
 }
 
 func (q *retryQueue) totalBytes() int { return int(q.queue.Stats().Bytes) }
 
+func (q *retryQueue) Dropped() uint64 { return q.queue.Stats().Dropped }
+
 func (q *retryQueue) oldestTimestamp() int64 {
 	var oldest int64
 	for _, item := range q.queue.Items(deliveryqueue.Retry) {
-		timestamp := item.Value.Entry.Timestamp
+		timestamp := item.Value.Entry.Timestamp()
 		if timestamp != 0 && (oldest == 0 || timestamp < oldest) {
 			oldest = timestamp
 		}
@@ -155,7 +194,7 @@ func matchIDs(ids []string) func(string) bool {
 func (q *retryQueue) retryNow(ids []string) int {
 	match := matchIDs(ids)
 	return q.queue.SetNextAttemptMatching(
-		func(item deliveryqueue.Item[retryValue]) bool { return match(item.Value.Entry.RequestID) },
+		func(item deliveryqueue.Item[retryValue]) bool { return match(item.ID) },
 		time.Time{},
 	)
 }
@@ -163,7 +202,7 @@ func (q *retryQueue) retryNow(ids []string) int {
 func (q *retryQueue) remove(ids []string) int {
 	match := matchIDs(ids)
 	return q.queue.RemoveMatching(func(item deliveryqueue.Item[retryValue]) bool {
-		return match(item.Value.Entry.RequestID)
+		return match(item.ID)
 	})
 }
 
@@ -171,21 +210,24 @@ func (q *retryQueue) degrade(ids []string, level int) int {
 	match := matchIDs(ids)
 	return q.queue.UpdateMatching(
 		func(item deliveryqueue.Item[retryValue]) bool {
-			return match(item.Value.Entry.RequestID) && item.Value.Degrade < level
+			return match(item.ID) && item.Value.Degrade < level
 		},
 		func(item *deliveryqueue.Item[retryValue]) {
-			applyDegrade(&item.Value.Entry, level)
+			applyUsageDegrade(&item.Value.Entry, level)
 			item.Value.Degrade = level
 			item.Value.Bytes = 0
 		},
 	)
 }
 
-func (q *retryQueue) logDrops(before uint64) {
-	after := q.queue.Stats()
-	if dropped := int(after.Dropped - before); dropped > 0 {
+func (q *retryQueue) logDrops(dropped, apiDropped int) {
+	if dropped > 0 {
+		if q.metrics != nil && apiDropped > 0 {
+			q.metrics.AddUsageDropped(uint64(apiDropped))
+		}
+		after := q.queue.Stats()
 		q.logger.Error("retry queue overflow, dropped oldest entries",
-			zap.Int("dropped", dropped), zap.Int("pending_len", after.Retry))
+			zap.Int("dropped", dropped), zap.Int("api_dropped", apiDropped), zap.Int("pending_len", after.Retry))
 	}
 }
 

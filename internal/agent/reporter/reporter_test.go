@@ -15,6 +15,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -30,6 +31,23 @@ type blockingPendingUsageStore struct {
 	blockOnce              sync.Once
 	finalDrainDone         <-chan struct{}
 	finalDrainBeforeAppend atomic.Bool
+}
+
+func (s *blockingPendingUsageStore) AppendReported(entries []protocol.ReportedUsage) {
+	blocked := false
+	s.blockOnce.Do(func() {
+		blocked = true
+		close(s.entered)
+		<-s.release
+	})
+	if blocked && s.finalDrainDone != nil {
+		select {
+		case <-s.finalDrainDone:
+			s.finalDrainBeforeAppend.Store(true)
+		default:
+		}
+	}
+	s.MemPendingUsageStore.AppendReported(entries)
 }
 
 type delayedUsageBus struct {
@@ -162,6 +180,40 @@ func TestReporterStartReturnsUsageSubscriptionError(t *testing.T) {
 	if err := r.Start(context.Background()); !errors.Is(err, subscribeErr) {
 		t.Fatalf("Start error = %v, want %v", err, subscribeErr)
 	}
+}
+
+func TestReporterEnqueueAPILifecycleAndDelivery(t *testing.T) {
+	received := make(chan protocol.APIUsageEntry, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, request, &report)
+		if len(report.APIRequests) == 1 {
+			received <- report.APIRequests[0]
+		}
+		writeAcceptedReport(w, report)
+	}))
+	t.Cleanup(server.Close)
+	store := NewMemPendingUsageStore(10, zap.NewNop())
+	uploader, err := NewUsageUploader(UploaderConfig{
+		Store: store, MasterURL: server.URL, AgentID: "agent", Secret: "secret",
+		FlushInterval: time.Hour, BatchMax: 10, BackoffMaxSec: func() int { return 1 },
+		SupportsGenericAPIUsage: func() bool { return true }, Logger: zap.NewNop(),
+	})
+	require.NoError(t, err)
+	reporter := New(eventbus.NewMemoryBus(), zap.NewNop(), store, uploader, nil)
+	require.ErrorIs(t, reporter.EnqueueAPI(protocol.APIUsageEntry{RequestID: "before-start"}), ErrReporterNotStarted)
+	require.NoError(t, reporter.Start(t.Context()))
+	require.NoError(t, reporter.EnqueueAPI(protocol.APIUsageEntry{RequestID: "api", ProviderDispatchKnown: true}))
+	select {
+	case entry := <-received:
+		require.Equal(t, "api", entry.RequestID)
+	case <-time.After(time.Second):
+		t.Fatal("API usage was not delivered")
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, reporter.Close(closeCtx))
+	require.ErrorIs(t, reporter.EnqueueAPI(protocol.APIUsageEntry{RequestID: "after-close"}), ErrReporterClosing)
 }
 
 func TestReporterCloseUnsubscribesUsageHandler(t *testing.T) {
@@ -373,7 +425,7 @@ func TestReporterPendingCountDoesNotDoubleCountMainInflight(t *testing.T) {
 	r, store := newReporterFixture(t, func(w http.ResponseWriter, _ *http.Request) {
 		close(requestEntered)
 		<-releaseRequest
-		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"accepted":1}`))
 	})
 	t.Cleanup(release)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -491,7 +543,7 @@ func TestQueueSnapshotShape(t *testing.T) {
 
 	// zero-value nextAt after retry_now 报告为 0,不是 -62135596800
 	u.retry.push([]protocol.UsageLogEntry{{RequestID: "r2", Timestamp: 200}}, 1, time.Time{})
-	n, err := r.QueueOp("retry_now", []string{"r2"}, 0)
+	n, err := r.QueueOp("retry_now", QueueOpTargets{QueueIDs: []string{"llm:r2"}}, 0)
 	if err != nil || n != 1 {
 		t.Fatalf("retry_now: n=%d err=%v", n, err)
 	}
@@ -511,22 +563,130 @@ func TestQueueOpDispatch(t *testing.T) {
 	r := New(nil, zap.NewNop(), store, u, nil)
 	u.retry.push([]protocol.UsageLogEntry{{RequestID: "a"}, {RequestID: "b"}}, 2, time.Now().Add(time.Hour))
 
-	if n, err := r.QueueOp("retry_now", nil, 0); err != nil || n != 2 {
+	if n, err := r.QueueOp("retry_now", QueueOpTargets{}, 0); err != nil || n != 2 {
 		t.Fatalf("retry_now: n=%d err=%v", n, err)
 	}
-	if n, err := r.QueueOp("degrade", []string{"a"}, DegradeStripTrace); err != nil || n != 1 {
+	if n, err := r.QueueOp("degrade", QueueOpTargets{QueueIDs: []string{"llm:a"}}, DegradeStripTrace); err != nil || n != 1 {
 		t.Fatalf("degrade: n=%d err=%v", n, err)
 	}
-	if _, err := r.QueueOp("degrade", []string{"a"}, 1); err == nil {
+	if _, err := r.QueueOp("degrade", QueueOpTargets{RequestIDs: []string{"a"}}, 1); err == nil {
 		t.Fatal("degrade to level 1 must be rejected")
 	}
-	if _, err := r.QueueOp("drop", nil, 0); err == nil {
+	if _, err := r.QueueOp("drop", QueueOpTargets{}, 0); err == nil {
 		t.Fatal("drop without explicit ids must be rejected")
 	}
-	if n, err := r.QueueOp("drop", []string{"b"}, 0); err != nil || n != 1 {
+	if n, err := r.QueueOp("drop", QueueOpTargets{QueueIDs: []string{"llm:b"}}, 0); err != nil || n != 1 {
 		t.Fatalf("drop: n=%d err=%v", n, err)
 	}
-	if _, err := r.QueueOp("nuke", nil, 0); err == nil {
+	if _, err := r.QueueOp("nuke", QueueOpTargets{}, 0); err == nil {
 		t.Fatal("unknown op must be rejected")
+	}
+}
+
+func TestQueueOpUsesTypedIdentityAndBareIDsFallbackOnlyToLLM(t *testing.T) {
+	store := NewMemPendingUsageStore(100, zap.NewNop())
+	u := newTestUploader(t, "http://127.0.0.1:0")
+	r := New(nil, zap.NewNop(), store, u, nil)
+	llm := protocol.UsageLogEntry{RequestID: "shared"}
+	api := protocol.APIUsageEntry{RequestID: "shared"}
+	u.retry.pushReported([]protocol.ReportedUsage{{LLM: &llm}, {API: &api}}, 2, time.Now().Add(time.Hour))
+
+	if n, err := r.QueueOp("degrade", QueueOpTargets{QueueIDs: []string{"api:shared"}}, DegradeStripTrace); err != nil || n != 1 {
+		t.Fatalf("typed API degrade: n=%d err=%v", n, err)
+	}
+	items := u.retry.snapshotAll()
+	if len(items) != 2 || items[0].entry.LLM == nil || items[0].degrade != DegradeNone ||
+		items[1].entry.API == nil || items[1].degrade != DegradeStripTrace {
+		t.Fatalf("typed degrade crossed usage identity: %+v", items)
+	}
+
+	if n, err := r.QueueOp("drop", QueueOpTargets{RequestIDs: []string{"shared"}}, 0); err != nil || n != 1 {
+		t.Fatalf("legacy bare LLM drop: n=%d err=%v", n, err)
+	}
+	items = u.retry.snapshotAll()
+	if len(items) != 1 || items[0].entry.API == nil {
+		t.Fatalf("legacy bare ID removed API entry: %+v", items)
+	}
+}
+
+func TestQueueOpSeparatesTypedQueueIDsFromLegacyRequestIDsWithPrefixCollision(t *testing.T) {
+	newCollisionReporter := func(t *testing.T) (*Reporter, *UsageUploader) {
+		t.Helper()
+		store := NewMemPendingUsageStore(100, zap.NewNop())
+		u := newTestUploader(t, "http://127.0.0.1:0")
+		r := New(nil, zap.NewNop(), store, u, nil)
+		llm := protocol.UsageLogEntry{RequestID: "api:x"}
+		api := protocol.APIUsageEntry{RequestID: "x"}
+		u.retry.pushReported([]protocol.ReportedUsage{{LLM: &llm}, {API: &api}}, 2, time.Now().Add(time.Hour))
+		return r, u
+	}
+
+	for _, operation := range []string{"retry_now", "degrade", "drop"} {
+		for _, target := range []struct {
+			name        string
+			targets     QueueOpTargets
+			wantQueueID string
+		}{
+			{name: "legacy", targets: QueueOpTargets{RequestIDs: []string{"api:x"}}, wantQueueID: "llm:api:x"},
+			{name: "modern", targets: QueueOpTargets{QueueIDs: []string{"api:x"}}, wantQueueID: "api:x"},
+		} {
+			t.Run(operation+"/"+target.name, func(t *testing.T) {
+				r, u := newCollisionReporter(t)
+				level := 0
+				if operation == "degrade" {
+					level = DegradeStripTrace
+				}
+				n, err := r.QueueOp(operation, target.targets, level)
+				if err != nil || n != 1 {
+					t.Fatalf("%s: n=%d err=%v", operation, n, err)
+				}
+				items := u.retry.snapshotAll()
+				if operation != "drop" && len(items) != 2 {
+					t.Fatalf("%s changed ownership cardinality: %+v", operation, items)
+				}
+				byID := make(map[string]retryItem, len(items))
+				for _, item := range items {
+					byID[item.entry.QueueID()] = item
+				}
+				switch operation {
+				case "retry_now":
+					if !byID[target.wantQueueID].nextAt.IsZero() {
+						t.Fatalf("target %s was not made due: %+v", target.wantQueueID, items)
+					}
+				case "degrade":
+					if byID[target.wantQueueID].degrade != DegradeStripTrace {
+						t.Fatalf("target %s was not degraded: %+v", target.wantQueueID, items)
+					}
+				case "drop":
+					if _, exists := byID[target.wantQueueID]; exists || len(items) != 1 {
+						t.Fatalf("target %s was not exclusively dropped: %+v", target.wantQueueID, items)
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("safe union deduplicates typed and legacy aliases", func(t *testing.T) {
+		r, _ := newCollisionReporter(t)
+		n, err := r.QueueOp("retry_now", QueueOpTargets{
+			QueueIDs: []string{"llm:api:x", "api:x"}, RequestIDs: []string{"api:x"},
+		}, 0)
+		if err != nil || n != 2 {
+			t.Fatalf("safe union: n=%d err=%v", n, err)
+		}
+	})
+
+	t.Run("nil means all but explicit empty means none", func(t *testing.T) {
+		r, _ := newCollisionReporter(t)
+		if n, err := r.QueueOp("retry_now", QueueOpTargets{QueueIDs: []string{}}, 0); err != nil || n != 0 {
+			t.Fatalf("explicit empty: n=%d err=%v", n, err)
+		}
+		if n, err := r.QueueOp("retry_now", QueueOpTargets{}, 0); err != nil || n != 2 {
+			t.Fatalf("nil all: n=%d err=%v", n, err)
+		}
+	})
+
+	if got := (QueueOpTargets{RequestIDs: []string{"llm:y"}}).typedQueueIDs(); len(got) != 1 || got[0] != "llm:llm:y" {
+		t.Fatalf("legacy llm prefix was guessed instead of treated as raw request ID: %v", got)
 	}
 }

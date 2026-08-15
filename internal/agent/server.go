@@ -23,6 +23,7 @@ import (
 	bodypkg "github.com/VaalaCat/ai-gateway/internal/agent/body"
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
+	"github.com/VaalaCat/ai-gateway/internal/agent/genericapi"
 	agentrelay "github.com/VaalaCat/ai-gateway/internal/agent/relay"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend"
@@ -93,14 +94,17 @@ type Server struct {
 	metricsHTTPServer *http.Server
 	MetricsRegistry   *prometheus.Registry
 	RelayMetrics      *pkgmetrics.AgentRelayMetrics
+	GenericAPIMetrics *genericapi.APIMetrics
 	RouteSuppressor   *diagnostics.Suppressor
 	ownsHTTPListener  bool
 
-	Inflight     *inflight.Registry
-	Breakers     *resilience.Registry
-	AutoBan      *resilience.AutoBanTracker
-	LimiterStore *limiter.MemStore
-	stopWatchdog func()
+	Inflight       *inflight.Registry
+	Breakers       *resilience.Registry
+	AutoBan        *resilience.AutoBanTracker
+	LimiterStore   *limiter.MemStore
+	stopWatchdog   func()
+	genericAPIOnce sync.Once
+	genericAPI     *genericAPIRuntime
 
 	clientMu sync.RWMutex
 	client   *ws.Client
@@ -191,6 +195,7 @@ func New(cfg config.AgentRuntimeProvider, logger *zap.Logger, options ...Standal
 		Creds:                     creds,
 		MetricsRegistry:           metricsRegistry,
 		RelayMetrics:              pkgmetrics.NewAgentRelayMetrics(metricsRegistry, metricsRegistry),
+		GenericAPIMetrics:         genericapi.NewAPIMetrics(metricsRegistry),
 		RouteSuppressor:           diagnostics.NewSuppressor(diagnostics.SuppressorOptions{}),
 		directSessionDialer:       standalone.DirectSessionDialer,
 		forwardCredentialReader:   standalone.ForwardCredentialReader,
@@ -269,6 +274,7 @@ func (s *Server) setupRoutes() {
 	v1.POST("/audio/transcriptions", runtime.relayHandler.Relay)
 	v1.POST("/audio/translations", runtime.relayHandler.Relay)
 	v1.POST("/audio/speech", runtime.relayHandler.Relay)
+	s.registerGenericAPIRoutes(s.Router)
 }
 
 func (s *Server) setupMetricsRoute() {
@@ -429,8 +435,9 @@ func (s *Server) serveHTTPServers(ctx context.Context, listener net.Listener, ht
 // The returned server has no Router — use MountRoutes() to attach
 // relay routes to an external router.
 type EmbeddedOptions struct {
-	MetricsRegistry *prometheus.Registry
-	RelayMetrics    *pkgmetrics.AgentRelayMetrics
+	MetricsRegistry   *prometheus.Registry
+	RelayMetrics      *pkgmetrics.AgentRelayMetrics
+	GenericAPIMetrics *genericapi.APIMetrics
 	// Store is owned by the embedded server once passed. NewEmbedded closes it
 	// before returning an error, and Shutdown closes it after a successful start.
 	Store *cache.Store
@@ -465,6 +472,7 @@ func NewEmbedded(cfg config.AgentRuntimeProvider, logger *zap.Logger, creds *enr
 		Creds:                creds,
 		MetricsRegistry:      metricsRegistry,
 		RelayMetrics:         relayMetrics,
+		GenericAPIMetrics:    embedded.GenericAPIMetrics,
 		RouteSuppressor:      diagnostics.NewSuppressor(diagnostics.SuppressorOptions{}),
 		legacyTransportOwner: agentrelaylegacy.NewTransportOwner(),
 	}
@@ -556,6 +564,176 @@ func (s *Server) MountRoutes(router *gin.Engine) {
 	v1.POST("/audio/transcriptions", runtime.relayHandler.Relay)
 	v1.POST("/audio/translations", runtime.relayHandler.Relay)
 	v1.POST("/audio/speech", runtime.relayHandler.Relay)
+	s.registerGenericAPIRoutes(router)
+}
+
+func (s *Server) registerGenericAPIRoutes(router *gin.Engine) {
+	if s == nil || s.Store == nil || router == nil {
+		return
+	}
+	generic := router.Group("/v1")
+	generic.Use(
+		ginutil.RecordRequestStart(),
+		genericapi.RequestIDMiddleware(),
+		auth.TokenAuthWithFailureWriter(s.Store, genericapi.WriteTokenAuthFailure),
+	)
+	genericapi.RegisterRoutes(generic, genericapi.NewHandler(genericapi.HandlerOptions{
+		Finder:                genericapi.NewServiceFinder(s.Store.APIIndex),
+		Permission:            genericapi.NewPermissionGate(s.Store, s.Store, s.Store.APIIndex),
+		Quota:                 genericapi.NewQuotaGate(s.Store, s.Store),
+		Limiter:               genericapi.NewLimiterGate(s.Store.LimiterIndex, s.LimiterStore),
+		AgentPicker:           genericapi.NewAgentPicker(s.Store.RouteIndex, s.Store, s.Creds.AgentID),
+		ExecutionCapabilities: serverGenericAPIExecutionCapabilityFinder{server: s},
+		Usage:                 genericapi.NewUsageBuilder(nil),
+		Reporter:              serverAPIUsageReporter{server: s},
+		MasterUsageSupport:    serverGenericAPIUsageSupport{server: s},
+		SourceAgentID:         s.Creds.AgentID,
+		TraceSettings:         s.Store,
+		Metrics:               s.GenericAPIMetrics,
+		Executor: genericapi.NewExecutor(map[string]genericapi.ProtocolHandler{
+			genericapi.ProtocolHTTP:      s.newGenericAPIProtocolHandler(),
+			genericapi.ProtocolWebSocket: s.newGenericAPIWebSocketProtocolHandler(),
+		}),
+	}))
+}
+
+type serverAPIUsageReporter struct{ server *Server }
+
+func (r serverAPIUsageReporter) EnqueueAPI(entry protocol.APIUsageEntry) error {
+	if r.server == nil || r.server.Reporter == nil {
+		return reporter.ErrReporterNotStarted
+	}
+	return r.server.Reporter.EnqueueAPI(entry)
+}
+
+type serverGenericAPIUsageSupport struct{ server *Server }
+
+func (support serverGenericAPIUsageSupport) SupportsGenericAPIUsage() bool {
+	return support.server != nil && support.server.masterSupportsGenericAPIUsage() &&
+		support.server.Reporter != nil && support.server.Reporter.AcceptsAPIUsage()
+}
+
+func (s *Server) masterSupportsGenericAPIUsage() bool {
+	if s == nil {
+		return false
+	}
+	return slices.Contains(s.currentTunnelBootstrap().Capabilities, protocol.MasterCapabilityGenericAPIUsageV1)
+}
+
+type genericAPIRuntime struct {
+	local           *genericapi.HTTPHandler
+	target          *genericapi.APITargetHandler
+	localWebSocket  *genericapi.WebSocketHandler
+	webSocketTarget *genericapi.WebSocketTargetHandler
+}
+
+func (s *Server) genericAPIRuntime() *genericAPIRuntime {
+	if s == nil {
+		return nil
+	}
+	s.genericAPIOnce.Do(func() {
+		if s.Store == nil {
+			return
+		}
+		if s.LimiterStore == nil {
+			s.LimiterStore = limiter.NewMemStore()
+		}
+		breakers := genericapi.NewAPIBreakerRegistry(s.Store, nil)
+		picker := genericapi.NewAPIUpstreamPicker(s.Store.APIIndex, breakers)
+		proxyURL := ""
+		if s.Cfg != nil {
+			proxyURL = s.Cfg.Agent.ProxyURL
+		}
+		local := genericapi.NewHTTPHandler(
+			picker, genericapi.NewHTTPTransport(proxyURL),
+			genericapi.NewLimiterGate(s.Store.LimiterIndex, s.LimiterStore),
+		).WithSettings(s.Store)
+		webSocket := genericapi.NewWebSocketHandler(genericapi.WebSocketHandlerOptions{
+			Picker: picker, Limiter: genericapi.NewLimiterGate(s.Store.LimiterIndex, s.LimiterStore), Settings: s.Store,
+		})
+		s.genericAPI = &genericAPIRuntime{
+			local: local, target: genericapi.NewAPITargetHandler(serverAPIServiceRouteFinder{s.Store.APIIndex}, local),
+			localWebSocket: webSocket,
+			webSocketTarget: genericapi.NewWebSocketTargetHandler(genericapi.WebSocketTargetHandlerOptions{
+				Finder: serverAPIServiceRouteFinder{s.Store.APIIndex}, Picker: picker,
+				Limiter: genericapi.NewLimiterGate(s.Store.LimiterIndex, s.LimiterStore), Settings: s.Store,
+			}),
+		}
+	})
+	return s.genericAPI
+}
+
+type serverAPIServiceRouteFinder struct{ index *cache.APIIndex }
+
+func (f serverAPIServiceRouteFinder) FindServiceRouteByID(serviceID, routeID uint) (genericapi.ServiceRoute, error) {
+	if f.index == nil {
+		return genericapi.ServiceRoute{}, genericapi.ErrExecutionUnavailable
+	}
+	value, err := f.index.FindServiceRouteByID(serviceID, routeID)
+	return genericapi.ServiceRoute{Service: value.Service, Route: value.Route, Protocol: genericapi.ProtocolHTTP}, err
+}
+
+func (s *Server) newGenericAPIProtocolHandler() genericapi.ProtocolHandler {
+	runtime := s.genericAPIRuntime()
+	if runtime == nil || s.Creds == nil {
+		return nil
+	}
+	var direct agentproxy.DirectHTTPAPITransportBuilder
+	if s.DirectSessionPool != nil {
+		direct = s.DirectSessionPool
+	}
+	var relay app.HTTPAPIStreamOpener
+	if s.TunnelManager != nil {
+		relay = s.TunnelManager
+	}
+	globalProxy, preferredTag := "", ""
+	if s.Cfg != nil {
+		globalProxy, preferredTag = s.Cfg.Agent.ProxyURL, s.Cfg.Agent.PreferredAddrTag
+	}
+	remote := genericapi.NewRemoteHTTPHandler(genericapi.RemoteHTTPHandlerOptions{
+		Direct: direct, Relay: relay, GlobalProxy: globalProxy, PreferredTag: preferredTag,
+	})
+	return genericapi.NewExecutionRouter(s.Creds.AgentID, runtime.local, remote)
+}
+
+func (s *Server) newGenericAPIWebSocketProtocolHandler() genericapi.ProtocolHandler {
+	runtime := s.genericAPIRuntime()
+	if runtime == nil || s.Creds == nil {
+		return nil
+	}
+	var relay app.WebSocketAPIStreamOpener
+	if s.TunnelManager != nil {
+		relay = s.TunnelManager
+	}
+	var direct agentproxy.DirectWebSocketAPIStreamOpener
+	if s.DirectSessionPool != nil {
+		direct = s.DirectSessionPool
+	}
+	globalProxy, preferredTag := "", ""
+	if s.Cfg != nil {
+		globalProxy, preferredTag = s.Cfg.Agent.ProxyURL, s.Cfg.Agent.PreferredAddrTag
+	}
+	remote := genericapi.NewRemoteWebSocketHandler(genericapi.RemoteWebSocketHandlerOptions{
+		Direct: direct, Relay: relay, TargetSupports: s.targetSupportsGenericAPIWebSocket,
+		GlobalProxy: globalProxy, PreferredTag: preferredTag, Settings: s.Store,
+	})
+	return genericapi.NewExecutionRouter(s.Creds.AgentID, runtime.localWebSocket, remote)
+}
+
+func (s *Server) genericAPITargetHandler() agenttunnel.APITargetHandler {
+	runtime := s.genericAPIRuntime()
+	if runtime == nil {
+		return nil
+	}
+	return runtime.target
+}
+
+func (s *Server) genericAPIWebSocketTargetHandler() agenttunnel.WebSocketTargetHandler {
+	runtime := s.genericAPIRuntime()
+	if runtime == nil {
+		return nil
+	}
+	return runtime.webSocketTarget
 }
 
 func (s *Server) registerAttemptProxyRoute(router *gin.Engine, handler *agentattemptproxy.Handler) {
@@ -1382,6 +1560,8 @@ func agentRuntimeCapabilities() []string {
 		protocol.AgentCapabilityDirectTunnelV1,
 		protocol.AgentCapabilityRelayHTTPPingV1,
 		protocol.AgentCapabilityTokenRoutingV1,
+		protocol.AgentCapabilityGenericAPIExecutionV1,
+		protocol.AgentCapabilityGenericAPIWebSocketV1,
 	}
 }
 
@@ -1466,6 +1646,26 @@ func (s *Server) targetSupportsDirectIngress(agentID string) bool {
 	)
 }
 
+func (s *Server) targetSupportsGenericAPIWebSocket(agentID string) bool {
+	return s != nil && s.Store != nil && slices.Contains(
+		s.Store.GetAgentCapabilities(agentID),
+		protocol.AgentCapabilityGenericAPIWebSocketV1,
+	)
+}
+
+type serverGenericAPIExecutionCapabilityFinder struct{ server *Server }
+
+func (finder serverGenericAPIExecutionCapabilityFinder) SupportsGenericAPIExecution(agentID string) bool {
+	return finder.server != nil && finder.server.targetSupportsGenericAPIExecution(agentID)
+}
+
+func (s *Server) targetSupportsGenericAPIExecution(agentID string) bool {
+	return s != nil && s.Store != nil && slices.Contains(
+		s.Store.GetAgentCapabilities(agentID),
+		protocol.AgentCapabilityGenericAPIExecutionV1,
+	)
+}
+
 func (s *Server) newTunnelManager() *agenttunnel.Manager {
 	return s.newTunnelManagerWithRouter(nil)
 }
@@ -1498,7 +1698,9 @@ func (s *Server) newTunnelManagerWithRouter(router http.Handler) *agenttunnel.Ma
 	dialer := agenttunnel.NewClientDialer(agenttunnel.ClientDialerOptions{
 		AgentID: s.Creds.AgentID, Bootstrap: s.currentTunnelBootstrap, Limits: s.currentTunnelLimits,
 		DrainTimeout:  s.currentTunnelDrainTimeout,
-		TargetHandler: s.NewTunnelTargetHandler(router), Logger: logger.Named("relay-tunnel-client"),
+		TargetHandler: s.NewTunnelTargetHandler(router), APITargetHandler: s.genericAPITargetHandler(),
+		WebSocketTargetHandler: s.genericAPIWebSocketTargetHandler(),
+		Logger:                 logger.Named("relay-tunnel-client"),
 	})
 	return agenttunnel.NewManager(agenttunnel.ManagerOptions{
 		SourceID: s.Creds.AgentID, RelayOutboundEnabled: s.relayOutboundEnabled,
@@ -1516,16 +1718,18 @@ func (s *Server) newDirectTunnelIngress(router http.Handler) *agenttunnel.Direct
 		logger = zap.NewNop()
 	}
 	return agenttunnel.NewDirectTunnelIngress(agenttunnel.DirectTunnelIngressOptions{
-		TargetAgentID: s.Creds.AgentID,
-		FindAgentByID: s.Store.GetAgent,
-		LoadAuth:      s.currentForwardAuthSnapshot,
-		Limits:        s.currentTunnelLimits(),
-		TargetHandler: s.NewTunnelTargetHandler(router),
-		Logger:        logger.Named("direct-tunnel-ingress"),
-		Metrics:       s.RelayMetrics,
-		Suppressor:    s.RouteSuppressor,
-		DrainTimeout:  s.currentTunnelDrainTimeout(),
-		MaxSessions:   s.currentDirectMaxSessions,
+		TargetAgentID:          s.Creds.AgentID,
+		FindAgentByID:          s.Store.GetAgent,
+		LoadAuth:               s.currentForwardAuthSnapshot,
+		Limits:                 s.currentTunnelLimits(),
+		TargetHandler:          s.NewTunnelTargetHandler(router),
+		APITargetHandler:       s.genericAPITargetHandler(),
+		WebSocketTargetHandler: s.genericAPIWebSocketTargetHandler(),
+		Logger:                 logger.Named("direct-tunnel-ingress"),
+		Metrics:                s.RelayMetrics,
+		Suppressor:             s.RouteSuppressor,
+		DrainTimeout:           s.currentTunnelDrainTimeout(),
+		MaxSessions:            s.currentDirectMaxSessions,
 	})
 }
 
@@ -2065,8 +2269,12 @@ func (s *Server) buildRelayHandler(relayTimeout time.Duration) relayRuntime {
 	agentApp := agentappkg.NewDefaultAgentApplication(s.Store, s.BodyStore, s.Logger, runtimeCfg, pool, s.legacyTransportOwner)
 
 	dispatcher := backend.NewDispatcher(agentApp)
-	s.LimiterStore = limiter.NewMemStore()
-	s.Breakers = resilience.NewRegistry()
+	if s.LimiterStore == nil {
+		s.LimiterStore = limiter.NewMemStore()
+	}
+	if s.Breakers == nil {
+		s.Breakers = resilience.NewRegistry()
+	}
 	s.AutoBan = resilience.NewAutoBanTracker()
 	remote := relayexec.NewRemoteAttemptExecutor(relayexec.RemoteAttemptExecutorOptions{
 		SourceAgentID:         s.Creds.AgentID,
@@ -2166,7 +2374,7 @@ var _ app.WSClient = (*lazyWSClient)(nil)
 func (s *Server) buildReporter() (*reporter.Reporter, error) {
 	store := reporter.NewMemPendingUsageStoreWithLimits(deliveryqueue.Limits{
 		MaxEntries: s.Cfg.Runtime.ReportBufferSize * 10,
-	}, s.Logger)
+	}, s.Logger, s.GenericAPIMetrics)
 	uploader, err := reporter.NewUsageUploader(reporter.UploaderConfig{
 		Store:                    store,
 		MasterURL:                s.Cfg.Agent.MasterURL,
@@ -2180,6 +2388,8 @@ func (s *Server) buildReporter() (*reporter.Reporter, error) {
 		SlimBodyAfterAttempts:    func() int { return s.Store.Settings().UsageSlimBodyAfterAttempts },
 		StripTraceAfterAttempts:  func() int { return s.Store.Settings().UsageStripTraceAfterAttempts },
 		BillingOnlyAfterAttempts: func() int { return s.Store.Settings().UsageBillingOnlyAfterAttempts },
+		SupportsGenericAPIUsage:  s.masterSupportsGenericAPIUsage,
+		Metrics:                  s.GenericAPIMetrics,
 		Logger:                   s.Logger,
 	})
 	if err != nil {

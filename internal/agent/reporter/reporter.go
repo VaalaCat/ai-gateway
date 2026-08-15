@@ -20,6 +20,7 @@ import (
 var _ app.Reporter = (*Reporter)(nil)
 
 var ErrReporterClosing = errors.New("reporter: closing")
+var ErrReporterNotStarted = errors.New("reporter: not started")
 
 // Reporter 订阅 usage.completed,把条目写入 PendingUsageStore,由 UsageUploader
 // 经 HTTP acked 投递给 master(spec §4:acked 才清,at-least-once + master 幂等)。
@@ -127,9 +128,44 @@ func (r *Reporter) appendUsage(entry protocol.UsageLogEntry) error {
 	if entry.Timestamp == 0 {
 		entry.Timestamp = time.Now().Unix()
 	}
-	r.store.Append([]protocol.UsageLogEntry{entry})
+	r.store.AppendReported([]protocol.ReportedUsage{{LLM: &entry}})
 	r.uploader.Kick()
 	return nil
+}
+
+// EnqueueAPI joins Generic API records to the same closing barrier, pending
+// store, retry path and final snapshot used by LLM usage.
+func (r *Reporter) EnqueueAPI(entry protocol.APIUsageEntry) error {
+	if r == nil {
+		return ErrReporterNotStarted
+	}
+	r.mu.Lock()
+	if !r.started || !r.running {
+		r.mu.Unlock()
+		return ErrReporterNotStarted
+	}
+	if r.closing {
+		r.mu.Unlock()
+		return ErrReporterClosing
+	}
+	r.usageCallbacks++
+	r.mu.Unlock()
+	defer r.finishUsageCallback()
+	if entry.Timestamp == 0 {
+		entry.Timestamp = time.Now().Unix()
+	}
+	r.store.AppendReported([]protocol.ReportedUsage{{API: &entry}})
+	r.uploader.Kick()
+	return nil
+}
+
+func (r *Reporter) AcceptsAPIUsage() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.started && r.running && !r.closing
 }
 
 func (r *Reporter) beginUsageCallback() bool {
@@ -268,6 +304,8 @@ func (r *Reporter) PendingCount() int {
 // QueueItemSnapshot 是旁路重试队列里一条记录的管理看板视图(见 QueueSnapshot.Items)。
 type QueueItemSnapshot struct {
 	RequestID    string `json:"request_id"`
+	QueueID      string `json:"queue_id"`
+	UsageType    string `json:"usage_type"`
 	Bytes        int    `json:"bytes"`
 	Attempts     int    `json:"attempts"`
 	DegradeLevel int    `json:"degrade_level"`
@@ -284,6 +322,9 @@ type QueueSnapshot struct {
 	LastSuccessAt int64               `json:"last_success_at"` // 0=从未
 	LastError     string              `json:"last_error"`
 	Inflight      int                 `json:"inflight"`
+	StoreDropped  uint64              `json:"store_dropped"`
+	RetryDropped  uint64              `json:"retry_dropped"`
+	TraceSlimmed  uint64              `json:"trace_slimmed"`
 	Items         []QueueItemSnapshot `json:"items"` // 旁路 top50 按 bytes 降序
 }
 
@@ -312,7 +353,10 @@ func (r *Reporter) QueueSnapshot() QueueSnapshot {
 		StoreLen: r.store.Len(), StoreBytes: r.store.Bytes(),
 		RetryLen: u.retry.Len(), RetryBytes: u.retry.totalBytes(),
 		LastSuccessAt: u.LastSuccessAt(), LastError: u.LastError(),
-		Inflight: u.InflightCount(),
+		Inflight: u.InflightCount(), RetryDropped: u.retry.Dropped(), TraceSlimmed: u.TraceSlimmed(),
+	}
+	if dropped, ok := r.store.(interface{ Dropped() uint64 }); ok {
+		snap.StoreDropped = dropped.Dropped()
 	}
 	snap.OldestTs = minNonZero(r.store.OldestTimestamp(), u.retry.oldestTimestamp())
 	slimAfter := u.slimBodyAfter()
@@ -325,8 +369,13 @@ func (r *Reporter) QueueSnapshot() QueueSnapshot {
 		if !it.nextAt.IsZero() {
 			nextAt = it.nextAt.Unix() // 0 = 立即可重试(retry_now 清过),与 last_success_at/oldest_ts 的 0=N/A 口径一致
 		}
+		usageType := "llm"
+		if it.entry.IsAPI() {
+			usageType = "api"
+		}
 		snap.Items = append(snap.Items, QueueItemSnapshot{
-			RequestID: it.entry.RequestID, Bytes: it.bytes, Attempts: it.attempts,
+			RequestID: it.entry.RequestID(), QueueID: it.entry.QueueID(), UsageType: usageType,
+			Bytes: it.bytes, Attempts: it.attempts,
 			DegradeLevel: level, NextAt: nextAt})
 	}
 	return snap
@@ -335,6 +384,33 @@ func (r *Reporter) QueueSnapshot() QueueSnapshot {
 // queueOpFn 是一种旁路队列管理操作的实现;queueOps 是分发表(策略表替代
 // if-else 链),QueueOp 的主分发只有一行查表+调用。
 type queueOpFn func(r *Reporter, ids []string, level int) (int, error)
+
+type QueueOpTargets struct {
+	QueueIDs   []string
+	RequestIDs []string
+}
+
+func (targets QueueOpTargets) typedQueueIDs() []string {
+	if targets.QueueIDs == nil && targets.RequestIDs == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(targets.QueueIDs)+len(targets.RequestIDs))
+	seen := make(map[string]struct{}, cap(ids))
+	appendID := func(id string) {
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	for _, id := range targets.QueueIDs {
+		appendID(id)
+	}
+	for _, requestID := range targets.RequestIDs {
+		appendID("llm:" + requestID)
+	}
+	return ids
+}
 
 var queueOps = map[string]queueOpFn{
 	"retry_now": func(r *Reporter, ids []string, _ int) (int, error) {
@@ -350,22 +426,23 @@ var queueOps = map[string]queueOpFn{
 	},
 	"drop": func(r *Reporter, ids []string, _ int) (int, error) {
 		if len(ids) == 0 {
-			return 0, fmt.Errorf("drop requires explicit request_ids")
+			return 0, fmt.Errorf("drop requires explicit queue_ids or request_ids")
 		}
 		n := r.uploader.retry.remove(ids)
 		// 人工丢弃 = 计费数据真丢,agent 侧留痕(master 侧另有审计,双端可对账)
 		r.logger.Error("usage entries dropped by operator",
-			zap.Strings("request_ids", ids), zap.Int("removed", n))
+			zap.Strings("queue_ids", ids), zap.Int("removed", n))
 		return n, nil
 	},
 }
 
-// QueueOp 分发一次管理端旁路队列操作(retry_now/degrade/drop),只作用旁路 retry
-// 队列——store 主队列不提供人工干预入口(正常流转,不该被操作员绕过重试节奏)。
-func (r *Reporter) QueueOp(op string, ids []string, level int) (int, error) {
+// QueueOp 分发一次管理端旁路队列操作。QueueIDs 精确匹配 typed identity；
+// RequestIDs 始终作为 legacy LLM request ID 加 llm: 前缀。两者都 nil 时保留
+// retry-all 语义，显式空 slice 则匹配零条。
+func (r *Reporter) QueueOp(op string, targets QueueOpTargets, level int) (int, error) {
 	fn, ok := queueOps[op]
 	if !ok {
 		return 0, fmt.Errorf("unknown queue op %q", op)
 	}
-	return fn(r, ids, level)
+	return fn(r, targets.typedQueueIDs(), level)
 }

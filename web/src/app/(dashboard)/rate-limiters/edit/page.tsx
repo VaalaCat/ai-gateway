@@ -6,17 +6,24 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 
 import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { RateLimiterForm } from "@/components/rate-limiter/rate-limiter-form";
+
+function EditRateLimiterPageSkeleton() {
+  const t = useTranslations("rateLimiters");
+
+  return (
+    <PageLayoutSkeleton
+      title={t("editTitle")}
+      description={t("editDescription")}
+      maxWidth="3xl"
+    />
+  );
+}
 
 export default function EditRateLimiterPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex items-center justify-center py-12 text-muted-foreground">
-          Loading...
-        </div>
-      }
-    >
+    <Suspense fallback={<EditRateLimiterPageSkeleton />}>
       <EditRateLimiterContent />
     </Suspense>
   );
@@ -40,7 +47,17 @@ function EditRateLimiterContent() {
     }
   }, [idValid, router, t]);
 
-  if (!idValid) return null;
+  if (!idValid) {
+    return (
+      <PageLayout
+        title={t("editTitle")}
+        description={t("editDescription")}
+        maxWidth="3xl"
+      >
+        <p className="py-12 text-center text-muted-foreground">{t("notFound")}</p>
+      </PageLayout>
+    );
+  }
 
   return (
     <PageLayout

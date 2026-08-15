@@ -533,6 +533,9 @@ func TestFullSyncReturnsAgentRouteFailureAfterOtherEntitiesAdvanceVersion(t *tes
 		if call.Request.Entity == events.EntityAgentRoute {
 			return nil, sentinel
 		}
+		if isTestAPIFullSyncEntity(call.Request.Entity) {
+			return emptyAPIFullSyncResponse(99), nil
+		}
 		return marshalAgentRouteFullSync(nil, protocol.FullSyncResponse{Version: 99}), nil
 	}
 	syncer := newAgentRouteTestSyncer(client)
@@ -556,6 +559,9 @@ func TestAgentRouteDirtySameVersionCheckRetriesAndRetainsFailure(t *testing.T) {
 		if call.Request.Entity == events.EntityAgentRoute {
 			return nil, sentinel
 		}
+		if isTestAPIFullSyncEntity(call.Request.Entity) {
+			return emptyAPIFullSyncResponse(55), nil
+		}
 		return marshalAgentRouteFullSync(nil, protocol.FullSyncResponse{Version: 55}), nil
 	}
 	syncer := newAgentRouteTestSyncer(client)
@@ -573,6 +579,9 @@ func TestAgentRouteDirtySameVersionCheckClearsAfterSuccessfulPublication(t *test
 	client.respond = func(_ context.Context, call agentRouteSyncCall, _ int) (json.RawMessage, error) {
 		if call.Method == consts.RPCSyncGetVersion {
 			return marshalGetVersion(55), nil
+		}
+		if isTestAPIFullSyncEntity(call.Request.Entity) {
+			return emptyAPIFullSyncResponse(55), nil
 		}
 		return marshalAgentRouteFullSync(nil, protocol.FullSyncResponse{Version: 55}), nil
 	}

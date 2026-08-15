@@ -1,4 +1,5 @@
 import type { EntityName } from "@/components/business/entity-picker/registry";
+import type { EntityPickerQuery } from "@/components/business/entity-picker/types";
 
 export interface FilterContext {
   isAdmin: boolean;
@@ -30,6 +31,8 @@ export type FilterDef =
       entity: EntityName;
       /** 传给 EntityPicker 的 placeholder。 */
       placeholder?: string;
+      /** 根据当前完整筛选值推导 picker 的父级/禁用状态。 */
+      pickerQuery?: (values: FilterValues) => EntityPickerQuery;
     })
   | (FilterDefBase & {
       kind: "enum";
@@ -43,6 +46,8 @@ export type FilterDef =
       placeholder?: string;
       /** 输入 debounce 毫秒；默认 300。 */
       debounceMs?: number;
+      /** 桌面端控件宽度；compact 适合状态码等短值，移动端仍为全宽。 */
+      controlWidth?: "compact" | "default";
     });
 
 export type FilterSpec = Record<string, FilterDef>;

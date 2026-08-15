@@ -1,7 +1,6 @@
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, type UseQueryOptions } from "@tanstack/react-query";
 
 import { api, buildQuery } from "./client";
-import type { PaginatedResponse, Token } from "@/lib/types";
 
 export type ModelMarketplaceRole = "user" | "admin";
 export type ModelMarketplaceKind = "" | "real" | "routing";
@@ -259,6 +258,9 @@ export interface ModelMarketplaceListResponse {
   selected_token: { id: number; name: string };
   models: MarketplaceModel[];
   filters: MarketplaceFilters;
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 export interface AdminModelMarketplaceListResponse {
@@ -268,6 +270,9 @@ export interface AdminModelMarketplaceListResponse {
   };
   models: MarketplaceModel[];
   filters: MarketplaceFilters;
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 export interface ModelMarketplaceListParams {
@@ -275,6 +280,8 @@ export interface ModelMarketplaceListParams {
   search?: string;
   provider?: string;
   kind?: ModelMarketplaceKind;
+  page: number;
+  pageSize: number;
 }
 
 function normalizedListParams(params: ModelMarketplaceListParams) {
@@ -283,6 +290,8 @@ function normalizedListParams(params: ModelMarketplaceListParams) {
     search: params.search ?? "",
     provider: params.provider ?? "",
     kind: params.kind ?? "",
+    page: params.page,
+    pageSize: params.pageSize,
   };
 }
 
@@ -304,7 +313,23 @@ function listQuery(params: ModelMarketplaceListParams) {
     search: params.search,
     provider: params.provider,
     kind: params.kind,
+    page: params.page,
+    page_size: params.pageSize,
   });
+}
+
+function listQueryScopeMatches(
+  queryKey: readonly unknown[] | undefined,
+  role: ModelMarketplaceRole,
+  viewerId: number | undefined,
+  tokenId: number | undefined,
+) {
+  const scope = queryKey?.[2];
+  if (typeof scope !== "object" || scope === null) return false;
+  const fields = scope as Record<string, unknown>;
+  return fields.role === role &&
+    fields.viewerId === (viewerId ?? null) &&
+    fields.tokenId === (tokenId ?? null);
 }
 
 export function useModelMarketplaceList(
@@ -316,15 +341,17 @@ export function useModelMarketplaceList(
   >,
 ) {
   const tokenIsValid = Number.isInteger(params.tokenId) && (params.tokenId ?? 0) > 0;
+  const { enabled: callerEnabled, ...queryOptions } = options ?? {};
+  const scopeIsValid = tokenIsValid && Number.isInteger(viewerId) && (viewerId ?? 0) > 0;
   return useQuery({
-    ...options,
+    placeholderData: (previousData, previousQuery) =>
+      listQueryScopeMatches(previousQuery?.queryKey, "user", viewerId, params.tokenId)
+        ? keepPreviousData(previousData)
+        : undefined,
+    ...queryOptions,
     queryKey: modelMarketplaceListQueryKey("user", viewerId, params),
     queryFn: () => api.get<ModelMarketplaceListResponse>(`/model-marketplace${listQuery(params)}`),
-    enabled:
-      tokenIsValid &&
-      Number.isInteger(viewerId) &&
-      (viewerId ?? 0) > 0 &&
-      (options?.enabled ?? true),
+    enabled: scopeIsValid ? (callerEnabled ?? true) : false,
   });
 }
 
@@ -336,11 +363,17 @@ export function useAdminModelMarketplaceList(
     "queryKey" | "queryFn"
   >,
 ) {
+  const { enabled: callerEnabled, ...queryOptions } = options ?? {};
+  const scopeIsValid = Number.isInteger(viewerId) && (viewerId ?? 0) > 0;
   return useQuery({
-    ...options,
+    placeholderData: (previousData, previousQuery) =>
+      listQueryScopeMatches(previousQuery?.queryKey, "admin", viewerId, params.tokenId)
+        ? keepPreviousData(previousData)
+        : undefined,
+    ...queryOptions,
     queryKey: modelMarketplaceListQueryKey("admin", viewerId, params),
     queryFn: () => api.get<AdminModelMarketplaceListResponse>(`/admin/model-marketplace${listQuery(params)}`),
-    enabled: Number.isInteger(viewerId) && (viewerId ?? 0) > 0 && (options?.enabled ?? true),
+    enabled: scopeIsValid ? (callerEnabled ?? true) : false,
   });
 }
 
@@ -420,37 +453,5 @@ export function useAdminModelMarketplaceDetail(
       Number.isInteger(viewerId) &&
       (viewerId ?? 0) > 0 &&
       (options?.enabled ?? true),
-  });
-}
-
-const MARKETPLACE_TOKEN_PAGE_SIZE = 100;
-
-async function listAllMarketplaceTokens() {
-  const tokens: Token[] = [];
-  let page = 1;
-  let total = 0;
-
-  do {
-    const response = await api.get<PaginatedResponse<Token>>(
-      `/tokens${buildQuery({ page, page_size: MARKETPLACE_TOKEN_PAGE_SIZE })}`,
-    );
-    tokens.push(...response.data);
-    total = response.total;
-    if (response.data.length === 0) break;
-    page += 1;
-  } while (tokens.length < total);
-
-  return tokens;
-}
-
-export function useMarketplaceTokens(
-  viewerId: number | undefined,
-  options?: Omit<UseQueryOptions<Token[]>, "queryKey" | "queryFn">,
-) {
-  return useQuery({
-    ...options,
-    queryKey: ["model-marketplace", "tokens", { viewerId: viewerId ?? null }],
-    queryFn: listAllMarketplaceTokens,
-    enabled: Number.isInteger(viewerId) && (viewerId ?? 0) > 0 && (options?.enabled ?? true),
   });
 }

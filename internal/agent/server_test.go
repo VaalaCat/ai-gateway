@@ -253,15 +253,16 @@ func (c *controlledControlSession) Close() error {
 }
 
 type orderedAgentControlClient struct {
-	mu                   sync.Mutex
-	methods              []string
-	capabilitiesUpdate   protocol.AgentCapabilitiesUpdate
-	handlers             map[string]appkg.NotificationHandler
-	inlineHandlers       map[string]appkg.NotificationHandler
-	capabilityOnRegister json.RawMessage
-	fullSyncAgentItems   json.RawMessage
-	notifyErr            error
-	onNotify             func()
+	mu                    sync.Mutex
+	methods               []string
+	capabilitiesUpdate    protocol.AgentCapabilitiesUpdate
+	handlers              map[string]appkg.NotificationHandler
+	inlineHandlers        map[string]appkg.NotificationHandler
+	capabilityOnRegister  json.RawMessage
+	fullSyncAgentItems    json.RawMessage
+	bootstrapCapabilities []string
+	notifyErr             error
+	onNotify              func()
 }
 
 func newOrderedAgentControlClient() *orderedAgentControlClient {
@@ -277,6 +278,7 @@ func (c *orderedAgentControlClient) Call(_ context.Context, method string, param
 	case consts.RPCAgentAuthBootstrap:
 		return marshalServerTest(protocol.AuthBootstrapResponse{
 			MasterInstanceID: "master-a",
+			Capabilities:     c.bootstrapCapabilities,
 			SigningKeys: []pkgagentauth.PublicKey{{
 				KeyID:     "key-a",
 				Algorithm: "EdDSA",
@@ -295,6 +297,31 @@ func (c *orderedAgentControlClient) Call(_ context.Context, method string, param
 	default:
 		return nil, errors.New("unexpected control call")
 	}
+}
+
+func TestGenericAPIUsageCapabilityFollowsCurrentAuthBootstrapSession(t *testing.T) {
+	store := agentcache.NewStore(nil, config.AgentCacheConfig{})
+	t.Cleanup(store.Close)
+	server := &Server{
+		Cfg: &config.AgentRuntimeConfig{Agent: config.AgentConfig{Listen: ":0"}}, Logger: zap.NewNop(),
+		Creds: &enrollment.Credentials{AgentID: "agent-a", Secret: "secret-a"}, Store: store,
+	}
+
+	legacy := newOrderedAgentControlClient()
+	server.Syncer = agentcache.NewSyncer(store, legacy, nil, zap.NewNop(), time.Hour)
+	legacyCache, err := server.startAgentAuthSession(t.Context(), legacy)
+	require.NoError(t, err)
+	require.False(t, server.masterSupportsGenericAPIUsage())
+	server.stopAgentAuthSession(legacyCache)
+
+	current := newOrderedAgentControlClient()
+	current.bootstrapCapabilities = []string{protocol.MasterCapabilityGenericAPIUsageV1}
+	server.Syncer = agentcache.NewSyncer(store, current, nil, zap.NewNop(), time.Hour)
+	currentCache, err := server.startAgentAuthSession(t.Context(), current)
+	require.NoError(t, err)
+	require.True(t, server.masterSupportsGenericAPIUsage())
+	server.stopAgentAuthSession(currentCache)
+	require.False(t, server.masterSupportsGenericAPIUsage())
 }
 
 func (c *orderedAgentControlClient) Notify(method string, params any) error {
@@ -419,13 +446,15 @@ func TestAgentAuthCacheSessionStartsBeforeCapabilitiesAndFullSync(t *testing.T) 
 			t.Fatalf("control method[%d] = %q, want %q; all=%#v", i, methods[i], want, methods)
 		}
 	}
-	// behavior change: the authenticated runtime advertises relay, forward-auth, Direct ingress, Relay ping, and Token routing contracts.
-	if update.AgentID != "agent-a" || len(update.Capabilities) != 5 ||
+	// behavior change: the authenticated runtime also advertises Generic API execution before WebSocket support.
+	if update.AgentID != "agent-a" || len(update.Capabilities) != 7 ||
 		update.Capabilities[0] != protocol.AgentCapabilityTunnelV2 ||
 		update.Capabilities[1] != protocol.AgentCapabilityForwardV1 ||
 		update.Capabilities[2] != protocol.AgentCapabilityDirectTunnelV1 ||
 		update.Capabilities[3] != protocol.AgentCapabilityRelayHTTPPingV1 ||
-		update.Capabilities[4] != protocol.AgentCapabilityTokenRoutingV1 {
+		update.Capabilities[4] != protocol.AgentCapabilityTokenRoutingV1 ||
+		update.Capabilities[5] != protocol.AgentCapabilityGenericAPIExecutionV1 ||
+		update.Capabilities[6] != protocol.AgentCapabilityGenericAPIWebSocketV1 {
 		t.Fatalf("runtime capability update = %#v, want authenticated ID and supported contracts", update)
 	}
 	if got := server.borrowAgentAuthCache(); got != owned {
@@ -903,6 +932,111 @@ func TestMountRoutes(t *testing.T) {
 	if !found {
 		t.Error("/v1/chat/completions route not found")
 	}
+}
+
+func TestServerGenericAPIRoutesUseGatewayTokenMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name string
+		new  func(*testing.T) (*Server, *gin.Engine)
+	}{
+		{
+			name: "standalone setup routes",
+			new: func(t *testing.T) (*Server, *gin.Engine) {
+				cfg := genericAPITestConfig(t)
+				require.NoError(t, os.WriteFile(cfg.Agent.CredentialsFile, []byte(`{"agent_id":"generic-api","secret":"secret"}`), 0o600))
+				server, err := New(cfg, zap.NewNop())
+				require.NoError(t, err)
+				return server, server.Router
+			},
+		},
+		{
+			name: "embedded mount routes",
+			new: func(t *testing.T) (*Server, *gin.Engine) {
+				server, err := NewEmbedded(genericAPITestConfig(t), zap.NewNop(), &enrollment.Credentials{AgentID: "generic-api", Secret: "secret"})
+				require.NoError(t, err)
+				router := gin.New()
+				server.MountRoutes(router)
+				return server, router
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, router := test.new(t)
+			t.Cleanup(func() { require.NoError(t, server.Shutdown(context.Background())) })
+			server.Store.SetToken(&models.Token{ID: 3, UserID: 5, Key: "generic-api-token", Status: consts.StatusEnabled, ExpiredAt: -1})
+			server.Store.SetToken(&models.Token{ID: 4, UserID: 5, Key: "disabled-token", Status: consts.StatusDisabled, ExpiredAt: -1})
+			server.Store.SetToken(&models.Token{ID: 5, UserID: 5, Key: "expired-token", Status: consts.StatusEnabled, ExpiredAt: time.Now().Add(-time.Hour).Unix()})
+			server.Store.SetToken(&models.Token{ID: 6, UserID: 8, Key: "group-disabled-token", Status: consts.StatusEnabled, ExpiredAt: -1})
+			server.Store.SetUser(&protocol.SyncedUser{ID: 8, GroupID: 2})
+			server.Store.SetUserGroup(&models.UserGroup{ID: 2, Status: consts.StatusDisabled, Name: "disabled"})
+
+			for _, path := range []string{"/v1/api/weather/current", "/v1/api/weather/files/a/b"} {
+				response := genericAPIRequest(router, path, "generic-api-token")
+				require.Equalf(t, http.StatusServiceUnavailable, response.Code, "valid token path %s", path)
+				require.Equal(t, "api_unavailable", genericAPIErrorCode(t, response),
+					"a Master without the auth-bootstrap usage capability must fail closed before cache lookup")
+			}
+
+			for _, authCase := range []struct {
+				name, token, wantCode string
+				wantStatus            int
+			}{
+				{name: "missing", wantStatus: http.StatusUnauthorized, wantCode: "missing_api_key"},
+				{name: "invalid", token: "invalid-token", wantStatus: http.StatusUnauthorized, wantCode: "invalid_api_key"},
+				{name: "disabled", token: "disabled-token", wantStatus: http.StatusForbidden, wantCode: "token_disabled"},
+				{name: "expired", token: "expired-token", wantStatus: http.StatusForbidden, wantCode: "token_expired"},
+				{name: "group disabled", token: "group-disabled-token", wantStatus: http.StatusForbidden, wantCode: "user_group_disabled"},
+			} {
+				t.Run(authCase.name, func(t *testing.T) {
+					response := genericAPIRequest(router, "/v1/api/weather/current", authCase.token)
+					require.Equal(t, authCase.wantStatus, response.Code)
+					require.Equal(t, authCase.wantCode, genericAPIErrorCode(t, response))
+					require.NotEmpty(t, response.Header().Get(consts.HeaderXRequestID))
+				})
+			}
+
+			llm := httptest.NewRecorder()
+			router.ServeHTTP(llm, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+			require.Equal(t, http.StatusUnauthorized, llm.Code)
+			var legacy struct {
+				Error string `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(llm.Body.Bytes(), &legacy))
+			require.Equal(t, consts.ErrMissingAPIKey, legacy.Error)
+		})
+	}
+}
+
+func genericAPITestConfig(t *testing.T) *config.AgentRuntimeConfig {
+	t.Helper()
+	return &config.AgentRuntimeConfig{Agent: config.AgentConfig{
+		CredentialsFile: filepath.Join(t.TempDir(), "credentials.json"),
+	}}
+}
+
+func genericAPIRequest(router *gin.Engine, path, token string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	if token != "" {
+		request.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+token)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	return response
+}
+
+func genericAPIErrorCode(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Error.RequestID)
+	require.Equal(t, body.Error.RequestID, response.Header().Get(consts.HeaderXRequestID))
+	return body.Error.Code
 }
 
 func TestMountRoutesRecordsRequestStartBeforeRelayIngress(t *testing.T) {

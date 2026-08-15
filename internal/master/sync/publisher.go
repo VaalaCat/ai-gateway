@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -26,6 +27,7 @@ type Publisher struct {
 	bus     app.EventBus
 	version *atomic.Int64
 	logger  *zap.Logger
+	pushMu  sync.Mutex
 }
 
 func NewPublisher(hub *Hub, bus app.EventBus, version *atomic.Int64, logger *zap.Logger) *Publisher {
@@ -79,6 +81,23 @@ func (p *Publisher) Start() {
 	subscribeTopic(p, events.EntityScript, events.ActionUpdate, events.ScriptUpdateTopic)
 	subscribeTopic(p, events.EntityScript, events.ActionDelete, events.ScriptDeleteTopic)
 
+	subscribeTopic(p, events.EntityAPIService, events.ActionCreate, events.APIServiceCreateTopic)
+	subscribeTopic(p, events.EntityAPIService, events.ActionUpdate, events.APIServiceUpdateTopic)
+	subscribeTopic(p, events.EntityAPIService, events.ActionDelete, events.APIServiceDeleteTopic)
+	subscribeTopic(p, events.EntityAPIRoute, events.ActionCreate, events.APIRouteCreateTopic)
+	subscribeTopic(p, events.EntityAPIRoute, events.ActionUpdate, events.APIRouteUpdateTopic)
+	subscribeTopic(p, events.EntityAPIRoute, events.ActionDelete, events.APIRouteDeleteTopic)
+	subscribeTopic(p, events.EntityAPIUpstream, events.ActionCreate, events.APIUpstreamCreateTopic)
+	subscribeTopic(p, events.EntityAPIUpstream, events.ActionUpdate, events.APIUpstreamUpdateTopic)
+	subscribeTopic(p, events.EntityAPIUpstream, events.ActionDelete, events.APIUpstreamDeleteTopic)
+	subscribeTopic(p, events.EntityAPIRole, events.ActionCreate, events.APIRoleCreateTopic)
+	subscribeTopic(p, events.EntityAPIRole, events.ActionUpdate, events.APIRoleUpdateTopic)
+	subscribeTopic(p, events.EntityAPIRole, events.ActionDelete, events.APIRoleDeleteTopic)
+	subscribeTopic(p, events.EntityUserAPIRoleSet, events.ActionInvalidate, events.UserAPIRolesSyncedTopic)
+	subscribeTopic(p, events.EntityUserGroupAPIRoleSet, events.ActionUpdate, events.UserGroupAPIRolesSyncedTopic)
+	subscribeTopic(p, events.EntityUserGroupAPIRoleSet, events.ActionDelete, events.UserGroupAPIRolesDeletedTopic)
+	subscribeTopic(p, events.EntityTokenAPIRoleSet, events.ActionInvalidate, events.TokenAPIRolesSyncedTopic)
+
 	// 结算后的余额回送：master 把受影响 user 的最新 Quota 定向推回来源 agent，
 	// 不走 Broadcast(全量广播)，只 NotifyAgent 单点投递。
 	if _, err := events.SubscribeUserQuotaSync(p.bus, func(_ context.Context, m protocol.UserQuotaSync) error {
@@ -97,6 +116,9 @@ func subscribeTopic[T any](p *Publisher, entity, action string, topic events.Top
 			return nil
 		}
 
+		// behavior change: version allocation and wire enqueue share one
+		// Publisher lock, so every Agent observes strictly increasing versions.
+		p.pushMu.Lock()
 		newVersion := p.version.Add(1)
 		push := protocol.SyncPushParams{
 			Entity:  entity,
@@ -105,6 +127,7 @@ func subscribeTopic[T any](p *Publisher, entity, action string, topic events.Top
 			Version: newVersion,
 		}
 		p.hub.Broadcast(consts.RPCSyncPush, push)
+		p.pushMu.Unlock()
 		p.logger.Info("sync.push broadcast",
 			zap.String("entity", entity),
 			zap.String("action", action),

@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { UseQueryOptions } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
 import type {
   PaginatedResponse,
@@ -15,10 +16,13 @@ export function useTokenTemplates(params: { page?: number; pageSize?: number; se
   });
 }
 
-export function useEnabledTokenTemplates() {
+export function useEnabledTokenTemplates(
+  options?: Omit<UseQueryOptions<PaginatedResponse<TokenTemplate>>, "queryKey" | "queryFn">,
+) {
   return useQuery({
     queryKey: ["token-templates-enabled"],
     queryFn: () => api.get<PaginatedResponse<TokenTemplate>>(`/token-templates?page=1&page_size=100`),
+    ...options,
   });
 }
 

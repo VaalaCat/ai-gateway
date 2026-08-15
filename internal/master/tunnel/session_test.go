@@ -13,6 +13,8 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
+	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -56,6 +58,127 @@ func TestSessionRejectsMalformedBypassProbeBeforeTargetLookup(t *testing.T) {
 	case raw := <-targetConn.writes:
 		t.Fatalf("malformed bypass probe reached target: %+v", decodeCapturedFrame(t, raw))
 	default:
+	}
+}
+
+func TestSessionRejectsInvalidOpenKindsBeforeHubLookup(t *testing.T) {
+	attempt := validHubAttemptMeta()
+	apiMeta := apiattempt.APIAttemptMeta{
+		APIServiceID: 7, APIRouteID: 9, Protocol: apiattempt.APIProtocolHTTP, Method: http.MethodPost,
+	}
+	validAPI := wire.Open{
+		Method: http.MethodPost, Path: "/api/items", Header: map[string][]string{}, TargetAgentID: "target",
+		RemainingNanos: int64(time.Second), ResponseWindow: testLimits().InitialStreamWindow, API: &apiMeta,
+	}
+	tests := []struct {
+		name     string
+		sequence uint32
+		payload  func(*testing.T) []byte
+	}{
+		{
+			name: "untyped open", sequence: 1,
+			payload: func(t *testing.T) []byte {
+				open := validAPI
+				open.API = nil
+				payload, err := wire.EncodeMetadata(open, testLimits().MaxMetadataBytes)
+				require.NoError(t, err)
+				return payload
+			},
+		},
+		{
+			name: "attempt and API", sequence: 1,
+			payload: func(t *testing.T) []byte {
+				open := validAPI
+				open.Attempt = &attempt
+				payload, err := wire.EncodeMetadata(open, testLimits().MaxMetadataBytes)
+				require.NoError(t, err)
+				return payload
+			},
+		},
+		{name: "malformed metadata", sequence: 1, payload: func(*testing.T) []byte { return []byte("{") }},
+		{
+			name: "wrong first sequence", sequence: 2,
+			payload: func(t *testing.T) []byte {
+				payload, err := wire.EncodeMetadata(validAPI, testLimits().MaxMetadataBytes)
+				require.NoError(t, err)
+				return payload
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lookup := newMutableRelayAgentLookup("source", "target")
+			hub := NewHub(HubOptions{InstanceID: "master-a", Agents: lookup, Limits: testLimits()})
+			source, sourceConn := liveTestSession(hub, "source", 1)
+			t.Cleanup(func() {
+				source.Cancel(errors.New("cleanup"))
+				require.NoError(t, hub.Close(context.Background()))
+			})
+			require.NoError(t, source.handleOpen(wire.Frame{
+				Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: wire.StreamID{45},
+				Sequence: test.sequence, Payload: test.payload(t),
+			}))
+			frame := decodeCapturedFrame(t, <-sourceConn.writes)
+			require.Equal(t, wire.FrameReset, frame.Type)
+			var reset wire.Reset
+			require.NoError(t, wire.DecodeMetadata(frame.Payload, &reset, testLimits().MaxMetadataBytes))
+			require.Equal(t, "open", reset.Stage)
+			require.Equal(t, wire.ErrorCodeRelayProtocol, reset.Code)
+			require.Zero(t, lookup.CallCount("source"))
+			require.Zero(t, lookup.CallCount("target"))
+		})
+	}
+}
+
+func TestSessionRoutesAPIAndRespectProbeThroughRelayPolicy(t *testing.T) {
+	apiMeta := apiattempt.APIAttemptMeta{
+		APIServiceID: 7, APIRouteID: 9, Protocol: apiattempt.APIProtocolHTTP, Method: http.MethodPost,
+	}
+	apiOpen := wire.Open{
+		Method: http.MethodPost, Path: "/api/items", Header: map[string][]string{}, TargetAgentID: "target",
+		RemainingNanos: int64(time.Second), ResponseWindow: testLimits().InitialStreamWindow, API: &apiMeta,
+	}
+	respectProbe := wire.Open{
+		ProbePolicy: wire.ProbeRespectBusinessPolicy, Method: http.MethodGet, Path: "/ping", Header: map[string][]string{},
+		TargetAgentID: "target", RemainingNanos: int64(time.Second), ResponseWindow: testLimits().InitialStreamWindow,
+	}
+	attemptMeta := validHubAttemptMeta()
+	attemptOpen := wire.Open{
+		Method: http.MethodPost, Path: attemptwire.EndpointPath, Header: map[string][]string{}, TargetAgentID: "target",
+		RemainingNanos: int64(time.Second), ResponseWindow: testLimits().InitialStreamWindow, Hop: 1, Attempt: &attemptMeta,
+	}
+	for _, test := range []struct {
+		name string
+		open wire.Open
+	}{
+		{name: "API", open: apiOpen},
+		{name: "respect probe", open: respectProbe},
+		{name: "attempt", open: attemptOpen},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lookup := newMutableRelayAgentLookup("source", "target")
+			lookup.SetRelayDirections("source", false, false)
+			lookup.SetRelayDirections("target", false, true)
+			hub := NewHub(HubOptions{InstanceID: "master-a", Agents: lookup, Limits: testLimits()})
+			source, sourceConn := liveTestSession(hub, "source", 1)
+			t.Cleanup(func() {
+				source.Cancel(errors.New("cleanup"))
+				require.NoError(t, hub.Close(context.Background()))
+			})
+			payload, err := wire.EncodeMetadata(test.open, testLimits().MaxMetadataBytes)
+			require.NoError(t, err)
+			require.NoError(t, source.handleOpen(wire.Frame{
+				Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: wire.StreamID{46}, Sequence: 1, Payload: payload,
+			}))
+			frame := decodeCapturedFrame(t, <-sourceConn.writes)
+			require.Equal(t, wire.FrameReset, frame.Type)
+			var reset wire.Reset
+			require.NoError(t, wire.DecodeMetadata(frame.Payload, &reset, testLimits().MaxMetadataBytes))
+			require.Equal(t, "policy", reset.Stage)
+			require.Equal(t, consts.RouteErrorSourceRelayOutboundDisabled, reset.Code)
+			require.Equal(t, 1, lookup.CallCount("source"))
+			require.Zero(t, lookup.CallCount("target"))
+		})
 	}
 }
 
@@ -669,7 +792,11 @@ func TestSessionStreamCapacityResetsAsOverloaded(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	source := newSession(h, conn, "source", 1, 1, limits, ctx, cancel)
 	go source.run()
-	payload, err := wire.EncodeMetadata(wire.Open{TargetAgentID: "target"}, limits.MaxMetadataBytes)
+	payload, err := wire.EncodeMetadata(wire.Open{
+		ProbePolicy: wire.ProbeBypassBusinessPolicy,
+		Method:      http.MethodGet, Path: "/ping", Header: map[string][]string{}, BodyLength: 0,
+		TargetAgentID: "target", RemainingNanos: int64(time.Second), ResponseWindow: limits.InitialStreamWindow,
+	}, limits.MaxMetadataBytes)
 	require.NoError(t, err)
 	sendSessionFrame(t, conn, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: wire.StreamID{33}, Sequence: 1, Payload: payload})
 	frame := receiveSessionFrame(t, conn, limits)

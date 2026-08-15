@@ -5,13 +5,26 @@ import { useTranslations } from "next-intl";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { ChannelForm } from "@/components/channel/channel-form";
 import { adminChannelAdapter } from "@/components/channel/channel-form/adapters/admin";
 import { useAgentRoutes } from "@/lib/api/agent-routes";
 
+function EditChannelPageSkeleton() {
+  const t = useTranslations("channels");
+
+  return (
+    <PageLayoutSkeleton
+      title={t("editTitle")}
+      description={t("editDescription")}
+      maxWidth="3xl"
+    />
+  );
+}
+
 export default function EditChannelPage() {
   return (
-    <Suspense fallback={<div className="flex items-center justify-center py-12 text-muted-foreground">Loading...</div>}>
+    <Suspense fallback={<EditChannelPageSkeleton />}>
       <EditChannelContent />
     </Suspense>
   );
@@ -39,7 +52,19 @@ function EditChannelContent() {
     }
   }, [idValid, router, t]);
 
-  if (!idValid) return null;
+  if (!idValid) {
+    return (
+      <PageLayout
+        title={t("editTitle")}
+        description={t("editDescription")}
+        maxWidth="3xl"
+      >
+        <p className="py-12 text-center text-muted-foreground">
+          {t("channelNotFound")}
+        </p>
+      </PageLayout>
+    );
+  }
 
   return (
     <PageLayout

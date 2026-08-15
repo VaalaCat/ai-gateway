@@ -2,16 +2,54 @@ package observability
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+// round1UsageQueueOpParams mirrors the a135b58 Agent RPC contract: queue_ids
+// is unknown and ignored, while a missing/null request_ids means retry/degrade all.
+type round1UsageQueueOpParams struct {
+	Op         string   `json:"op"`
+	RequestIDs []string `json:"request_ids,omitempty"`
+	Level      int      `json:"level,omitempty"`
+}
+
+func round1AgentQueueOp(raw []byte, queued []string) ([]string, error) {
+	var params round1UsageQueueOpParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, err
+	}
+	if params.Op == "drop" && len(params.RequestIDs) == 0 {
+		return nil, errors.New("drop requires explicit request_ids")
+	}
+	if params.RequestIDs == nil {
+		return append([]string(nil), queued...), nil
+	}
+	targets := make(map[string]struct{}, len(params.RequestIDs))
+	for _, id := range params.RequestIDs {
+		if !strings.HasPrefix(id, "llm:") && !strings.HasPrefix(id, "api:") {
+			id = "llm:" + id
+		}
+		targets[id] = struct{}{}
+	}
+	var touched []string
+	for _, id := range queued {
+		if _, ok := targets[id]; ok {
+			touched = append(touched, id)
+		}
+	}
+	return touched, nil
+}
 
 // newObsTestHandler 装配一个带 N 个在线 agent(按传入顺序建 DB 行,自增 ID 从 1 开始)的
 // Handler + 测试 Context,供 board/op 两组测试复用,减少 setupTestDB+db.Create+newTestContext
@@ -70,6 +108,119 @@ func TestPostDeliveryOp_DegradeValidation(t *testing.T) {
 	resp, err := h.PostDeliveryOp(appCtx, DeliveryOpRequest{AgentID: 1, Op: "degrade", RequestIDs: []string{"r1"}, Level: 2})
 	if err != nil || !called || resp.Affected != 1 {
 		t.Fatalf("degrade level=2 should be forwarded: resp=%+v err=%v called=%v", resp, err, called)
+	}
+}
+
+func TestPostDeliveryOpModernQueueIDsAreSafeForRound1Agent(t *testing.T) {
+	for _, operation := range []string{"retry_now", "degrade", "drop"} {
+		t.Run(operation, func(t *testing.T) {
+			h, appCtx := newObsTestHandler(t, []string{"uid-a"})
+			queued := []string{"llm:api:shared", "api:shared"}
+			var touched []string
+			h.HubCall = func(_ string, _ string, params any, _ time.Duration) (json.RawMessage, error) {
+				raw, err := json.Marshal(params)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var decoded map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				if string(decoded["request_ids"]) != "[]" {
+					t.Fatalf("round1 safety requires explicit request_ids: [], got %s", decoded["request_ids"])
+				}
+				if string(decoded["queue_ids"]) != `["api:shared"]` {
+					t.Fatalf("current Agent requires exact queue_ids, got %s", decoded["queue_ids"])
+				}
+				touched, err = round1AgentQueueOp(raw, queued)
+				if err != nil {
+					return nil, err
+				}
+				return json.RawMessage(fmt.Sprintf(`{"affected":%d}`, len(touched))), nil
+			}
+
+			level := 0
+			if operation == "degrade" {
+				level = 2
+			}
+			response, err := h.PostDeliveryOp(appCtx, DeliveryOpRequest{
+				AgentID: 1, Op: operation, QueueIDs: []string{"api:shared"},
+				RequestIDs: []string{"legacy-extra-must-not-union"}, Level: level,
+			})
+			if operation == "drop" {
+				if err == nil {
+					t.Fatal("round1 drop must fail closed instead of pretending success")
+				}
+			} else if err != nil || response.Affected != 0 {
+				t.Fatalf("round1 %s must be a safe no-op: response=%+v err=%v", operation, response, err)
+			}
+			if len(touched) != 0 {
+				t.Fatalf("round1 %s touched %v, want none", operation, touched)
+			}
+		})
+	}
+}
+
+func TestPostDeliveryOpPreservesBareLegacyRequestIDs(t *testing.T) {
+	for _, operation := range []string{"retry_now", "degrade", "drop"} {
+		t.Run(operation, func(t *testing.T) {
+			h, appCtx := newObsTestHandler(t, []string{"uid-a"})
+			appCtx.Logger = zap.NewNop()
+			var forwardedQueueIDs, forwardedRequestIDs []string
+			h.HubCall = func(_ string, _ string, params any, _ time.Duration) (json.RawMessage, error) {
+				payload := params.(map[string]any)
+				forwardedQueueIDs, _ = payload["queue_ids"].([]string)
+				forwardedRequestIDs, _ = payload["request_ids"].([]string)
+				return json.RawMessage(`{"affected":1}`), nil
+			}
+			level := 0
+			if operation == "degrade" {
+				level = 2
+			}
+			response, err := h.PostDeliveryOp(appCtx, DeliveryOpRequest{
+				AgentID: 1, Op: operation, RequestIDs: []string{"legacy-raw"}, Level: level,
+			})
+			if err != nil || response.Affected != 1 {
+				t.Fatalf("legacy %s: response=%+v err=%v", operation, response, err)
+			}
+			if forwardedQueueIDs != nil || len(forwardedRequestIDs) != 1 || forwardedRequestIDs[0] != "legacy-raw" {
+				t.Fatalf("legacy targets changed: queue_ids=%v request_ids=%v", forwardedQueueIDs, forwardedRequestIDs)
+			}
+		})
+	}
+}
+
+func TestPostDeliveryOpRejectsRound1TypedRequestIDsBeforeFanout(t *testing.T) {
+	for _, operation := range []string{"retry_now", "degrade", "drop"} {
+		for _, requestID := range []string{"llm:shared", "api:shared"} {
+			t.Run(operation+"/"+requestID[:3], func(t *testing.T) {
+				h, appCtx := newObsTestHandler(t, []string{"uid-a"})
+				core, logs := observer.New(zap.WarnLevel)
+				appCtx.Logger = zap.New(core)
+				calls := 0
+				h.HubCall = func(_ string, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+					calls++
+					return json.RawMessage(`{"affected":1}`), nil
+				}
+				level := 0
+				if operation == "degrade" {
+					level = 2
+				}
+				_, err := h.PostDeliveryOp(appCtx, DeliveryOpRequest{
+					AgentID: 1, Op: operation, RequestIDs: []string{requestID}, Level: level,
+				})
+				var apiErr *api.APIError
+				if !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadRequest || !strings.Contains(apiErr.Message, "refresh") {
+					t.Fatalf("error = %#v, want 400 refresh guidance", err)
+				}
+				if calls != 0 {
+					t.Fatalf("HubCall calls = %d, want 0", calls)
+				}
+				if entries := logs.FilterMessage("delivery-op drop executed").All(); len(entries) != 0 {
+					t.Fatalf("rejected stale request wrote %d success audit entries", len(entries))
+				}
+			})
+		}
 	}
 }
 

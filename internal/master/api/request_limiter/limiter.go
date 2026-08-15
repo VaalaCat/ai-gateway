@@ -3,6 +3,7 @@ package request_limiter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -27,6 +28,12 @@ func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[m
 }
 
 func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.RequestLimiter], error) {
+	h.mutationMu.Lock()
+	defer h.mutationMu.Unlock()
+
+	if !models.ValidRequestLimiterName(req.Name) {
+		return api.Created[models.RequestLimiter]{}, api.BadRequestError("name must be 1..128 bytes of trimmed UTF-8 without control characters", nil)
+	}
 	if !validMetric(req.Metric) {
 		return api.Created[models.RequestLimiter]{}, api.BadRequestError("metric must be 'concurrency' or 'rate'", nil)
 	}
@@ -71,17 +78,12 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 }
 
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.RequestLimiter, error) {
+	h.mutationMu.Lock()
+	defer h.mutationMu.Unlock()
+
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
-	q := dao.NewAdminQuery(daoCtx)
-	m := dao.NewAdminMutation(daoCtx)
-
-	existing, err := q.RequestLimiter().GetByID(uint(id))
-	if err != nil {
-		return models.RequestLimiter{}, api.NotFoundError(consts.ErrNotFound)
-	}
-
 	updates := req.Fields
 	if updates == nil {
 		updates = map[string]any{}
@@ -89,14 +91,36 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.RequestLimit
 	delete(updates, "id")
 	delete(updates, "created_at")
 
-	if err := validateUpdate(updates, existing); err != nil {
-		return models.RequestLimiter{}, err
-	}
-
-	if err := m.RequestLimiter().Update(uint(id), updates); err != nil {
+	err := dao.RunInCoreTx[dao.Context](daoCtx, func(txCtx dao.Context) error {
+		q := dao.NewAdminQuery(txCtx)
+		existing, err := q.RequestLimiter().GetByID(uint(id))
+		if err != nil {
+			return api.NotFoundError(consts.ErrNotFound)
+		}
+		if err := validateUpdate(updates, existing); err != nil {
+			return err
+		}
+		bindings, err := q.LimiterBinding().ListByLimiter(uint(id))
+		if err != nil {
+			return api.InternalError("list limiter bindings failed", err)
+		}
+		if err := validateAPIBoundLimiterUpdate(*existing, updates, bindings); err != nil {
+			return err
+		}
+		if err := dao.NewAdminMutation(txCtx).RequestLimiter().Update(uint(id), updates); err != nil {
+			return api.InternalError("update request limiter failed", err)
+		}
+		return nil
+	})
+	if err != nil {
+		var apiErr *api.APIError
+		if errors.As(err, &apiErr) {
+			return models.RequestLimiter{}, apiErr
+		}
 		return models.RequestLimiter{}, api.InternalError("update request limiter failed", err)
 	}
 
+	q := dao.NewAdminQuery(daoCtx)
 	limiter, err := q.RequestLimiter().GetByID(uint(id))
 	if err != nil {
 		return models.RequestLimiter{}, api.InternalError("get updated request limiter failed", err)
@@ -106,34 +130,82 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.RequestLimit
 	return *limiter, nil
 }
 
+func validateAPIBoundLimiterUpdate(
+	existing models.RequestLimiter,
+	updates map[string]any,
+	bindings []models.LimiterBinding,
+) error {
+	effective := existing
+	if keyBy, ok := updates["key_by"].(string); ok {
+		effective.KeyBy = keyBy
+	}
+	if channelScope, ok := updates["channel_scope"].(string); ok {
+		effective.ChannelScope = channelScope
+	}
+	for _, binding := range bindings {
+		if !models.IsAPILimiterTarget(binding.TargetType) {
+			continue
+		}
+		if !models.ValidAPILimiterBinding(effective, binding.TargetType) {
+			return api.BadRequestError("updated limiter is incompatible with existing API bindings", nil)
+		}
+	}
+	return nil
+}
+
 func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusResponse, error) {
+	h.mutationMu.Lock()
+	defer h.mutationMu.Unlock()
+
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
-	q := dao.NewAdminQuery(daoCtx)
-	m := dao.NewAdminMutation(daoCtx)
-
-	limiter, err := q.RequestLimiter().GetByID(uint(id))
+	var limiter models.RequestLimiter
+	err := dao.RunInCoreTx[dao.Context](daoCtx, func(txCtx dao.Context) error {
+		q := dao.NewAdminQuery(txCtx)
+		found, err := q.RequestLimiter().GetByID(uint(id))
+		if err != nil {
+			return api.NotFoundError(consts.ErrNotFound)
+		}
+		limiter = *found
+		m := dao.NewAdminMutation(txCtx)
+		// 先连带删绑定，再删 limiter（绑定无主则等于失效）。
+		if err := m.LimiterBinding().DeleteByLimiter(uint(id)); err != nil {
+			return api.InternalError("delete limiter bindings failed", err)
+		}
+		if err := m.RequestLimiter().Delete(uint(id)); err != nil {
+			return api.InternalError("delete request limiter failed", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return api.StatusResponse{}, api.NotFoundError(consts.ErrNotFound)
-	}
-
-	// 先连带删绑定，再删 limiter（绑定无主则等于失效）。
-	if err := m.LimiterBinding().DeleteByLimiter(uint(id)); err != nil {
-		return api.StatusResponse{}, api.InternalError("delete limiter bindings failed", err)
-	}
-	if err := m.RequestLimiter().Delete(uint(id)); err != nil {
+		var apiErr *api.APIError
+		if errors.As(err, &apiErr) {
+			return api.StatusResponse{}, apiErr
+		}
 		return api.StatusResponse{}, api.InternalError("delete request limiter failed", err)
 	}
 
-	_ = events.Publish(context.Background(), c.GetBus(), events.RequestLimiterDeleteTopic, *limiter)
+	_ = events.Publish(context.Background(), c.GetBus(), events.RequestLimiterDeleteTopic, limiter)
 	return api.StatusResponse{Status: "deleted"}, nil
 }
 
-// validateUpdate 只校验出现在 patch 里的字段（部分更新语义）；window_ms 的合法性
-// 取决于生效后的 metric——patch 里有就用 patch 的，否则沿用既有记录的，避免改成 rate
-// 后窗口仍为 0 导致 TryRate 行为异常，或单独清窗口而漏检。
+// validateUpdate 校验 patch 字段；name 额外校验 patch 后的生效值，防止历史非法名
+// 被 non-name patch 再次发布。window_ms 的合法性取决于生效后的 metric——patch 里
+// 有就用 patch 的，否则沿用既有记录的。
 func validateUpdate(updates map[string]any, existing *models.RequestLimiter) error {
+	effectiveName := existing.Name
+	if value, ok := updates["name"]; ok {
+		name, validType := value.(string)
+		if !validType {
+			return api.BadRequestError("name must be 1..128 bytes of trimmed UTF-8 without control characters", nil)
+		}
+		effectiveName = name
+	}
+	// behavior change: legacy invalid names must be repaired before any update can publish them again.
+	if !models.ValidRequestLimiterName(effectiveName) {
+		return api.BadRequestError("name must be 1..128 bytes of trimmed UTF-8 without control characters", nil)
+	}
 	if v, ok := updates["metric"]; ok {
 		if s, ok := v.(string); !ok || !validMetric(s) {
 			return api.BadRequestError("metric must be 'concurrency' or 'rate'", nil)

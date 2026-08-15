@@ -1,6 +1,8 @@
 package token
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"strconv"
@@ -12,11 +14,85 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
+
+func TestTokenAPIRoleUpdatePublishesOnlyAfterCommittedRoleChange(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	user := models.User{ID: 1, Username: "role-owner", Password: "x", GroupID: 1, Status: 1}
+	require.NoError(t, db.Create(&user).Error)
+	role := models.Role{Key: "invoker", Name: "Invoker", Status: 1}
+	require.NoError(t, db.Create(&role).Error)
+	token := seedToken(t, db, nil)
+
+	called := 0
+	_, err := events.Subscribe(ctx.GetBus(), events.TokenAPIRolesSyncedTopic,
+		func(_ context.Context, payload protocol.APIRoleSetInvalidate) error {
+			called++
+			require.Equal(t, token.ID, payload.PrincipalID)
+			var committed models.Token
+			require.NoError(t, db.First(&committed, token.ID).Error)
+			require.Equal(t, models.APIRoleModeExplicit, committed.APIRoleMode)
+			var bindings []models.RoleBinding
+			require.NoError(t, db.Where("principal_type = ? AND principal_id = ?", models.APIPrincipalToken, token.ID).Find(&bindings).Error)
+			require.Len(t, bindings, 1)
+			return nil
+		})
+	require.NoError(t, err)
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(token.ID), 10)}
+	req.SetBodyMap(map[string]any{
+		"api_role_mode": string(models.APIRoleModeExplicit),
+		"api_role_ids":  []any{float64(role.ID)},
+	})
+	_, err = h.Update(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, 1, called)
+
+	rename := UpdateRequest{ID: req.ID}
+	rename.SetBodyMap(map[string]any{"name": "renamed"})
+	_, err = h.Update(ctx, rename)
+	require.NoError(t, err)
+	require.Equal(t, 1, called)
+}
+
+func TestTokenAPIRoleMutationFailurePublishesNoRoleSetEvent(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	require.NoError(t, db.Create(&models.User{ID: 1, Username: "failed-owner", Password: "x", GroupID: 1, Status: 1}).Error)
+	token := seedToken(t, db, nil)
+	eventsSeen := 0
+	_, err := events.Subscribe(ctx.GetBus(), events.TokenAPIRolesSyncedTopic,
+		func(_ context.Context, _ protocol.APIRoleSetInvalidate) error {
+			eventsSeen++
+			return nil
+		})
+	require.NoError(t, err)
+	callbackName := "test:fail_token_api_role_update"
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table == "tokens" {
+			tx.AddError(errors.New("forced token mutation failure"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove(callbackName) })
+
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(token.ID), 10)}
+	req.SetBodyMap(map[string]any{
+		"api_role_mode": string(models.APIRoleModeExplicit),
+		"api_role_ids":  []any{},
+	})
+	_, err = h.Update(ctx, req)
+	require.Error(t, err)
+	require.Zero(t, eventsSeen)
+	var reloaded models.Token
+	require.NoError(t, db.First(&reloaded, token.ID).Error)
+	require.Equal(t, models.APIRoleModeInherit, reloaded.APIRoleMode)
+}
 
 func setupTokenUpdateTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	t.Helper()
@@ -25,6 +101,12 @@ func setupTokenUpdateTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 		t.Fatal(err)
 	}
 	if err := models.AutoMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&models.APIService{}, &models.APIBackend{}, &models.APIRoute{},
+		&models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.RoleBinding{},
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -467,5 +549,209 @@ func TestTokenUpdate_NormalUserCanSetBYOKOnly(t *testing.T) {
 	}
 	if !got.BYOKOnly {
 		t.Errorf("BYOKOnly = false, want true (normal user must be able to set it)")
+	}
+}
+
+func TestTokenUpdate_APIRoleFieldsMustAppearTogether(t *testing.T) {
+	for _, fields := range []map[string]any{
+		{"api_role_mode": "explicit"},
+		{"api_role_ids": []any{}},
+	} {
+		h, ctx, db := setupTokenUpdateTest(t)
+		tok := seedToken(t, db, nil)
+		setScope(ctx, true, 99)
+		req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+		req.SetBodyMap(fields)
+
+		_, err := h.Update(ctx, req)
+		requireAPIStatus(t, err, 400)
+	}
+}
+
+func TestTokenUpdate_AdminExplicitReplacesBindingsWithSortedUniqueIDs(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	tok := seedToken(t, db, nil)
+	setScope(ctx, true, 99)
+	roles := seedTokenAPIRoles(t, db,
+		models.Role{Key: "reader", Name: "Reader", Status: consts.StatusEnabled},
+		models.Role{Key: "manager", Name: "Manager", Status: consts.StatusEnabled},
+	)
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{
+		"api_role_mode": "explicit",
+		"api_role_ids":  []any{float64(roles[1].ID), float64(roles[0].ID), float64(roles[1].ID)},
+	})
+
+	got, err := h.Update(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.APIRoleMode != models.APIRoleModeExplicit {
+		t.Fatalf("APIRoleMode=%q want explicit", got.APIRoleMode)
+	}
+	require.Equal(t, []uint{roles[0].ID, roles[1].ID}, tokenBindingRoleIDs(t, db, tok.ID))
+}
+
+func TestTokenUpdate_InheritClearsBindings(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	tok := seedToken(t, db, nil)
+	setScope(ctx, true, 99)
+	role := seedTokenAPIRoles(t, db, models.Role{Key: "old", Name: "Old", Status: consts.StatusEnabled})[0]
+	require.NoError(t, db.Create(&models.RoleBinding{PrincipalType: models.APIPrincipalToken, PrincipalID: tok.ID, RoleID: role.ID}).Error)
+	require.NoError(t, db.Model(&models.Token{}).Where("id = ?", tok.ID).Update("api_role_mode", models.APIRoleModeExplicit).Error)
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"api_role_mode": "inherit", "api_role_ids": []any{}})
+
+	got, err := h.Update(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.Equal(t, models.APIRoleModeInherit, got.APIRoleMode)
+	require.Empty(t, tokenBindingRoleIDs(t, db, tok.ID))
+}
+
+func TestTokenUpdate_InheritRejectsNonEmptyRoleIDs(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	tok := seedToken(t, db, nil)
+	setScope(ctx, true, 99)
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"api_role_mode": "inherit", "api_role_ids": []any{float64(1)}})
+
+	_, err := h.Update(ctx, req)
+	requireAPIStatus(t, err, 400)
+}
+
+func TestTokenUpdate_NormalUserRoleIDsMustBeEffectiveSubset(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		requested  func([]models.Role) []any
+		wantStatus int
+	}{
+		{name: "allowed direct and group", requested: func(roles []models.Role) []any {
+			return []any{float64(roles[1].ID), float64(roles[0].ID)}
+		}},
+		{name: "rejects role outside effective set", requested: func(roles []models.Role) []any {
+			return []any{float64(roles[2].ID)}
+		}, wantStatus: 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ctx, db := setupTokenUpdateTest(t)
+			user := models.User{Username: "owner", Role: consts.RoleUser, GroupID: 7}
+			require.NoError(t, db.Create(&user).Error)
+			tok := models.Token{Name: "owned", Key: "sk-owned", UserID: user.ID, Status: consts.StatusEnabled}
+			require.NoError(t, db.Create(&tok).Error)
+			setScope(ctx, false, user.ID)
+			roles := seedTokenAPIRoles(t, db,
+				models.Role{Key: "direct", Name: "Direct", Status: consts.StatusEnabled},
+				models.Role{Key: "group", Name: "Group", Status: consts.StatusEnabled},
+				models.Role{Key: "other", Name: "Other", Status: consts.StatusEnabled},
+			)
+			require.NoError(t, db.Create(&models.RoleBinding{PrincipalType: models.APIPrincipalUser, PrincipalID: user.ID, RoleID: roles[0].ID}).Error)
+			require.NoError(t, db.Create(&models.RoleBinding{PrincipalType: models.APIPrincipalUserGroup, PrincipalID: user.GroupID, RoleID: roles[1].ID}).Error)
+			req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+			req.SetBodyMap(map[string]any{"api_role_mode": "explicit", "api_role_ids": tc.requested(roles)})
+
+			_, err := h.Update(ctx, req)
+			if tc.wantStatus != 0 {
+				requireAPIStatus(t, err, tc.wantStatus)
+				require.Empty(t, tokenBindingRoleIDs(t, db, tok.ID))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []uint{roles[0].ID, roles[1].ID}, tokenBindingRoleIDs(t, db, tok.ID))
+		})
+	}
+}
+
+func TestTokenUpdate_RejectsGatewayAdminDisabledAndMissingRoles(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		role models.Role
+		id   uint
+	}{
+		{name: "gateway admin", role: models.Role{Key: "gateway_admin", Name: "Gateway Admin", BuiltIn: true, Status: consts.StatusEnabled}},
+		{name: "disabled", role: models.Role{Key: "disabled", Name: "Disabled", Status: consts.StatusDisabled}},
+		{name: "managed", role: models.Role{Key: models.ManagedAPIRoleKey(models.APIPrincipalUser, 42), Name: "Managed", Kind: models.APIRoleKindManaged, Status: consts.StatusEnabled}},
+		{name: "missing", id: 999},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ctx, db := setupTokenUpdateTest(t)
+			tok := seedToken(t, db, nil)
+			setScope(ctx, true, 99)
+			roleID := tc.id
+			if roleID == 0 {
+				role := seedTokenAPIRoles(t, db, tc.role)[0]
+				roleID = role.ID
+			}
+			req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+			req.SetBodyMap(map[string]any{"api_role_mode": "explicit", "api_role_ids": []any{float64(roleID)}})
+
+			_, err := h.Update(ctx, req)
+			requireAPIStatus(t, err, 400)
+			require.Empty(t, tokenBindingRoleIDs(t, db, tok.ID))
+		})
+	}
+}
+
+func TestTokenUpdate_RollsBackModeAndBindingsWhenReplacementFails(t *testing.T) {
+	h, ctx, db := setupTokenUpdateTest(t)
+	tok := seedToken(t, db, nil)
+	setScope(ctx, true, 99)
+	roles := seedTokenAPIRoles(t, db,
+		models.Role{Key: "old", Name: "Old", Status: consts.StatusEnabled},
+		models.Role{Key: "new", Name: "New", Status: consts.StatusEnabled},
+	)
+	require.NoError(t, db.Create(&models.RoleBinding{PrincipalType: models.APIPrincipalToken, PrincipalID: tok.ID, RoleID: roles[0].ID}).Error)
+	callbackName := "test:fail_token_role_binding_create"
+	sentinel := errors.New("binding create failed")
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "role_bindings" {
+			tx.AddError(sentinel)
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Create().Remove(callbackName) })
+	req := UpdateRequest{ID: strconv.FormatUint(uint64(tok.ID), 10)}
+	req.SetBodyMap(map[string]any{"api_role_mode": "explicit", "api_role_ids": []any{float64(roles[1].ID)}})
+
+	_, err := h.Update(ctx, req)
+	if err == nil {
+		t.Fatal("expected replacement failure")
+	}
+	var reloaded models.Token
+	require.NoError(t, db.First(&reloaded, tok.ID).Error)
+	require.Equal(t, models.APIRoleModeInherit, reloaded.APIRoleMode)
+	require.Equal(t, []uint{roles[0].ID}, tokenBindingRoleIDs(t, db, tok.ID))
+}
+
+func seedTokenAPIRoles(t *testing.T, db *gorm.DB, roles ...models.Role) []models.Role {
+	t.Helper()
+	for i := range roles {
+		status := roles[i].Status
+		require.NoError(t, db.Create(&roles[i]).Error)
+		if status == consts.StatusDisabled {
+			require.NoError(t, db.Model(&models.Role{}).Where("id = ?", roles[i].ID).Update("status", consts.StatusDisabled).Error)
+			roles[i].Status = consts.StatusDisabled
+		}
+	}
+	return roles
+}
+
+func tokenBindingRoleIDs(t *testing.T, db *gorm.DB, tokenID uint) []uint {
+	t.Helper()
+	var ids []uint
+	require.NoError(t, db.Model(&models.RoleBinding{}).
+		Where("principal_type = ? AND principal_id = ?", models.APIPrincipalToken, tokenID).
+		Order("role_id ASC").Pluck("role_id", &ids).Error)
+	return ids
+}
+
+func requireAPIStatus(t *testing.T, err error, status int) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected API status %d", status)
+	}
+	apiErr, ok := err.(*api.APIError)
+	if !ok || apiErr.Status != status {
+		t.Fatalf("error=%#v want API status %d", err, status)
 	}
 }

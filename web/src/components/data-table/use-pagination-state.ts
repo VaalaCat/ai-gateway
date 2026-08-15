@@ -1,14 +1,26 @@
 "use client";
 
 import { useCallback } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
+import {
+  useSearchParamPatch,
+  type PatchSearchParams,
+} from "./use-search-param-patch";
+import { parsePositiveDecimal } from "@/lib/utils/decimal";
+
+export interface UsePaginationStateOptions {
+  patchSearchParams?: PatchSearchParams;
+  /** 当前分页页码使用的 URL key，默认 page。 */
+  pageKey?: string;
+  /** 当前分页大小使用的 URL key，默认 page_size。 */
+  pageSizeKey?: string;
+}
 
 /**
- * 只接受正整数,否则回退(拒绝负数/小数/NaN/0,防止 garbage pageCount 或后端 bind 400)。
+ * 只接受规范正十进制整数,否则回退(拒绝前导零、非十进制、unsafe、负数/小数/NaN/0)。
  */
 function readPositiveInt(raw: string | null, fallback: number): number {
-  const n = Number(raw);
-  return Number.isInteger(n) && n > 0 ? n : fallback;
+  return parsePositiveDecimal(raw) ?? fallback;
 }
 
 /**
@@ -18,25 +30,25 @@ function readPositiveInt(raw: string | null, fallback: number): number {
  */
 export function usePaginationState(
   defaultPageSize: number,
+  options: UsePaginationStateOptions = {},
 ): [number, number, (page: number, pageSize: number) => void] {
-  const router = useRouter();
-  const pathname = usePathname();
   const searchParams = useSearchParams();
+  const defaultPatchSearchParams = useSearchParamPatch();
+  const patchSearchParams = options.patchSearchParams ?? defaultPatchSearchParams;
+  const pageKey = options.pageKey ?? "page";
+  const pageSizeKey = options.pageSizeKey ?? "page_size";
 
-  const page = readPositiveInt(searchParams.get("page"), 1);
-  const pageSize = readPositiveInt(searchParams.get("page_size"), defaultPageSize);
+  const page = readPositiveInt(searchParams.get(pageKey), 1);
+  const pageSize = readPositiveInt(searchParams.get(pageSizeKey), defaultPageSize);
 
   const setPagination = useCallback(
     (nextPage: number, nextSize: number) => {
-      const params = new URLSearchParams(searchParams.toString());
-      if (nextPage <= 1) params.delete("page");
-      else params.set("page", String(nextPage));
-      if (nextSize === defaultPageSize) params.delete("page_size");
-      else params.set("page_size", String(nextSize));
-      const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname);
+      patchSearchParams({
+        [pageKey]: nextPage <= 1 ? undefined : nextPage,
+        [pageSizeKey]: nextSize === defaultPageSize ? undefined : nextSize,
+      });
     },
-    [searchParams, router, pathname, defaultPageSize],
+    [defaultPageSize, pageKey, pageSizeKey, patchSearchParams],
   );
 
   return [page, pageSize, setPagination];

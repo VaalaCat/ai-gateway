@@ -21,6 +21,9 @@ func setupBYOKTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.AutoMigrate(&models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.RoleBinding{}); err != nil {
+		t.Fatal(err)
+	}
 	if err := models.SeedDefaultUserGroup(db); err != nil {
 		t.Fatal(err)
 	}

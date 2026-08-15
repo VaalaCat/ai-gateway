@@ -58,6 +58,7 @@ function AgentRouteForm({
   const [values, setValues] = useState<AgentRouteFormValues>(() =>
     createAgentRouteFormValues(route),
   );
+  const [apiServiceID, setAPIServiceID] = useState("");
   const [invalidField, setInvalidField] = useState<InvalidField>(null);
   const submitLocked = useRef(false);
   const createMutation = useCreateAgentRoute();
@@ -105,6 +106,7 @@ function AgentRouteForm({
                 sourceType: sourceType as AgentRouteSourceType,
                 sourceId: "",
               });
+              setAPIServiceID("");
               setInvalidField(null);
             }}
           >
@@ -115,6 +117,8 @@ function AgentRouteForm({
               <SelectGroup>
                 <SelectItem value="token">{t("sourceToken")}</SelectItem>
                 <SelectItem value="channel">{t("sourceChannel")}</SelectItem>
+                <SelectItem value="api_service">{t("sourceAPIService")}</SelectItem>
+                <SelectItem value="api_route">{t("sourceAPIRoute")}</SelectItem>
               </SelectGroup>
             </SelectContent>
           </Select>
@@ -122,16 +126,52 @@ function AgentRouteForm({
 
         <Field data-invalid={invalidField === "source_id"}>
           <FieldLabel>{t("source")}</FieldLabel>
-          <EntityPicker
-            key={values.sourceType}
-            entity={values.sourceType}
-            value={values.sourceId}
-            onChange={(sourceId) => {
-              setValues({ ...values, sourceId });
-              setInvalidField(null);
-            }}
-            placeholder={values.sourceType === "token" ? t("selectToken") : t("selectChannel")}
-          />
+          {values.sourceType === "token" || values.sourceType === "channel" ? (
+            <EntityPicker
+              key={values.sourceType}
+              entity={values.sourceType}
+              value={values.sourceId}
+              onChange={(sourceId) => {
+                setValues({ ...values, sourceId });
+                setInvalidField(null);
+              }}
+              placeholder={values.sourceType === "token" ? t("selectToken") : t("selectChannel")}
+            />
+          ) : values.sourceType === "api_service" ? (
+            <EntityPicker
+              entity="api-service"
+              value={values.sourceId}
+              onChange={(sourceId) => {
+                setValues({ ...values, sourceId });
+                setInvalidField(null);
+              }}
+              placeholder={t("sourceAPIService")}
+            />
+          ) : (
+            <div className="grid gap-3">
+              <EntityPicker
+                entity="api-service"
+                value={apiServiceID}
+                onChange={(nextAPIServiceID) => {
+                  setAPIServiceID(nextAPIServiceID);
+                  setValues({ ...values, sourceId: "" });
+                  setInvalidField(null);
+                }}
+                placeholder={t("sourceAPIService")}
+              />
+              <EntityPicker
+                entity="api-route"
+                value={values.sourceId}
+                onChange={(sourceId) => {
+                  setValues({ ...values, sourceId });
+                  setInvalidField(null);
+                }}
+                apiServiceId={Number(apiServiceID) || undefined}
+                disabled={!Number.isSafeInteger(Number(apiServiceID)) || Number(apiServiceID) <= 0}
+                placeholder={t("sourceAPIRoute")}
+              />
+            </div>
+          )}
         </Field>
 
         <Field>

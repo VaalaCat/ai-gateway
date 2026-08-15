@@ -6,8 +6,8 @@ export const tokenTemplateAdapter: EntityAdapter<TokenTemplate> = {
   name: "token-template",
   // 用用户可访问的 enabled 接口(/token-templates):管理员和普通用户都能用,且只返回启用的模板。
   // 该接口无 search 参数;模板量小(≤100),按 name 客户端过滤。
-  useList: ({ search }: EntityListParams) => {
-    const q = useEnabledTokenTemplates();
+  useList: ({ search, enabled = true }: EntityListParams) => {
+    const q = useEnabledTokenTemplates({ enabled });
     const kw = (search ?? "").toLowerCase();
     const all = q.data?.data ?? [];
     const data = kw ? all.filter((t) => t.name.toLowerCase().includes(kw)) : all;

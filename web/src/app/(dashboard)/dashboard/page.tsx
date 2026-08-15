@@ -22,6 +22,7 @@ import type { TimeBucket } from "@/lib/types/observability";
 import { applySevenDayDefaultRange } from "@/lib/utils/observability-range";
 
 import { ObservabilityHeader } from "@/components/business/observability-header";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { MetricTrendChart, type TrendDim } from "@/components/business/metric-trend-chart";
 import { DonutChart } from "@/components/business/donut-chart";
 import { Leaderboard } from "@/components/business/leaderboard";
@@ -44,13 +45,10 @@ import {
 } from "@/lib/utils/format";
 
 export default function DashboardPage() {
+  const t = useTranslations("dashboard");
   return (
     <Suspense
-      fallback={
-        <div className="flex items-center justify-center py-12 text-muted-foreground">
-          Loading...
-        </div>
-      }
+      fallback={<PageLayoutSkeleton title={t("title")} description={t("description")} />}
     >
       <DashboardPageContent />
     </Suspense>

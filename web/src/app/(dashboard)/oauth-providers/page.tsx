@@ -12,6 +12,7 @@ import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
@@ -142,8 +143,11 @@ export default function OAuthProvidersPage() {
   ];
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">{t("title")}</h1>
+    <PageLayout
+      title={t("title")}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
       <DataTable
         columns={columns}
         data={providers}
@@ -186,6 +190,7 @@ export default function OAuthProvidersPage() {
         }
         onConfirm={handleDelete}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

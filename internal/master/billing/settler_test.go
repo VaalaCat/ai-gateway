@@ -641,16 +641,17 @@ func TestSettleOne_HasTrace(t *testing.T) {
 	settler := newTestSettler(appProv, bus, logger)
 	settler.Settle(context.Background(), "test-agent", []protocol.UsageLogEntry{
 		{
-			RequestID:        "req-trace-1",
-			UserID:           1,
-			TokenID:          1,
-			ChannelID:        1,
-			ModelName:        "gpt-4o",
-			PromptTokens:     100,
-			CompletionTokens: 50,
-			Status:           1,
-			TraceData:        `{"inbound_path":"/v1/chat/completions","outbound_path":"https://api.openai.com/v1/chat/completions"}`,
-			Timestamp:        time.Now().Unix(),
+			RequestID:            "req-trace-1",
+			UserID:               1,
+			TokenID:              1,
+			ChannelID:            1,
+			ModelName:            "gpt-4o",
+			PromptTokens:         100,
+			CompletionTokens:     50,
+			Status:               1,
+			TraceData:            `{"inbound_path":"/v1/chat/completions","outbound_path":"https://api.openai.com/v1/chat/completions"}`,
+			TraceRetentionStatus: models.TraceRetentionBodyTruncated,
+			Timestamp:            time.Now().Unix(),
 		},
 	})
 
@@ -660,6 +661,9 @@ func TestSettleOne_HasTrace(t *testing.T) {
 	}
 	if !log.HasTrace {
 		t.Fatalf("has_trace = false, want true")
+	}
+	if log.TraceRetentionStatus != models.TraceRetentionBodyTruncated {
+		t.Fatalf("trace_retention_status = %q, want body_truncated", log.TraceRetentionStatus)
 	}
 
 	var trace models.UsageLogTrace

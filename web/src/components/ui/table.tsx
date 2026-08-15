@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils"
 
 type TableContainerProps = React.ComponentProps<"div"> & {
   "data-testid"?: string
+  "data-expanded-row-width"?: "table" | "viewport"
 }
 
 type TableProps = React.ComponentProps<"table"> & {

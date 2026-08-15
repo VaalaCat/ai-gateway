@@ -17,6 +17,7 @@ const (
 )
 
 type ListRequest struct {
+	api.PaginationQuery
 	TokenID  uint                 `form:"token_id"`
 	Search   string               `form:"search"`
 	Provider string               `form:"provider"`
@@ -38,6 +39,9 @@ type UserMarketplaceListResponse struct {
 	SelectedToken UserSelectedTokenDTO      `json:"selected_token"`
 	Models        []UserMarketplaceModelDTO `json:"models"`
 	Filters       UserMarketplaceFiltersDTO `json:"filters"`
+	Total         int64                     `json:"total"`
+	Page          int                       `json:"page"`
+	PageSize      int                       `json:"page_size"`
 }
 
 // UserMarketplaceModelDTO is a product-only tagged union. Omitting the unused
@@ -199,11 +203,18 @@ func (h *Handler) List(c *app.Context, req ListRequest) (UserMarketplaceListResp
 	if err := validateListKind(req.Kind); err != nil {
 		return UserMarketplaceListResponse{}, err
 	}
-	composed, err := h.compose(c.RequestContext(), viewer, UsageWindow24Hours, false)
+	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
+	directory, err := h.buildMarketplaceDirectory(c.RequestContext(), viewer, false)
 	if err != nil {
 		return UserMarketplaceListResponse{}, err
 	}
-	return mapUserList(composed, req), nil
+	filters := userMarketplaceFilters(directory.real)
+	pageData, total := filterAndPageMarketplaceDirectory(directory, req, page, pageSize)
+	pageData, err = h.enrichMarketplacePerformance(c.RequestContext(), pageData, UsageWindow24Hours)
+	if err != nil {
+		return UserMarketplaceListResponse{}, err
+	}
+	return mapUserList(pageData, filters, total, page, pageSize), nil
 }
 
 func validateListKind(kind MarketplaceModelKind) error {
@@ -213,29 +224,32 @@ func validateListKind(kind MarketplaceModelKind) error {
 	return api.BadRequestError("invalid marketplace model kind", nil)
 }
 
-func mapUserList(composed composedMarketplace, req ListRequest) UserMarketplaceListResponse {
+func mapUserList(
+	pageData composedMarketplace,
+	filters UserMarketplaceFiltersDTO,
+	total int64,
+	page int,
+	pageSize int,
+) UserMarketplaceListResponse {
 	response := UserMarketplaceListResponse{
-		SelectedToken: mapUserSelectedToken(composed.viewer),
+		SelectedToken: mapUserSelectedToken(pageData.viewer),
 		Models:        []UserMarketplaceModelDTO{},
-		Filters:       userMarketplaceFilters(composed.real),
+		Filters:       filters,
+		Total:         total,
+		Page:          page,
+		PageSize:      pageSize,
 	}
-	for _, model := range composed.real {
-		if matchesRealListRequest(model, req) {
-			response.Models = append(response.Models, mapUserRealModel(model))
-		}
+	for _, model := range pageData.real {
+		response.Models = append(response.Models, mapUserRealModel(model))
 	}
-	for _, model := range composed.routing {
-		if matchesRoutingListRequest(model, req) {
-			response.Models = append(response.Models, mapUserRoutingModel(model))
-		}
+	for _, model := range pageData.routing {
+		response.Models = append(response.Models, mapUserRoutingModel(model))
 	}
 	sort.Slice(response.Models, func(i, j int) bool {
-		leftName := userMarketplaceModelName(response.Models[i])
-		rightName := userMarketplaceModelName(response.Models[j])
-		if leftName != rightName {
-			return leftName < rightName
-		}
-		return response.Models[i].Kind < response.Models[j].Kind
+		return marketplaceModelOrderLess(
+			userMarketplaceModelName(response.Models[i]), response.Models[i].Kind,
+			userMarketplaceModelName(response.Models[j]), response.Models[j].Kind,
+		)
 	})
 	return response
 }

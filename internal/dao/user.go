@@ -3,6 +3,7 @@ package dao
 import (
 	"errors"
 	"math"
+	"sort"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"gorm.io/gorm"
@@ -26,6 +27,7 @@ var ErrQuotaOutOfRange = errors.New("quota out of range")
 
 type AdminUserQuery interface {
 	GetByID(id uint) (*models.User, error)
+	ListByIDs(ids []uint) ([]models.User, error)
 	GetByUsername(username string) (*models.User, error)
 	GetByEmail(email string) (*models.User, error)
 	List(opts ListOptions, filter UserListFilter) ([]models.User, int64, error)
@@ -74,6 +76,32 @@ func (q *adminUserQuery) GetByID(id uint) (*models.User, error) {
 	var user models.User
 	err := q.ctx.GetCoreDB().First(&user, id).Error
 	return &user, err
+}
+
+func (q *adminUserQuery) ListByIDs(ids []uint) ([]models.User, error) {
+	ids = uniqueSortedUserIDs(ids)
+	if len(ids) == 0 {
+		return []models.User{}, nil
+	}
+	var users []models.User
+	err := q.ctx.GetCoreDB().Where("id IN ?", ids).Find(&users).Error
+	return users, err
+}
+
+func uniqueSortedUserIDs(ids []uint) []uint {
+	if len(ids) == 0 {
+		return nil
+	}
+	unique := append([]uint(nil), ids...)
+	sort.Slice(unique, func(i, j int) bool { return unique[i] < unique[j] })
+	end := 1
+	for _, id := range unique[1:] {
+		if id != unique[end-1] {
+			unique[end] = id
+			end++
+		}
+	}
+	return unique[:end]
 }
 
 func (q *adminUserQuery) ListByGroupIDs(groupIDs []uint) ([]models.User, error) {

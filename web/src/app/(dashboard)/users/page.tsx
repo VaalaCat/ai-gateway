@@ -15,6 +15,8 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/business/password-input";
 import { Label } from "@/components/ui/label";
@@ -43,16 +45,19 @@ import { StatusBadge, RoleBadge } from "@/components/business/status-badge";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { ProfileFormDialog } from "@/components/business/profile-form-dialog";
 import { DateCell } from "@/components/business/date-cell";
+import { MoneyCell } from "@/components/business/money-cell";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 
 import { useUsers, useCreateUser, useDeleteUser, useUpdateQuota } from "@/lib/api/users";
 import { formatErrorToast } from "@/lib/api/error-toast";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { User } from "@/lib/types";
 
 export default function UsersPage() {
+  const t = useTranslations("users");
   return (
-    <Suspense fallback={<div className="flex items-center justify-center py-12 text-muted-foreground">Loading...</div>}>
+    <Suspense fallback={<PageLayoutSkeleton title={t("title")} description={t("description")} />}>
       <UsersPageContent />
     </Suspense>
   );
@@ -117,6 +122,7 @@ function UsersPageContent() {
   }>({ username: "", password: "", role: "1", group_id: undefined });
   // Quota form state
   const [quotaDelta, setQuotaDelta] = useState("");
+  const quotaDeltaMoney = humanizeNumberUnit(quotaDelta, "quota");
   const linkedEditItem = targetId && targetId !== dismissedTargetId
     ? users.find((user) => String(user.id) === targetId) ?? null
     : null;
@@ -215,12 +221,12 @@ function UsersPageContent() {
     {
       accessorKey: "quota",
       header: ({ column }) => <DataTableColumnHeader column={column} title={t("quota")} />,
-      cell: ({ row }) => <span className="tabular-nums">$ {(row.original.quota / 100000).toFixed(2)}</span>,
+      cell: ({ row }) => <MoneyCell quota={row.original.quota} className="tabular-nums" />,
     },
     {
       accessorKey: "used_quota",
       header: ({ column }) => <DataTableColumnHeader column={column} title={t("usedQuota")} />,
-      cell: ({ row }) => <span className="tabular-nums">$ {(row.original.used_quota / 100000).toFixed(2)}</span>,
+      cell: ({ row }) => <MoneyCell quota={row.original.used_quota} className="tabular-nums" />,
     },
     {
       accessorKey: "created_at",
@@ -262,11 +268,13 @@ function UsersPageContent() {
   ];
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
+    <PageLayout
+      title={t("title")}
+      description={t("description")}
+      actions={<Button size="sm" onClick={() => { setCreateForm({ username: "", password: "", role: "1", group_id: undefined }); setCreateOpen(true); }}><Plus className="mr-2 size-4" />{t("createUser")}</Button>}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       <DataTable
         columns={columns}
@@ -282,15 +290,6 @@ function UsersPageContent() {
             spec={filterSpec}
             value={filterValues}
             onChange={setFilterValues}
-            primaryAction={
-              <Button size="sm" onClick={() => {
-                setCreateForm({ username: "", password: "", role: "1", group_id: undefined });
-                setCreateOpen(true);
-              }}>
-                <Plus className="mr-2 size-4" />
-                {t("createUser")}
-              </Button>
-            }
           />
         }
       />
@@ -394,9 +393,9 @@ function UsersPageContent() {
                 value={quotaDelta}
                 onChange={(e) => setQuotaDelta(e.target.value)}
               />
-              {quotaDelta && Number(quotaDelta) !== 0 && (
+              {quotaDeltaMoney && Number(quotaDelta) !== 0 && (
                 <p className="text-sm text-muted-foreground tabular-nums">
-                  ≈ $ {(Number(quotaDelta) / 100000).toFixed(4)} USD
+                  ≈ {quotaDeltaMoney} USD
                 </p>
               )}
               <p className="text-sm text-muted-foreground">{t("quotaDeltaHint")}</p>
@@ -414,6 +413,7 @@ function UsersPageContent() {
         onOpenChange={(open) => { if (!open) setDeleteItem(null); }}
         onConfirm={handleDelete}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

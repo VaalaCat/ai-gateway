@@ -31,18 +31,20 @@ const maxDirectIngressSessions = 256
 var errDirectIngressClosed = errors.New("direct tunnel ingress closed")
 
 type DirectTunnelIngressOptions struct {
-	TargetAgentID    string
-	FindAgentByID    func(string) *models.Agent
-	LoadAuth         func() agentproxy.ForwardAuthSnapshot
-	Limits           wire.Limits
-	TargetHandler    *TargetHandler
-	Logger           *zap.Logger
-	HandshakeTimeout time.Duration
-	DrainTimeout     time.Duration
-	MaxSessions      func() int
-	Now              func() time.Time
-	Metrics          *pkgmetrics.AgentRelayMetrics
-	Suppressor       *diagnostics.Suppressor
+	TargetAgentID          string
+	FindAgentByID          func(string) *models.Agent
+	LoadAuth               func() agentproxy.ForwardAuthSnapshot
+	Limits                 wire.Limits
+	TargetHandler          *TargetHandler
+	APITargetHandler       APITargetHandler
+	WebSocketTargetHandler WebSocketTargetHandler
+	Logger                 *zap.Logger
+	HandshakeTimeout       time.Duration
+	DrainTimeout           time.Duration
+	MaxSessions            func() int
+	Now                    func() time.Time
+	Metrics                *pkgmetrics.AgentRelayMetrics
+	Suppressor             *diagnostics.Suppressor
 }
 
 type directIngressConnection struct {
@@ -399,7 +401,9 @@ func (i *DirectTunnelIngress) Handle(c *gin.Context) {
 		Direction: SessionDirectionDirectIncoming, IngressKind: agentproxy.IngressKindDirectTunnel,
 		BoundSourceAgentID: claims.SourceAgentID, AdmissionDeadline: claims.ExpiresAt.Time,
 		SourceEnabled: i.sourceEnabled, TargetStatusEnabled: i.targetStatusEnabled,
-		TargetHandler: i.opts.TargetHandler, Logger: i.opts.Logger, Metrics: i.opts.Metrics,
+		TargetHandler: i.opts.TargetHandler, APITargetHandler: i.opts.APITargetHandler,
+		WebSocketTargetHandler: i.opts.WebSocketTargetHandler,
+		Logger:                 i.opts.Logger, Metrics: i.opts.Metrics,
 		directLogs: i.logs, directSourceAgentID: claims.SourceAgentID, directTargetAgentID: i.opts.TargetAgentID,
 	})
 	installed, notices := i.installSession(tracked, session, i.opts.Now(), i.currentRuntimeSettings())

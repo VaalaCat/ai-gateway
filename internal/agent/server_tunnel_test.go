@@ -183,12 +183,15 @@ func TestTunnelServerOldMasterDoesNotDialUntilBootstrapGenerationChanges(t *test
 
 func TestTunnelServerReportsRuntimeCapabilities(t *testing.T) {
 	t.Parallel()
+	// behavior change: Generic API execution capability is required before remote dispatch.
 	require.ElementsMatch(t, []string{
 		protocol.AgentCapabilityTunnelV2,
 		protocol.AgentCapabilityForwardV1,
 		protocol.AgentCapabilityDirectTunnelV1,
 		protocol.AgentCapabilityRelayHTTPPingV1,
 		protocol.AgentCapabilityTokenRoutingV1,
+		protocol.AgentCapabilityGenericAPIExecutionV1,
+		protocol.AgentCapabilityGenericAPIWebSocketV1,
 	}, agentRuntimeCapabilities())
 }
 

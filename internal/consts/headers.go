@@ -21,6 +21,7 @@ const (
 	HeaderXAgentHop           = "X-Vaala-Agent-Hop"
 	HeaderXAgentForwardTicket = "X-Vaala-Agent-Forward-Ticket"
 	HeaderXAgentRouteID       = "X-Vaala-Agent-Route-ID"
+	HeaderXServerTimeMs       = "X-Vaala-Server-Time-Ms"
 )
 
 // HTTP header values / prefixes.

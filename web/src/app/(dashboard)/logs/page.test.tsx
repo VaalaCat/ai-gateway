@@ -145,16 +145,26 @@ it("moves the shared date range into the page header without granularity", () =>
   expect(state.filterStateSpec).toHaveProperty("time");
 });
 
-it("writes a header date change atomically into the existing filter state", () => {
-  render(<LogsPage />);
+it("writes a header date change as one atomic exclusive filter range", () => {
+  const view = render(<LogsPage />);
 
   const onRangeChange = state.observabilityHeaderProps?.onRangeChange as
     | ((range: { start: number; end: number; gran: "day" }) => void)
     | undefined;
-  onRangeChange?.({ start: 100, end: 200, gran: "day" });
+  const selectedDayStart = Math.floor(new Date(2026, 6, 20, 0, 0, 0, 0).getTime() / 1000);
+  const selectedDayInclusiveEnd = Math.floor(new Date(2026, 6, 20, 23, 59, 59, 0).getTime() / 1000);
+  const nextDayStart = Math.floor(new Date(2026, 6, 21, 0, 0, 0, 0).getTime() / 1000);
+  onRangeChange?.({ start: selectedDayStart, end: selectedDayInclusiveEnd, gran: "day" });
 
   expect(state.setFilterValues).toHaveBeenCalledOnce();
-  expect(state.setFilterValues).toHaveBeenCalledWith({ start: 100, end: 200 });
+  expect(state.setFilterValues).toHaveBeenCalledWith({ start: selectedDayStart, end: nextDayStart });
+
+  state.filterValues = state.setFilterValues.mock.calls[0][0];
+  view.rerender(<LogsPage />);
+  expect(state.insightsParams).toEqual({ start: selectedDayStart, end: nextDayStart });
+  expect({ start: state.logsParams?.start, end: state.logsParams?.end }).toEqual(
+    state.insightsParams,
+  );
 });
 
 it("keeps log-only filters, auto refresh, and column visibility inside the table toolbar", () => {
@@ -238,6 +248,24 @@ it("sends a known local day as an exclusive API range", () => {
   );
   expect(tsToDateStr(nextDayStart - 1)).toBe("2026-07-20");
   expect(tsToDateStr(nextDayStart)).toBe("2026-07-21");
+});
+
+it("uses a shared-toolbar exclusive end without extending the API range by another day", () => {
+  const selectedDayStart = Math.floor(new Date(2026, 6, 20, 0, 0, 0, 0).getTime() / 1000);
+  const nextDayStart = Math.floor(new Date(2026, 6, 21, 0, 0, 0, 0).getTime() / 1000);
+  state.filterValues = { start: selectedDayStart, end: nextDayStart };
+
+  render(<LogsPage />);
+
+  expect(state.insightsParams).toEqual({ start: selectedDayStart, end: nextDayStart });
+  expect({ start: state.logsParams?.start, end: state.logsParams?.end }).toEqual(
+    state.insightsParams,
+  );
+  expect(state.observabilityHeaderProps?.range).toEqual({
+    start: selectedDayStart,
+    end: nextDayStart - 1,
+    gran: "day",
+  });
 });
 
 it("sorts and clamps a legacy range to seven inclusive days anchored at the end", () => {

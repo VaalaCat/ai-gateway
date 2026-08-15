@@ -33,12 +33,12 @@ const uploadBackoffBase = time.Second
 // usageIngestMaxBodyBytes),master 直接 400。uploader 把 400 当普通失败退避重试——但 PeekBatch
 // 永远返回队头那一批,同一批会被原样重试到天荒地老,投递永久卡死("poison batch")。
 //
-// 这里按“累计 marshal 字节数”在 uploader 侧提前切一刀,预算定得比服务端上限宽松得多
-// (4MiB vs 10MiB),给 UsageReport 外壳和其它字段的开销留足余量。
+// 这里先按完整 UsageReport marshal 大小判断预算；超限时只在 wire 副本上压缩 API
+// trace，再按预算切 batch。预算定得比服务端上限宽松得多(4MiB vs 10MiB)，给
+// UsageReport 外壳和其它字段的开销留足余量，pending/retry 原条目始终保持不变。
 //
-// 已知局限:切分保证“至少含 1 条”——哪怕单条本身已经超预算也必须尝试送出去(不能砍成 0 条,
-// 那样反而彻底卡死)。如果管理员把 trace_max_body_size 调到 ~5MiB 以上,单条日志自己就可能
-// 超过服务端 10MiB 上限,这种情况这里管不了,需要管理员按 trace 体积自行把上限设在合理范围。
+// 切分保证“至少含 1 条”——哪怕 API strip trace 后仍因顶层事实超预算，或 LLM 单条自身
+// 已经超预算，也必须尝试送出去，不能砍成 0 条让队列永久卡死。
 const uploadBatchByteBudget = 4 << 20 // 4MiB
 
 type UploaderConfig struct {
@@ -57,6 +57,8 @@ type UploaderConfig struct {
 	SlimBodyAfterAttempts    func() int // L1 门槛(取代 slimAfterConsecutiveFailures 常量)
 	StripTraceAfterAttempts  func() int // L2 门槛
 	BillingOnlyAfterAttempts func() int // L3 门槛
+	SupportsGenericAPIUsage  func() bool
+	Metrics                  GenericAPIUsageMetrics
 	Logger                   *zap.Logger
 }
 
@@ -92,12 +94,13 @@ type UsageUploader struct {
 	// 必须靠这张表才能覆盖到它们,见 dispatchRetryItems/sendRetryBatch 的登记时机。
 	inflightMu    sync.Mutex
 	inflightSeq   int64
-	inflightRetry map[int64][]protocol.UsageLogEntry
+	inflightRetry map[int64][]protocol.ReportedUsage
 	// mainInflight 只是计数:主队列在飞条目全程留在 store 里,不需要额外登记内容,
 	// 这里仅用于 InflightCount() 报出"当前有多少条正在传输中"。
 	mainInflight atomic.Int64
 
 	lastSuccessAt atomic.Int64
+	traceSlimmed  atomic.Uint64
 	lastErr       atomic.Value // string
 
 	// drainDone 在 Run 退出(含关停收尾)后关闭——Task 8 的磁盘快照器等它保证不会
@@ -125,12 +128,12 @@ func NewUsageUploader(cfg UploaderConfig) (*UsageUploader, error) {
 		client:           client,
 		url:              target,
 		kick:             make(chan struct{}, 1),
-		retry:            newRetryQueue(retryLimit, cfg.Logger),
+		retry:            newRetryQueue(retryLimit, cfg.Logger, cfg.Metrics),
 		concurrency:      intFnOr(cfg.Concurrency, 2),
 		slimBodyAfter:    intFnOr(cfg.SlimBodyAfterAttempts, 3),
 		stripTraceAfter:  intFnOr(cfg.StripTraceAfterAttempts, 6),
 		billingOnlyAfter: intFnOr(cfg.BillingOnlyAfterAttempts, 9),
-		inflightRetry:    make(map[int64][]protocol.UsageLogEntry),
+		inflightRetry:    make(map[int64][]protocol.ReportedUsage),
 		drainDone:        make(chan struct{}),
 		finalDrainDone:   make(chan struct{}),
 	}, nil
@@ -152,6 +155,10 @@ func (u *UsageUploader) CloseIdleConnections() {
 // RetryLen 是旁路重试队列里还有多少条待重试——Reporter.PendingCount 靠它把
 // "挪到旁路里的条目"也算进总的未送达计数,而不是让 Store.Len() 单独失真变小。
 func (u *UsageUploader) RetryLen() int { return u.retry.Len() }
+
+func (u *UsageUploader) supportsGenericAPIUsage() bool {
+	return u.cfg.SupportsGenericAPIUsage != nil && u.cfg.SupportsGenericAPIUsage()
+}
 
 // Run 是唤醒后调 cycle 的薄循环:cycle 失败(主队列本轮有失败)就按原来的节奏
 // 退避 sleep 一轮再回 select,成功则把 backoff 重置回基线——退避节奏本身跟以前
@@ -208,30 +215,37 @@ func (u *UsageUploader) drainMainQueue(ctx context.Context) bool {
 	}
 	anyFailed := false
 	for u.cfg.Store.Len() > 0 && ctx.Err() == nil {
-		peek := u.cfg.Store.PeekBatch(u.cfg.BatchMax)
-		var batches [][]protocol.UsageLogEntry
+		peek := u.cfg.Store.PeekReportedBatch(u.cfg.BatchMax, u.supportsGenericAPIUsage())
+		if len(peek) == 0 {
+			break
+		}
+		type mainBatch struct {
+			stored []protocol.ReportedUsage
+			wire   []protocol.ReportedUsage
+		}
+		var batches []mainBatch
 		for len(peek) > 0 && len(batches) < n {
-			b := trimBatchToByteBudget(peek, uploadBatchByteBudget)
-			batches = append(batches, b)
-			peek = peek[len(b):]
+			stored, wire := buildUploadBatch(u.cfg.AgentID, peek, uploadBatchByteBudget)
+			batches = append(batches, mainBatch{stored: stored, wire: wire})
+			peek = peek[len(stored):]
 		}
 		var mu sync.Mutex
 		roundFailed := false
 		p := pool.New().WithMaxGoroutines(n)
 		for _, batch := range batches {
 			p.Go(func() {
-				u.mainInflight.Add(int64(len(batch)))
-				defer u.mainInflight.Add(-int64(len(batch)))
-				if err := u.uploadOnce(ctx, batch); err != nil {
+				u.mainInflight.Add(int64(len(batch.stored)))
+				defer u.mainInflight.Add(-int64(len(batch.stored)))
+				if err := u.uploadOnce(ctx, batch.wire); err != nil {
 					now := time.Now()
 					// 先入旁路队列再从主队列摘除——中间崩溃留下的是"两边都有"(重发
 					// 经 master request_id 去重吸收),而不是"两边都无"(丢失)。
-					u.retry.push(batch, 1, now.Add(u.retryBackoff(1)))
-					u.cfg.Store.Ack(batch)
+					u.retry.pushReported(batch.stored, 1, now.Add(u.retryBackoff(1)))
+					u.cfg.Store.AckReported(batch.stored)
 					u.recordError(err)
 					// ④ 诊断打点:投递失败,批次挪去旁路重试,数据不丢
 					u.cfg.Logger.Warn("moving failed batch to retry queue",
-						zap.Strings("request_ids", requestIDs(batch)), zap.Int("batch_size", len(batch)),
+						zap.Strings("request_ids", requestIDs(batch.stored)), zap.Int("batch_size", len(batch.stored)),
 						zap.Int("pending", u.cfg.Store.Len()), zap.Int("retry_pending", u.retry.Len()),
 						zap.Error(err))
 					mu.Lock()
@@ -239,7 +253,7 @@ func (u *UsageUploader) drainMainQueue(ctx context.Context) bool {
 					mu.Unlock()
 					return
 				}
-				u.cfg.Store.Ack(batch)
+				u.cfg.Store.AckReported(batch.stored)
 				u.markSuccess()
 			})
 		}
@@ -258,7 +272,7 @@ func (u *UsageUploader) drainMainQueue(ctx context.Context) bool {
 // 拼在一起按字节预算发送。失败的各自重新 push 回旁路队列,attempts+1、退避相应
 // 拉长;送成功的已经被 due() 摘出队列,什么都不用做。
 func (u *UsageUploader) processRetryQueue(ctx context.Context) {
-	items := u.retry.due(time.Now(), u.cfg.BatchMax)
+	items := u.retry.dueReported(time.Now(), u.cfg.BatchMax, u.supportsGenericAPIUsage())
 	if len(items) == 0 {
 		return
 	}
@@ -300,6 +314,7 @@ func (u *UsageUploader) dispatchRetryItems(ctx context.Context, items []retryIte
 	sorted := make([]retryItem, len(items))
 	copy(sorted, items)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].attempts < sorted[j].attempts })
+	u.applyPersistentRetryDegrade(sorted)
 
 	var young, poisonCandidates []retryItem
 	for _, it := range sorted {
@@ -310,15 +325,21 @@ func (u *UsageUploader) dispatchRetryItems(ctx context.Context, items []retryIte
 		}
 	}
 
-	var batches [][]retryItem
+	type retryUploadBatch struct {
+		items []retryItem
+		wire  []protocol.ReportedUsage
+	}
+	var batches []retryUploadBatch
 	for len(young) > 0 {
-		entries := retryEntries(young)
-		trimmed := trimBatchToByteBudget(entries, uploadBatchByteBudget)
-		batches = append(batches, young[:len(trimmed)])
-		young = young[len(trimmed):]
+		wireCandidates := u.slimRetryWireCopies(young)
+		owned, wire := buildUploadBatch(u.cfg.AgentID, wireCandidates, uploadBatchByteBudget)
+		batches = append(batches, retryUploadBatch{items: young[:len(owned)], wire: wire})
+		young = young[len(owned):]
 	}
 	for _, it := range poisonCandidates {
-		batches = append(batches, []retryItem{it})
+		items := []retryItem{it}
+		_, wire := buildUploadBatch(u.cfg.AgentID, u.slimRetryWireCopies(items), uploadBatchByteBudget)
+		batches = append(batches, retryUploadBatch{items: items, wire: wire})
 	}
 
 	n := u.concurrency()
@@ -327,21 +348,15 @@ func (u *UsageUploader) dispatchRetryItems(ctx context.Context, items []retryIte
 	}
 	p := pool.New().WithMaxGoroutines(n)
 	for _, batch := range batches {
-		entries := u.degradeAndSlimForSend(batch)
-		id := u.trackInflight(entries)
-		p.Go(func() { u.sendRetryBatch(ctx, id, entries, batch, onFailure) })
+		id := u.trackInflight(batch.wire)
+		p.Go(func() { u.sendRetryBatch(ctx, id, batch.wire, batch.items, onFailure) })
 	}
 	p.Wait()
 }
 
-// degradeAndSlimForSend 就地把 batch 里每条按 attempts 对照阶梯门槛做持久降级
-// (billingOnlyAfter()→L3、stripTraceAfter()→L2;mutates batch[i].entry/degrade/
-// bytes,失败重新入队后级别保留),再判断是否需要 L1 送时瘦身(slimBodyAfter() +
-// slimOversizedEntries 的 >2MiB 门槛;不落 retryItem,只影响这次发送的副本)。
-// 返回本次实际要发送、也是 inflight registry 要登记的 entries。
-func (u *UsageUploader) degradeAndSlimForSend(batch []retryItem) []protocol.UsageLogEntry {
-	for i := range batch {
-		it := &batch[i]
+func (u *UsageUploader) applyPersistentRetryDegrade(items []retryItem) {
+	for index := range items {
+		it := &items[index]
 		target := DegradeNone
 		switch {
 		case it.attempts >= u.billingOnlyAfter():
@@ -351,21 +366,43 @@ func (u *UsageUploader) degradeAndSlimForSend(batch []retryItem) []protocol.Usag
 		}
 		if target > it.degrade {
 			before := it.bytes
-			applyDegrade(&it.entry, target)
+			applyUsageDegrade(&it.entry, target)
 			it.degrade = target
 			it.bytes = entrySize(it.entry)
 			u.cfg.Logger.Warn("degrading usage entry after repeated failures",
-				zap.String("request_id", it.entry.RequestID), zap.Int("level", target),
+				zap.String("request_id", it.entry.RequestID()), zap.Int("level", target),
 				zap.Int("attempts", it.attempts), zap.Int("bytes_before", before), zap.Int("bytes_after", it.bytes))
 		}
 	}
-	entries := retryEntries(batch)
-	for _, it := range batch {
+}
+
+func (u *UsageUploader) slimRetryWireCopies(items []retryItem) []protocol.ReportedUsage {
+	entries := retryEntries(items)
+	for _, it := range items {
 		if it.attempts >= u.slimBodyAfter() {
-			return slimOversizedEntries(entries, u.cfg.Logger)
+			var count uint64
+			for _, entry := range entries {
+				if entry.IsAPI() && entrySize(entry) > slimThresholdBytes {
+					count++
+				}
+			}
+			if count > 0 {
+				u.traceSlimmed.Add(count)
+				if u.cfg.Metrics != nil {
+					u.cfg.Metrics.AddTraceSlimmed(count)
+				}
+			}
+			return slimOversizedReportedUsage(entries, u.cfg.Logger)
 		}
 	}
 	return entries
+}
+
+func (u *UsageUploader) TraceSlimmed() uint64 {
+	if u == nil {
+		return 0
+	}
+	return u.traceSlimmed.Load()
 }
 
 // sendRetryBatch 投递一小批已经完成降级/瘦身的旁路条目。entries 是即将上线的
@@ -378,7 +415,7 @@ func (u *UsageUploader) degradeAndSlimForSend(batch []retryItem) []protocol.Usag
 // 旁路队列、也不在 inflight registry"的空档;失败路径下 onFailure 重新入队和
 // untrack 之间短暂的双计(retry 队列 + registry 都算到)是可接受的过冲,漏记的
 // 欠冲不可接受。
-func (u *UsageUploader) sendRetryBatch(ctx context.Context, id int64, entries []protocol.UsageLogEntry, batch []retryItem, onFailure retryFailureHandler) {
+func (u *UsageUploader) sendRetryBatch(ctx context.Context, id int64, entries []protocol.ReportedUsage, batch []retryItem, onFailure retryFailureHandler) {
 	err := u.uploadOnce(ctx, entries)
 	if err != nil {
 		u.recordError(err)
@@ -411,7 +448,7 @@ func (u *UsageUploader) LastError() string {
 // trackInflight 把一批已经被 due() 摘出旁路队列、即将上传的 entries 登记进
 // registry,返回登记用的 id(untrackInflight 用它精确摘除这一批,不影响同时在飞
 // 的其它批次)。
-func (u *UsageUploader) trackInflight(entries []protocol.UsageLogEntry) int64 {
+func (u *UsageUploader) trackInflight(entries []protocol.ReportedUsage) int64 {
 	u.inflightMu.Lock()
 	defer u.inflightMu.Unlock()
 	u.inflightSeq++
@@ -429,10 +466,10 @@ func (u *UsageUploader) untrackInflight(id int64) {
 
 // inflightEntries 返回当前所有旁路在飞条目(仅旁路——主队列在飞条目全程留在
 // store 里,快照/心跳走 store 就已经覆盖,不用在这里重复列出)。
-func (u *UsageUploader) inflightEntries() []protocol.UsageLogEntry {
+func (u *UsageUploader) inflightEntries() []protocol.ReportedUsage {
 	u.inflightMu.Lock()
 	defer u.inflightMu.Unlock()
-	var out []protocol.UsageLogEntry
+	var out []protocol.ReportedUsage
 	for _, ents := range u.inflightRetry {
 		out = append(out, ents...)
 	}
@@ -469,8 +506,8 @@ func (u *UsageUploader) FinalDrain(ctx context.Context) {
 }
 
 // retryEntries 摘出一批 retryItem 里的 UsageLogEntry,供 uploadOnce/slim 使用。
-func retryEntries(items []retryItem) []protocol.UsageLogEntry {
-	out := make([]protocol.UsageLogEntry, len(items))
+func retryEntries(items []retryItem) []protocol.ReportedUsage {
+	out := make([]protocol.ReportedUsage, len(items))
 	for i, it := range items {
 		out[i] = it.entry
 	}
@@ -478,10 +515,10 @@ func retryEntries(items []retryItem) []protocol.UsageLogEntry {
 }
 
 // requestIDs 摘出一批日志的 RequestID,供警告日志诊断用。
-func requestIDs(batch []protocol.UsageLogEntry) []string {
+func requestIDs(batch []protocol.ReportedUsage) []string {
 	ids := make([]string, len(batch))
 	for i, e := range batch {
-		ids[i] = e.RequestID
+		ids[i] = e.RequestID()
 	}
 	return ids
 }
@@ -490,7 +527,7 @@ func requestIDs(batch []protocol.UsageLogEntry) []string {
 func retryItemIDs(batch []retryItem) []string {
 	ids := make([]string, len(batch))
 	for i, it := range batch {
-		ids[i] = it.entry.RequestID
+		ids[i] = it.entry.RequestID()
 	}
 	return ids
 }
@@ -516,17 +553,20 @@ func (u *UsageUploader) retryBackoff(attempts int) time.Duration {
 // 主队列收尾完再尽力对旁路队列里的全部条目各投一次(见 drainRetryOnShutdown)。
 func (u *UsageUploader) drainOnShutdown(ctx context.Context) {
 	for u.cfg.Store.Len() > 0 {
-		batch := u.cfg.Store.PeekBatch(u.cfg.BatchMax)
-		batch = trimBatchToByteBudget(batch, uploadBatchByteBudget)
-		u.mainInflight.Add(int64(len(batch)))
-		err := u.uploadOnce(ctx, batch)
-		u.mainInflight.Add(-int64(len(batch)))
+		peek := u.cfg.Store.PeekReportedBatch(u.cfg.BatchMax, u.supportsGenericAPIUsage())
+		if len(peek) == 0 {
+			break
+		}
+		stored, wire := buildUploadBatch(u.cfg.AgentID, peek, uploadBatchByteBudget)
+		u.mainInflight.Add(int64(len(stored)))
+		err := u.uploadOnce(ctx, wire)
+		u.mainInflight.Add(-int64(len(stored)))
 		if err != nil {
 			u.cfg.Logger.Warn("final drain on shutdown failed, giving up",
 				zap.Int("pending", u.cfg.Store.Len()), zap.Error(err))
 			break
 		}
-		u.cfg.Store.Ack(batch)
+		u.cfg.Store.AckReported(stored)
 	}
 	// 主队列收尾无论是排空成功还是中途放弃,旁路重试队列都必须走一遍——否则
 	// master 挂掉时旁路里还没到期的条目会随着进程退出悄悄消失,连一条日志都
@@ -570,26 +610,64 @@ func (u *UsageUploader) drainRetryOnShutdown(ctx context.Context) {
 	})
 }
 
-// trimBatchToByteBudget 把 batch 按累计 marshal 字节数砍到 budget 以内,但至少保留 1 条——
-// 哪怕队首那一条自己已经超预算,也要作为单条 batch 尝试投递,总好过整批一条都不发。
-// 被砍掉的尾部条目仍留在 store 里,下一次循环的 PeekBatch(Store.Len()>0 已经保证会有
-// 下一次)会再捞到它们。
-func trimBatchToByteBudget(batch []protocol.UsageLogEntry, budget int) []protocol.UsageLogEntry {
-	if len(batch) <= 1 {
-		return batch
+// buildUploadBatch first slims API trace data on a wire-only copy when the
+// complete typed envelope exceeds budget, then selects the largest fitting
+// prefix. stored always points at the untouched queue entries used for Ack or
+// retry; a single entry is returned even when its non-trace facts exceed budget.
+func buildUploadBatch(agentID string, batch []protocol.ReportedUsage, budget int) (stored, wire []protocol.ReportedUsage) {
+	if len(batch) == 0 {
+		return nil, nil
 	}
-	total := 0
-	for i, e := range batch {
-		size := 0
-		if b, err := json.Marshal(e); err == nil {
-			size = len(b)
-		}
-		if i > 0 && total+size > budget {
-			return batch[:i]
-		}
-		total += size
+	wire = batch
+	if usageReportSize(agentID, wire) > budget {
+		wire = slimAPITraceCopiesForWireBudget(wire, budget)
 	}
-	return batch
+	if len(wire) == 1 || usageReportSize(agentID, wire) <= budget {
+		return batch, wire
+	}
+
+	low, high, fit := 1, len(wire)-1, 1
+	for low <= high {
+		middle := low + (high-low)/2
+		if usageReportSize(agentID, wire[:middle]) <= budget {
+			fit = middle
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	return batch[:fit], wire[:fit]
+}
+
+func usageReportSize(agentID string, batch []protocol.ReportedUsage) int {
+	report, err := usageReport(agentID, batch)
+	if err != nil {
+		return int(^uint(0) >> 1)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		return int(^uint(0) >> 1)
+	}
+	return len(encoded)
+}
+
+func slimAPITraceCopiesForWireBudget(batch []protocol.ReportedUsage, budget int) []protocol.ReportedUsage {
+	out := append([]protocol.ReportedUsage(nil), batch...)
+	target := budget / 2
+	for index, usage := range batch {
+		if usage.API == nil || usage.API.Trace == nil {
+			continue
+		}
+		entry := *usage.API
+		slim, err := apiUsageResult(entry).Slim(target)
+		if err != nil {
+			entry.Trace = nil
+		} else {
+			applyAPIUsageResult(&entry, slim)
+		}
+		out[index] = protocol.ReportedUsage{API: &entry}
+	}
+	return out
 }
 
 // uploadOnce marshals batch and posts it gzip-compressed (the measured ~12KB/s agent
@@ -599,15 +677,19 @@ func trimBatchToByteBudget(batch []protocol.UsageLogEntry, budget int) []protoco
 // plaintext bytes are resent uncompressed exactly once. A plaintext retry that also
 // fails non-2xx is a genuinely bad request, not a stale master, so it is not retried
 // again here — the caller's normal batch-level retry/degrade path takes over.
-func (u *UsageUploader) uploadOnce(ctx context.Context, batch []protocol.UsageLogEntry) error {
-	plain, err := json.Marshal(protocol.UsageReport{AgentID: u.cfg.AgentID, Logs: batch})
+func (u *UsageUploader) uploadOnce(ctx context.Context, batch []protocol.ReportedUsage) error {
+	report, err := usageReport(u.cfg.AgentID, batch)
 	if err != nil {
 		return err
 	}
-	status, err := u.postReport(ctx, plain, true)
+	plain, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	status, response, err := u.postReport(ctx, plain, true)
 	if err == nil && (status == http.StatusBadRequest || status == http.StatusUnsupportedMediaType) {
 		u.cfg.Logger.Warn("gzip upload rejected, falling back to plaintext once", zap.Int("status", status))
-		status, err = u.postReport(ctx, plain, false)
+		status, response, err = u.postReport(ctx, plain, false)
 	}
 	if err != nil {
 		return err
@@ -615,7 +697,7 @@ func (u *UsageUploader) uploadOnce(ctx context.Context, batch []protocol.UsageLo
 	if status < 200 || status > 299 {
 		return fmt.Errorf("usage ingest returned %d", status)
 	}
-	return nil
+	return validateUsageAcceptance(response, len(report.Logs), len(report.APIRequests))
 }
 
 // postReport sends plain once, optionally gzip-compressed, and returns the HTTP status
@@ -623,7 +705,7 @@ func (u *UsageUploader) uploadOnce(ctx context.Context, batch []protocol.UsageLo
 // per-request timeout (uploadTimeoutFor) is sized off the actual bytes going out on the
 // wire — compressed when useGzip succeeds — so gzip'd uploads aren't saddled with a
 // timeout budget computed for the much larger uncompressed body.
-func (u *UsageUploader) postReport(ctx context.Context, plain []byte, useGzip bool) (int, error) {
+func (u *UsageUploader) postReport(ctx context.Context, plain []byte, useGzip bool) (int, []byte, error) {
 	body := plain
 	encoding := ""
 	if useGzip {
@@ -640,7 +722,7 @@ func (u *UsageUploader) postReport(ctx context.Context, plain []byte, useGzip bo
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.url, bytes.NewReader(body))
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if encoding != "" {
@@ -650,10 +732,50 @@ func (u *UsageUploader) postReport(ctx context.Context, plain []byte, useGzip bo
 	req.Header.Set(consts.HeaderXAgentSecret, u.cfg.Secret)
 	resp, err := u.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 	// 读干净 body 才能让底层连接被 keep-alive 复用,否则每次都新建连接。
-	io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, nil
+	response, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, response, nil
+}
+
+func usageReport(agentID string, batch []protocol.ReportedUsage) (protocol.UsageReport, error) {
+	report := protocol.UsageReport{AgentID: agentID}
+	for _, item := range batch {
+		if !item.Valid() {
+			return protocol.UsageReport{}, fmt.Errorf("invalid reported usage item")
+		}
+		if item.LLM != nil {
+			report.Logs = append(report.Logs, *item.LLM)
+		} else {
+			report.APIRequests = append(report.APIRequests, *item.API)
+		}
+	}
+	return report, nil
+}
+
+func validateUsageAcceptance(response []byte, wantLogs, wantAPI int) error {
+	var accepted struct {
+		Accepted            *int `json:"accepted"`
+		AcceptedLogs        *int `json:"accepted_logs"`
+		AcceptedAPIRequests *int `json:"accepted_api_requests"`
+	}
+	if len(response) == 0 || json.Unmarshal(response, &accepted) != nil {
+		return fmt.Errorf("usage ingest returned invalid acceptance body")
+	}
+	if accepted.AcceptedLogs != nil && accepted.AcceptedAPIRequests != nil {
+		if *accepted.AcceptedLogs == wantLogs && *accepted.AcceptedAPIRequests == wantAPI {
+			return nil
+		}
+		return fmt.Errorf("usage ingest acceptance mismatch: logs=%d/%d api=%d/%d",
+			*accepted.AcceptedLogs, wantLogs, *accepted.AcceptedAPIRequests, wantAPI)
+	}
+	if wantAPI == 0 && accepted.Accepted != nil && *accepted.Accepted == wantLogs {
+		return nil
+	}
+	return fmt.Errorf("usage ingest response omitted required acceptance counts")
 }

@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
@@ -26,23 +25,30 @@ const (
 )
 
 var switchFrameRoutes = map[wire.Type]routeDirection{
-	wire.FrameOpen:          routeSourceToTarget,
-	wire.FrameReady:         routeTargetToSource,
-	wire.FrameCommit:        routeSourceToTarget,
-	wire.FrameCommitted:     routeTargetToSource,
-	wire.FrameRequestData:   routeSourceToTarget,
-	wire.FrameRequestEnd:    routeSourceToTarget,
-	wire.FrameHeaders:       routeTargetToSource,
-	wire.FrameResponseData:  routeTargetToSource,
-	wire.FrameAttemptResult: routeTargetToSource,
-	wire.FrameEnd:           routeTargetToSource,
-	wire.FrameCancel:        routeSourceToTarget | routeTargetToSource,
-	wire.FrameReset:         routeSourceToTarget | routeTargetToSource,
-	wire.FrameWindowUpdate:  routeSourceToTarget | routeTargetToSource,
+	wire.FrameOpen:                  routeSourceToTarget,
+	wire.FrameReady:                 routeTargetToSource,
+	wire.FrameCommit:                routeSourceToTarget,
+	wire.FrameCommitted:             routeTargetToSource,
+	wire.FrameRequestData:           routeSourceToTarget,
+	wire.FrameRequestEnd:            routeSourceToTarget,
+	wire.FrameHeaders:               routeTargetToSource,
+	wire.FrameResponseData:          routeTargetToSource,
+	wire.FrameAttemptResult:         routeTargetToSource,
+	wire.FrameEnd:                   routeTargetToSource,
+	wire.FrameAPIResult:             routeTargetToSource,
+	wire.FrameCancel:                routeSourceToTarget | routeTargetToSource,
+	wire.FrameReset:                 routeSourceToTarget | routeTargetToSource,
+	wire.FrameWindowUpdate:          routeSourceToTarget | routeTargetToSource,
+	wire.FrameWebSocketMessageStart: routeSourceToTarget | routeTargetToSource,
+	wire.FrameWebSocketMessageData:  routeSourceToTarget | routeTargetToSource,
+	wire.FrameWebSocketMessageEnd:   routeSourceToTarget | routeTargetToSource,
+	wire.FrameWebSocketPing:         routeSourceToTarget | routeTargetToSource,
+	wire.FrameWebSocketPong:         routeSourceToTarget | routeTargetToSource,
+	wire.FrameWebSocketClose:        routeSourceToTarget | routeTargetToSource,
 }
 
 var terminalFrames = map[wire.Type]struct{}{
-	wire.FrameEnd: {}, wire.FrameCancel: {}, wire.FrameReset: {},
+	wire.FrameEnd: {}, wire.FrameAPIResult: {}, wire.FrameCancel: {}, wire.FrameReset: {},
 }
 
 type switchQueue struct {
@@ -56,6 +62,8 @@ const (
 	switchStreamUnknown switchStreamKind = iota
 	switchStreamAttempt
 	switchStreamProbe
+	switchStreamAPI
+	switchStreamWebSocket
 )
 
 type responsePhase uint8
@@ -64,6 +72,7 @@ const (
 	responseWaitingHeaders responsePhase = iota
 	responseStreaming
 	responseResult
+	responseEnd
 )
 
 type Switch struct {
@@ -173,7 +182,7 @@ func (s *Switch) accept(from *Session, generation uint64, frame wire.Frame) erro
 	if from != s.source && from != s.target {
 		return errInvalidDirection
 	}
-	if err := validateFramePayloadHardLimit(frame); err != nil {
+	if err := validateFramePayloadHardLimit(frame, s.limits); err != nil {
 		return err
 	}
 	if frame.Type == wire.FrameOpen {
@@ -212,11 +221,9 @@ func (s *Switch) accept(from *Session, generation uint64, frame wire.Frame) erro
 	return nil
 }
 
-func validateFramePayloadHardLimit(frame wire.Frame) error {
-	if len(frame.Payload) > wire.MaxV2PayloadBytes {
-		return errProtocol
-	}
-	if frame.Type == wire.FrameAttemptResult && len(frame.Payload) > attemptwire.MaxResultWireBytes {
+func validateFramePayloadHardLimit(frame wire.Frame, limits wire.Limits) error {
+	limit, err := wire.FramePayloadLimit(frame.Type, limits)
+	if err != nil || int64(len(frame.Payload)) > limit {
 		return errProtocol
 	}
 	return nil
@@ -257,6 +264,15 @@ func (s *Switch) prepareOpen(frame wire.Frame) (wire.Frame, error) {
 		copied := *open.Attempt
 		open.Attempt = &copied
 	}
+	if open.API != nil {
+		copied := *open.API
+		copied.RequestTrailerKeys = append([]string(nil), open.API.RequestTrailerKeys...)
+		open.API = &copied
+	}
+	if open.WebSocket != nil {
+		copied := *open.WebSocket
+		open.WebSocket = &copied
+	}
 	payload, err := wire.EncodeMetadata(open, s.limits.MaxMetadataBytes)
 	if err != nil {
 		return wire.Frame{}, err
@@ -270,16 +286,26 @@ func (s *Switch) prepareOpen(frame wire.Frame) (wire.Frame, error) {
 }
 
 func switchKindForOpen(open wire.Open) (switchStreamKind, error) {
-	if open.Attempt == nil {
-		if open.IsConnectivityProbe() {
-			return switchStreamProbe, nil
+	kind, err := open.StreamKind()
+	if err != nil {
+		return switchStreamUnknown, errProtocol
+	}
+	switch kind {
+	case wire.OpenStreamProbe:
+		return switchStreamProbe, nil
+	case wire.OpenStreamAttempt:
+		return switchStreamAttempt, nil
+	case wire.OpenStreamAPI:
+		if open.API != nil && open.API.Protocol == "websocket" {
+			if open.WebSocket == nil {
+				return switchStreamUnknown, errProtocol
+			}
+			return switchStreamWebSocket, nil
 		}
+		return switchStreamAPI, nil
+	default:
 		return switchStreamUnknown, errProtocol
 	}
-	if open.ProbePolicy != "" {
-		return switchStreamUnknown, errProtocol
-	}
-	return switchStreamAttempt, nil
 }
 
 func (s *Switch) validateResponseOrder(from *Session, frameType wire.Type) error {
@@ -289,6 +315,9 @@ func (s *Switch) validateResponseOrder(from *Session, frameType wire.Type) error
 	s.sequenceMu.Lock()
 	defer s.sequenceMu.Unlock()
 	if s.streamKind == switchStreamUnknown {
+		return nil
+	}
+	if s.streamKind == switchStreamWebSocket {
 		return nil
 	}
 	switch frameType {
@@ -308,12 +337,21 @@ func (s *Switch) validateResponseOrder(from *Session, frameType wire.Type) error
 		s.responsePhase = responseResult
 	case wire.FrameEnd:
 		expected := responseResult
-		if s.streamKind == switchStreamProbe {
+		switch s.streamKind {
+		case switchStreamProbe, switchStreamAPI:
 			expected = responseStreaming
 		}
 		if s.responsePhase != expected {
 			return errProtocol
 		}
+		if s.streamKind == switchStreamAPI {
+			s.responsePhase = responseEnd
+		}
+	case wire.FrameAPIResult:
+		if s.streamKind != switchStreamAPI || s.responsePhase != responseEnd {
+			return errProtocol
+		}
+		s.responsePhase = responseResult
 	}
 	return nil
 }
@@ -406,7 +444,7 @@ func (s *Switch) forward(queue *switchQueue) {
 				return
 			}
 			s.markDelivered(queue.destination, item.frame)
-			if terminalFrame(item.frame.Type) {
+			if s.terminalFrame(item.frame.Type) {
 				s.markTerminalForwarded()
 				s.Cancel(errSessionClosed)
 				return
@@ -429,6 +467,25 @@ func (s *Switch) releaseQueue(queue *switchQueue) {
 func terminalFrame(frameType wire.Type) bool {
 	_, terminal := terminalFrames[frameType]
 	return terminal
+}
+
+func (s *Switch) terminalFrame(frameType wire.Type) bool {
+	if !terminalFrame(frameType) {
+		return false
+	}
+	s.sequenceMu.Lock()
+	kind := s.streamKind
+	s.sequenceMu.Unlock()
+	if frameType == wire.FrameEnd {
+		return kind != switchStreamAPI
+	}
+	if frameType == wire.FrameAPIResult {
+		return kind == switchStreamAPI || kind == switchStreamWebSocket
+	}
+	if frameType == wire.FrameWebSocketClose {
+		return kind == switchStreamWebSocket
+	}
+	return true
 }
 
 func (s *Switch) Cancel(cause error) {

@@ -120,11 +120,14 @@ export function useBYOKChannel(id: number) {
   });
 }
 
-export function useBYOKAvailableModels() {
+export function useBYOKAvailableModels(
+  options?: Omit<UseQueryOptions<{ models: string[] }>, "queryKey" | "queryFn">,
+) {
   return useQuery({
     queryKey: ["byok-available-models"],
     queryFn: () =>
       api.get<{ models: string[] }>("/private-channels/available-models"),
+    ...options,
   });
 }
 

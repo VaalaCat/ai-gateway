@@ -21,6 +21,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent"
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/enrollment"
+	agentgenericapi "github.com/VaalaCat/ai-gateway/internal/agent/genericapi"
 	relayplan "github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -29,6 +30,14 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	apiagent "github.com/VaalaCat/ai-gateway/internal/master/api/agent"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/agent_route"
+	apiaccessgrant "github.com/VaalaCat/ai-gateway/internal/master/api/api_access_grant"
+	apibackend "github.com/VaalaCat/ai-gateway/internal/master/api/api_backend"
+	apiCatalog "github.com/VaalaCat/ai-gateway/internal/master/api/api_catalog"
+	apirequestlog "github.com/VaalaCat/ai-gateway/internal/master/api/api_request_log"
+	apirole "github.com/VaalaCat/ai-gateway/internal/master/api/api_role"
+	apiroute "github.com/VaalaCat/ai-gateway/internal/master/api/api_route"
+	apiservice "github.com/VaalaCat/ai-gateway/internal/master/api/api_service"
+	apiupstream "github.com/VaalaCat/ai-gateway/internal/master/api/api_upstream"
 	apibilling "github.com/VaalaCat/ai-gateway/internal/master/api/billing"
 	apicache "github.com/VaalaCat/ai-gateway/internal/master/api/cache"
 	apicapability "github.com/VaalaCat/ai-gateway/internal/master/api/capability"
@@ -53,6 +62,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api/token_template"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/user"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/user_group"
+	masterapiusage "github.com/VaalaCat/ai-gateway/internal/master/apiusage"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
 	"github.com/VaalaCat/ai-gateway/internal/master/channelautodisable"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
@@ -139,10 +149,13 @@ type Server struct {
 	App                     app.Application
 	MetricsRegistry         *prometheus.Registry
 	RelayMetrics            *pkgmetrics.AgentRelayMetrics
+	GenericAPIMetrics       *agentgenericapi.APIMetrics
 	StatsCache              *dao.StatsCache
 	ModelPerformanceCache   *apimodelmarketplace.GlobalModelPerformanceCache
 	ModelMarketplaceHandler *apimodelmarketplace.Handler
 	LogDeliveryWorker       *masterlogqueue.LogDeliveryWorker
+	APIUsageQueue           *masterapiusage.APIUsageQueue
+	APIUsageWorker          *masterapiusage.APIUsageWorker
 	HistoryBackfillWorker   *masterhistorybackfill.Worker
 
 	// Heartbeat captures agent last_seen in memory and periodically flushes
@@ -178,24 +191,26 @@ type Server struct {
 	oauthAllowlist     *apioauth.Allowlist
 	oauthHandler       *apioauth.Handler
 
-	lifecycleOnce      sync.Once
-	lifecycleMu        sync.Mutex
-	rootCtx            context.Context
-	rootCancel         context.CancelCauseFunc
-	registrationCtx    context.Context
-	registrationCancel context.CancelCauseFunc
-	done               chan struct{}
-	closing            bool
-	startupState       startupState
-	startupGeneration  uint64
-	startupLease       *registrationLease
-	shutdownErr        error
-	shutdownOnce       sync.Once
-	workers            conc.WaitGroup
-	activeWorkers      atomic.Int64
-	httpHandlers       atomic.Int64
-	acceptedSockets    atomic.Int64
-	httpHandlerChanged chan struct{}
+	lifecycleOnce       sync.Once
+	lifecycleMu         sync.Mutex
+	rootCtx             context.Context
+	rootCancel          context.CancelCauseFunc
+	registrationCtx     context.Context
+	registrationCancel  context.CancelCauseFunc
+	done                chan struct{}
+	closing             bool
+	startupState        startupState
+	startupGeneration   uint64
+	startupLease        *registrationLease
+	shutdownErr         error
+	shutdownOnce        sync.Once
+	usageDeliveryCancel context.CancelCauseFunc
+	usageDeliveryCtx    context.Context
+	workers             conc.WaitGroup
+	activeWorkers       atomic.Int64
+	httpHandlers        atomic.Int64
+	acceptedSockets     atomic.Int64
+	httpHandlerChanged  chan struct{}
 
 	afterRunRegistration   func()
 	afterShutdownAdmission func()
@@ -285,6 +300,11 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		return nil, fmt.Errorf("seed default user group: %w", err)
 	}
 
+	// behavior change: make the generic API administrator role available before sync starts.
+	if err := models.SeedGatewayAdminRole(db); err != nil {
+		return nil, fmt.Errorf("seed gateway admin role: %w", err)
+	}
+
 	if err := models.SeedBYOKSettings(db); err != nil {
 		return nil, fmt.Errorf("seed byok settings: %w", err)
 	}
@@ -309,18 +329,19 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	modelPerformanceQuery := dao.NewModelMarketplacePerformanceQuery(dao.NewContext(application))
 
 	s := &Server{
-		Cfg:             runtimeCfg,
-		Logger:          logger,
-		DB:              db,
-		LogDB:           logDB,
-		Bus:             bus,
-		Router:          gin.New(),
-		App:             application,
-		BYOKProvider:    byokProvider,
-		InstanceID:      uuid.NewString(),
-		MetricsRegistry: metricsRegistry,
-		RelayMetrics:    pkgmetrics.NewAgentRelayMetrics(metricsRegistry, metricsRegistry),
-		StatsCache:      dao.NewStatsCache(),
+		Cfg:               runtimeCfg,
+		Logger:            logger,
+		DB:                db,
+		LogDB:             logDB,
+		Bus:               bus,
+		Router:            gin.New(),
+		App:               application,
+		BYOKProvider:      byokProvider,
+		InstanceID:        uuid.NewString(),
+		MetricsRegistry:   metricsRegistry,
+		RelayMetrics:      pkgmetrics.NewAgentRelayMetrics(metricsRegistry, metricsRegistry),
+		GenericAPIMetrics: agentgenericapi.NewAPIMetrics(metricsRegistry),
+		StatsCache:        dao.NewStatsCache(),
 	}
 	s.initLifecycle()
 	s.ModelPerformanceCache = apimodelmarketplace.NewGlobalModelPerformanceCacheWithLifecycle(
@@ -338,6 +359,9 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 	if err != nil {
 		return nil, fmt.Errorf("init model marketplace handler: %w", err)
 	}
+	usageDeliveryCtx, usageDeliveryCancel := context.WithCancelCause(context.Background())
+	s.usageDeliveryCtx = usageDeliveryCtx
+	s.usageDeliveryCancel = usageDeliveryCancel
 	logDeliveryMetrics := pkgmetrics.NewLogDeliveryMetrics(metricsRegistry)
 	settingsFinder := masterlogqueue.NewCoreSettingsFinder(application.GetCoreDB, func(err error) {
 		logger.Error("load log delivery settings", zap.Error(err))
@@ -358,13 +382,24 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 		SnapshotPath: masterLogSnapshotPath(runtimeCfg.Master.LogDBPath, s.InstanceID),
 		OnError:      func(err error) { logger.Error("log delivery degraded", zap.Error(err)) },
 	})
-	if err := s.LogDeliveryWorker.Start(s.lifecycleContext()); err != nil {
+	if err := s.LogDeliveryWorker.Start(usageDeliveryCtx); err != nil {
+		usageDeliveryCancel(err)
 		return nil, fmt.Errorf("start log delivery worker: %w", err)
 	}
-	logWorkerOwned := true
+	apiUsageMetrics := masterapiusage.NewMetrics(metricsRegistry)
+	apiUsageQueue := masterapiusage.NewQueue(masterapiusage.QueueOptions{Capacity: 10000, DedupCapacity: 10000, Metrics: apiUsageMetrics})
+	s.APIUsageQueue = apiUsageQueue
+	apiUsageSettler := masterapiusage.NewMasterAPIUsageSettler(application, bus, logger, s.LogDeliveryWorker)
+	s.APIUsageWorker = masterapiusage.NewWorker(masterapiusage.WorkerOptions{
+		Queue: apiUsageQueue, Settler: apiUsageSettler, Settings: masterapiusage.NewCoreWorkerSettingsFinder(application), Metrics: apiUsageMetrics, Logger: logger,
+	})
+	s.APIUsageWorker.Start(usageDeliveryCtx)
+	usageDeliveryOwned := true
 	defer func() {
-		if logWorkerOwned {
-			_ = s.LogDeliveryWorker.Stop(context.Background())
+		if usageDeliveryOwned {
+			stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = stopUsageDelivery(s.APIUsageWorker.Stop, s.APIUsageWorker.Wait, s.LogDeliveryWorker.Stop, usageDeliveryCancel, stopCtx)
+			cancelStop()
 		}
 	}()
 	s.HistoryBackfillWorker, err = newHistoryBackfillWorker(&runtimeCfg.Master, application, connector, logger)
@@ -410,6 +445,7 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 				protocol.AgentCapabilityTunnelV2,
 			},
 			AgentTicketSigner: s.Signer,
+			AcceptAPIUsage:    apiUsageQueue.Accept,
 		},
 	)
 
@@ -538,7 +574,7 @@ func New(cfg config.MasterRuntimeProvider, logger *zap.Logger) (*Server, error) 
 
 	dbOwned = false
 	logDBOwned = false
-	logWorkerOwned = false
+	usageDeliveryOwned = false
 	historyWorkerOwned = false
 	return s, nil
 }
@@ -581,6 +617,9 @@ func (s *Server) setupRoutes() {
 	obsH := &apiobservability.Handler{
 		HubCall:           s.Hub.Call,
 		GetOnlineAgentIDs: s.Hub.GetOnlineAgentIDs,
+		LogBacklogSnapshot: func() apimonitoring.LogBacklog {
+			return apimonitoring.LogBacklogFrom(s.LogDeliveryWorker.Status())
+		},
 	}
 	cacheH := &apicache.Handler{
 		GetOnlineAgentIDs: s.Hub.GetOnlineAgentIDs,
@@ -722,7 +761,17 @@ func (s *Server) setupRoutes() {
 	s.Router.GET("/api/oauth/:provider/link", oauthH.HandleLink)
 
 	mrH := &apimodelrouting.Handler{Bus: s.Bus}
-	capabilityH := &apicapability.Handler{}
+	apiActions := msync.NewAPISyncActions(s.Bus, s.BYOKProvider.GetCipher())
+	apiServiceH := &apiservice.Handler{App: s.App, Publisher: apiActions}
+	apiUpstreamCreator := apiupstream.Creator{Cipher: s.BYOKProvider.GetCipher()}
+	apiRouteH := &apiroute.Handler{App: s.App, Publisher: apiActions, UpstreamCreator: apiUpstreamCreator}
+	apiBackendH := &apibackend.Handler{App: s.App, Publisher: apiActions}
+	apiUpstreamH := &apiupstream.Handler{App: s.App, Publisher: apiActions, Creator: apiUpstreamCreator}
+	apiRoleH := &apirole.Handler{App: s.App, Publisher: apiActions}
+	apiAccessGrantH := &apiaccessgrant.Handler{App: s.App, Publisher: apiActions}
+	apiCatalogH := &apiCatalog.Handler{App: s.App}
+	apiRequestLogH := &apirequestlog.Handler{App: s.App}
+	capabilityH := &apicapability.Handler{App: s.App}
 	pcH := private_channel.NewHandler(s.App, s.BYOKProvider)
 	marketplaceH := s.ModelMarketplaceHandler
 
@@ -732,6 +781,14 @@ func (s *Server) setupRoutes() {
 	userAuth.Use(middleware.ScopeMiddleware())
 	userAuth.GET("/profile", api.Adapt(adapter, api.BindNone, userH.GetProfile))
 	userAuth.GET("/capabilities", api.Adapt(adapter, api.BindNone, capabilityH.Get))
+	userAuth.GET("/api-catalog/services", api.Adapt(adapter, api.BindQuery, apiCatalogH.ListServices))
+	userAuth.GET("/api-catalog/services/detail", api.Adapt(adapter, api.BindQuery, apiCatalogH.ServiceDetail))
+	userAuth.GET("/api-catalog/routes", api.Adapt(adapter, api.BindQuery, apiCatalogH.ListRoutes))
+	userAuth.GET("/api-catalog/effective", api.Adapt(adapter, api.BindQuery, apiCatalogH.Effective))
+	userAuth.GET("/api-request-logs", api.Adapt(adapter, api.BindQuery, apiRequestLogH.PortalList))
+	userAuth.GET("/api-request-traces", api.Adapt(adapter, api.BindQuery, apiRequestLogH.PortalGetTrace))
+	userAuth.GET("/api-request-logs/:request_id", api.Adapt(adapter, api.BindURI, apiRequestLogH.PortalGet))
+	userAuth.GET("/api-request-logs/:request_id/trace", api.Adapt(adapter, api.BindURI, apiRequestLogH.PortalGetTrace))
 	userAuth.GET("/model-marketplace", marketplaceH.UserFeatureEnabledMiddleware(adapter), api.Adapt(adapter, api.BindQuery, marketplaceH.List))
 	userAuth.GET("/model-marketplace/detail", marketplaceH.UserFeatureEnabledMiddleware(adapter), api.Adapt(adapter, api.BindQuery, marketplaceH.Detail))
 	userAuth.PUT("/profile", api.Adapt(adapter, api.BindJSON, userH.UpdateProfile))
@@ -747,7 +804,6 @@ func (s *Server) setupRoutes() {
 	userAuth.GET("/invite-codes", api.Adapt(adapter, api.BindQuery, inviteH.ListMine))
 	userAuth.POST("/invite-codes", api.Adapt(adapter, api.BindJSON, inviteH.Create))
 	userAuth.DELETE("/invite-codes/:id", api.Adapt(adapter, api.BindURI, inviteH.DeleteMine))
-
 	// Portal model-routings (user-owned, scope forced to user)
 	userAuth.GET("/model-routings", api.Adapt(adapter, api.BindQuery, mrH.PortalList))
 	userAuth.POST("/model-routings", api.Adapt(adapter, api.BindJSON, mrH.PortalCreate))
@@ -788,6 +844,44 @@ func (s *Server) setupRoutes() {
 	auth.Use(middleware.ScopeMiddleware())
 	auth.GET("/model-marketplace", api.Adapt(adapter, api.BindQuery, marketplaceH.AdminList))
 	auth.GET("/model-marketplace/detail", api.Adapt(adapter, api.BindQuery, marketplaceH.AdminDetail))
+	auth.GET("/api-roles", api.Adapt(adapter, api.BindQuery, apiRoleH.List))
+	auth.POST("/api-roles", api.Adapt(adapter, api.BindJSON, apiRoleH.Create))
+	auth.GET("/api-roles/:id", api.Adapt(adapter, api.BindURI, apiRoleH.Get))
+	auth.PUT("/api-roles/:id", api.Adapt(adapter, api.BindURIAndJSON, apiRoleH.Update))
+	auth.DELETE("/api-roles/:id", api.Adapt(adapter, api.BindURI, apiRoleH.Delete))
+	auth.GET("/api-role-bindings", api.Adapt(adapter, api.BindQuery, apiRoleH.ListBindings))
+	auth.POST("/api-role-bindings", api.Adapt(adapter, api.BindJSON, apiRoleH.CreateBinding))
+	auth.PUT("/api-role-bindings/:id", api.Adapt(adapter, api.BindURIAndJSON, apiRoleH.UpdateBinding))
+	auth.DELETE("/api-role-bindings/:id", api.Adapt(adapter, api.BindURI, apiRoleH.DeleteBinding))
+	auth.GET("/api-access-grants", api.Adapt(adapter, api.BindQuery, apiAccessGrantH.List))
+	auth.GET("/api-access-grants/effective", api.Adapt(adapter, api.BindQuery, apiAccessGrantH.Effective))
+	auth.PUT("/api-access-grants/:principal_type/:principal_id/services/:service_id", api.Adapt(adapter, api.BindURIAndJSON, apiAccessGrantH.Replace))
+	auth.DELETE("/api-access-grants/:principal_type/:principal_id/services/:service_id", api.Adapt(adapter, api.BindURI, apiAccessGrantH.Delete))
+	auth.GET("/api-services", api.Adapt(adapter, api.BindQuery, apiServiceH.List))
+	auth.POST("/api-services", api.Adapt(adapter, api.BindJSON, apiServiceH.Create))
+	auth.GET("/api-services/:id", api.Adapt(adapter, api.BindURI, apiServiceH.Get))
+	auth.PUT("/api-services/:id", api.Adapt(adapter, api.BindURIAndBodyMap, apiServiceH.Update))
+	auth.DELETE("/api-services/:id", api.Adapt(adapter, api.BindURI, apiServiceH.Delete))
+	auth.GET("/api-backends", api.Adapt(adapter, api.BindQuery, apiBackendH.List))
+	auth.POST("/api-backends", api.Adapt(adapter, api.BindJSON, apiBackendH.Create))
+	auth.GET("/api-backends/:id", api.Adapt(adapter, api.BindURI, apiBackendH.Get))
+	auth.PUT("/api-backends/:id", api.Adapt(adapter, api.BindURIAndBodyMap, apiBackendH.Update))
+	auth.DELETE("/api-backends/:id", api.Adapt(adapter, api.BindURI, apiBackendH.Delete))
+	auth.GET("/api-routes", api.Adapt(adapter, api.BindQuery, apiRouteH.List))
+	auth.POST("/api-routes/preview", api.Adapt(adapter, api.BindJSON, apiRouteH.Preview))
+	auth.POST("/api-routes", api.Adapt(adapter, api.BindStrictJSONText, apiRouteH.Create))
+	auth.GET("/api-routes/:id", api.Adapt(adapter, api.BindURI, apiRouteH.Get))
+	auth.PUT("/api-routes/:id", api.Adapt(adapter, api.BindURIAndStrictJSONBodyMap, apiRouteH.Update))
+	auth.DELETE("/api-routes/:id", api.Adapt(adapter, api.BindURI, apiRouteH.Delete))
+	auth.GET("/api-upstreams", api.Adapt(adapter, api.BindQuery, apiUpstreamH.List))
+	auth.POST("/api-upstreams", api.Adapt(adapter, api.BindJSON, apiUpstreamH.Create))
+	auth.GET("/api-upstreams/:id", api.Adapt(adapter, api.BindURI, apiUpstreamH.Get))
+	auth.PUT("/api-upstreams/:id", api.Adapt(adapter, api.BindURIAndBodyMap, apiUpstreamH.Update))
+	auth.DELETE("/api-upstreams/:id", api.Adapt(adapter, api.BindURI, apiUpstreamH.Delete))
+	auth.GET("/api-request-logs", api.Adapt(adapter, api.BindQuery, apiRequestLogH.List))
+	auth.GET("/api-request-traces", api.Adapt(adapter, api.BindQuery, apiRequestLogH.GetTrace))
+	auth.GET("/api-request-logs/:request_id", api.Adapt(adapter, api.BindURI, apiRequestLogH.Get))
+	auth.GET("/api-request-logs/:request_id/trace", api.Adapt(adapter, api.BindURI, apiRequestLogH.GetTrace))
 
 	auth.GET("/users", api.Adapt(adapter, api.BindQuery, userH.List))
 	auth.POST("/users", api.Adapt(adapter, api.BindJSON, userH.Create))
@@ -887,8 +981,8 @@ func (s *Server) setupRoutes() {
 
 	rateLimiterH := &apiratelimiter.Handler{}
 	auth.GET("/rate-limiters", api.Adapt(adapter, api.BindQuery, rateLimiterH.List))
-	auth.POST("/rate-limiters", api.Adapt(adapter, api.BindJSON, rateLimiterH.Create))
-	auth.PUT("/rate-limiters/:id", api.Adapt(adapter, api.BindURIAndBodyMap, rateLimiterH.Update))
+	auth.POST("/rate-limiters", api.Adapt(adapter, api.BindStrictJSONText, rateLimiterH.Create))
+	auth.PUT("/rate-limiters/:id", api.Adapt(adapter, api.BindURIAndStrictJSONBodyMap, rateLimiterH.Update))
 	auth.DELETE("/rate-limiters/:id", api.Adapt(adapter, api.BindURI, rateLimiterH.Delete))
 	auth.GET("/limiter-bindings", api.Adapt(adapter, api.BindQuery, rateLimiterH.ListBindings))
 	auth.POST("/limiter-bindings", api.Adapt(adapter, api.BindJSON, rateLimiterH.CreateBinding))
@@ -1211,8 +1305,9 @@ func (s *Server) prepareEmbeddedAgent(ctx context.Context, listenAddr string) (*
 	}
 
 	embeddedAgent, err := agent.NewEmbedded(agentCfg, s.Logger.Named("embedded-agent"), creds, agent.EmbeddedOptions{
-		MetricsRegistry: s.MetricsRegistry,
-		RelayMetrics:    s.RelayMetrics,
+		MetricsRegistry:   s.MetricsRegistry,
+		RelayMetrics:      s.RelayMetrics,
+		GenericAPIMetrics: s.GenericAPIMetrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create embedded agent: %w", err)
@@ -1756,7 +1851,11 @@ func (s *Server) beginShutdown(ctx context.Context) {
 		cancelRegistration := s.registrationCancel
 		embeddedAgent := s.embeddedAgent
 		operations := s.Operations
+		apiUsageQueue := s.APIUsageQueue
 		s.lifecycleMu.Unlock()
+		if apiUsageQueue != nil {
+			apiUsageQueue.CloseAdmission()
+		}
 		cancelRegistration(errMasterServerClosing)
 		if operations != nil {
 			operations.Cancel()
@@ -1889,9 +1988,17 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	if s.HistoryBackfillWorker != nil {
 		drainErr = errors.Join(drainErr, s.HistoryBackfillWorker.Stop(ctx))
 	}
-	if s.LogDeliveryWorker != nil {
-		drainErr = errors.Join(drainErr, s.LogDeliveryWorker.Stop(ctx))
+	var apiUsageStop func(context.Context) error
+	var apiUsageWait func(context.Context) error
+	if s.APIUsageWorker != nil {
+		apiUsageStop = s.APIUsageWorker.Stop
+		apiUsageWait = s.APIUsageWorker.Wait
 	}
+	var logDeliveryStop func(context.Context) error
+	if s.LogDeliveryWorker != nil {
+		logDeliveryStop = s.LogDeliveryWorker.Stop
+	}
+	drainErr = errors.Join(drainErr, stopUsageDelivery(apiUsageStop, apiUsageWait, logDeliveryStop, s.usageDeliveryCancel, ctx))
 	s.workers.Wait()
 	if s.DB != nil {
 		s.saveVersion(ctx)
@@ -1910,6 +2017,31 @@ func (s *Server) finalizeShutdown(ctx context.Context, startupDone <-chan struct
 	s.shutdownErr = drainErr
 	s.lifecycleMu.Unlock()
 	close(s.done)
+}
+
+func stopUsageDelivery(apiStop, apiWait, logStop func(context.Context) error, cancel context.CancelCauseFunc, ctx context.Context) error {
+	var err error
+	cleanupCtx := ctx
+	if apiStop != nil {
+		apiStopErr := apiStop(ctx)
+		err = errors.Join(err, apiStopErr)
+		if apiStopErr != nil {
+			cleanupCtx = context.Background()
+		}
+	}
+	if apiWait != nil {
+		err = errors.Join(err, apiWait(cleanupCtx))
+	}
+	if apiStop != nil && context.Cause(ctx) != nil {
+		cleanupCtx = context.Background()
+	}
+	if logStop != nil {
+		err = errors.Join(err, logStop(cleanupCtx))
+	}
+	if cancel != nil {
+		cancel(errors.New("usage delivery stopped"))
+	}
+	return err
 }
 
 func masterLogSnapshotPath(logDSN, instanceID string) string {

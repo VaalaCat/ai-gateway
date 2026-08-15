@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	masterlogqueue "github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
@@ -21,4 +22,12 @@ type MonitoringDataFinder interface {
 	ErrorDistribution(string, dao.ObsRange, dao.Scope) ([]dao.ErrBucket, error)
 	DashboardKpis(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.KpiBundle, error)
 	CacheSaving(dao.ObsRange, dao.Scope, dao.ObsFilter) (dao.CacheSaving, error)
+}
+
+func LogBacklogFrom(status masterlogqueue.DeliveryStatus) LogBacklog {
+	return LogBacklog{
+		Pending: status.Queue.Pending, Retry: status.Queue.Retry, Inflight: status.Queue.Inflight,
+		Bytes: status.Queue.Bytes, OldestSeconds: int64(status.Queue.OldestAge.Seconds()),
+		Dropped: status.Queue.Dropped, LastError: status.LastError, SchemaReady: status.SchemaReady,
+	}
 }

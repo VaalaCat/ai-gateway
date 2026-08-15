@@ -291,6 +291,8 @@ var (
 	_ agentproxy.DirectAttemptStreamOpener     = (*DirectSessionPool)(nil)
 	_ agentproxy.DirectProbeStreamOpener       = (*DirectSessionPool)(nil)
 	_ agentproxy.DirectAttemptTransportBuilder = (*DirectSessionPool)(nil)
+	_ agentproxy.DirectHTTPAPIStreamOpener     = (*DirectSessionPool)(nil)
+	_ agentproxy.DirectHTTPAPITransportBuilder = (*DirectSessionPool)(nil)
 )
 
 // ---- public opener API --------------------------------------------------
@@ -314,6 +316,56 @@ func (p *DirectSessionPool) OpenAttemptStream(
 	}
 	defer reservation.Release()
 	return reservation.OpenAttemptStream(ctx, req)
+}
+
+func (p *DirectSessionPool) OpenHTTPAPIStream(
+	ctx context.Context, target agentproxy.DirectSessionTarget, open app.APIOpen,
+) (app.HTTPAPIStream, error) {
+	transport, err := p.BuildDirectHTTPAPITransport(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	reservation, err := transport.AcquireHTTPAPIStream(ctx)
+	if err != nil {
+		if reservation != nil {
+			reservation.Release()
+		}
+		return nil, err
+	}
+	if reservation == nil {
+		return nil, &directOpenError{stage: "pool", code: "direct_closed", endpoint: sanitizedDirectEndpoint(target.WebSocketURL)}
+	}
+	defer reservation.Release()
+	return reservation.OpenHTTPAPIStream(ctx, open)
+}
+
+func (p *DirectSessionPool) OpenWebSocketAPIStream(
+	ctx context.Context,
+	target agentproxy.DirectSessionTarget,
+	open app.WebSocketOpen,
+) (app.WebSocketAPIStream, error) {
+	if p == nil || p.opts.DirectOutboundEnabled == nil || !p.opts.DirectOutboundEnabled() {
+		return nil, newPathPolicyError(consts.RouteErrorSourceDirectOutboundDisabled)
+	}
+	built, err := p.buildDirectAttemptTransport(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	borrow, err := p.acquireBuilt(ctx, built)
+	if err != nil {
+		return nil, err
+	}
+	defer borrow.session.releaseAdmission()
+	return borrow.session.OpenWebSocketAPIStream(ctx, open)
+}
+
+func (p *DirectSessionPool) BuildDirectHTTPAPITransport(
+	ctx context.Context, target agentproxy.DirectSessionTarget,
+) (agentproxy.DirectHTTPAPITransport, error) {
+	if p == nil || p.opts.DirectOutboundEnabled == nil || !p.opts.DirectOutboundEnabled() {
+		return nil, newPathPolicyError(consts.RouteErrorSourceDirectOutboundDisabled)
+	}
+	return p.buildDirectAttemptTransport(ctx, target)
 }
 
 func (p *DirectSessionPool) BuildDirectAttemptTransport(
@@ -361,6 +413,25 @@ func (t *directAttemptTransport) AcquireAttemptStream(
 	}, nil
 }
 
+func (t *directAttemptTransport) AcquireHTTPAPIStream(
+	ctx context.Context,
+) (agentproxy.DirectHTTPAPIStreamReservation, error) {
+	if t == nil || t.pool == nil {
+		return nil, &directOpenError{stage: "pool", code: "direct_closed", endpoint: "invalid://invalid" + DirectTunnelPath}
+	}
+	borrow, err := t.pool.acquireBuilt(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	base := &directAttemptStreamReservation{
+		session: borrow.session, identity: directTransportIdentity(borrow.key, borrow.fingerprint),
+		addressFingerprint: borrow.frozen.AddressFingerprint,
+		endpoint:           sanitizedDirectEndpoint(borrow.frozen.WebSocketURL),
+		state:              directReservationAcquired, openDone: make(chan struct{}),
+	}
+	return &directHTTPAPIStreamReservation{directAttemptStreamReservation: base}, nil
+}
+
 type directReservationState uint8
 
 const (
@@ -380,6 +451,33 @@ type directAttemptStreamReservation struct {
 	state       directReservationState
 	openDone    chan struct{}
 	releaseOnce sync.Once
+}
+
+type directHTTPAPIStreamReservation struct {
+	*directAttemptStreamReservation
+}
+
+func (r *directHTTPAPIStreamReservation) OpenHTTPAPIStream(
+	ctx context.Context, open app.APIOpen,
+) (stream app.HTTPAPIStream, err error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if r == nil || r.directAttemptStreamReservation == nil || r.session == nil {
+		return nil, directReservationUnavailableError(nil)
+	}
+	r.mu.Lock()
+	if r.state != directReservationAcquired {
+		r.mu.Unlock()
+		return nil, directReservationUnavailableError(r.directAttemptStreamReservation)
+	}
+	r.state = directReservationOpening
+	r.mu.Unlock()
+	defer r.finishOpen()
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, cause
+	}
+	return r.session.OpenHTTPAPIStream(ctx, open)
 }
 
 func (r *directAttemptStreamReservation) TransportIdentity() agentproxy.DirectTransportIdentity {

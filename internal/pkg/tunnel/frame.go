@@ -33,6 +33,13 @@ const (
 	FrameCancel
 	FrameReset
 	FrameWindowUpdate
+	FrameAPIResult
+	FrameWebSocketMessageStart
+	FrameWebSocketMessageData
+	FrameWebSocketMessageEnd
+	FrameWebSocketPing
+	FrameWebSocketPong
+	FrameWebSocketClose
 )
 
 type Frame struct {
@@ -141,7 +148,7 @@ func validateFrameFields(version uint8, frameType Type, flags uint16) error {
 	if version != ProtocolVersion {
 		return ErrUnsupportedVersion
 	}
-	if frameType < FrameOpen || frameType > FrameWindowUpdate {
+	if frameType < FrameOpen || frameType > FrameWebSocketClose {
 		return ErrUnknownFrameType
 	}
 	if flags != 0 {
@@ -153,8 +160,11 @@ func validateFrameFields(version uint8, frameType Type, flags uint16) error {
 // FramePayloadLimit returns the negotiated payload ceiling for one frame type.
 func FramePayloadLimit(frameType Type, limits Limits) (int64, error) {
 	limit := limits.MaxMetadataBytes
-	if frameType == FrameRequestData || frameType == FrameResponseData {
+	if frameType == FrameRequestData || frameType == FrameResponseData || frameType == FrameWebSocketMessageData {
 		limit = limits.MaxDataBytes
+	}
+	if frameType == FrameWebSocketPing || frameType == FrameWebSocketPong || frameType == FrameWebSocketClose {
+		limit = MaxWebSocketControlPayloadBytes
 	}
 	if limit <= 0 {
 		return 0, ErrInvalidLimits

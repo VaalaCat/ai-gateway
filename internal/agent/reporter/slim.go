@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 )
@@ -29,6 +30,7 @@ const slimMarker = "[trimmed: oversized entry exceeded upload budget after repea
 // 这里会先克隆一份底层数组再改字段,不会污染 store 里仍要重试的原始条目
 // (对应 uploader.go 里"操作 peeked 副本,不需要 store 侧的可变 API"的设计)。
 func slimEntry(e *protocol.UsageLogEntry) {
+	advanceTraceRetention(e, models.TraceRetentionBodyTrimmed)
 	if len(e.AttemptTraces) > 0 {
 		traces := make([]models.UsageLogTrace, len(e.AttemptTraces))
 		copy(traces, e.AttemptTraces)
@@ -111,6 +113,69 @@ func slimOversizedEntries(batch []protocol.UsageLogEntry, logger *zap.Logger) []
 	return out
 }
 
+func slimOversizedReportedUsage(batch []protocol.ReportedUsage, logger *zap.Logger) []protocol.ReportedUsage {
+	out := append([]protocol.ReportedUsage(nil), batch...)
+	for index, usage := range batch {
+		before := entrySize(usage)
+		if before <= slimThresholdBytes {
+			continue
+		}
+		if usage.LLM != nil {
+			entry := *usage.LLM
+			slimEntry(&entry)
+			out[index] = protocol.ReportedUsage{LLM: &entry}
+		} else if usage.API != nil {
+			entry := *usage.API
+			result := apiUsageResult(entry)
+			slim, err := result.Slim(slimThresholdBytes / 2)
+			if err != nil {
+				entry.Trace = nil
+			} else {
+				applyAPIUsageResult(&entry, slim)
+			}
+			out[index] = protocol.ReportedUsage{API: &entry}
+		}
+		logger.Warn("slimming oversized usage entry after repeated upload failures",
+			zap.String("request_id", usage.RequestID()), zap.Int("bytes_before", before), zap.Int("bytes_after", entrySize(out[index])))
+	}
+	return out
+}
+
+func apiUsageResult(entry protocol.APIUsageEntry) apiattempt.APIExecutionResult {
+	return apiattempt.APIExecutionResult{
+		APIUpstreamID: entry.APIUpstreamID, APIUpstreamName: entry.UpstreamName,
+		UpstreamStatus: entry.StatusCode, ProviderDispatchKnown: entry.ProviderDispatchKnown,
+		ProviderDispatched: entry.ProviderDispatched, RequestBytes: entry.RequestBytes,
+		ResponseBytes: entry.ResponseBytes, FirstByteMs: entry.FirstByteMs,
+		WebSocketCloseCode: entry.WebSocketCloseCode, ErrorStage: entry.ErrorStage,
+		ErrorCode: entry.ErrorCode, RateLimitDecision: entry.RateLimitDecision,
+		RateLimitWaitMs: entry.RateLimitWaitMs, RateLimitReason: entry.RateLimitReason,
+		RateLimitHits: entry.RateLimitHits, RateLimitHitTotal: entry.RateLimitHitTotal,
+		RateLimitHitsTruncated: entry.RateLimitHitsTruncated, Trace: entry.Trace,
+	}
+}
+
+func applyAPIUsageResult(entry *protocol.APIUsageEntry, result apiattempt.APIExecutionResult) {
+	entry.APIUpstreamID = result.APIUpstreamID
+	entry.UpstreamName = result.APIUpstreamName
+	entry.StatusCode = result.UpstreamStatus
+	entry.ProviderDispatchKnown = result.ProviderDispatchKnown
+	entry.ProviderDispatched = result.ProviderDispatched
+	entry.RequestBytes = result.RequestBytes
+	entry.ResponseBytes = result.ResponseBytes
+	entry.FirstByteMs = result.FirstByteMs
+	entry.WebSocketCloseCode = result.WebSocketCloseCode
+	entry.ErrorStage = result.ErrorStage
+	entry.ErrorCode = result.ErrorCode
+	entry.RateLimitDecision = result.RateLimitDecision
+	entry.RateLimitWaitMs = result.RateLimitWaitMs
+	entry.RateLimitReason = result.RateLimitReason
+	entry.RateLimitHits = result.RateLimitHits
+	entry.RateLimitHitTotal = result.RateLimitHitTotal
+	entry.RateLimitHitsTruncated = result.RateLimitHitsTruncated
+	entry.Trace = result.Trace
+}
+
 // uploadTimeoutFor 按 body 体积算出这次上传该给多长的超时:基础 30s,每凑满 1MiB
 // 再加 30s,封顶 5 分钟——固定 30s 会掐死跨区上传的大批次(即便不再是 poison batch,
 // 正常的大 batch 也可能真的需要更久才能传完),但也不能让单次请求无限期挂着。
@@ -137,7 +202,8 @@ const (
 	DegradeBillingOnly = 3
 )
 
-// degradeMarkers 落进 Other JSON 的 degrade 标记值;落库后 logs 页可识别这条被降过级。
+// degradeMarkers 保留旧 Other JSON 标记供兼容消费方使用；新 UI 读取独立的
+// TraceRetentionStatus 字段，不再解析 Other。
 var degradeMarkers = map[int]string{
 	DegradeStripTrace:  "trace_stripped",
 	DegradeBillingOnly: "billing_only",
@@ -149,14 +215,33 @@ var degradeSteps = map[int]func(*protocol.UsageLogEntry){
 	DegradeStripTrace: func(e *protocol.UsageLogEntry) {
 		e.AttemptTraces = nil
 		e.TraceData = ""
+		advanceTraceRetention(e, models.TraceRetentionStripped)
 	},
 	DegradeBillingOnly: func(e *protocol.UsageLogEntry) {
 		e.FallbackChain = nil
+		advanceTraceRetention(e, models.TraceRetentionBillingOnly)
 	},
 }
 
-// applyDegrade 把 e 就地推到 level:只升不降、幂等;当前级别从 Other 的 degrade
-// 标记反推(条目本身不带级别字段,持久级别由 retryItem 记录,这里只管剥离动作)。
+var traceRetentionRanks = map[models.TraceRetentionStatus]int{
+	models.TraceRetentionFull:          0,
+	models.TraceRetentionHeadersOnly:   1,
+	models.TraceRetentionBodyTruncated: 1,
+	models.TraceRetentionDisabled:      1,
+	models.TraceRetentionBodyTrimmed:   2,
+	models.TraceRetentionStripped:      3,
+	models.TraceRetentionBillingOnly:   4,
+}
+
+func advanceTraceRetention(e *protocol.UsageLogEntry, next models.TraceRetentionStatus) {
+	if e == nil || traceRetentionRanks[next] < traceRetentionRanks[e.TraceRetentionStatus] {
+		return
+	}
+	e.TraceRetentionStatus = next
+}
+
+// applyDegrade 把 e 就地推到 level:只升不降、幂等。retryItem 保存上传重试级别，
+// TraceRetentionStatus 保存最终对用户可见的保留结果。
 func applyDegrade(e *protocol.UsageLogEntry, level int) {
 	if level < DegradeStripTrace {
 		return // L0/L1 无就地动作
@@ -170,6 +255,23 @@ func applyDegrade(e *protocol.UsageLogEntry, level int) {
 		}
 	}
 	markDegrade(e, degradeMarkers[level])
+}
+
+func applyUsageDegrade(usage *protocol.ReportedUsage, level int) {
+	if usage == nil || level < DegradeStripTrace {
+		return
+	}
+	if usage.LLM != nil {
+		entry := *usage.LLM
+		applyDegrade(&entry, level)
+		usage.LLM = &entry
+		return
+	}
+	if usage.API != nil {
+		entry := *usage.API
+		entry.Trace = nil
+		usage.API = &entry
+	}
 }
 
 // markDegrade 把 degrade 标记合并进 Other(JSON object);Other 解析失败(裸文本/

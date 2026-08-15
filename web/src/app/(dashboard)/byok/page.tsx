@@ -18,6 +18,8 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import {
   Tooltip,
   TooltipContent,
@@ -447,11 +449,12 @@ function BYOKPageInner() {
   ];
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
+    <PageLayout
+      title={t("title")}
+      description={t("description")}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       <DataTable
         columns={columns}
@@ -553,13 +556,15 @@ function BYOKPageInner() {
         title={t("deleteConfirm", { name: deleteTarget?.name ?? "" })}
         description={t("deleteDescription")}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }
 
 export default function BYOKPage() {
+  const t = useTranslations("byok");
   return (
-    <Suspense>
+    <Suspense fallback={<PageLayoutSkeleton title={t("title")} description={t("description")} />}>
       <BYOKPageInner />
     </Suspense>
   );

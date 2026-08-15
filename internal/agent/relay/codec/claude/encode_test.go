@@ -767,6 +767,44 @@ func TestClaudeStreamEncode_ToolCallCorrectShape(t *testing.T) {
 	}
 }
 
+func TestClaudeStreamEncode_DoneClosesOpenToolCall(t *testing.T) {
+	events := []codec.Event{
+		{Type: codec.EventStreamStart},
+		{Type: codec.EventToolCallStart, ToolCall: &codec.StreamingToolCall{CallID: "toolu_x", Name: "exec"}},
+		{Type: codec.EventToolCallArgumentsDelta, ToolCall: &codec.StreamingToolCall{CallID: "toolu_x", Arguments: `{"a":1}`}},
+		// Defensive boundary: an upstream decoder reaches Done without an End.
+		{Type: codec.EventDone, FinishReason: consts.FinishReasonStop},
+	}
+	sse := parseClaudeSSE(runClaudeEncodeStream(t, events))
+
+	toolStopIndex, messageDeltaIndex := -1, -1
+	var stopReason string
+	for index, event := range sse {
+		switch event.Event {
+		case sseconsts.ContentBlockStop:
+			toolStopIndex = index
+		case sseconsts.MessageDelta:
+			messageDeltaIndex = index
+			var payload struct {
+				Delta struct {
+					StopReason string `json:"stop_reason"`
+				} `json:"delta"`
+			}
+			if err := json.Unmarshal([]byte(event.Data), &payload); err != nil {
+				t.Fatalf("unmarshal message_delta: %v", err)
+			}
+			stopReason = payload.Delta.StopReason
+		}
+	}
+
+	if toolStopIndex < 0 || messageDeltaIndex < 0 || toolStopIndex > messageDeltaIndex {
+		t.Fatalf("tool block must stop before message_delta: tool_stop=%d message_delta=%d", toolStopIndex, messageDeltaIndex)
+	}
+	if stopReason != consts.ClaudeStopToolUse {
+		t.Fatalf("stop_reason = %q, want %q", stopReason, consts.ClaudeStopToolUse)
+	}
+}
+
 func TestEncodeRequest_DropsEmptyTextBlock(t *testing.T) {
 	c := &ClaudeCodec{}
 	req := &codec.Request{

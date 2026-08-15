@@ -14,6 +14,7 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -162,14 +163,13 @@ export default function ScriptsPage() {
   const isEmpty = !isLoading && scripts.length === 0 && !search;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t("title")}</h1>
-          <p className="mt-1 text-muted-foreground">{t("description")}</p>
-        </div>
-        <Button onClick={() => router.push("/scripts/new")}>{t("create")}</Button>
-      </div>
+    <PageLayout
+      title={t("title")}
+      description={t("description")}
+      actions={<Button onClick={() => router.push("/scripts/new")}>{t("create")}</Button>}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       {isEmpty ? (
         <div className="flex flex-col items-center justify-center gap-4 py-24 text-center">
@@ -200,6 +200,7 @@ export default function ScriptsPage() {
         onConfirm={handleDelete}
         description={t("deleteConfirm")}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

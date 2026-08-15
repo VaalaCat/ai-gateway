@@ -6,6 +6,7 @@ import { RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PageLayout } from "@/components/layout/page-layout";
 import {
   Accordion,
   AccordionContent,
@@ -29,14 +30,11 @@ export default function AgentsCachePage() {
     [data],
   );
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <h1 className="text-2xl font-bold">{t("cache")}</h1>
-          <p className="text-muted-foreground mt-1">{ta("cacheSubtitle")}</p>
-        </div>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0 mt-1">
+    <PageLayout
+      title={t("cache")}
+      description={ta("cacheSubtitle")}
+      actions={
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
           {dataUpdatedAt > 0 && (
             <span>
               {ta("lastUpdated")}: <DateCell timestamp={Math.floor(dataUpdatedAt / 1000)} relative />
@@ -53,7 +51,10 @@ export default function AgentsCachePage() {
             {ta("refresh")}
           </Button>
         </div>
-      </div>
+      }
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       {isLoading || !data ? (
         <div className="flex items-center justify-center py-12 text-muted-foreground">
@@ -123,6 +124,7 @@ export default function AgentsCachePage() {
           </div>
         </>
       )}
-    </div>
+      </div>
+    </PageLayout>
   );
 }

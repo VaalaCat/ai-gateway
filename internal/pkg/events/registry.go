@@ -32,6 +32,12 @@ func NewRegistry() TopicRegistry {
 	userQuotaSyncType := reflect.TypeOf(protocol.UserQuotaSync{})
 	syncPushType := reflect.TypeOf(protocol.SyncPushParams{})
 	emptyType := reflect.TypeOf(struct{}{})
+	apiServiceType := reflect.TypeOf(protocol.SyncedAPIService{})
+	apiRouteType := reflect.TypeOf(protocol.SyncedAPIRoute{})
+	apiUpstreamType := reflect.TypeOf(protocol.SyncedAPIUpstream{})
+	apiRoleType := reflect.TypeOf(protocol.SyncedAPIRole{})
+	apiRoleSetInvalidateType := reflect.TypeOf(protocol.APIRoleSetInvalidate{})
+	apiRoleSetResultType := reflect.TypeOf(protocol.APIRoleSetFetchResult{})
 
 	return &defaultRegistry{
 		exact: map[string]reflect.Type{
@@ -57,6 +63,23 @@ func NewRegistry() TopicRegistry {
 			UserQuotaSyncTopic.Value():     userQuotaSyncType,
 
 			SyncFullSyncRequestedTopic.Value(): emptyType,
+
+			APIServiceCreateTopic.Value():         apiServiceType,
+			APIServiceUpdateTopic.Value():         apiServiceType,
+			APIServiceDeleteTopic.Value():         apiServiceType,
+			APIRouteCreateTopic.Value():           apiRouteType,
+			APIRouteUpdateTopic.Value():           apiRouteType,
+			APIRouteDeleteTopic.Value():           apiRouteType,
+			APIUpstreamCreateTopic.Value():        apiUpstreamType,
+			APIUpstreamUpdateTopic.Value():        apiUpstreamType,
+			APIUpstreamDeleteTopic.Value():        apiUpstreamType,
+			APIRoleCreateTopic.Value():            apiRoleType,
+			APIRoleUpdateTopic.Value():            apiRoleType,
+			APIRoleDeleteTopic.Value():            apiRoleType,
+			UserAPIRolesSyncedTopic.Value():       apiRoleSetInvalidateType,
+			UserGroupAPIRolesSyncedTopic.Value():  apiRoleSetResultType,
+			UserGroupAPIRolesDeletedTopic.Value(): apiRoleSetResultType,
+			TokenAPIRolesSyncedTopic.Value():      apiRoleSetInvalidateType,
 		},
 		patterns: []patternPayload{
 			{pattern: TokenAllPattern.Value(), typ: tokenType},

@@ -1,7 +1,11 @@
 package dao
 
 import (
+	"errors"
+
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"gorm.io/gorm"
 )
 
 type AdminTokenQuery interface {
@@ -16,14 +20,18 @@ type AdminTokenQuery interface {
 type AdminTokenMutation interface {
 	Create(token *models.Token) error
 	Update(id uint, updates map[string]any) error
+	UpdateExisting(id uint, updates map[string]any) error
+	UpdateOwned(id, userID uint, updates map[string]any) error
 	Delete(id uint) error
-	DeleteWithRoutings(id uint) ([]models.ModelRouting, error)
+	DeleteWithRoutings(id uint) ([]models.ModelRouting, uint, error)
 	DisableAllForUser(userID uint) error
 	BulkSyncFromTemplate(templateID uint, tpl *models.TokenTemplate, f models.SyncFields) (changedIDs []uint, total int, err error)
 }
 
 type adminTokenQuery struct{ ctx *baseContext }
 type adminTokenMutation struct{ ctx *baseContext }
+
+var ErrTokenNotFoundOrOwnershipChanged = errors.New("token not found or ownership changed")
 
 func (q *adminTokenQuery) GetByID(id uint) (*models.Token, error) {
 	var token models.Token
@@ -52,11 +60,24 @@ func (q *adminTokenQuery) List(opts ListOptions, filter TokenListFilter) ([]mode
 		like := "%" + filter.Search + "%"
 		db = db.Where("name LIKE ? OR `key` LIKE ?", like, like)
 	}
+	if filter.ID != nil {
+		db = db.Where("id = ?", *filter.ID)
+	}
 	if filter.UserID != nil {
 		db = db.Where("user_id = ?", *filter.UserID)
 	}
 	if filter.Status != nil {
 		db = db.Where("status = ?", *filter.Status)
+	}
+	if filter.UsableAt != nil {
+		db = db.Where(
+			"status = ? AND (expired_at <= 0 OR expired_at >= ?)",
+			consts.StatusEnabled,
+			*filter.UsableAt,
+		)
+	}
+	if filter.APIRoleMode != nil {
+		db = db.Where("api_role_mode = ?", *filter.APIRoleMode)
 	}
 	var total int64
 	if err := db.Count(&total).Error; err != nil {
@@ -75,12 +96,37 @@ func (m *adminTokenMutation) Update(id uint, updates map[string]any) error {
 	return m.ctx.GetCoreDB().Model(&models.Token{}).Where("id = ?", id).Updates(updates).Error
 }
 
+func (m *adminTokenMutation) UpdateExisting(id uint, updates map[string]any) error {
+	return m.updateOne(m.ctx.GetCoreDB().Model(&models.Token{}).Where("id = ?", id), updates)
+}
+
+func (m *adminTokenMutation) UpdateOwned(id, userID uint, updates map[string]any) error {
+	return m.updateOne(
+		m.ctx.GetCoreDB().Model(&models.Token{}).Where("id = ? AND user_id = ?", id, userID),
+		updates,
+	)
+}
+
+func (m *adminTokenMutation) updateOne(query *gorm.DB, updates map[string]any) error {
+	result := query.Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTokenNotFoundOrOwnershipChanged
+	}
+	return nil
+}
+
 func (m *adminTokenMutation) Delete(id uint) error {
 	return m.ctx.GetCoreDB().Delete(&models.Token{}, id).Error
 }
 
-func (m *adminTokenMutation) DeleteWithRoutings(id uint) (deleted []models.ModelRouting, err error) {
+func (m *adminTokenMutation) DeleteWithRoutings(id uint) (deleted []models.ModelRouting, deletedManagedRoleID uint, err error) {
 	err = RunInTx[Context](m.ctx, func(txCtx Context) error {
+		if lockErr := LockAPIPrincipal(txCtx.GetCoreDB(), models.APIPrincipalToken, id); lockErr != nil {
+			return lockErr
+		}
 		q := NewAdminQuery(txCtx)
 		var listErr error
 		deleted, listErr = q.ModelRouting().ListByToken(id)
@@ -91,9 +137,13 @@ func (m *adminTokenMutation) DeleteWithRoutings(id uint) (deleted []models.Model
 		if deleteErr := m.ModelRouting().DeleteByToken(id); deleteErr != nil {
 			return deleteErr
 		}
+		deletedManagedRoleID, listErr = DeleteAPIPrincipalAccess(txCtx.GetCoreDB(), models.APIPrincipalToken, id)
+		if listErr != nil {
+			return listErr
+		}
 		return m.Token().Delete(id)
 	})
-	return deleted, err
+	return deleted, deletedManagedRoleID, err
 }
 
 func (m *adminTokenMutation) DisableAllForUser(userID uint) error {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/stretchr/testify/require"
@@ -104,7 +105,7 @@ func TestUsageUploaderCloseIdleConnectionsClosesRealSocket(t *testing.T) {
 	closed := make(chan struct{})
 	var idleOnce, closedOnce sync.Once
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+		_, _ = io.WriteString(w, `{"accepted":1}`)
 	}))
 	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		switch state {
@@ -117,7 +118,7 @@ func TestUsageUploaderCloseIdleConnectionsClosesRealSocket(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 	u := newTestUploader(t, srv.URL)
-	if err := u.uploadOnce(context.Background(), []protocol.UsageLogEntry{{RequestID: "socket"}}); err != nil {
+	if err := u.uploadOnce(context.Background(), reportedLLM(entry("socket"))); err != nil {
 		t.Fatalf("uploadOnce: %v", err)
 	}
 	<-idle
@@ -183,15 +184,25 @@ func decodeMaybeGzip(t *testing.T, r *http.Request, report *protocol.UsageReport
 	return raw
 }
 
+func writeAcceptedReport(w http.ResponseWriter, report protocol.UsageReport) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprintf(w, `{"accepted_logs":%d,"accepted_api_requests":%d}`, len(report.Logs), len(report.APIRequests))
+}
+
+func decodeAndAcceptReport(t *testing.T, w http.ResponseWriter, r *http.Request) protocol.UsageReport {
+	var report protocol.UsageReport
+	decodeMaybeGzip(t, r, &report)
+	writeAcceptedReport(w, report)
+	return report
+}
+
 func TestUploader_AcksOnSuccess(t *testing.T) {
 	var gotAuth atomic.Bool
 	u, store, _ := newUploaderFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(consts.HeaderXAgentID) == "agent-t" && r.Header.Get(consts.HeaderXAgentSecret) == "sec-t" {
 			gotAuth.Store(true)
 		}
-		var rep protocol.UsageReport
-		_ = json.NewDecoder(r.Body).Decode(&rep)
-		w.WriteHeader(http.StatusOK)
+		decodeAndAcceptReport(t, w, r)
 	})
 	store.Append([]protocol.UsageLogEntry{entry("a"), entry("b"), entry("c")}) // 2 批(BatchMax=2)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -211,11 +222,13 @@ func TestUploader_AcksOnSuccess(t *testing.T) {
 func TestUploader_RetainsOnFailureThenRetries(t *testing.T) {
 	var calls atomic.Int32
 	u, store, _ := newUploaderFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, r, &report)
 		if calls.Add(1) == 1 {
 			w.WriteHeader(http.StatusInternalServerError) // 第一次 5xx
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writeAcceptedReport(w, report)
 	})
 	store.Append([]protocol.UsageLogEntry{entry("a")})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -238,7 +251,7 @@ func TestUploader_RetainsOnFailureThenRetries(t *testing.T) {
 // shutdown deadline 的 caller 通过 FinalDrain 显式执行。
 func TestUploader_DrainsOnShutdown(t *testing.T) {
 	u, store, _ := newUploaderFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		decodeAndAcceptReport(t, w, r)
 	})
 	store.Append([]protocol.UsageLogEntry{entry("a"), entry("b"), entry("c")})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -263,7 +276,7 @@ func TestUploader_EmptyStoreNoRequest(t *testing.T) { // boundary
 	var calls atomic.Int32
 	u, _, _ := newUploaderFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"accepted":0}`)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -299,7 +312,7 @@ func TestUploader_ByteBudgetSplitsOversizedBacklog(t *testing.T) {
 		if n := int32(len(rep.Logs)); n > maxBatchLen.Load() {
 			maxBatchLen.Store(n)
 		}
-		w.WriteHeader(http.StatusOK)
+		writeAcceptedReport(w, rep)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(handler))
 	t.Cleanup(srv.Close)
@@ -349,7 +362,7 @@ func TestUploader_ByteBudgetStillSendsSingleOversizedEntry(t *testing.T) {
 		decodeMaybeGzip(t, r, &rep)
 		requestCount.Add(1)
 		lastBatchLen.Store(int32(len(rep.Logs)))
-		w.WriteHeader(http.StatusOK)
+		writeAcceptedReport(w, rep)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(handler))
 	t.Cleanup(srv.Close)
@@ -378,6 +391,232 @@ func TestUploader_ByteBudgetStillSendsSingleOversizedEntry(t *testing.T) {
 	}
 	if lastBatchLen.Load() != 1 {
 		t.Fatalf("last batch length = %d, want 1 (single oversized entry must still be sent alone)", lastBatchLen.Load())
+	}
+}
+
+func TestUploaderFirstWireBudgetSlimsAPITraceWithoutRetryOrStoreMutation(t *testing.T) {
+	const traceBytes = uploadBatchByteBudget + 512*1024
+
+	var mu sync.Mutex
+	var received []protocol.UsageReport
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, request, &report)
+		mu.Lock()
+		received = append(received, report)
+		mu.Unlock()
+		writeAcceptedReport(w, report)
+	}))
+	t.Cleanup(server.Close)
+
+	store := NewMemPendingUsageStore(10, zap.NewNop())
+	uploader, err := NewUsageUploader(UploaderConfig{
+		Store: store, MasterURL: server.URL, AgentID: "agent", Secret: "secret",
+		FlushInterval: time.Hour, BatchMax: 10, BackoffMaxSec: func() int { return 1 },
+		Concurrency: func() int { return 1 }, SupportsGenericAPIUsage: func() bool { return true },
+		Logger: zap.NewNop(),
+	})
+	require.NoError(t, err)
+
+	body := randomASCII(traceBytes)
+	api := protocol.APIUsageEntry{
+		RequestID: "api-large", StatusCode: 202, QuotaGateDecision: "allowed",
+		ProviderDispatchKnown: true, ProviderDispatched: true,
+		RequestBytes: 123, ResponseBytes: 456, RateLimitDecision: "allowed",
+		RateLimitHitTotal: 1, Trace: &protocol.APITraceEntry{ResponseBody: &apiattempt.APIBodyCapture{
+			Captured: true, Data: body, CapturedBytes: int64(len(body)), TotalBytes: int64(len(body)),
+		}},
+	}
+	llmBefore := protocol.UsageLogEntry{RequestID: "llm-before"}
+	llmAfter := protocol.UsageLogEntry{RequestID: "llm-after"}
+	mixed := []protocol.ReportedUsage{{LLM: &llmBefore}, {API: &api}, {LLM: &llmAfter}}
+	stored, wire := buildUploadBatch("agent", mixed, uploadBatchByteBudget)
+	require.Equal(t, []string{"llm:llm-before", "api:api-large", "llm:llm-after"},
+		[]string{stored[0].QueueID(), stored[1].QueueID(), stored[2].QueueID()})
+	require.Equal(t, []string{"llm:llm-before", "api:api-large", "llm:llm-after"},
+		[]string{wire[0].QueueID(), wire[1].QueueID(), wire[2].QueueID()})
+	store.AppendReported(mixed)
+
+	require.False(t, uploader.drainMainQueue(t.Context()))
+	require.Zero(t, uploader.RetryLen(), "first upload must not require the failure/retry slimming path")
+	require.Zero(t, store.Len())
+	require.Equal(t, body, api.Trace.ResponseBody.Data, "wire slimming must not mutate the stored API entry")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, received, 1, "pre-slim must happen before the mixed batch is split")
+	require.Equal(t, []string{"llm-before", "llm-after"}, []string{received[0].Logs[0].RequestID, received[0].Logs[1].RequestID})
+	require.Len(t, received[0].APIRequests, 1)
+	got := received[0].APIRequests[0]
+	require.Less(t, len(got.Trace.ResponseBody.Data), len(body))
+	require.Equal(t, "api-large", got.RequestID)
+	require.True(t, got.ProviderDispatchKnown)
+	require.True(t, got.ProviderDispatched)
+	require.Equal(t, 202, got.StatusCode)
+	require.Equal(t, int64(123), got.RequestBytes)
+	require.Equal(t, int64(456), got.ResponseBytes)
+	require.Equal(t, "allowed", got.QuotaGateDecision)
+	require.Equal(t, "allowed", got.RateLimitDecision)
+	require.Equal(t, 1, got.RateLimitHitTotal)
+}
+
+func TestBuildUploadBatchPreservesSingleOversizedAPIAndDoesNotSlimLLM(t *testing.T) {
+	t.Run("single API top-level facts remain sendable above budget", func(t *testing.T) {
+		body := randomASCII(2048)
+		api := protocol.APIUsageEntry{
+			RequestID: "api-top-level-large", Subpath: randomASCII(4096),
+			ProviderDispatchKnown: true, ProviderDispatched: true,
+			Trace: &protocol.APITraceEntry{ResponseBody: &apiattempt.APIBodyCapture{
+				Captured: true, Data: body, CapturedBytes: int64(len(body)), TotalBytes: int64(len(body)),
+			}},
+		}
+		original := []protocol.ReportedUsage{{API: &api}}
+
+		stored, wire := buildUploadBatch("agent", original, 1024)
+
+		require.Len(t, stored, 1)
+		require.Len(t, wire, 1)
+		require.Equal(t, "api-top-level-large", wire[0].RequestID())
+		require.True(t, wire[0].API.ProviderDispatchKnown)
+		require.True(t, wire[0].API.ProviderDispatched)
+		require.Equal(t, api.Subpath, wire[0].API.Subpath)
+		require.Greater(t, usageReportSize("agent", wire), 1024,
+			"a single entry must remain sendable when non-trace facts alone exceed budget")
+		require.Equal(t, body, api.Trace.ResponseBody.Data)
+	})
+
+	t.Run("LLM trace keeps the existing unslimmed byte-budget behavior", func(t *testing.T) {
+		trace := randomASCII(2048)
+		llm := protocol.UsageLogEntry{RequestID: "llm-large", TraceData: trace}
+		api := protocol.APIUsageEntry{RequestID: "api-after"}
+
+		stored, wire := buildUploadBatch("agent", []protocol.ReportedUsage{{LLM: &llm}, {API: &api}}, 1024)
+
+		require.Len(t, stored, 1)
+		require.Len(t, wire, 1)
+		require.Equal(t, "llm:llm-large", wire[0].QueueID())
+		require.Equal(t, trace, wire[0].LLM.TraceData)
+	})
+}
+
+func retryOwnershipBoundaryEntries(t *testing.T) []protocol.ReportedUsage {
+	t.Helper()
+	base := []protocol.ReportedUsage{
+		{LLM: &protocol.UsageLogEntry{RequestID: "first", Other: `{"padding":""}`}},
+		{LLM: &protocol.UsageLogEntry{RequestID: "second", Other: `{"padding":""}`}},
+	}
+	preBase := usageReportSize("agent-t", base)
+	degradedBase := append([]protocol.ReportedUsage(nil), base...)
+	for index := range degradedBase {
+		entry := *degradedBase[index].LLM
+		degradedBase[index] = protocol.ReportedUsage{LLM: &entry}
+		applyUsageDegrade(&degradedBase[index], DegradeStripTrace)
+	}
+	delta := usageReportSize("agent-t", degradedBase) - preBase
+	if delta <= 2 {
+		t.Fatalf("degrade marker delta = %d, want >2", delta)
+	}
+	paddingTotal := uploadBatchByteBudget - preBase - delta/2
+	first := protocol.UsageLogEntry{RequestID: "first", Other: `{"padding":"` + strings.Repeat("x", paddingTotal/2) + `"}`}
+	second := protocol.UsageLogEntry{RequestID: "second", Other: `{"padding":"` + strings.Repeat("x", paddingTotal-paddingTotal/2) + `"}`}
+	original := []protocol.ReportedUsage{{LLM: &first}, {LLM: &second}}
+	degraded := []protocol.ReportedUsage{{LLM: &first}, {LLM: &second}}
+	for index := range degraded {
+		entry := *degraded[index].LLM
+		degraded[index] = protocol.ReportedUsage{LLM: &entry}
+		applyUsageDegrade(&degraded[index], DegradeStripTrace)
+	}
+	if before, after := usageReportSize("agent-t", original), usageReportSize("agent-t", degraded); before > uploadBatchByteBudget || after <= uploadBatchByteBudget {
+		t.Fatalf("fixture does not cross budget: before=%d after=%d budget=%d", before, after, uploadBatchByteBudget)
+	}
+	return original
+}
+
+func TestRetryOwnershipRebuildsAfterPersistentDegradeCrossesWireBudget(t *testing.T) {
+	original := retryOwnershipBoundaryEntries(t)
+
+	var mu sync.Mutex
+	var delivered []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, request, &report)
+		mu.Lock()
+		for _, entry := range report.Logs {
+			delivered = append(delivered, entry.RequestID)
+		}
+		mu.Unlock()
+		writeAcceptedReport(w, report)
+	}))
+	t.Cleanup(server.Close)
+	uploader := newTestUploaderWithConcurrency(t, server.URL, 1)
+	uploader.stripTraceAfter = func() int { return 1 }
+	uploader.retry.pushReported(original, 1, time.Time{})
+
+	uploader.processRetryQueue(t.Context())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(delivered) != 2 || delivered[0] != "first" || delivered[1] != "second" {
+		t.Fatalf("delivered = %v, want [first second]", delivered)
+	}
+	if uploader.RetryLen() != 0 || uploader.InflightCount() != 0 {
+		t.Fatalf("retry=%d inflight=%d, want 0/0", uploader.RetryLen(), uploader.InflightCount())
+	}
+}
+
+func TestRetryOwnershipFailureRequeuesOnlyMatchingSuffixAndTracksItInflight(t *testing.T) {
+	const waitTimeout = 5 * time.Second
+
+	original := retryOwnershipBoundaryEntries(t)
+	secondEntered := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var releaseSecondOnce sync.Once
+	releaseSecondUpload := func() { releaseSecondOnce.Do(func() { close(releaseSecond) }) }
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, request, &report)
+		if calls.Add(1) == 1 {
+			writeAcceptedReport(w, report)
+			return
+		}
+		close(secondEntered)
+		<-releaseSecond
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(releaseSecondUpload)
+	uploader := newTestUploaderWithConcurrency(t, server.URL, 1)
+	uploader.stripTraceAfter = func() int { return 1 }
+	uploader.retry.pushReported(original, 1, time.Time{})
+
+	done := make(chan struct{})
+	go func() {
+		uploader.processRetryQueue(t.Context())
+		close(done)
+	}()
+	select {
+	case <-secondEntered:
+	case <-time.After(waitTimeout):
+		t.Fatal("second ownership batch never reached upload")
+	}
+	inflight := uploader.inflightEntries()
+	if len(inflight) != 1 || inflight[0].QueueID() != "llm:second" {
+		t.Fatalf("inflight = %+v, want only llm:second", inflight)
+	}
+	releaseSecondUpload()
+	select {
+	case <-done:
+	case <-time.After(waitTimeout):
+		t.Fatal("retry queue processing did not finish after releasing second upload")
+	}
+
+	items := uploader.retry.snapshotAll()
+	if len(items) != 1 || items[0].entry.QueueID() != "llm:second" {
+		t.Fatalf("retry = %+v, want only llm:second", items)
+	}
+	if uploader.InflightCount() != 0 {
+		t.Fatalf("inflight count = %d, want 0", uploader.InflightCount())
 	}
 }
 
@@ -424,7 +663,7 @@ func TestUploader_PoisonIsolation_GoodEntriesDeliverEarly_PoisonEventuallySlims(
 			}
 		}
 		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
+		writeAcceptedReport(w, rep)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(handler))
 	t.Cleanup(srv.Close)
@@ -517,7 +756,7 @@ func TestUploader_RetryQueue_NetworkOutage_RecoversFullyWithoutSlimming(t *testi
 			}
 		}
 		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
+		writeAcceptedReport(w, rep)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(handler))
 	t.Cleanup(srv.Close)
@@ -610,11 +849,11 @@ func TestUploadOnceSendsGzip(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotEncoding = r.Header.Get("Content-Encoding")
 		gotBody, _ = io.ReadAll(r.Body)
-		w.WriteHeader(200)
+		_, _ = io.WriteString(w, `{"accepted":1}`)
 	}))
 	defer srv.Close()
 	u := newTestUploader(t, srv.URL)
-	err := u.uploadOnce(context.Background(), []protocol.UsageLogEntry{{RequestID: "a"}})
+	err := u.uploadOnce(context.Background(), reportedLLM(entry("a")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +883,7 @@ func TestUploadRetryPreservesAutoDisableTriggerBody(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writeAcceptedReport(w, report)
 	}))
 	t.Cleanup(server.Close)
 	uploader := newTestUploader(t, server.URL)
@@ -652,8 +891,8 @@ func TestUploadRetryPreservesAutoDisableTriggerBody(t *testing.T) {
 		RequestID: "triggered", AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
 	}
 
-	require.Error(t, uploader.uploadOnce(t.Context(), []protocol.UsageLogEntry{entry}))
-	require.NoError(t, uploader.uploadOnce(t.Context(), []protocol.UsageLogEntry{entry}))
+	require.Error(t, uploader.uploadOnce(t.Context(), reportedLLM(entry)))
+	require.NoError(t, uploader.uploadOnce(t.Context(), reportedLLM(entry)))
 
 	require.Equal(t, [][]attemptproxy.ChannelAutoDisableTrigger{{trigger}, {trigger}}, bodies)
 }
@@ -671,11 +910,11 @@ func TestUploadOncePlaintextFallbackOn400(t *testing.T) {
 			w.WriteHeader(400) // 老 master 不识别 gzip
 			return
 		}
-		w.WriteHeader(200)
+		_, _ = io.WriteString(w, `{"accepted":1}`)
 	}))
 	defer srv.Close()
 	u := newTestUploader(t, srv.URL)
-	if err := u.uploadOnce(context.Background(), []protocol.UsageLogEntry{{RequestID: "a"}}); err != nil {
+	if err := u.uploadOnce(context.Background(), reportedLLM(entry("a"))); err != nil {
 		t.Fatalf("fallback should succeed: %v", err)
 	}
 	if len(calls) != 2 || calls[0] != "gzip" || calls[1] != "" {
@@ -694,7 +933,7 @@ func TestUploadOnceFallbackOnlyOnce(t *testing.T) {
 	}))
 	defer srv.Close()
 	u := newTestUploader(t, srv.URL)
-	if err := u.uploadOnce(context.Background(), []protocol.UsageLogEntry{{RequestID: "a"}}); err == nil {
+	if err := u.uploadOnce(context.Background(), reportedLLM(entry("a"))); err == nil {
 		t.Fatal("must return error when plaintext also fails")
 	}
 	if n != 2 {
@@ -752,12 +991,12 @@ func TestCycleDrainsMainBeforeRetry(t *testing.T) {
 			order = append(order, e.RequestID)
 		}
 		mu.Unlock()
-		w.WriteHeader(200)
+		writeAcceptedReport(w, report)
 	}))
 	defer srv.Close()
 	u := newTestUploader(t, srv.URL)                                             // concurrency=1 保证串行可断言顺序
 	u.retry.push([]protocol.UsageLogEntry{{RequestID: "stale"}}, 1, time.Time{}) // 已到期
-	u.cfg.Store.Append([]protocol.UsageLogEntry{{RequestID: "fresh"}})
+	u.cfg.Store.AppendReported(reportedLLM(entry("fresh")))
 	backoff := uploadBackoffBase
 	u.cycle(context.Background(), &backoff)
 	mu.Lock()
@@ -798,15 +1037,16 @@ func TestMainQueueUploadsConcurrently(t *testing.T) {
 			}
 		}
 		time.Sleep(150 * time.Millisecond)
-		io.Copy(io.Discard, r.Body)
-		w.WriteHeader(200)
+		decodeAndAcceptReport(t, w, r)
 	}))
 	defer srv.Close()
 	u := newTestUploaderWithConcurrency(t, srv.URL, 2)
 	// 两条各 ~3MiB 的大条目:字节预算 4MiB 会切成两个子批
 	big := strings.Repeat("x", 3<<20)
-	u.cfg.Store.Append([]protocol.UsageLogEntry{
-		{RequestID: "a", TraceData: big}, {RequestID: "b", TraceData: big}})
+	u.cfg.Store.AppendReported(reportedLLM(
+		protocol.UsageLogEntry{RequestID: "a", TraceData: big},
+		protocol.UsageLogEntry{RequestID: "b", TraceData: big},
+	))
 	start := time.Now()
 	backoff := uploadBackoffBase
 	u.cycle(context.Background(), &backoff)
@@ -843,7 +1083,7 @@ func TestRetryDispatchAppliesDegradeLadder(t *testing.T) {
 			w.WriteHeader(500)
 			return
 		}
-		w.WriteHeader(200)
+		writeAcceptedReport(w, report)
 	}))
 	defer srv.Close()
 	u := newTestUploader(t, srv.URL) // 门槛用默认 3/6/9
@@ -874,17 +1114,17 @@ func TestRetryDispatchAppliesDegradeLadder(t *testing.T) {
 
 	// 失败回队后级别保留:直接看队列快照
 	for _, it := range u.retry.snapshotTop(10) {
-		switch it.entry.RequestID {
+		switch it.entry.RequestID() {
 		case "l2":
 			if it.degrade != DegradeStripTrace {
 				t.Fatalf("l2 degrade lost on re-push: %d", it.degrade)
 			}
-			require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, it.entry.AutoDisableTriggers)
+			require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, it.entry.LLM.AutoDisableTriggers)
 		case "l3":
 			if it.degrade != DegradeBillingOnly {
 				t.Fatalf("l3 degrade lost on re-push: %d", it.degrade)
 			}
-			require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, it.entry.AutoDisableTriggers)
+			require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{autoDisableTrigger()}, it.entry.LLM.AutoDisableTriggers)
 		}
 	}
 }
@@ -898,7 +1138,7 @@ func TestRetryFlightTrackedInInflight(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(entered)
 		<-release
-		w.WriteHeader(200)
+		_, _ = io.WriteString(w, `{"accepted":1}`)
 	}))
 	defer srv.Close()
 	u := newTestUploader(t, srv.URL)
@@ -909,13 +1149,45 @@ func TestRetryFlightTrackedInInflight(t *testing.T) {
 	}()
 	<-entered
 	ents := u.inflightEntries()
-	if len(ents) != 1 || ents[0].RequestID != "flying" {
+	if len(ents) != 1 || ents[0].RequestID() != "flying" {
 		t.Fatalf("inflight = %+v, want [flying]", ents)
 	}
 	if u.InflightCount() != 1 {
 		t.Fatalf("InflightCount = %d, want 1", u.InflightCount())
 	}
 	close(release)
+}
+
+func TestMixedRetryInflightKeepsBothTypesWithCollidingRequestID(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, request, &report)
+		close(entered)
+		<-release
+		writeAcceptedReport(w, report)
+	}))
+	t.Cleanup(server.Close)
+	uploader := newTestUploader(t, server.URL)
+	uploader.cfg.SupportsGenericAPIUsage = func() bool { return true }
+	llm := protocol.UsageLogEntry{RequestID: "shared"}
+	api := protocol.APIUsageEntry{RequestID: "shared"}
+	uploader.retry.pushReported([]protocol.ReportedUsage{{LLM: &llm}, {API: &api}}, 1, time.Time{})
+	go func() {
+		backoff := uploadBackoffBase
+		uploader.cycle(t.Context(), &backoff)
+	}()
+	<-entered
+
+	inflight := uploader.inflightEntries()
+	require.Len(t, inflight, 2)
+	require.False(t, inflight[0].IsAPI())
+	require.True(t, inflight[1].IsAPI())
+	require.Equal(t, "shared", inflight[0].RequestID())
+	require.Equal(t, "shared", inflight[1].RequestID())
+	close(release)
+	waitFor(t, time.Second, func() bool { return uploader.InflightCount() == 0 && uploader.RetryLen() == 0 })
 }
 
 // TestMainFailureMovesToRetryAndSignalsBackoff: a main-queue failure still goes out via
@@ -927,7 +1199,7 @@ func TestMainFailureMovesToRetryAndSignalsBackoff(t *testing.T) {
 	}))
 	defer srv.Close()
 	u := newTestUploader(t, srv.URL)
-	u.cfg.Store.Append([]protocol.UsageLogEntry{{RequestID: "a"}})
+	u.cfg.Store.AppendReported(reportedLLM(entry("a")))
 	backoff := uploadBackoffBase
 	failed := u.cycle(context.Background(), &backoff)
 	if !failed {
@@ -951,4 +1223,75 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met within timeout")
+}
+
+func TestUploadOnceRequiresExactAcceptedCountsForMixedUsage(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		wantErr  bool
+	}{
+		{name: "exact dual count", response: `{"accepted_logs":1,"accepted_api_requests":1}`},
+		{name: "mismatched API count", response: `{"accepted_logs":1,"accepted_api_requests":0}`, wantErr: true},
+		{name: "legacy accepted only", response: `{"accepted":2}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, test.response)
+			}))
+			t.Cleanup(server.Close)
+			uploader := newTestUploader(t, server.URL)
+			batch := []protocol.ReportedUsage{
+				{LLM: &protocol.UsageLogEntry{RequestID: "shared"}},
+				{API: &protocol.APIUsageEntry{RequestID: "shared"}},
+			}
+
+			err := uploader.uploadOnce(t.Context(), batch)
+			require.Equal(t, test.wantErr, err != nil)
+		})
+	}
+}
+
+func TestUploaderKeepsAPIQueuedForLegacyMasterWhileDeliveringLLM(t *testing.T) {
+	var supports atomic.Bool
+	var mu sync.Mutex
+	received := []protocol.UsageReport{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var report protocol.UsageReport
+		decodeMaybeGzip(t, request, &report)
+		mu.Lock()
+		received = append(received, report)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if len(report.APIRequests) == 0 {
+			_, _ = fmt.Fprintf(w, `{"accepted":%d}`, len(report.Logs))
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"accepted_logs":%d,"accepted_api_requests":%d}`, len(report.Logs), len(report.APIRequests))
+	}))
+	t.Cleanup(server.Close)
+	store := NewMemPendingUsageStore(10, zap.NewNop())
+	uploader, err := NewUsageUploader(UploaderConfig{
+		Store: store, MasterURL: server.URL, AgentID: "agent", Secret: "secret",
+		FlushInterval: time.Hour, BatchMax: 10, BackoffMaxSec: func() int { return 1 },
+		SupportsGenericAPIUsage: supports.Load, Logger: zap.NewNop(),
+	})
+	require.NoError(t, err)
+	api := protocol.ReportedUsage{API: &protocol.APIUsageEntry{RequestID: "api-first"}}
+	llm := protocol.ReportedUsage{LLM: &protocol.UsageLogEntry{RequestID: "llm-second"}}
+	store.AppendReported([]protocol.ReportedUsage{api, llm})
+
+	require.False(t, uploader.drainMainQueue(t.Context()))
+	require.Equal(t, []protocol.ReportedUsage{api}, store.PeekReportedBatch(10, true))
+	supports.Store(true)
+	require.False(t, uploader.drainMainQueue(t.Context()))
+	require.Zero(t, store.Len())
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, received, 2)
+	require.Equal(t, "llm-second", received[0].Logs[0].RequestID)
+	require.Empty(t, received[0].APIRequests)
+	require.Equal(t, "api-first", received[1].APIRequests[0].RequestID)
 }

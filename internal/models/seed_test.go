@@ -3,7 +3,9 @@ package models
 import (
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
@@ -88,4 +90,65 @@ func TestSeedBYOKSettings_DoesNotOverrideExisting(t *testing.T) {
 	if s.Value != "false" {
 		t.Fatalf("byok_enabled overwritten: %q", s.Value)
 	}
+}
+
+func TestSeedGatewayAdminRoleIsIdempotentAndRepairsGrants(t *testing.T) {
+	// This catches a seed that creates a role without its invoke grant, leaks
+	// duplicate rows on repeated startup, or cannot repair a manually deleted grant.
+	db := openSplitTestDB(t)
+	require.NoError(t, MigrateCoreDB(db))
+
+	require.NoError(t, SeedGatewayAdminRole(db))
+	require.NoError(t, SeedGatewayAdminRole(db))
+
+	var role Role
+	require.NoError(t, db.Where("key = ?", "gateway_admin").First(&role).Error)
+	require.True(t, role.BuiltIn)
+	require.Equal(t, consts.StatusEnabled, role.Status)
+	require.Equal(t, "Gateway Admin", role.Name)
+	require.Equal(t, "Built-in administrator for generic API gateway resources", role.Description)
+	var grants []Permission
+	require.NoError(t, db.Model(&Permission{}).
+		Joins("JOIN role_permissions ON role_permissions.permission_id = permissions.id").
+		Where("role_permissions.role_id = ?", role.ID).
+		Order("permissions.resource, permissions.action").
+		Find(&grants).Error)
+	require.Equal(t, []Permission{
+		{Resource: APIResourceService, ResourceID: 0, Action: APIPermissionInvoke},
+	}, withoutPermissionIDs(grants))
+
+	var deleted Permission
+	require.NoError(t, db.Where("resource = ? AND resource_id = ? AND action = ?", APIResourceService, 0, APIPermissionInvoke).First(&deleted).Error)
+	require.NoError(t, db.Where("role_id = ? AND permission_id = ?", role.ID, deleted.ID).Delete(&RolePermission{}).Error)
+	extra := Permission{Resource: APIResourceService, ResourceID: 99, Action: APIPermissionInvoke}
+	require.NoError(t, db.Create(&extra).Error)
+	require.NoError(t, db.Create(&RolePermission{RoleID: role.ID, PermissionID: extra.ID}).Error)
+	require.NoError(t, db.Model(&Role{}).Where("id = ?", role.ID).Updates(map[string]any{
+		"name": "Drifted", "description": "drifted", "built_in": false, "status": consts.StatusDisabled,
+	}).Error)
+	require.NoError(t, SeedGatewayAdminRole(db))
+
+	var repaired int64
+	require.NoError(t, db.Model(&RolePermission{}).Where("role_id = ? AND permission_id = ?", role.ID, deleted.ID).Count(&repaired).Error)
+	require.Equal(t, int64(1), repaired)
+	var extraCount int64
+	require.NoError(t, db.Model(&RolePermission{}).Where("role_id = ? AND permission_id = ?", role.ID, extra.ID).Count(&extraCount).Error)
+	require.Zero(t, extraCount, "seed must remove grants outside the built-in contract")
+	role = Role{}
+	require.NoError(t, db.Where("key = ?", "gateway_admin").First(&role).Error)
+	require.True(t, role.BuiltIn)
+	require.Equal(t, consts.StatusEnabled, role.Status)
+	require.Equal(t, "Gateway Admin", role.Name)
+	require.Equal(t, "Built-in administrator for generic API gateway resources", role.Description)
+	var bindingCount int64
+	require.NoError(t, db.Model(&RoleBinding{}).Count(&bindingCount).Error)
+	require.Zero(t, bindingCount, "the built-in seed must never grant the role to a principal")
+}
+
+func withoutPermissionIDs(in []Permission) []Permission {
+	out := make([]Permission, len(in))
+	for i, permission := range in {
+		out[i] = Permission{Resource: permission.Resource, ResourceID: permission.ResourceID, Action: permission.Action}
+	}
+	return out
 }

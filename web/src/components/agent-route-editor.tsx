@@ -20,7 +20,7 @@ import { formatErrorToast } from "@/lib/api/error-toast";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 
 interface AgentRouteEditorProps {
-  sourceType: "token" | "channel";
+  sourceType: "token" | "channel" | "api_service" | "api_route";
   sourceId: number;
 }
 

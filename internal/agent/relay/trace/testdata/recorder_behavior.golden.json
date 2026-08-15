@@ -1,0 +1,13 @@
+{
+  "inbound_path": "/v1/chat",
+  "inbound_authorization": "***",
+  "inbound_body": "...(truncated)-request",
+  "outbound_path": "/v1/chat",
+  "outbound_api_key": "***",
+  "outbound_body": "...(truncated)-request",
+  "upstream_status": 200,
+  "response_cookie": "***",
+  "upstream_body": "...(truncated)response",
+  "client_body": "...(truncated)response",
+  "verbose": true
+}

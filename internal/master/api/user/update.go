@@ -1,13 +1,13 @@
 package user
 
 import (
-	"context"
 	"strconv"
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	mastersync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
@@ -51,7 +51,6 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.User, error)
 	}
 
 	// Validate group_id if present (must be a positive uint pointing to existing group)
-	var newGroupID *uint
 	if raw, ok := updates["group_id"]; ok {
 		fnum, ok := raw.(float64)
 		if !ok {
@@ -68,7 +67,6 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.User, error)
 			return models.User{}, api.BadRequestError("user_group not found", err)
 		}
 		updates["group_id"] = gid
-		newGroupID = &gid
 	}
 
 	if pw, ok := updates["password"]; ok && pw != nil {
@@ -93,10 +91,25 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.User, error)
 	}
 	user.Password = ""
 
-	if newGroupID != nil && h.Bus != nil && oldGroupID != *newGroupID {
-		_ = events.Publish(context.Background(), h.Bus, events.UserSyncUpdateTopic,
-			protocol.SyncedUser{ID: uint(id), GroupID: *newGroupID})
+	groupChanged := normalizedUserGroupID(oldGroupID) != normalizedUserGroupID(user.GroupID)
+	if groupChanged && h.Bus != nil {
+		if err := events.Publish(c.RequestContext(), h.Bus, events.UserSyncUpdateTopic,
+			protocol.SyncedUser{ID: uint(id), GroupID: normalizedUserGroupID(user.GroupID)}); err != nil {
+			return models.User{}, api.InternalError("publish user sync update failed", err)
+		}
+	}
+	if h.Bus != nil && (groupChanged || oldUser.Role != user.Role) {
+		if err := mastersync.NewAPISyncActions(h.Bus, nil).InvalidateUserRoleSet(c.RequestContext(), user.ID); err != nil {
+			return models.User{}, api.InternalError("publish user API roles failed", err)
+		}
 	}
 
 	return *user, nil
+}
+
+func normalizedUserGroupID(groupID uint) uint {
+	if groupID == 0 {
+		return models.DefaultUserGroupID
+	}
+	return groupID
 }

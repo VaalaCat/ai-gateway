@@ -13,6 +13,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	masterapiusage "github.com/VaalaCat/ai-gateway/internal/master/apiusage"
 	masterlogqueue "github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -189,6 +190,30 @@ var settingDefs = map[string]struct {
 }
 
 func init() {
+	for key, bounds := range map[string][3]int{
+		masterapiusage.QueueCapacityKey: {
+			masterapiusage.DefaultQueueCapacity,
+			masterapiusage.MinimumQueueCapacity,
+			masterapiusage.MaximumQueueCapacity,
+		},
+		masterapiusage.WorkerConcurrencyKey: {
+			masterapiusage.DefaultWorkerConcurrency,
+			masterapiusage.MinimumWorkerConcurrency,
+			masterapiusage.MaximumWorkerConcurrency,
+		},
+	} {
+		bounds := bounds
+		settingDefs[key] = struct {
+			Default  string
+			Validate func(string) bool
+		}{
+			Default: strconv.Itoa(bounds[0]),
+			Validate: func(value string) bool {
+				n, err := strconv.Atoi(value)
+				return err == nil && n >= bounds[1] && n <= bounds[2]
+			},
+		}
+	}
 	for key, definition := range masterlogqueue.DeliverySettingDefinitions() {
 		definition := definition
 		settingDefs[key] = struct {
@@ -354,7 +379,12 @@ func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (Set
 	}
 
 	publishErrors := make([]error, 0)
+	publishAttempts := 0
 	for _, key := range keys {
+		if _, isAgent := agentKeys[key]; !isAgent {
+			continue
+		}
+		publishAttempts++
 		if err := events.PublishSettingUpdate(requestContext, c.GetBus(), models.Setting{Key: key, Value: req.Settings[key]}); err != nil {
 			publishErrors = append(publishErrors, err)
 		}
@@ -363,7 +393,7 @@ func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (Set
 		c.Logger.Warn("settings committed with publish failures",
 			zap.String("code", "settings_publish_after_commit_failed"),
 			zap.Int("failed", len(publishErrors)),
-			zap.Int("attempted", len(keys)),
+			zap.Int("attempted", publishAttempts),
 		)
 	}
 

@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { EntityMultiPicker } from "@/components/business/entity-picker/entity-multi-picker";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { EntityLabel } from "@/components/business/entity-label";
 import type { EntityName } from "@/components/business/entity-picker/registry";
 import { FieldTip } from "@/components/business/field-tip";
@@ -28,6 +29,7 @@ import {
 import { formatErrorToast } from "@/lib/api/error-toast";
 import type {
   LimiterBinding,
+  LimiterChannelScope,
   LimiterKeyBy,
   LimiterTargetType,
 } from "@/lib/types";
@@ -37,14 +39,29 @@ const ALL_TARGET_TYPES: LimiterTargetType[] = [
   "channel",
   "user_group",
   "user",
+  "api_service",
+  "api_route",
+  "api_upstream",
 ];
 
-// validBindingTarget 是后端 models.ValidBindingTarget 的 TS 镜像（§5.1）：
-// KeyBy 决定一条 limiter 能绑哪类目标，二者必须保持一致，否则后端会 400。
+// validBindingTarget 镜像后端写入契约：KeyBy 限定挂载点，ChannelScope
+// 再把 Generic API target 收窄到 API-only（空 scope）规则。
 export function validBindingTarget(
   keyBy: LimiterKeyBy,
+  channelScope: LimiterChannelScope,
   targetType: LimiterTargetType,
 ): boolean {
+  if (
+    targetType === "api_service" ||
+    targetType === "api_route" ||
+    targetType === "api_upstream"
+  ) {
+    return (
+      channelScope === "" &&
+      (keyBy === "shared" || keyBy === "per_user" || keyBy === "per_group")
+    );
+  }
+
   switch (keyBy) {
     case "shared":
       return targetType === "global";
@@ -70,8 +87,17 @@ function targetTypeOptionKey(
   | "targetGlobal"
   | "targetChannel"
   | "targetUserGroup"
-  | "targetUser" {
+  | "targetUser"
+  | "targetAPIService"
+  | "targetAPIRoute"
+  | "targetAPIUpstream" {
   switch (t) {
+    case "api_service":
+      return "targetAPIService";
+    case "api_route":
+      return "targetAPIRoute";
+    case "api_upstream":
+      return "targetAPIUpstream";
     case "channel":
       return "targetChannel";
     case "user_group":
@@ -83,18 +109,26 @@ function targetTypeOptionKey(
   }
 }
 
+function targetNeedsObject(targetType: LimiterTargetType): boolean {
+  return targetType !== "global";
+}
+
 // 非全局 target_type 映射到 EntityPicker / EntityLabel 的 adapter 名（注意下划线↔连字符）。
-function entityNameOf(targetType: LimiterTargetType): EntityName | null {
-  switch (targetType) {
-    case "channel":
-      return "channel";
-    case "user_group":
-      return "user-group";
-    case "user":
-      return "user";
-    default:
-      return null;
-  }
+const ENTITY_NAMES_BY_LIMITER_TARGET: Partial<Record<LimiterTargetType, EntityName>> = {
+  channel: "channel",
+  user_group: "user-group",
+  user: "user",
+  api_service: "api-service",
+  api_route: "api-route",
+  api_upstream: "api-upstream",
+};
+
+export function entityNameOf(targetType: LimiterTargetType): EntityName | null {
+  return ENTITY_NAMES_BY_LIMITER_TARGET[targetType] ?? null;
+}
+
+function targetNeedsAPIService(targetType: LimiterTargetType) {
+  return targetType === "api_route" || targetType === "api_upstream";
 }
 
 // 一条已存在绑定的标签：global 直接显示文案，其余用 EntityLabel 解析对象名。
@@ -118,6 +152,8 @@ function BindingTag({
       <span className="font-medium">
         {entity ? (
           <EntityLabel entity={entity} id={binding.target_id} />
+        ) : binding.target_type !== "global" ? (
+          <span className="font-mono tabular-nums">{binding.target_id}</span>
         ) : (
           t("targetGlobalLabel")
         )}
@@ -143,13 +179,14 @@ function BindingTag({
 export function BindingEditor({
   limiterId,
   keyBy,
+  channelScope,
   policyDirty = false,
 }: {
   limiterId: number;
-  // keyBy 必须是已落库的口径（后端 CreateBinding 重新从 DB 读 limiter.KeyBy 校验），
-  // 不能传表单里未保存的实时值，否则下拉给出的目标类型会与后端校验对不上。
+  // 候选项跟随表单 draft 即时变化；policyDirty 会在 draft 未保存时禁止提交。
   keyBy: LimiterKeyBy;
-  // 表单里的 key_by 被改且尚未保存时为 true：此时禁用加绑定，提示先保存策略。
+  channelScope: LimiterChannelScope;
+  // 表单 policy 被改且尚未保存时为 true：此时禁用加绑定，提示先保存策略。
   policyDirty?: boolean;
 }) {
   const t = useTranslations("rateLimiters");
@@ -162,8 +199,11 @@ export function BindingEditor({
 
   // 当前 key_by 允许的 target_type（即时校验：非法组合根本不出现在下拉里）。
   const allowedTypes = useMemo(
-    () => ALL_TARGET_TYPES.filter((tt) => validBindingTarget(keyBy, tt)),
-    [keyBy],
+    () =>
+      ALL_TARGET_TYPES.filter((tt) =>
+        validBindingTarget(keyBy, channelScope, tt),
+      ),
+    [keyBy, channelScope],
   );
 
   const [targetType, setTargetType] = useState<LimiterTargetType>(
@@ -173,11 +213,12 @@ export function BindingEditor({
     type: allowedTypes[0] ?? "global",
     values: [],
   });
+  const [apiServiceID, setAPIServiceID] = useState("");
   const [isBatching, setIsBatching] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  // key_by 改了导致当前选择不再合法时，回退到第一个合法项。
-  const effectiveType = validBindingTarget(keyBy, targetType)
+  // key_by 或 channel_scope 改了导致当前选择不再合法时，回退到第一个合法项。
+  const effectiveType = validBindingTarget(keyBy, channelScope, targetType)
     ? targetType
     : allowedTypes[0] ?? "global";
 
@@ -185,7 +226,12 @@ export function BindingEditor({
   const setTargetValues = (values: string[]) => setTargetSelection({ type: effectiveType, values });
 
   const entity = entityNameOf(effectiveType);
-  const needsObject = entity !== null;
+  const needsObject = targetNeedsObject(effectiveType);
+  const needsAPIService = targetNeedsAPIService(effectiveType);
+  const parsedAPIServiceID = Number(apiServiceID);
+  const apiServiceId = Number.isSafeInteger(parsedAPIServiceID) && parsedAPIServiceID > 0
+    ? parsedAPIServiceID
+    : undefined;
 
   // 当前类型下已绑定的 target_id（多选里排除，避免撞 uk_limiter_binding 唯一约束 → 409）
   const boundIdsOfType = (bindings ?? [])
@@ -193,7 +239,14 @@ export function BindingEditor({
     .map((b) => String(b.target_id));
 
   const onTypeChange = (v: string) => {
-    setTargetType(v as LimiterTargetType);
+    const nextType = v as LimiterTargetType;
+    setTargetType(nextType);
+    setTargetSelection({ type: nextType, values: [] });
+    setAPIServiceID("");
+  };
+
+  const onAPIServiceChange = (nextServiceID: string) => {
+    setAPIServiceID(nextServiceID);
     setTargetValues([]);
   };
 
@@ -202,7 +255,7 @@ export function BindingEditor({
       toast.error(t("bindingPolicyDirty"));
       return;
     }
-    if (!validBindingTarget(keyBy, effectiveType)) {
+    if (!validBindingTarget(keyBy, channelScope, effectiveType)) {
       toast.error(t("bindingInvalidCombo"));
       return;
     }
@@ -330,6 +383,19 @@ export function BindingEditor({
           </Select>
         </div>
 
+        {needsAPIService ? (
+          <div className="grid flex-1 gap-1.5">
+            <Label className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+              {t("targetAPIService")}
+            </Label>
+            <EntityPicker
+              entity="api-service"
+              value={apiServiceID}
+              onChange={onAPIServiceChange}
+              disabled={policyDirty}
+            />
+          </div>
+        ) : null}
         {needsObject && entity ? (
           <div className="grid flex-1 gap-1.5">
             <Label className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
@@ -340,7 +406,8 @@ export function BindingEditor({
               value={targetValues}
               onChange={setTargetValues}
               excludeIds={boundIdsOfType}
-              disabled={policyDirty}
+              apiServiceId={apiServiceId}
+              disabled={policyDirty || (needsAPIService && apiServiceId === undefined)}
             />
           </div>
         ) : null}

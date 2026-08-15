@@ -1,7 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { Input } from "@/components/ui/input";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { ChannelForm } from "../types";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 import { parseAffinity, stringifyAffinity, AffinityOverride } from "../utils";
 
 type ParticipationValue = "inherit" | "enabled" | "disabled";
@@ -67,11 +68,16 @@ export function AffinitySection({ form, setForm }: AffinitySectionProps) {
         </div>
         <div className="space-y-2">
           <Label>{t("affinityTTLOverride")}</Label>
-          <Input
+          <NumberUnitInput
             type="number"
             min={0}
             max={86400}
+            unit="s"
             value={affinity.ttl_sec !== undefined ? String(affinity.ttl_sec) : ""}
+            humanReadable={humanizeNumberUnit(
+              affinity.ttl_sec !== undefined ? String(affinity.ttl_sec) : "",
+              "seconds",
+            )}
             onChange={(e) => updateTTL(e.target.value)}
           />
           <p className="text-xs text-muted-foreground">{t("affinityTTLOverrideTip")}</p>

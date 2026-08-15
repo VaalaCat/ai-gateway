@@ -1,14 +1,13 @@
 import type { ReactNode } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestQueryClient } from "@/test/render";
-import { useAuth } from "@/lib/auth";
+import * as marketplaceApi from "./model-marketplace";
 import {
   useAdminModelMarketplaceDetail,
   useAdminModelMarketplaceList,
-  useMarketplaceTokens,
   useModelMarketplaceDetail,
   useModelMarketplaceList,
   type AdminModelMarketplaceListResponse,
@@ -26,26 +25,22 @@ const userResponse: ModelMarketplaceListResponse = {
   selected_token: { id: 17, name: "Primary" },
   models: [],
   filters: { providers: [], input_modalities: [], output_modalities: [] },
+  total: 0,
+  page: 1,
+  page_size: 20,
 };
 
 const adminResponse: AdminModelMarketplaceListResponse = {
   view: { mode: "token_preview", selected_token: { id: 17, name: "Primary" } },
   models: [],
   filters: { providers: [], input_modalities: [], output_modalities: [] },
+  total: 0,
+  page: 1,
+  page_size: 20,
 };
 
 function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={createTestQueryClient()}>{children}</QueryClientProvider>;
-}
-
-function authToken(userId: number) {
-  const payload = btoa(JSON.stringify({
-    user_id: userId,
-    username: `user-${userId}`,
-    role: 1,
-    exp: Math.floor(Date.now() / 1000) + 3_600,
-  })).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-  return `header.${payload}.signature`;
 }
 
 describe("model marketplace list API hooks", () => {
@@ -60,17 +55,33 @@ describe("model marketplace list API hooks", () => {
     const localWrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
-    const params = { tokenId: 17, search: "gpt", provider: "OpenAI", kind: "real" as const };
+    const params = {
+      tokenId: 17,
+      search: "gpt",
+      provider: "OpenAI",
+      kind: "real" as const,
+      page: 2,
+      pageSize: 10,
+    };
     const { result } = renderHook(() => useModelMarketplaceList(params, 7), { wrapper: localWrapper });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiGet).toHaveBeenCalledWith(
-      "/model-marketplace?token_id=17&search=gpt&provider=OpenAI&kind=real",
+      "/model-marketplace?token_id=17&search=gpt&provider=OpenAI&kind=real&page=2&page_size=10",
     );
     expect(queryClient.getQueryState([
       "model-marketplace",
       "list",
-      { role: "user", viewerId: 7, tokenId: 17, search: "gpt", provider: "OpenAI", kind: "real" },
+      {
+        role: "user",
+        viewerId: 7,
+        tokenId: 17,
+        search: "gpt",
+        provider: "OpenAI",
+        kind: "real",
+        page: 2,
+        pageSize: 10,
+      },
     ])?.status).toBe("success");
   });
 
@@ -80,26 +91,60 @@ describe("model marketplace list API hooks", () => {
     const localWrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
-    const params = { tokenId: 17, search: "", provider: "", kind: "" as const };
+    const params = {
+      tokenId: 17,
+      search: "gpt",
+      provider: "OpenAI",
+      kind: "real" as const,
+      page: 2,
+      pageSize: 10,
+    };
     const { result } = renderHook(() => useAdminModelMarketplaceList(params, 7), { wrapper: localWrapper });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(apiGet).toHaveBeenCalledWith("/admin/model-marketplace?token_id=17");
+    expect(apiGet).toHaveBeenCalledWith(
+      "/admin/model-marketplace?token_id=17&search=gpt&provider=OpenAI&kind=real&page=2&page_size=10",
+    );
     expect(queryClient.getQueryState([
       "model-marketplace",
       "list",
-      { role: "admin", viewerId: 7, tokenId: 17, search: "", provider: "", kind: "" },
+      {
+        role: "admin",
+        viewerId: 7,
+        tokenId: 17,
+        search: "gpt",
+        provider: "OpenAI",
+        kind: "real",
+        page: 2,
+        pageSize: 10,
+      },
     ])?.status).toBe("success");
     expect(queryClient.getQueryState([
       "model-marketplace",
       "list",
-      { role: "user", viewerId: 7, tokenId: 17, search: "", provider: "", kind: "" },
+      {
+        role: "user",
+        viewerId: 7,
+        tokenId: 17,
+        search: "gpt",
+        provider: "OpenAI",
+        kind: "real",
+        page: 2,
+        pageSize: 10,
+      },
     ])).toBeUndefined();
   });
 
   it("does not issue an ordinary-user request without a positive Token id", () => {
     const { result } = renderHook(
-      () => useModelMarketplaceList({ tokenId: undefined, search: "", provider: "", kind: "" }, 7),
+      () => useModelMarketplaceList({
+        tokenId: undefined,
+        search: "",
+        provider: "",
+        kind: "",
+        page: 1,
+        pageSize: 20,
+      }, 7),
       { wrapper },
     );
 
@@ -107,10 +152,62 @@ describe("model marketplace list API hooks", () => {
     expect(apiGet).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["user missing Token", () => useModelMarketplaceList({
+      tokenId: undefined,
+      search: "",
+      provider: "",
+      kind: "" as const,
+      page: 1,
+      pageSize: 20,
+    }, 7, { enabled: true }).fetchStatus],
+    ["user invalid viewer", () => useModelMarketplaceList({
+      tokenId: 17,
+      search: "",
+      provider: "",
+      kind: "" as const,
+      page: 1,
+      pageSize: 20,
+    }, 0, { enabled: true }).fetchStatus],
+    ["admin invalid viewer", () => useAdminModelMarketplaceList({
+      search: "",
+      provider: "",
+      kind: "" as const,
+      page: 1,
+      pageSize: 20,
+    }, undefined, { enabled: true }).fetchStatus],
+    ["user caller-disabled valid scope", () => useModelMarketplaceList({
+      tokenId: 17,
+      search: "",
+      provider: "",
+      kind: "" as const,
+      page: 1,
+      pageSize: 20,
+    }, 7, { enabled: false }).fetchStatus],
+    ["admin caller-disabled valid scope", () => useAdminModelMarketplaceList({
+      search: "",
+      provider: "",
+      kind: "" as const,
+      page: 1,
+      pageSize: 20,
+    }, 7, { enabled: false }).fetchStatus],
+  ] as const)("keeps the %s hard gate when caller options specify enabled", (_name, useFetchStatus) => {
+    const { result } = renderHook(useFetchStatus, { wrapper });
+
+    expect(result.current).toBe("idle");
+    expect(apiGet).not.toHaveBeenCalled();
+  });
+
   it("surfaces a list failure without catalog data", async () => {
     apiGet.mockRejectedValueOnce(new Error("catalog unavailable"));
     const { result } = renderHook(
-      () => useAdminModelMarketplaceList({ search: "", provider: "", kind: "" }, 7),
+      () => useAdminModelMarketplaceList({
+        search: "",
+        provider: "",
+        kind: "",
+        page: 1,
+        pageSize: 20,
+      }, 7),
       { wrapper },
     );
 
@@ -118,90 +215,49 @@ describe("model marketplace list API hooks", () => {
     expect(result.current.data).toBeUndefined();
   });
 
-  it("isolates both Token and catalog cache entries when auth storage changes in one QueryClient", async () => {
-    let resolveBobCatalog!: (value: ModelMarketplaceListResponse) => void;
-    let resolveBobTokens!: (value: { data: never[]; total: number; page: number; page_size: number }) => void;
-    const bobCatalog = new Promise<ModelMarketplaceListResponse>((resolve) => { resolveBobCatalog = resolve; });
-    const bobTokens = new Promise<{ data: never[]; total: number; page: number; page_size: number }>((resolve) => {
-      resolveBobTokens = resolve;
-    });
-    apiGet.mockImplementation((path: string) => {
-      if (path === "/tokens?page=1&page_size=100") {
-        return apiGet.mock.calls.filter(([calledPath]) => calledPath === path).length === 1
-          ? Promise.resolve({ data: [{ id: 17, name: "Alice Token" }], total: 1, page: 1, page_size: 100 })
-          : bobTokens;
-      }
-      return apiGet.mock.calls.filter(([calledPath]) =>
-        typeof calledPath === "string" && calledPath.startsWith("/model-marketplace")
-      ).length === 1
-        ? Promise.resolve(userResponse)
-        : bobCatalog;
-    });
+  it("isolates catalog cache entries by page and page size", async () => {
+    apiGet
+      .mockResolvedValueOnce({ ...userResponse, page: 1, page_size: 20 })
+      .mockResolvedValueOnce({ ...userResponse, page: 2, page_size: 10 });
     const queryClient = createTestQueryClient();
     const localWrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
-    const aliceToken = authToken(7);
-    const bobToken = authToken(8);
-    window.localStorage.setItem("token", aliceToken);
-    const { result } = renderHook(
-      () => {
-        const { user } = useAuth();
-        const viewerId = user?.user_id;
-        return {
-          viewerId,
-        tokens: useMarketplaceTokens(viewerId),
-        catalog: useModelMarketplaceList({ tokenId: 17 }, viewerId),
-        };
-      },
+    const pageOneParams = {
+      tokenId: 17,
+      search: "gpt",
+      provider: "OpenAI",
+      kind: "real" as const,
+      page: 1,
+      pageSize: 20,
+    };
+    const pageTwoParams = { ...pageOneParams, page: 2, pageSize: 10 };
+    const pageOne = renderHook(
+      () => useModelMarketplaceList(pageOneParams, 7),
       { wrapper: localWrapper },
     );
+    await waitFor(() => expect(pageOne.result.current.isSuccess).toBe(true));
+    const pageTwo = renderHook(
+      () => useModelMarketplaceList(pageTwoParams, 7),
+      { wrapper: localWrapper },
+    );
+    await waitFor(() => expect(pageTwo.result.current.isSuccess).toBe(true));
 
-    await waitFor(() => expect(result.current.catalog.data).toBe(userResponse));
-    expect(result.current.tokens.data?.[0]?.name).toBe("Alice Token");
-
-    act(() => {
-      window.localStorage.setItem("token", bobToken);
-      window.dispatchEvent(new StorageEvent("storage", {
-        key: "token",
-        oldValue: aliceToken,
-        newValue: bobToken,
-      }));
-    });
-
-    expect(result.current.viewerId).toBe(8);
-    expect(result.current.catalog.data).toBeUndefined();
-    expect(result.current.tokens.data).toBeUndefined();
+    expect(apiGet).toHaveBeenCalledTimes(2);
     expect(queryClient.getQueryData([
-      "model-marketplace", "list",
-      { role: "user", viewerId: 8, tokenId: 17, search: "", provider: "", kind: "" },
-    ])).toBeUndefined();
-    expect(queryClient.getQueryData(["model-marketplace", "tokens", { viewerId: 8 }])).toBeUndefined();
-
-    resolveBobTokens({ data: [], total: 0, page: 1, page_size: 100 });
-    resolveBobCatalog({ ...userResponse, selected_token: { id: 17, name: "Bob Token" } });
-    await waitFor(() => expect(result.current.catalog.data?.selected_token.name).toBe("Bob Token"));
+      "model-marketplace",
+      "list",
+      { role: "user", viewerId: 7, ...pageOneParams },
+    ])).toEqual(expect.objectContaining({ page: 1, page_size: 20 }));
+    expect(queryClient.getQueryData([
+      "model-marketplace",
+      "list",
+      { role: "user", viewerId: 7, ...pageTwoParams },
+    ])).toEqual(expect.objectContaining({ page: 2, page_size: 10 }));
   });
 
-  it("loads every Token page so a valid Token beyond the first 100 is selectable", async () => {
-    const firstPage = Array.from({ length: 100 }, (_, index) => ({
-      id: index + 1,
-      name: `Disabled ${index + 1}`,
-      status: 0,
-      expired_at: -1,
-    }));
-    const lastToken = { id: 101, name: "Page two", status: 1, expired_at: -1 };
-    apiGet
-      .mockResolvedValueOnce({ data: firstPage, total: 101, page: 1, page_size: 100 })
-      .mockResolvedValueOnce({ data: [lastToken], total: 101, page: 2, page_size: 100 });
-
-    const { result } = renderHook(() => useMarketplaceTokens(7), { wrapper });
-
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toHaveLength(101);
-    expect(result.current.data?.[100]).toEqual(lastToken);
-    expect(apiGet).toHaveBeenNthCalledWith(1, "/tokens?page=1&page_size=100");
-    expect(apiGet).toHaveBeenNthCalledWith(2, "/tokens?page=2&page_size=100");
+  it("does not expose a marketplace-specific Token list hook", () => {
+    expect(marketplaceApi).not.toHaveProperty("useMarketplaceTokens");
   });
 });
 

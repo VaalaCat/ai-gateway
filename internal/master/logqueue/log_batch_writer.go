@@ -50,8 +50,19 @@ func (w *LogBatchWriter) Write(ctx context.Context, batches []LogBatch) error {
 }
 
 func validateBatch(batch *LogBatch) error {
-	if batch.Request.RequestID == "" {
+	if (batch.Request.RequestID == "") == (batch.APIRequest == nil) {
 		return fmt.Errorf("request_id is empty")
+	}
+	if batch.APIRequest != nil {
+		if batch.APIRequest.RequestID == "" {
+			return fmt.Errorf("api request_id is empty")
+		}
+		for _, trace := range batch.APITraces {
+			if trace.RequestID != batch.APIRequest.RequestID {
+				return fmt.Errorf("api trace request_id %q does not match request %q", trace.RequestID, batch.APIRequest.RequestID)
+			}
+		}
+		return nil
 	}
 	for _, trace := range batch.Traces {
 		if trace.RequestID != batch.Request.RequestID {
@@ -62,6 +73,9 @@ func validateBatch(batch *LogBatch) error {
 }
 
 func writeBatch(tx *gorm.DB, batch *LogBatch) error {
+	if batch.APIRequest != nil {
+		return writeAPIBatch(tx, batch)
+	}
 	inserted, err := insertRequest(tx, batch.Request)
 	if err != nil || !inserted {
 		return err
@@ -77,6 +91,24 @@ func writeBatch(tx *gorm.DB, batch *LogBatch) error {
 		}
 	}
 	return applyLogDeltas(tx, batch)
+}
+
+func writeAPIBatch(tx *gorm.DB, batch *LogBatch) error {
+	request := *batch.APIRequest
+	request.ID = 0
+	result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "request_id"}}, DoNothing: true}).Create(&request)
+	if result.Error != nil || result.RowsAffected == 0 {
+		return result.Error
+	}
+	for i := range batch.APITraces {
+		batch.APITraces[i].ID = 0
+	}
+	if len(batch.APITraces) > 0 {
+		if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "request_id"}}, DoNothing: true}).Create(&batch.APITraces).Error; err != nil {
+			return fmt.Errorf("insert api request traces: %w", err)
+		}
+	}
+	return nil
 }
 
 func insertRequest(tx *gorm.DB, request models.RequestLog) (bool, error) {

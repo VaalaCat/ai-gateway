@@ -29,6 +29,10 @@ const (
 // LRUCache 据此触发负缓存。
 var ErrNotFound = errors.New("entity not found")
 
+// ErrLoadInvalidated means a key was invalidated while its cold load was in
+// flight. Callers must retry instead of using the stale loader result.
+var ErrLoadInvalidated = errors.New("entitycache: load invalidated")
+
 // ErrLoadLimitReached 表示已有过多不同 key 正在加载；同 key follower 不受影响。
 var ErrLoadLimitReached = errors.New("entitycache: concurrent load limit reached")
 
@@ -101,6 +105,9 @@ type EntityCache[K comparable, V any] interface {
 	// Delete 直接删除。
 	Delete(key K)
 
+	// Clear 删除所有正向、负向和可见缓存状态。
+	Clear()
+
 	// Len 返回当前条目数。
 	Len() int
 
@@ -109,4 +116,11 @@ type EntityCache[K comparable, V any] interface {
 
 	// Stats 返回运行计数快照。
 	Stats() Stats
+}
+
+// MutationEpochCache lets side loaders conditionally warm a cache only when no
+// invalidation happened after the remote request began.
+type MutationEpochCache[K comparable, V any] interface {
+	MutationEpoch() uint64
+	SetIfMutationEpoch(epoch uint64, key K, value V) bool
 }

@@ -79,8 +79,10 @@ function parseWindow(value: string | null): MarketplaceUsageWindow {
 
 function DetailSkeleton() {
   const t = useTranslations("modelMarketplace.detail");
+  const root = useTranslations("modelMarketplace");
   return (
-    <div className="flex min-w-0 flex-col gap-4" aria-label={t("loading")} aria-busy="true">
+    <PageLayout title={root("title")} description={root("description")} maxWidth="full">
+      <div className="flex min-w-0 flex-col gap-4" aria-label={t("loading")} aria-busy="true">
       <div data-testid="detail-skeleton-header" className="flex min-w-0 items-center gap-3">
         <Skeleton className="size-8 shrink-0" />
         <div className="flex min-w-0 flex-1 flex-col gap-2">
@@ -122,7 +124,8 @@ function DetailSkeleton() {
         </div>
         <Skeleton className="h-64 w-full" />
       </div>
-    </div>
+      </div>
+    </PageLayout>
   );
 }
 
@@ -159,17 +162,19 @@ function DetailLoadError({ retry }: { retry: () => unknown }) {
   const t = useTranslations("modelMarketplace.detail");
   const root = useTranslations("modelMarketplace");
   return (
-    <Alert variant="destructive">
-      <AlertCircle aria-hidden="true" />
-      <AlertTitle>{t("detailLoadErrorTitle")}</AlertTitle>
-      <AlertDescription className="flex flex-col items-start gap-3">
-        <p>{t("detailLoadErrorDescription")}</p>
-        <Button variant="outline" size="sm" onClick={() => retry()}>
-          <RefreshCw data-icon="inline-start" />
-          {root("retry")}
-        </Button>
-      </AlertDescription>
-    </Alert>
+    <PageLayout title={root("title")} description={root("description")} maxWidth="full">
+      <Alert variant="destructive">
+        <AlertCircle aria-hidden="true" />
+        <AlertTitle>{t("detailLoadErrorTitle")}</AlertTitle>
+        <AlertDescription className="flex flex-col items-start gap-3">
+          <p>{t("detailLoadErrorDescription")}</p>
+          <Button variant="outline" size="sm" onClick={() => retry()}>
+            <RefreshCw data-icon="inline-start" />
+            {root("retry")}
+          </Button>
+        </AlertDescription>
+      </Alert>
+    </PageLayout>
   );
 }
 

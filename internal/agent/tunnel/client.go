@@ -43,12 +43,14 @@ func newDialer() *websocket.Dialer {
 }
 
 type ClientDialerOptions struct {
-	AgentID       string
-	Bootstrap     func() agentauthcache.BootstrapSnapshot
-	Limits        func() wire.Limits
-	DrainTimeout  func() time.Duration
-	TargetHandler *TargetHandler
-	Logger        *zap.Logger
+	AgentID                string
+	Bootstrap              func() agentauthcache.BootstrapSnapshot
+	Limits                 func() wire.Limits
+	DrainTimeout           func() time.Duration
+	TargetHandler          *TargetHandler
+	APITargetHandler       APITargetHandler
+	WebSocketTargetHandler WebSocketTargetHandler
+	Logger                 *zap.Logger
 }
 
 type clientDialFunc func(context.Context, string, http.Header) (sessionConn, *http.Response, error)
@@ -267,7 +269,9 @@ func (d *ClientDialer) Dial(
 	}
 	succeeded = true
 	return newSession(conn, welcome.SessionGeneration, welcome.Limits, SessionOptions{
-		Direction: SessionDirectionRelay, TargetHandler: d.opts.TargetHandler, Logger: d.opts.Logger,
+		Direction: SessionDirectionRelay, TargetHandler: d.opts.TargetHandler,
+		APITargetHandler: d.opts.APITargetHandler, WebSocketTargetHandler: d.opts.WebSocketTargetHandler,
+		Logger: d.opts.Logger,
 	}), nil
 }
 

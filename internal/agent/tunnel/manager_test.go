@@ -324,7 +324,7 @@ func TestManagerPublicMethodSetIsLocked(t *testing.T) {
 		methods = append(methods, typeOfManager.Method(i).Name)
 	}
 	require.Equal(t, []string{
-		"Apply", "Close", "Disconnect", "Done", "Drain", "OpenAttemptStream", "OpenProbeStream", "Reconnect", "Run", "Snapshot",
+		"Apply", "Close", "Disconnect", "Done", "Drain", "OpenAttemptStream", "OpenHTTPAPIStream", "OpenProbeStream", "OpenWebSocketAPIStream", "Reconnect", "Run", "Snapshot",
 	}, methods)
 }
 

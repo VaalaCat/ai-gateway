@@ -10,6 +10,8 @@ interface EntityLabelProps {
   entity: EntityName;
   id: string | number | undefined | null;
   scope?: AdminScope;
+  /** 用于需要父 Service 限定的日志快照 adapter。 */
+  apiServiceId?: number;
   className?: string;
   /** 名字后是否附灰色 #id(默认 true)。value-即-label 的实体(如 model)自动不显示。 */
   showId?: boolean;
@@ -21,13 +23,14 @@ export function EntityLabel({
   entity,
   id,
   scope = "self",
+  apiServiceId,
   className,
   showId = true,
   hover = true,
 }: EntityLabelProps) {
   const adapter = ENTITY_ADAPTERS[entity] as unknown as EntityAdapter<unknown>;
   const idStr = id == null || id === "" ? "" : String(id);
-  const one = adapter.useOne(idStr, { scope });
+  const one = adapter.useOne(idStr, { scope, apiServiceId });
 
   if (!idStr) {
     return <span className={cn("text-muted-foreground", className)}>-</span>;

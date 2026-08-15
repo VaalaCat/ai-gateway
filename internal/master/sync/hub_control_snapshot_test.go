@@ -864,6 +864,40 @@ func TestCapabilityDeliveryFailureClosesOnlyFailedRecipientAfterFanoutAndUnlock(
 	}, "fanout stopped before the healthy recipient")
 }
 
+func TestBroadcastClosesOnlySyncPushEnqueueFailures(t *testing.T) {
+	h := newControlTestHub(100, 200)
+	failedConn := &ws.Conn{}
+	healthyConn := &ws.Conn{}
+	_, _, _ = h.installControlSession("failed", failedConn, "127.0.0.1:1")
+	_, _, _ = h.installControlSession("healthy", healthyConn, "127.0.0.1:2")
+
+	delivered := make(map[*ws.Conn][]string)
+	h.sendNotification = func(conn *ws.Conn, method string, _ any) error {
+		delivered[conn] = append(delivered[conn], method)
+		if conn == failedConn {
+			return errors.New("queue full")
+		}
+		return nil
+	}
+	var closed []*ws.Conn
+	h.closePeerUpdateConn = func(conn *ws.Conn) error {
+		if !h.mu.TryLock() {
+			t.Fatal("failed sync.push conn closed while Hub map lock was held")
+		}
+		h.mu.Unlock()
+		closed = append(closed, conn)
+		return nil
+	}
+
+	h.Broadcast("ordinary.notification", struct{}{})
+	require.Empty(t, closed, "ordinary notifications remain lossy")
+	h.Broadcast(consts.RPCSyncPush, protocol.SyncPushParams{})
+
+	require.Equal(t, []*ws.Conn{failedConn}, closed)
+	require.Equal(t, []string{"ordinary.notification", consts.RPCSyncPush}, delivered[failedConn])
+	require.Equal(t, []string{"ordinary.notification", consts.RPCSyncPush}, delivered[healthyConn])
+}
+
 func TestCapabilityGenuineChangeBudgetClosesNinthChangeAndResetsOnReplacement(t *testing.T) {
 	h := newControlTestHub(100, 200, 300)
 	offenderConn := &ws.Conn{}

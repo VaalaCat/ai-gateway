@@ -16,6 +16,7 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -299,16 +300,13 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
   const pageSubtitle = apiMode === "admin" ? t("subtitle") : t("filtersUserHint");
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{pageTitle}</h1>
-          <p className="text-muted-foreground mt-1">{pageSubtitle}</p>
-        </div>
-        <Button onClick={() => router.push(`${baseHref}/new`)}>
-          {t("create")}
-        </Button>
-      </div>
+    <PageLayout
+      title={pageTitle}
+      description={pageSubtitle}
+      actions={<Button onClick={() => router.push(`${baseHref}/new`)}>{t("create")}</Button>}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       {isEmpty ? (
         <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
@@ -349,6 +347,7 @@ export function ModelRoutingsListPage({ apiMode }: ModelRoutingsListPageProps) {
         }}
         onConfirm={handleDelete}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

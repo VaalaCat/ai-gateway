@@ -12,6 +12,8 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
 )
@@ -170,6 +172,34 @@ func TestWSBridgeRequestedFullSyncUsesInlineDirectAdmission(t *testing.T) {
 	calls.Wait()
 	if syncer.RequestFullSync() {
 		t.Fatal("100 direct admissions must leave exactly one pending signal")
+	}
+}
+
+func TestWSBridgeGenericAPIPushUsesInlineOrderedSyncerPath(t *testing.T) {
+	client := newCaptureWSClient()
+	store := NewStore(nil, config.AgentCacheConfig{})
+	bus := eventbus.NewMemoryBus()
+	syncer := NewSyncer(store, client, bus, zap.NewNop(), time.Hour)
+	bridge := NewWSBridge(client, store, bus, zap.NewNop())
+	bridge.Syncer = syncer
+	bridge.Start()
+
+	push := apiPush(t, events.EntityAPIService, events.ActionCreate,
+		protocol.SyncedAPIService{ID: 7, Slug: "weather", Status: 1}, 9)
+	raw, err := json.Marshal(push)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.inlineHandlers[consts.RPCSyncPush](context.Background(), raw); err != nil {
+		t.Fatalf("generic API inline push: %v", err)
+	}
+
+	service, ok := store.APIIndex.load().servicesByID[7]
+	if !ok || service.Slug != "weather" {
+		t.Fatalf("inline push did not update API index: %#v, ok=%v", service, ok)
+	}
+	if store.Version() != 9 {
+		t.Fatalf("version = %d, want 9", store.Version())
 	}
 }
 

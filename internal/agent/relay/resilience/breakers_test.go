@@ -115,3 +115,36 @@ func TestRegistry_ReplacesBreakerWhenCooldownOrEnabledChanges(t *testing.T) {
 		})
 	}
 }
+
+func TestRegistryExplicitHalfOpenPermitLimitOne(t *testing.T) {
+	registry := NewRegistry()
+	config := testCfg()
+	config.BreakerThreshold = 5
+	config.HalfOpenPermitLimit = 1
+	breaker := registry.Get(adminKey(77), config)
+	breaker.HalfOpen()
+
+	if !breaker.TryAcquirePermit() {
+		t.Fatal("first explicit half-open permit should be available")
+	}
+	if breaker.TryAcquirePermit() {
+		t.Fatal("explicit half-open permit limit must reject a concurrent second probe")
+	}
+}
+
+func TestRegistryDefaultHalfOpenCapacityRemainsThresholdDerived(t *testing.T) {
+	registry := NewRegistry()
+	config := testCfg()
+	config.BreakerThreshold = 5
+	breaker := registry.Get(adminKey(78), config)
+	breaker.HalfOpen()
+
+	for attempt := 0; attempt < 5; attempt++ {
+		if !breaker.TryAcquirePermit() {
+			t.Fatalf("default LLM breaker permit %d unexpectedly rejected", attempt+1)
+		}
+	}
+	if breaker.TryAcquirePermit() {
+		t.Fatal("default half-open capacity should remain equal to threshold")
+	}
+}

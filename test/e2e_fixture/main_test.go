@@ -102,6 +102,41 @@ func TestPrepareSeedsLoginReadyIsolatedUsers(t *testing.T) {
 	}
 }
 
+func TestPrepareSeedsRouteWorkspaceFixture(t *testing.T) {
+	root := newFixtureTestRoot(t, "route-workspace")
+	require.NoError(t, prepare(root, ":8140", "http://localhost:8141", false))
+	core, err := masterdatabase.NewConnector().OpenExistingCorePath(filepath.Join(root, "core.db"))
+	require.NoError(t, err)
+	sqlDB, err := core.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	var service models.APIService
+	require.NoError(t, core.First(&service, 101).Error)
+	require.Equal(t, "route-workspace-e2e", service.Slug)
+	require.Equal(t, "Route Workspace E2E", service.Name)
+
+	var backend models.APIBackend
+	require.NoError(t, core.First(&backend, 201).Error)
+	require.Equal(t, service.ID, backend.APIServiceID)
+	require.Equal(t, "Primary Target", backend.Name)
+
+	var route models.APIRoute
+	require.NoError(t, core.First(&route, 401).Error)
+	require.Equal(t, service.ID, route.APIServiceID)
+	require.Equal(t, backend.ID, route.BackendID)
+	require.Equal(t, "responsive-route-workspace", route.Slug)
+	require.Equal(t, []models.APIProtocol{models.APIProtocolHTTP}, []models.APIProtocol(route.Protocols))
+	require.Equal(t, []string{"GET"}, []string(route.AllowedMethods))
+
+	var upstreams []models.APIUpstream
+	require.NoError(t, core.Where("backend_id = ?", backend.ID).Order("id").Find(&upstreams).Error)
+	require.Len(t, upstreams, 2)
+	require.Equal(t, []uint{301, 302}, []uint{upstreams[0].ID, upstreams[1].ID})
+	require.Equal(t, []string{"Primary Endpoint", "Disabled Backup"}, []string{upstreams[0].Name, upstreams[1].Name})
+	require.Equal(t, []int{consts.StatusEnabled, consts.StatusDisabled}, []int{upstreams[0].Status, upstreams[1].Status})
+}
+
 func TestValidateFixtureRootAcceptsDedicatedDirectTempChild(t *testing.T) {
 	root := newFixtureTestRoot(t, "valid")
 	canonicalTemp, err := filepath.EvalSymlinks(os.TempDir())

@@ -4,6 +4,7 @@ import { Table } from "@tanstack/react-table";
 import { Settings2 } from "lucide-react";
 import { useTranslations } from "next-intl";
 
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -20,9 +21,10 @@ import {
 
 interface ColumnVisibilityProps<TData> {
   table: Table<TData>;
+  mobileTouchSize?: "comfortable";
 }
 
-export function ColumnVisibility<TData>({ table }: ColumnVisibilityProps<TData>) {
+export function ColumnVisibility<TData>({ table, mobileTouchSize }: ColumnVisibilityProps<TData>) {
   const t = useTranslations("common");
   const columns = table.getAllLeafColumns().filter((col) => col.getCanHide());
 
@@ -50,7 +52,10 @@ export function ColumnVisibility<TData>({ table }: ColumnVisibilityProps<TData>)
             {columns.map((column) => (
               <label
                 key={column.id}
-                className="flex items-center gap-2 text-sm cursor-pointer"
+                className={cn(
+                  "flex cursor-pointer items-center gap-2 text-sm",
+                  mobileTouchSize === "comfortable" && "max-sm:min-h-11 max-sm:min-w-44",
+                )}
               >
                 <Checkbox
                   checked={column.getIsVisible()}

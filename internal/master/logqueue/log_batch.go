@@ -20,6 +20,8 @@ type LogBatch struct {
 	TPS          []models.UsageTPSHistogram      `json:"tps,omitempty"`
 	UserTTFT     []models.UsageUserTTFTHistogram `json:"user_ttft,omitempty"`
 	UserTPS      []models.UsageUserTPSHistogram  `json:"user_tps,omitempty"`
+	APIRequest   *models.APIRequestLog           `json:"api_request,omitempty"`
+	APITraces    []models.APIRequestTrace        `json:"api_traces,omitempty"`
 }
 
 func BatchSize(batch LogBatch) int64 {

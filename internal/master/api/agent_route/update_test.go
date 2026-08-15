@@ -21,6 +21,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
 
@@ -39,6 +40,9 @@ func setupAgentRouteTest(t *testing.T) (*Handler, *app.Context, *gorm.DB) {
 	sqlDB.SetMaxIdleConns(1)
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatalf("migrate database: %v", err)
+	}
+	if err := db.AutoMigrate(&models.APIService{}, &models.APIBackend{}, &models.APIRoute{}); err != nil {
+		t.Fatalf("migrate API source fixtures: %v", err)
 	}
 
 	application := app.NewApplication()
@@ -352,6 +356,107 @@ func TestUpdate_ValidationMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("validateAgentRoute() error = %v", err)
 			}
+		})
+	}
+}
+
+func TestAgentRouteAPISourcesCreateUpdateAndValidation(t *testing.T) {
+	t.Run("create api service and update to api route", func(t *testing.T) {
+		h, ctx, db := setupAgentRouteTest(t)
+		_, _, _ = seedAgentRouteDependencies(t, db)
+		service := models.APIService{Slug: "weather", Name: "Weather", Status: 1}
+		require.NoError(t, db.Create(&service).Error)
+		backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+		require.NoError(t, db.Create(&backend).Error)
+		route := models.APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "forecast", Status: 1}
+		require.NoError(t, db.Create(&route).Error)
+
+		created, err := h.Create(ctx, CreateRequest{
+			SourceType: models.AgentRouteSourceAPIService,
+			SourceID:   service.ID,
+			AgentTag:   "api-pool",
+		})
+		require.NoError(t, err)
+		require.Equal(t, models.AgentRouteSourceAPIService, created.Value.SourceType)
+		require.Equal(t, service.ID, created.Value.SourceID)
+		require.Empty(t, created.Value.Model)
+
+		updated, err := h.Update(ctx, UpdateRequest{
+			ID:         strconv.FormatUint(uint64(created.Value.ID), 10),
+			SourceType: stringPointer(models.AgentRouteSourceAPIRoute),
+			SourceID:   uintPointer(route.ID),
+		})
+		require.NoError(t, err)
+		require.Equal(t, models.AgentRouteSourceAPIRoute, updated.SourceType)
+		require.Equal(t, route.ID, updated.SourceID)
+		require.Empty(t, updated.Model)
+	})
+
+	t.Run("update rejects api source with retained model and preserves row", func(t *testing.T) {
+		h, ctx, db := setupAgentRouteTest(t)
+		token, _, agent := seedAgentRouteDependencies(t, db)
+		service := models.APIService{Slug: "weather", Name: "Weather", Status: 1}
+		require.NoError(t, db.Create(&service).Error)
+		existing := seedAgentRoute(t, db, models.AgentRoute{
+			SourceType: models.AgentRouteSourceToken,
+			SourceID:   token.ID,
+			Model:      "gpt-4o",
+			AgentID:    agent.AgentID,
+		})
+
+		_, err := h.Update(ctx, UpdateRequest{
+			ID:         strconv.FormatUint(uint64(existing.ID), 10),
+			SourceType: stringPointer(models.AgentRouteSourceAPIService),
+			SourceID:   uintPointer(service.ID),
+		})
+		requireAPIStatus(t, err, http.StatusBadRequest)
+		var reloaded models.AgentRoute
+		require.NoError(t, db.First(&reloaded, existing.ID).Error)
+		require.Equal(t, existing, reloaded)
+	})
+
+	tests := []struct {
+		name       string
+		sourceType string
+		sourceID   uint
+		model      string
+	}{
+		{name: "missing api service", sourceType: models.AgentRouteSourceAPIService, sourceID: 999_999},
+		{name: "missing api route", sourceType: models.AgentRouteSourceAPIRoute, sourceID: 999_999},
+		{name: "zero api service id", sourceType: models.AgentRouteSourceAPIService},
+		{name: "zero api route id", sourceType: models.AgentRouteSourceAPIRoute},
+		{name: "api service rejects model", sourceType: models.AgentRouteSourceAPIService, sourceID: 1, model: "gpt-4o"},
+		{name: "api route rejects model", sourceType: models.AgentRouteSourceAPIRoute, sourceID: 1, model: "gpt-4o"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, ctx, db := setupAgentRouteTest(t)
+			_, _, _ = seedAgentRouteDependencies(t, db)
+			service := models.APIService{Slug: "weather", Name: "Weather", Status: 1}
+			require.NoError(t, db.Create(&service).Error)
+			backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+			require.NoError(t, db.Create(&backend).Error)
+			route := models.APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "forecast", Status: 1}
+			require.NoError(t, db.Create(&route).Error)
+			sourceID := tt.sourceID
+			if sourceID == 1 {
+				if tt.sourceType == models.AgentRouteSourceAPIService {
+					sourceID = service.ID
+				} else {
+					sourceID = route.ID
+				}
+			}
+
+			_, err := h.Create(ctx, CreateRequest{
+				SourceType: tt.sourceType,
+				SourceID:   sourceID,
+				Model:      tt.model,
+				AgentTag:   "api-pool",
+			})
+			requireAPIStatus(t, err, http.StatusBadRequest)
+			var count int64
+			require.NoError(t, db.Model(&models.AgentRoute{}).Count(&count).Error)
+			require.Zero(t, count)
 		})
 	}
 }

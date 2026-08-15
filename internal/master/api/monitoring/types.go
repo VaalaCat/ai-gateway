@@ -2,6 +2,17 @@ package monitoring
 
 import "github.com/VaalaCat/ai-gateway/internal/dao"
 
+type LogBacklog struct {
+	Pending       int    `json:"pending"`
+	Retry         int    `json:"retry"`
+	Inflight      int    `json:"inflight"`
+	Bytes         uint64 `json:"bytes"`
+	OldestSeconds int64  `json:"oldest_seconds"`
+	Dropped       uint64 `json:"dropped"`
+	LastError     string `json:"last_error"`
+	SchemaReady   bool   `json:"schema_ready"`
+}
+
 // InsightsRequest 是 /v1/monitoring/insights 入参。
 // start/end 为 unix 秒, end 缺省 now, start 缺省 end-86400;
 // gran 缺省 "day"。窗口超限会被 ObsRange.Validate 拦下。
@@ -38,8 +49,9 @@ type KpiRings struct {
 // KpiRing 是单个环形 KPI 卡片的统一形态。
 //
 // Value 是 any 因为不同卡片含义不同:
-//   success/cache/tps/error → 数字 (int64 / float64)
-//   agents                  → 形如 "3/4" 的字符串 (online/total)
+//
+//	success/cache/tps/error → 数字 (int64 / float64)
+//	agents                  → 形如 "3/4" 的字符串 (online/total)
 //
 // WarnAbove 仅 error 卡片填充,前端高于阈值时变红。
 type KpiRing struct {

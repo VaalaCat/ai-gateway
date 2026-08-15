@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/master/apiusage"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -28,6 +29,18 @@ import (
 type retryingUsageAutoDisabler struct {
 	calls int
 }
+
+type recordingAPIUsageMetrics struct {
+	accepted, fullDropped int
+}
+
+func (m *recordingAPIUsageMetrics) Accepted()            { m.accepted++ }
+func (m *recordingAPIUsageMetrics) FullDropped()         { m.fullDropped++ }
+func (*recordingAPIUsageMetrics) InvalidDropped()        {}
+func (*recordingAPIUsageMetrics) Duplicate()             {}
+func (*recordingAPIUsageMetrics) RetryExhausted()        {}
+func (*recordingAPIUsageMetrics) CapacityShrinkDropped() {}
+func (*recordingAPIUsageMetrics) QueueDepth(int)         {}
 
 func (d *retryingUsageAutoDisabler) DisableFromTriggers(context.Context, []attemptproxy.ChannelAutoDisableTrigger) error {
 	d.calls++
@@ -61,6 +74,45 @@ func TestUsageHTTPRetriesTriggerAfterBillingDedup(t *testing.T) {
 	require.NoError(t, h.App.GetCoreDB().Model(&models.UsageLog{}).
 		Where("request_id = ?", "usage-http-trigger-retry").Count(&count).Error)
 	require.Equal(t, int64(1), count)
+}
+
+// Production break caught: mixed reports must settle LLM before best-effort
+// API admission; a full API queue still acks the whole report, but a genuine
+// non-full admission error must not be acknowledged.
+func TestAPIUsageIngestAcceptsBeforeAckAndDropsOnlyWhenQueueFull(t *testing.T) {
+	h, r, agent := newUsageTestFixture(t)
+	metrics := &recordingAPIUsageMetrics{}
+	queue := apiusage.NewQueue(apiusage.QueueOptions{Capacity: 1, DedupCapacity: 4, Metrics: metrics})
+	order := make([]string, 0, 2)
+	h.SettleUsage = func(_ context.Context, _ string, logs []protocol.UsageLogEntry) error {
+		require.Len(t, logs, 1)
+		order = append(order, "llm")
+		return nil
+	}
+	h.AcceptAPIUsage = func(ctx context.Context, id string, entries []protocol.APIUsageEntry) error {
+		order = append(order, "api")
+		return queue.Accept(ctx, id, entries)
+	}
+	report := protocol.UsageReport{Logs: []protocol.UsageLogEntry{{RequestID: "llm-1"}}, APIRequests: []protocol.APIUsageEntry{{RequestID: "api-kept"}, {RequestID: "api-dropped"}}}
+	w := postUsage(t, r, agent.AgentID, agent.Secret, report)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, []string{"llm", "api"}, order)
+	require.Equal(t, 1, queue.Len())
+	require.Equal(t, uint64(1), queue.Stats().Dropped)
+	require.Equal(t, 1, metrics.accepted)
+	require.Equal(t, 1, metrics.fullDropped)
+	var response map[string]int
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	require.Equal(t, 1, response["accepted_logs"])
+	require.Equal(t, 2, response["accepted_api_requests"])
+
+	h.AcceptAPIUsage = func(_ context.Context, id string, entries []protocol.APIUsageEntry) error {
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		return queue.Accept(cancelled, id, entries)
+	}
+	w = postUsage(t, r, agent.AgentID, agent.Secret, protocol.UsageReport{APIRequests: []protocol.APIUsageEntry{{RequestID: "api-error"}}})
+	require.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
 }
 
 // newUsageTestFixture 组装一个最小 master.sync 环境:
@@ -379,4 +431,77 @@ func TestUsageHTTP_OverwritesAgentIDFromAuth(t *testing.T) { // cheap:防跨 age
 	if rep.AgentID != agent.AgentID {
 		t.Fatalf("published AgentID = %q, want authenticated agent %q (auth must win over body)", rep.AgentID, agent.AgentID)
 	}
+}
+
+func TestUsageHTTPMixedSettlesLLMBeforeAcceptingAPIWithAuthenticatedAgent(t *testing.T) {
+	h, router, agent := newUsageTestFixture(t)
+	order := []string{}
+	h.SettleUsage = func(_ context.Context, agentID string, logs []protocol.UsageLogEntry) error {
+		require.Equal(t, agent.AgentID, agentID)
+		require.Equal(t, "shared", logs[0].RequestID)
+		order = append(order, "llm")
+		return nil
+	}
+	h.AcceptAPIUsage = func(_ context.Context, agentID string, entries []protocol.APIUsageEntry) error {
+		require.Equal(t, agent.AgentID, agentID)
+		require.Equal(t, "shared", entries[0].RequestID)
+		order = append(order, "api")
+		return nil
+	}
+
+	response := postUsage(t, router, agent.AgentID, agent.Secret, protocol.UsageReport{
+		AgentID: "forged", Logs: []protocol.UsageLogEntry{{RequestID: "shared"}},
+		APIRequests: []protocol.APIUsageEntry{{RequestID: "shared"}},
+	})
+
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, []string{"llm", "api"}, order)
+	var accepted map[string]int
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &accepted))
+	require.Equal(t, 1, accepted["accepted_logs"])
+	require.Equal(t, 1, accepted["accepted_api_requests"])
+}
+
+func TestUsageHTTPMixedFailsClosedWhenAPIAcceptorUnavailableAfterLLMSettlement(t *testing.T) {
+	h, router, agent := newUsageTestFixture(t)
+	settled := 0
+	h.SettleUsage = func(context.Context, string, []protocol.UsageLogEntry) error {
+		settled++
+		return nil
+	}
+
+	report := protocol.UsageReport{
+		Logs:        []protocol.UsageLogEntry{{RequestID: "retry-id"}},
+		APIRequests: []protocol.APIUsageEntry{{RequestID: "retry-id"}},
+	}
+	first := postUsage(t, router, agent.AgentID, agent.Secret, report)
+	second := postUsage(t, router, agent.AgentID, agent.Secret, report)
+
+	require.Equal(t, http.StatusServiceUnavailable, first.Code)
+	require.Equal(t, http.StatusServiceUnavailable, second.Code)
+	require.Equal(t, 2, settled, "the same request_id is retried; LLM settlement must be idempotent")
+}
+
+func TestUsageHTTPAPIOnlyAcceptorFailureDoesNotClaimAcceptance(t *testing.T) {
+	h, router, agent := newUsageTestFixture(t)
+	h.AcceptAPIUsage = func(context.Context, string, []protocol.APIUsageEntry) error {
+		return errors.New("queue full")
+	}
+
+	response := postUsage(t, router, agent.AgentID, agent.Secret, protocol.UsageReport{
+		APIRequests: []protocol.APIUsageEntry{{RequestID: "api-only"}},
+	})
+
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.NotContains(t, response.Body.String(), "accepted_api_requests")
+}
+
+func TestGenericAPIUsageCapabilityRequiresConfiguredAcceptor(t *testing.T) {
+	legacy := NewHub(nil, zap.NewNop(), nil, nil, nil, HubOptions{})
+	require.NotContains(t, legacy.masterCapabilities, protocol.MasterCapabilityGenericAPIUsageV1)
+
+	accepting := NewHub(nil, zap.NewNop(), nil, nil, nil, HubOptions{
+		AcceptAPIUsage: func(context.Context, string, []protocol.APIUsageEntry) error { return nil },
+	})
+	require.Contains(t, accepting.masterCapabilities, protocol.MasterCapabilityGenericAPIUsageV1)
 }

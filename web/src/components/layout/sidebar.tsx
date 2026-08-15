@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import {
   Activity,
+  BookOpen,
   Bot,
   Brain,
   ChevronRight,
@@ -19,6 +20,7 @@ import {
   Route,
   ScrollText,
   Server,
+  ShieldCheck,
   Store,
   Ticket,
   Wallet,
@@ -30,6 +32,7 @@ import {
 import { useAuth } from "@/lib/auth";
 import { usePublicConfig } from "@/lib/api/system";
 import {
+  isGenericAPIVisible,
   isModelMarketplaceVisible,
   useCapabilities,
 } from "@/lib/api/capabilities";
@@ -122,8 +125,15 @@ export function AppSidebar() {
   const userItems: Item[] = [
     { label: t("dashboard"), icon: LayoutDashboard, href: "/dashboard" },
     { label: t("tokens"), icon: Key, href: "/tokens" },
+    { label: t("apiCatalog"), icon: BookOpen, href: "/api-catalog" },
     ...(isModelMarketplaceVisible(capabilities, isAdmin)
       ? [{ label: t("modelMarketplace"), icon: Store, href: "/model-marketplace" }]
+      : []),
+    ...(isGenericAPIVisible(capabilities, "services")
+      ? [{ label: t("apiServices"), icon: Server, href: "/api-services" }]
+      : []),
+    ...(isGenericAPIVisible(capabilities, "logs")
+      ? [{ label: t("apiLogs"), icon: ScrollText, href: "/api-logs" }]
       : []),
     { label: t("logs"), icon: ScrollText, href: "/logs" },
     { label: t("billing"), icon: Wallet, href: "/billing" },
@@ -155,6 +165,9 @@ export function AppSidebar() {
               icon: KeyRound,
               href: "/oauth-providers",
             },
+            ...(isGenericAPIVisible(capabilities, "access")
+              ? [{ label: t("apiAccess"), icon: ShieldCheck, href: "/api-access" }]
+              : []),
           ],
         },
         {

@@ -30,6 +30,8 @@ const { state } = vi.hoisted(() => ({
     token: null as Token | null,
     create: vi.fn(),
     update: vi.fn(),
+    apiRoles: [{ id: 101, key: "reader", name: "Reader", description: "", status: 1, permissions: [] }],
+    apiRoleBindings: [{ id: 201, principal_type: "token", principal_id: 23, role_id: 101 }],
     billingOverviewCalls: [] as BillingOverviewCall[],
     tokenBillingCalls: [] as TokenBillingCall[],
   },
@@ -63,6 +65,10 @@ vi.mock("@/lib/api/tokens", () => ({
   useCreateToken: () => ({ mutateAsync: state.create, isPending: false }),
   useUpdateToken: () => ({ mutateAsync: state.update, isPending: false }),
   useDeleteToken: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+vi.mock("@/lib/api/api-access", () => ({
+  useAPIRoles: () => ({ data: { data: state.apiRoles } }),
+  useAPIRoleBindings: () => ({ data: { data: state.apiRoleBindings } }),
 }));
 vi.mock("@/lib/api/token-templates", () => ({
   useEnabledTokenTemplates: () => ({ data: { data: [{ id: 5, byok_only: false }] } }),
@@ -185,6 +191,7 @@ function token(traceMode: unknown): Token {
     models: "",
     trace_enabled: true,
     trace_mode: traceMode as Token["trace_mode"],
+    api_role_mode: "explicit",
     created_at: 1,
     updated_at: 1,
   };
@@ -197,7 +204,7 @@ async function selectHeaders() {
 
 describe("TokensPage trace mode payloads", () => {
   beforeEach(() => {
-    state.isAdmin = true;
+    state.isAdmin = false;
     state.token = null;
     state.create.mockReset();
     state.create.mockResolvedValue({});
@@ -274,6 +281,63 @@ describe("TokensPage trace mode payloads", () => {
   );
 });
 
+describe("TokensPage API role payloads", () => {
+  beforeEach(() => {
+    state.isAdmin = true;
+    state.token = token("full");
+    state.update.mockReset();
+    state.update.mockResolvedValue({});
+    state.apiRoles = [{ id: 101, key: "reader", name: "Reader", description: "", status: 1, permissions: [] }];
+    state.apiRoleBindings = [{ id: 201, principal_type: "token", principal_id: 23, role_id: 101 }];
+  });
+
+  it("keeps explicit empty API roles as an intentional empty selection", async () => {
+    render(<TokensPage />);
+
+    await userEvent.click(screen.getByRole("button", { name: "edit" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Reader" }));
+    await userEvent.click(screen.getByRole("button", { name: "save" }));
+
+    await waitFor(() => expect(state.update).toHaveBeenCalled());
+    expect(state.update.mock.calls[0][0]).toMatchObject({
+      id: 23,
+      api_role_mode: "explicit",
+      api_role_ids: [],
+    });
+  });
+
+  it("keeps an explicit role selection in the update payload", async () => {
+    render(<TokensPage />);
+
+    await userEvent.click(screen.getByRole("button", { name: "edit" }));
+    expect(screen.getByRole("checkbox", { name: "Reader" })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "save" }));
+
+    await waitFor(() => expect(state.update).toHaveBeenCalled());
+    expect(state.update.mock.calls[0][0]).toMatchObject({
+      id: 23,
+      api_role_mode: "explicit",
+      api_role_ids: [101],
+    });
+  });
+
+  it("treats a legacy missing mode as inherit and disables explicit role selection", async () => {
+    state.token = { ...token("full"), api_role_mode: undefined };
+    render(<TokensPage />);
+
+    await userEvent.click(screen.getByRole("button", { name: "edit" }));
+    expect(screen.getByRole("checkbox", { name: "Reader" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "save" }));
+
+    await waitFor(() => expect(state.update).toHaveBeenCalled());
+    expect(state.update.mock.calls[0][0]).toMatchObject({
+      id: 23,
+      api_role_mode: "inherit",
+      api_role_ids: [],
+    });
+  });
+});
+
 describe("TokensPage billing date range", () => {
   beforeEach(() => {
     state.isAdmin = false;
@@ -344,5 +408,23 @@ describe("TokensPage billing date range", () => {
       },
       options: { enabled: true },
     });
+  });
+});
+
+describe("TokensPage page header", () => {
+  beforeEach(() => {
+    state.isAdmin = false;
+    state.token = null;
+  });
+
+  it("puts the page title and create action in the shared header while keeping billing a section heading", () => {
+    render(<TokensPage />);
+
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole("heading", { level: 1 })).toHaveClass("tracking-tight");
+    expect(screen.getByTestId("page-header-actions")).toContainElement(
+      screen.getByRole("button", { name: "createToken" }),
+    );
+    expect(screen.getByRole("heading", { level: 2, name: "billingTitle" })).toBeInTheDocument();
   });
 });

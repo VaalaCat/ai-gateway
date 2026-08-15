@@ -7,6 +7,7 @@ import { ColumnDef } from "@tanstack/react-table";
 import { ArrowLeft, ScrollText } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import {
   Card,
   CardContent,
@@ -63,20 +64,20 @@ export default function BYOKStatsPage() {
   const byModel = useBYOKBillingByModel(range, { enabled: dateValid });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2">
-          <Button asChild variant="ghost" size="sm">
+    <PageLayout
+      title={t("title")}
+      description={t("description")}
+      backAction={
+        <Button asChild variant="ghost" size="sm">
             <Link href="/byok">
               <ArrowLeft className="mr-2 size-4" />
               {t("back")}
             </Link>
-          </Button>
-          <h1 className="text-2xl font-bold">{t("title")}</h1>
-        </div>
-      </div>
-
-      <p className="text-sm text-muted-foreground">{t("description")}</p>
+        </Button>
+      }
+      maxWidth="full"
+    >
+      <div className="space-y-6">
 
       <div className="flex flex-wrap items-end gap-3 rounded-lg border p-4">
         <DateRangePicker
@@ -141,7 +142,8 @@ export default function BYOKStatsPage() {
           loading={byModel.isLoading}
         />
       </div>
-    </div>
+      </div>
+    </PageLayout>
   );
 }
 

@@ -18,6 +18,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { MessageList } from "@/components/playground/message-list";
 import { SSEViewer } from "@/components/playground/sse-viewer";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
+import { PageHeader } from "@/components/layout/page-header";
 import { useToken } from "@/lib/api/tokens";
 import { CHAT_ROLES, HTTP_HEADERS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
@@ -432,13 +433,7 @@ export default function PlaygroundPage() {
 
   return (
     <div className="h-full flex flex-col">
-      {/* Header */}
-      <div className="shrink-0 mb-4">
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground text-sm mt-0.5">{t("description")}</p>
-      </div>
-
-      {/* Body */}
+      <PageHeader title={t("title")} description={t("description")} />
       <div className={cn("flex-1 min-h-0 flex gap-4", isMobile ? "flex-col" : "flex-row")}>
         {/* Settings */}
         {isMobile ? (

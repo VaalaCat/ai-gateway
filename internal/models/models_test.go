@@ -85,6 +85,23 @@ func TestAutoMigrate(t *testing.T) {
 	}
 }
 
+func TestAutoMigrateCoreAPIRoutingTargetModels(t *testing.T) {
+	// This catches a core migration that creates generic API tables without the
+	// backend ownership boundary or omits the persisted route request example.
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	defer sqlDB.Close()
+
+	require.NoError(t, MigrateCoreDB(db))
+	require.True(t, db.Migrator().HasTable(&APIBackend{}))
+	require.True(t, db.Migrator().HasColumn(&APIRoute{}, "backend_id"))
+	require.True(t, db.Migrator().HasColumn(&APIRoute{}, "example_request"))
+	require.True(t, db.Migrator().HasColumn(&APIUpstream{}, "backend_id"))
+	require.False(t, db.Migrator().HasColumn(&APIUpstream{}, "api_service_id"))
+}
+
 func TestAutoMigrateAddsAutoBanRuntimeColumns(t *testing.T) {
 	db := setupTestDB(t)
 	sqlDB, _ := db.DB()
@@ -699,13 +716,14 @@ func TestUsageLog_TraceFieldsMigrate(t *testing.T) {
 		t.Fatalf("AutoMigrate failed: %v", err)
 	}
 	log := UsageLog{
-		RequestID:          "req-trace-test",
-		ErrorStage:         "outbound_encode",
-		InboundDecodeMs:    1,
-		OutboundEncodeMs:   2,
-		UpstreamDispatchMs: 100,
-		UpstreamDecodeMs:   5,
-		ClientEncodeMs:     3,
+		RequestID:            "req-trace-test",
+		TraceRetentionStatus: TraceRetentionHeadersOnly,
+		ErrorStage:           "outbound_encode",
+		InboundDecodeMs:      1,
+		OutboundEncodeMs:     2,
+		UpstreamDispatchMs:   100,
+		UpstreamDecodeMs:     5,
+		ClientEncodeMs:       3,
 	}
 	if err := db.Create(&log).Error; err != nil {
 		t.Fatalf("Create with trace fields failed: %v", err)
@@ -719,6 +737,9 @@ func TestUsageLog_TraceFieldsMigrate(t *testing.T) {
 	}
 	if got.UpstreamDispatchMs != 100 {
 		t.Errorf("UpstreamDispatchMs = %d, want 100", got.UpstreamDispatchMs)
+	}
+	if got.TraceRetentionStatus != TraceRetentionHeadersOnly {
+		t.Errorf("TraceRetentionStatus = %q, want headers_only", got.TraceRetentionStatus)
 	}
 }
 

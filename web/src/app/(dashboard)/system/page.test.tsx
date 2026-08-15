@@ -110,6 +110,25 @@ function marketplaceEnabledSwitch() {
   return control as HTMLButtonElement;
 }
 
+const genericAPISettingLabels = {
+  api_usage_queue_capacity: "apiUsageQueueCapacity",
+  api_usage_worker_concurrency: "apiUsageWorkerConcurrency",
+  api_upload_idle_timeout_ms: "apiUploadIdleTimeoutMs",
+  api_upstream_dial_timeout_ms: "apiUpstreamDialTimeoutMs",
+  api_upstream_tls_handshake_timeout_ms: "apiUpstreamTLSHandshakeTimeoutMs",
+  api_upstream_response_header_timeout_ms: "apiUpstreamResponseHeaderTimeoutMs",
+  api_websocket_handshake_timeout_ms: "apiWebSocketHandshakeTimeoutMs",
+  api_websocket_control_write_timeout_ms: "apiWebSocketControlWriteTimeoutMs",
+} as const;
+
+function genericAPISettingInput(key: keyof typeof genericAPISettingLabels) {
+  const panel = within(panelForTab("tabs.requestPath"));
+  const label = panel.getByText(genericAPISettingLabels[key]);
+  const input = label.parentElement?.querySelector("input");
+  expect(input).not.toBeNull();
+  return input as HTMLInputElement;
+}
+
 beforeEach(() => {
   navigation.pathname = "/system";
   navigation.query = "";
@@ -122,6 +141,21 @@ beforeEach(() => {
   mocks.toastSuccess.mockReset();
   mocks.toastError.mockReset();
   mocks.settings = {};
+});
+
+it("renders the no-description system page with a shared header refresh action", () => {
+  render(<SystemMaintenancePage />);
+
+  const header = screen.getByTestId("page-header");
+  expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  expect(screen.getByRole("heading", { level: 1 })).toHaveClass("tracking-tight");
+  expect(header.querySelector("p")).not.toBeInTheDocument();
+  expect(screen.getByTestId("page-header-actions")).toContainElement(
+    screen.getByRole("button", { name: "refresh" }),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "refresh" }));
+  expect(mocks.refetchStats).toHaveBeenCalledOnce();
 });
 
 it("assigns the key fields to all five maintenance panels", () => {
@@ -195,6 +229,85 @@ it("saves a request-path draft from the policy tab with the existing payload sha
       onError: expect.any(Function),
     }),
   );
+});
+
+it("loads all Generic API queue and timeout settings", () => {
+  mocks.settings = {
+    api_usage_queue_capacity: "12345",
+    api_usage_worker_concurrency: "7",
+    api_upload_idle_timeout_ms: "0",
+    api_upstream_dial_timeout_ms: "31000",
+    api_upstream_tls_handshake_timeout_ms: "11000",
+    api_upstream_response_header_timeout_ms: "12000",
+    api_websocket_handshake_timeout_ms: "46000",
+    api_websocket_control_write_timeout_ms: "6000",
+  };
+  render(<SystemMaintenancePage />);
+
+  for (const [key, value] of Object.entries(mocks.settings)) {
+    expect(genericAPISettingInput(key as keyof typeof genericAPISettingLabels)).toHaveValue(Number(value));
+  }
+});
+
+it("saves queue maxima and timeout zero/max boundaries together", () => {
+  mocks.settings = {
+    api_usage_queue_capacity: "10000",
+    api_usage_worker_concurrency: "2",
+    api_upload_idle_timeout_ms: "1",
+    api_upstream_dial_timeout_ms: "1",
+    api_upstream_tls_handshake_timeout_ms: "1",
+    api_upstream_response_header_timeout_ms: "1",
+    api_websocket_handshake_timeout_ms: "1",
+    api_websocket_control_write_timeout_ms: "1",
+  };
+  render(<SystemMaintenancePage />);
+
+  const updates = {
+    api_usage_queue_capacity: "1000000",
+    api_usage_worker_concurrency: "32",
+    api_upload_idle_timeout_ms: "0",
+    api_upstream_dial_timeout_ms: "3600000",
+    api_upstream_tls_handshake_timeout_ms: "0",
+    api_upstream_response_header_timeout_ms: "3600000",
+    api_websocket_handshake_timeout_ms: "0",
+    api_websocket_control_write_timeout_ms: "3600000",
+  };
+  for (const [key, value] of Object.entries(updates)) {
+    fireEvent.change(genericAPISettingInput(key as keyof typeof genericAPISettingLabels), { target: { value } });
+  }
+  fireEvent.click(
+    within(panelForTab("tabs.requestPath")).getByRole("button", { name: "saveSettings" }),
+  );
+
+  expect(mocks.updateSettings).toHaveBeenCalledWith(
+    { settings: updates },
+    expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) }),
+  );
+});
+
+it.each([
+  ["api_usage_queue_capacity", "", "apiUsageSettingRangeError"],
+  ["api_usage_queue_capacity", "99", "apiUsageSettingRangeError"],
+  ["api_usage_queue_capacity", "1000001", "apiUsageSettingRangeError"],
+  ["api_usage_worker_concurrency", "1.5", "apiUsageSettingRangeError"],
+  ["api_usage_worker_concurrency", "0", "apiUsageSettingRangeError"],
+  ["api_usage_worker_concurrency", "33", "apiUsageSettingRangeError"],
+  ["api_upload_idle_timeout_ms", "", "apiUsageSettingRangeError"],
+  ["api_upstream_dial_timeout_ms", "1.5", "apiUsageSettingRangeError"],
+  ["api_upstream_tls_handshake_timeout_ms", "-1", "apiUsageSettingRangeError"],
+  ["api_upstream_response_header_timeout_ms", "3600001", "apiUsageSettingRangeError"],
+  ["api_websocket_handshake_timeout_ms", "-1", "apiUsageSettingRangeError"],
+  ["api_websocket_control_write_timeout_ms", "3600001", "apiUsageSettingRangeError"],
+] as const)("rejects invalid Generic API setting %s=%j", (key, value, errorKey) => {
+  render(<SystemMaintenancePage />);
+
+  fireEvent.change(genericAPISettingInput(key), { target: { value } });
+  fireEvent.click(
+    within(panelForTab("tabs.requestPath")).getByRole("button", { name: "saveSettings" }),
+  );
+
+  expect(mocks.updateSettings).not.toHaveBeenCalled();
+  expect(mocks.toastError).toHaveBeenCalledWith(errorKey);
 });
 
 it("keeps the cross-tab draft when saving settings fails", () => {

@@ -4,11 +4,63 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"net/http"
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAPIRequestEndAndResponseEndTrailerRoundTrip(t *testing.T) {
+	meta := apiattempt.APIAttemptMeta{
+		APIServiceID: 7, APIRouteID: 9, Protocol: apiattempt.APIProtocolHTTP,
+		Method: http.MethodPost, Subpath: "/events", RawQuery: "cursor=a%2Fb",
+		RequestTrailerKeys: []string{"Digest", "X-Checksum"},
+		TracePolicy:        apiattempt.APITracePolicy{Mode: apiattempt.APITraceModeHeaders, MaxBodyBytes: 4096},
+	}
+	open := Open{
+		Method: http.MethodPost, Path: "/v1/api/events/append", Header: map[string][]string{}, BodyLength: -1,
+		RequestID: "request-1", TargetAgentID: "agent-b", ResponseWindow: 32, API: &meta,
+	}
+	openPayload, err := EncodeMetadata(open, MaxMetadataBytes)
+	require.NoError(t, err)
+	var decodedOpen Open
+	require.NoError(t, DecodeMetadata(openPayload, &decodedOpen, MaxMetadataBytes))
+	require.Equal(t, open, decodedOpen)
+	require.Nil(t, decodedOpen.Attempt)
+
+	requestFinal := Trailers{Header: map[string][]string{"Digest": {"sha-256=abc"}, "X-Checksum": {"request-final"}}}
+	responseFinal := Trailers{Header: map[string][]string{"X-Checksum": {"response-final"}}, Dynamic: []string{"X-Dynamic"}}
+	for _, test := range []struct {
+		name      string
+		frameType Type
+		want      Trailers
+	}{
+		{name: "request end", frameType: FrameRequestEnd, want: requestFinal},
+		{name: "response end", frameType: FrameEnd, want: responseFinal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, encodeErr := EncodeMetadata(test.want, MaxMetadataBytes)
+			require.NoError(t, encodeErr)
+			message, encodeErr := Encode(Frame{Version: ProtocolVersion, Type: test.frameType, StreamID: StreamID{2}, Sequence: 4, Payload: payload}, testLimits())
+			require.NoError(t, encodeErr)
+			frame, decodeErr := Decode(message, testLimits())
+			require.NoError(t, decodeErr)
+			var got Trailers
+			require.NoError(t, DecodeMetadata(frame.Payload, &got, MaxMetadataBytes))
+			require.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestAPIOpenMetadataRejectsAmbiguousAttemptCombination(t *testing.T) {
+	meta := apiattempt.APIAttemptMeta{APIServiceID: 1, APIRouteID: 2, Protocol: apiattempt.APIProtocolHTTP, Method: http.MethodGet}
+	llm := attemptwire.AttemptProxyMeta{}
+	open := Open{Method: http.MethodGet, Path: "/", ResponseWindow: 1, API: &meta, Attempt: &llm}
+	_, err := open.StreamKind()
+	require.ErrorIs(t, err, ErrInvalidOpenKind)
+}
 
 func TestNormalizeV2Limits(t *testing.T) {
 	valid := Limits{MaxMetadataBytes: math.MaxInt64, MaxDataBytes: math.MaxInt64,

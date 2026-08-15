@@ -97,7 +97,8 @@ func New[T any](limits Limits, sizeOf func(T) int64, clock Clock) *Queue[T] {
 func (q *Queue[T]) Enqueue(value T) EnqueueResult {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.putLocked(Item[T]{Value: value}, Pending, q.clock.Now())
+	result, _ := q.putLocked(Item[T]{Value: value}, Pending, q.clock.Now())
+	return result
 }
 
 // UpdateLimits applies runtime capacity settings and evicts the oldest
@@ -114,6 +115,13 @@ func (q *Queue[T]) UpdateLimits(limits Limits) {
 // producers should normally use Enqueue; adapters use Put to preserve stable
 // IDs, retry attempts and retry deadlines from an existing protocol.
 func (q *Queue[T]) Put(item Item[T], state State) EnqueueResult {
+	result, _ := q.PutWithEvicted(item, state)
+	return result
+}
+
+// PutWithEvicted has the same admission contract as Put and additionally
+// returns the actual pending/retry items removed while enforcing limits.
+func (q *Queue[T]) PutWithEvicted(item Item[T], state State) (EnqueueResult, []Item[T]) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if state != Pending && state != Retry {
@@ -122,19 +130,19 @@ func (q *Queue[T]) Put(item Item[T], state State) EnqueueResult {
 	return q.putLocked(item, state, q.clock.Now())
 }
 
-func (q *Queue[T]) putLocked(item Item[T], state State, now time.Time) EnqueueResult {
+func (q *Queue[T]) putLocked(item Item[T], state State, now time.Time) (EnqueueResult, []Item[T]) {
 	if item.Attempts < 0 {
-		return EnqueueResult{ID: item.ID, Error: "delivery queue item attempts must not be negative"}
+		return EnqueueResult{ID: item.ID, Error: "delivery queue item attempts must not be negative"}, nil
 	}
 	id := item.ID
 	if id == "" {
 		var ok bool
 		id, ok = q.nextGeneratedIDLocked()
 		if !ok {
-			return EnqueueResult{Error: "delivery queue generated ID space exhausted"}
+			return EnqueueResult{Error: "delivery queue generated ID space exhausted"}, nil
 		}
 	} else if q.hasIDLocked(id) {
-		return EnqueueResult{ID: id, Conflict: true, Error: fmt.Sprintf("delivery queue item ID %q already exists", id)}
+		return EnqueueResult{ID: id, Conflict: true, Error: fmt.Sprintf("delivery queue item ID %q already exists", id)}, nil
 	}
 	size := q.sizeOf(item.Value)
 	if size < 0 {
@@ -145,23 +153,26 @@ func (q *Queue[T]) putLocked(item Item[T], state State, now time.Time) EnqueueRe
 	incoming := &queueItem[T]{Item: item, state: state, createdAt: now}
 	q.items = append(q.items, incoming)
 	q.generation++
+	evicted := make([]Item[T], 0)
 	for q.overLimitLocked() {
 		idx := q.oldestEvictableLocked()
 		if idx < 0 {
 			q.removeByIDLocked(id)
 			q.dropped++
 			q.generation++
-			return EnqueueResult{ID: id, Dropped: true}
+			evicted = append(evicted, item)
+			return EnqueueResult{ID: id, Dropped: true}, evicted
 		}
-		droppedID := q.items[idx].ID
+		dropped := q.items[idx].Item
 		q.items = append(q.items[:idx], q.items[idx+1:]...)
+		evicted = append(evicted, dropped)
 		q.dropped++
 		q.generation++
-		if droppedID == id {
-			return EnqueueResult{ID: id, Dropped: true}
+		if dropped.ID == id {
+			return EnqueueResult{ID: id, Dropped: true}, evicted
 		}
 	}
-	return EnqueueResult{ID: id, Accepted: true}
+	return EnqueueResult{ID: id, Accepted: true}, evicted
 }
 
 // Items returns a stable copy in enqueue order. With no states it returns all

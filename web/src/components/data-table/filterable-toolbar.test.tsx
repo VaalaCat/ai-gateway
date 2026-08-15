@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 
 import { FilterableToolbar } from "./filterable-toolbar";
-import { tsToDateStr } from "@/lib/utils/date-range";
+import type { FilterSpec } from "./filter-spec";
+import { dateStrToExclusiveEndTs, dateStrToTs, tsToDateStr } from "@/lib/utils/date-range";
 
 type PickerProps = {
   value: { startDate: string; endDate: string };
@@ -14,8 +15,19 @@ type PickerProps = {
   className?: string;
 };
 
+type EntityPickerProps = {
+  entity: string;
+  placeholder?: string;
+  value?: string;
+  onChange: (value: string) => void;
+  id?: string;
+  apiServiceId?: number;
+  disabled?: boolean;
+};
+
 const mocks = vi.hoisted(() => ({
   pickerProps: undefined as PickerProps | undefined,
+  entityPickerProps: undefined as EntityPickerProps | undefined,
   entityPickerInstance: 0,
 }));
 
@@ -33,16 +45,16 @@ vi.mock("@/components/business/entity-picker/entity-picker", () => ({
     placeholder,
     value,
     onChange,
-  }: {
-    entity: string;
-    placeholder?: string;
-    value?: string;
-    onChange: (value: string) => void;
-  }) => {
+    id,
+    apiServiceId,
+    disabled,
+  }: EntityPickerProps) => {
     const [instance] = useState(() => ++mocks.entityPickerInstance);
+    mocks.entityPickerProps = { entity, placeholder, value, onChange, id, apiServiceId, disabled };
     return (
       <button
         type="button"
+        id={id}
         role="combobox"
         aria-controls="entity-options"
         aria-expanded="false"
@@ -57,9 +69,17 @@ vi.mock("@/components/business/entity-picker/entity-picker", () => ({
   },
 }));
 
+beforeAll(() => {
+  Element.prototype.hasPointerCapture ??= () => false;
+  Element.prototype.setPointerCapture ??= () => {};
+  Element.prototype.releasePointerCapture ??= () => {};
+  Element.prototype.scrollIntoView ??= () => {};
+});
+
 beforeEach(() => {
   vi.useFakeTimers();
   mocks.pickerProps = undefined;
+  mocks.entityPickerProps = undefined;
   mocks.entityPickerInstance = 0;
 });
 afterEach(() => vi.useRealTimers());
@@ -130,6 +150,39 @@ it("wraps each filter in a labeled FilterField, label falls back to placeholder"
   expect(screen.getByText("statusLabel")).toBeInTheDocument(); // def.label 优先
 });
 
+it("programmatically associates visible labels with picker, text, and enum controls", () => {
+  render(
+    <FilterableToolbar
+      spec={{
+        token_id: {
+          kind: "picker",
+          entity: "usable-token",
+          label: "Token",
+          placeholder: "Select Token",
+        },
+        search: { kind: "text", label: "Search", placeholder: "Search models" },
+        provider: {
+          kind: "enum",
+          label: "Provider",
+          options: [{ value: "OpenAI", label: "OpenAI" }],
+        },
+        kind: {
+          kind: "enum",
+          label: "Kind",
+          options: [{ value: "real", label: "Real" }],
+        },
+      }}
+      value={{}}
+      onChange={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("combobox", { name: "Token" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Search" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Provider" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Kind" })).toBeInTheDocument();
+});
+
 it("renders compact sm controls in the toolbar", () => {
   const spec = {
     search: { kind: "text" as const, placeholder: "searchPh" },
@@ -140,7 +193,56 @@ it("renders compact sm controls in the toolbar", () => {
   expect(screen.getByPlaceholderText("searchPh").className).toContain("h-8");
 });
 
-it("renders one compact date range field and emits one atomic update", () => {
+it("keeps portal option sizing unchanged without a mobile touch opt-in", () => {
+  const spec = {
+    status: { kind: "enum" as const, options: [{ value: "1", label: "on" }], placeholder: "st" },
+  };
+  render(<FilterableToolbar spec={spec} value={{}} onChange={() => {}} />);
+
+  fireEvent.click(screen.getByRole("combobox"));
+
+  expect(screen.getByRole("option", { name: "on" })).not.toHaveClass("max-sm:min-h-11");
+  expect(document.querySelector('[data-slot="select-content"]')).not.toHaveClass("max-sm:min-w-44");
+});
+
+it("opens enum portals with comfortable mobile touch sizing when requested", () => {
+  const spec = {
+    status: { kind: "enum" as const, options: [{ value: "1", label: "on" }], placeholder: "st" },
+  };
+  render(
+    <FilterableToolbar
+      spec={spec}
+      value={{}}
+      onChange={() => {}}
+      mobileTouchSize="comfortable"
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("combobox"));
+
+  expect(screen.getByRole("option", { name: "on" })).toHaveClass("max-sm:min-h-11");
+  expect(document.querySelector('[data-slot="select-content"]')).toHaveClass("max-sm:min-w-44");
+});
+
+it("supports compact text width without changing default or popover widths", () => {
+  const spec: FilterSpec = {
+    status_code: { kind: "text", label: "Status", controlWidth: "compact" },
+    request_id: { kind: "text", label: "Request" },
+    advanced_code: { kind: "text", label: "Advanced", controlWidth: "compact", advanced: true },
+  };
+
+  render(<FilterableToolbar spec={spec} value={{}} onChange={() => {}} />);
+
+  expect(screen.getByRole("textbox", { name: "Status" }).parentElement).toHaveClass("sm:w-32");
+  expect(screen.getByRole("textbox", { name: "Request" }).parentElement).toHaveClass("sm:w-56");
+  expect(screen.queryByRole("textbox", { name: "Advanced" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /filters/ }));
+  expect(screen.getByRole("textbox", { name: "Advanced" }).parentElement).not.toHaveClass("sm:w-32", "sm:w-56");
+});
+
+// behavior change: shared time filters emit a next-midnight exclusive end bound.
+it("renders one compact date range field and emits one atomic exclusive update", () => {
   const onChange = vi.fn();
   const spec = { time: { kind: "time" as const, maxHourDays: 7 } };
   render(<FilterableToolbar spec={spec} value={{}} onChange={onChange} />);
@@ -161,10 +263,9 @@ it("renders one compact date range field and emits one atomic update", () => {
   });
   expect(onChange).toHaveBeenCalledOnce();
   expect(onChange).toHaveBeenCalledWith({
-    start: expect.any(Number),
-    end: expect.any(Number),
+    start: dateStrToTs("2026-07-14", false),
+    end: dateStrToExclusiveEndTs("2026-07-20"),
   });
-  expect(onChange.mock.calls[0][0].end).toBeGreaterThan(onChange.mock.calls[0][0].start);
 });
 
 it("does not duplicate enum placeholder text between label and trigger", () => {
@@ -181,6 +282,49 @@ it("picker label falls back to entity noun and trigger shows the all placeholder
   render(<FilterableToolbar spec={spec} value={{}} onChange={() => {}} />);
   expect(screen.getByText("label.token")).toBeInTheDocument(); // 名词标签 key 回显
   expect(screen.getByRole("combobox")).toHaveTextContent("all");
+});
+
+it("passes a picker-specific placeholder to EntityPicker", () => {
+  render(
+    <FilterableToolbar
+      spec={{
+        token_id: {
+          kind: "picker",
+          entity: "usable-token",
+          placeholder: "Select Token",
+        },
+      }}
+      value={{}}
+      onChange={() => {}}
+    />,
+  );
+  expect(screen.getByRole("combobox")).toHaveTextContent("Select Token");
+});
+
+it("derives picker query parameters from the complete filter value", () => {
+  const spec = {
+    api_route_id: {
+      kind: "picker",
+      entity: "token",
+      pickerQuery: (values: Record<string, string | number | undefined>) => ({
+        apiServiceId: Number(values.api_service_id) || undefined,
+        disabled: !values.api_service_id,
+      }),
+    },
+  } satisfies FilterSpec;
+
+  render(
+    <FilterableToolbar
+      spec={spec}
+      value={{ api_service_id: "7" }}
+      onChange={() => {}}
+    />,
+  );
+
+  expect(mocks.entityPickerProps).toMatchObject({
+    apiServiceId: 7,
+    disabled: false,
+  });
 });
 
 it("remounts a picker when the entity type changes for the same filter field", () => {

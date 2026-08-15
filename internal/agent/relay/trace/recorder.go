@@ -12,8 +12,10 @@ import (
 
 	backendcommon "github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/legacy"
+	"github.com/VaalaCat/ai-gateway/internal/agent/tracecapture"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 )
@@ -268,53 +270,20 @@ func (r *Recorder) WrapUpstreamBody(resp *http.Response) io.ReadCloser {
 	return io.NopCloser(io.TeeReader(resp.Body, r.upstreamBody))
 }
 
-// tailAppender is a fixed-capacity streaming window that always acknowledges
-// the original write length so capture cannot interfere with relay I/O.
-type tailAppender struct {
-	buf       []byte
-	limit     int
-	totalSeen int64
-}
+// tailAppender keeps the legacy private name while composing the shared,
+// side-effect-free fixed tail used by Generic API capture.
+type tailAppender = tracecapture.BodyWindow
 
 func newTailAppender(limit int) *tailAppender {
-	if limit <= 0 {
-		limit = defaultTraceMaxBodySize
-	}
-	return &tailAppender{limit: limit}
-}
-
-func (a *tailAppender) Write(p []byte) (int, error) {
-	originalLen := len(p)
-	a.totalSeen += int64(originalLen)
-	if originalLen >= a.limit {
-		a.buf = append(a.buf[:0], p[originalLen-a.limit:]...)
-		return originalLen, nil
-	}
-	overflow := len(a.buf) + originalLen - a.limit
-	if overflow > 0 {
-		copy(a.buf, a.buf[overflow:])
-		a.buf = a.buf[:len(a.buf)-overflow]
-	}
-	a.buf = append(a.buf, p...)
-	return originalLen, nil
-}
-
-func (a *tailAppender) WriteString(s string) (int, error) { return a.Write([]byte(s)) }
-func (a *tailAppender) Bytes() []byte                     { return a.buf }
-func (a *tailAppender) String() string                    { return string(a.buf) }
-func (a *tailAppender) Len() int                          { return len(a.buf) }
-func (a *tailAppender) Limit() int                        { return a.limit }
-func (a *tailAppender) TotalSeen() int64                  { return a.totalSeen }
-func (a *tailAppender) Truncated() bool                   { return a.totalSeen > int64(a.limit) }
-func (a *tailAppender) Reset() {
-	a.buf = a.buf[:0]
-	a.totalSeen = 0
+	return tracecapture.NewBodyWindow(limit)
 }
 
 func boundedTail(body []byte, limit int) ([]byte, int64) {
-	a := backendcommon.NewMaskingTail(limit)
-	_, _ = a.Write(body)
-	return append([]byte(nil), a.Bytes()...), a.TotalSeen()
+	masked := backendcommon.NewMaskingTail(limit)
+	_, _ = masked.Write(body)
+	window := tracecapture.NewBodyWindow(limit)
+	_, _ = window.Write(masked.Bytes())
+	return window.Bytes(), masked.TotalSeen()
 }
 
 func traceBufferHardLimit(size int) int {
@@ -568,6 +537,46 @@ func (r *Recorder) Finalize() (rec *TraceRecord) {
 	return r.buildTraceRecord()
 }
 
+// RetentionStatus reports the final user-visible retention state for record.
+// Upload degradation may replace this value later in the reporter.
+func (r *Recorder) RetentionStatus(record *TraceRecord) models.TraceRetentionStatus {
+	if r == nil {
+		return ""
+	}
+	if r.mode == CaptureOff && (record == nil || record.FailStage == StageNone) {
+		return models.TraceRetentionDisabled
+	}
+	if r.mode == CaptureHeaders && (record == nil || record.FailStage == StageNone) {
+		return models.TraceRetentionHeadersOnly
+	}
+	if traceRecordBodyTruncated(record) {
+		return models.TraceRetentionBodyTruncated
+	}
+	for _, attempt := range r.attempts {
+		if traceRecordBodyTruncated(attempt) {
+			return models.TraceRetentionBodyTruncated
+		}
+	}
+	return models.TraceRetentionFull
+}
+
+func traceRecordBodyTruncated(record *TraceRecord) bool {
+	if record == nil {
+		return false
+	}
+	for _, body := range []string{
+		record.InboundBody,
+		record.OutboundBody,
+		record.UpstreamBody,
+		record.ClientResponseBody,
+	} {
+		if strings.HasPrefix(body, truncatedPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // SnapshotAttempt 把当前 attempt 的 mask trace 收进累加切片，供 publish 逐候选落库。
 // nil 接收者安全（no-op）。
 func (r *Recorder) SnapshotAttempt() {
@@ -735,11 +744,11 @@ func CaptureModeFromContext(c *gin.Context) CaptureMode {
 	if !ok || ui == nil || !ui.TraceEnabled {
 		return CaptureOff
 	}
-	mode, unknown := ui.TraceMode.ForRuntime()
+	policy, unknown := tracecapture.PolicyFromToken(ui.TraceEnabled, string(ui.TraceMode), defaultTraceMaxBodySize)
 	if unknown {
 		logUnknownTraceMode(ui.TraceMode)
 	}
-	if mode == models.TokenTraceModeHeaders {
+	if policy.Mode == apiattempt.APITraceModeHeaders {
 		return CaptureHeaders
 	}
 	return CaptureFull

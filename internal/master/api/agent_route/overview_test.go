@@ -52,3 +52,18 @@ func TestAgentRouteOverviewReturnsFilteredJoinedProjection(t *testing.T) {
 	require.Equal(t, token.Name, resp.Data[0].SourceName)
 	require.Equal(t, agent.Name, resp.Data[0].AgentName)
 }
+
+func TestAgentRouteOverviewAcceptsAPISourceFilters(t *testing.T) {
+	for _, sourceType := range []string{
+		models.AgentRouteSourceAPIService,
+		models.AgentRouteSourceAPIRoute,
+	} {
+		t.Run(sourceType, func(t *testing.T) {
+			filter, err := (OverviewRequest{SourceType: sourceType, SourceID: "7"}).Filter()
+			require.NoError(t, err)
+			require.Equal(t, sourceType, filter.SourceType)
+			require.NotNil(t, filter.SourceID)
+			require.Equal(t, uint(7), *filter.SourceID)
+		})
+	}
+}

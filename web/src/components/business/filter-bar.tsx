@@ -15,14 +15,16 @@ export function FilterField({
   label,
   children,
   className,
+  htmlFor,
 }: {
   label: string;
   children: ReactNode;
   className?: string;
+  htmlFor?: string;
 }) {
   return (
     <div className={cn("space-y-1", className)}>
-      <Label className="text-xs font-normal text-muted-foreground">{label}</Label>
+      <Label htmlFor={htmlFor} className="text-xs font-normal text-muted-foreground">{label}</Label>
       {children}
     </div>
   );

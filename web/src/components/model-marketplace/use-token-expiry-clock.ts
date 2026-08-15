@@ -2,6 +2,11 @@
 
 import { useEffect, useState } from "react";
 
+import {
+  tokenServerTimeAxis,
+  useServerTimeOffsetMs,
+  type ServerTimeAxis,
+} from "@/lib/api/server-time";
 import type { Token } from "@/lib/types";
 
 export const MAX_TOKEN_EXPIRY_TIMER_DELAY_MS = 2_147_483_647;
@@ -17,26 +22,28 @@ export function nextTokenExpiryDelayMs(tokens: Token[], nowMs: number) {
   return Math.min(nearestDeadline - nowMs, MAX_TOKEN_EXPIRY_TIMER_DELAY_MS);
 }
 
-export function useTokenExpiryClock(tokens: Token[]) {
-  const [nowMs, setNowMs] = useState(() => Date.now());
+export function useTokenExpiryClock(
+  tokens: Token[],
+  axis: ServerTimeAxis = tokenServerTimeAxis,
+) {
+  const offsetMs = useServerTimeOffsetMs(axis);
+  const [revision, setRevision] = useState(0);
+  void revision;
+  const serverNowSeconds = offsetMs === undefined ? undefined : axis.nowSeconds();
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- newly fetched expiries must be compared with fetch-time, not mount-time
-    setNowMs(Date.now());
-  }, [tokens]);
-
-  useEffect(() => {
-    const delay = nextTokenExpiryDelayMs(tokens, Date.now());
+    if (offsetMs === undefined) return;
+    const delay = nextTokenExpiryDelayMs(tokens, Date.now() + offsetMs);
     if (delay === undefined) return;
-    const timer = window.setTimeout(() => setNowMs(Date.now()), delay);
+    const timer = window.setTimeout(() => setRevision((current) => current + 1), delay);
     return () => window.clearTimeout(timer);
-  }, [nowMs, tokens]);
+  }, [offsetMs, revision, tokens]);
 
   useEffect(() => {
-    const updateNow = () => setNowMs(Date.now());
+    const updateNow = () => setRevision((current) => current + 1);
     document.addEventListener("visibilitychange", updateNow);
     return () => document.removeEventListener("visibilitychange", updateNow);
   }, []);
 
-  return Math.floor(nowMs / 1_000);
+  return serverNowSeconds;
 }

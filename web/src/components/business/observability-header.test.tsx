@@ -41,8 +41,8 @@ beforeEach(() => {
   mocks.toastInfo.mockReset();
 });
 
-it("keeps the title and controls stacked until the large breakpoint", () => {
-  const { container } = render(
+it("delegates the title and subtitle to PageHeader while preserving observability controls", () => {
+  render(
     <ObservabilityHeader
       title="Dashboard"
       subtitle="Overview"
@@ -52,9 +52,46 @@ it("keeps the title and controls stacked until the large breakpoint", () => {
     />,
   );
 
-  const headingRow = container.querySelector("h1")?.parentElement?.parentElement;
-  expect(headingRow).toHaveClass("lg:flex-row", "lg:items-start", "lg:justify-between");
-  expect(headingRow).not.toHaveClass("md:flex-row", "md:items-start", "md:justify-between");
+  expect(screen.getByTestId("page-header")).toHaveTextContent("Dashboard");
+  expect(screen.getByTestId("page-header")).toHaveTextContent("Overview");
+  expect(screen.getByTestId("date-range")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+});
+
+it("uses PageHeader above the independent observability controls", () => {
+  render(
+    <ObservabilityHeader
+      title="Dashboard"
+      subtitle="Overview"
+      range={{ start: 100, end: 200, gran: "day" }}
+      onRangeChange={() => {}}
+      onRefresh={() => {}}
+    />,
+  );
+
+  const header = screen.getByTestId("page-header");
+  expect(header).toContainElement(screen.getByRole("heading", { level: 1, name: "Dashboard" }));
+  expect(header).not.toContainElement(screen.getByTestId("date-range"));
+  expect(screen.getByTestId("date-range").parentElement?.parentElement).toHaveClass(
+    "lg:justify-end",
+  );
+});
+
+it("can render only observability controls when the route already owns the PageHeader", () => {
+  render(
+    <ObservabilityHeader
+      title="Dashboard"
+      subtitle="Overview"
+      range={{ start: 100, end: 200, gran: "day" }}
+      onRangeChange={() => {}}
+      onRefresh={() => {}}
+      showPageHeader={false}
+    />,
+  );
+
+  expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+  expect(screen.getByTestId("date-range")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
 });
 
 it("emits one complete date range update and preserves granularity", async () => {
@@ -237,7 +274,7 @@ it("renders the page scope label and controls in a compact rail", () => {
   expect(rail?.querySelector('[data-slot="separator"]')).toBeInTheDocument();
 });
 
-it("keeps header actions beside refresh in the existing action container", () => {
+it("puts optional header actions in PageHeader while preserving the refresh action slot", () => {
   const { container } = render(
     <ObservabilityHeader
       title="Dashboard"
@@ -250,6 +287,7 @@ it("keeps header actions beside refresh in the existing action container", () =>
 
   const refresh = screen.getByRole("button", { name: "Refresh" });
   const actions = screen.getByRole("button", { name: "More actions" });
-  expect(actions.parentElement).toBe(refresh.parentElement);
+  expect(actions.parentElement).toBe(screen.getByTestId("page-header-actions"));
+  expect(refresh.parentElement).toHaveAttribute("data-slot", "header-actions");
   expect(container.querySelector('[data-slot="header-actions-row"]')).not.toBeInTheDocument();
 });

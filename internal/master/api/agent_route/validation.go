@@ -23,22 +23,30 @@ func validateAgentRoute(q dao.AdminQuery, route models.AgentRoute) error {
 	}
 
 	switch route.SourceType {
-	case "token":
+	case models.AgentRouteSourceToken:
 		if _, err := q.Token().GetByID(route.SourceID); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return api.BadRequestError(fmt.Sprintf("token %d not found", route.SourceID), err)
 			}
 			return api.InternalError("validate agent route source failed", err)
 		}
-	case "channel":
+	case models.AgentRouteSourceChannel:
 		if _, err := q.Channel().GetByID(route.SourceID); err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return api.BadRequestError(fmt.Sprintf("channel %d not found", route.SourceID), err)
 			}
 			return api.InternalError("validate agent route source failed", err)
 		}
+	case models.AgentRouteSourceAPIService:
+		if err := validateAPIAgentRouteSource(route, "api service", q.APIService().GetByID); err != nil {
+			return err
+		}
+	case models.AgentRouteSourceAPIRoute:
+		if err := validateAPIAgentRouteSource(route, "api route", q.APIRoute().GetByID); err != nil {
+			return err
+		}
 	default:
-		return api.BadRequestError("source_type must be 'token' or 'channel'", nil)
+		return api.BadRequestError("source_type must be token, channel, api_service, or api_route", nil)
 	}
 
 	if route.AgentID != "" {
@@ -48,6 +56,22 @@ func validateAgentRoute(q dao.AdminQuery, route models.AgentRoute) error {
 			}
 			return api.InternalError("validate agent route agent failed", err)
 		}
+	}
+	return nil
+}
+
+func validateAPIAgentRouteSource[T any](route models.AgentRoute, name string, getByID func(uint) (*T, error)) error {
+	if route.SourceID == 0 {
+		return api.BadRequestError(name+" source_id must be positive", nil)
+	}
+	if route.Model != "" {
+		return api.BadRequestError(name+" agent route model must be empty", nil)
+	}
+	if _, err := getByID(route.SourceID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return api.BadRequestError(fmt.Sprintf("%s %d not found", name, route.SourceID), err)
+		}
+		return api.InternalError("validate agent route source failed", err)
 	}
 	return nil
 }

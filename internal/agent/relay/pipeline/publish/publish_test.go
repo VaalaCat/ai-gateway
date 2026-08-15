@@ -115,6 +115,24 @@ func TestAttachTraceDataIsZeroWhenNoStages(t *testing.T) {
 	}
 }
 
+func TestAttachTraceDataProjectsRetentionStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode trace.CaptureMode
+		want models.TraceRetentionStatus
+	}{
+		{name: "disabled", mode: trace.CaptureOff, want: models.TraceRetentionDisabled},
+		{name: "headers only", mode: trace.CaptureHeaders, want: models.TraceRetentionHeadersOnly},
+		{name: "full", mode: trace.CaptureFull, want: models.TraceRetentionFull},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var entry protocol.UsageLogEntry
+			attachTraceData(&entry, trace.NewRecorder(tc.mode, 64))
+			require.Equal(t, tc.want, entry.TraceRetentionStatus)
+		})
+	}
+}
+
 // ---------- H2: Publisher.Publish tests ----------
 
 // captureBus 用 eventbus.NewMemoryBus 真实实现 + subscribe 收集发布出来的 UsageLogEntry。

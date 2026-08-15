@@ -16,6 +16,7 @@ interface DataTablePaginationProps {
   page: number;
   pageSize: number;
   pageCount: number;
+  disabled?: boolean;
   onPaginationChange: (page: number, pageSize: number) => void;
 }
 
@@ -23,6 +24,7 @@ export function DataTablePagination({
   page,
   pageSize,
   pageCount,
+  disabled = false,
   onPaginationChange,
 }: DataTablePaginationProps) {
   const t = useTranslations("common");
@@ -32,6 +34,7 @@ export function DataTablePagination({
       <div className="flex items-center gap-2">
         <Select
           value={String(pageSize)}
+          disabled={disabled}
           onValueChange={(value) => {
             onPaginationChange(1, Number(value));
           }}
@@ -55,16 +58,18 @@ export function DataTablePagination({
         <Button
           variant="outline"
           size="icon-sm"
+          aria-label={t("previousPage")}
           onClick={() => onPaginationChange(page - 1, pageSize)}
-          disabled={page <= 1}
+          disabled={disabled || page <= 1}
         >
           <ChevronLeft className="size-4" />
         </Button>
         <Button
           variant="outline"
           size="icon-sm"
+          aria-label={t("nextPage")}
           onClick={() => onPaginationChange(page + 1, pageSize)}
-          disabled={page >= pageCount}
+          disabled={disabled || page >= pageCount}
         >
           <ChevronRight className="size-4" />
         </Button>

@@ -2,6 +2,7 @@
 
 import { useTranslations } from "next-intl";
 import { Input } from "@/components/ui/input";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -11,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { ChannelForm } from "../types";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 import { parseResilience, stringifyResilience, ResilienceOverride } from "../utils";
 
 type NumericResilienceKey =
@@ -76,12 +78,20 @@ export function ResilienceSection({ form, setForm }: ResilienceSectionProps) {
             </SelectContent>
           </Select>
         </div>
-        {FIELDS.map(({ key, labelKey }) => (
-          <div key={key} className="space-y-2">
-            <Label>{t(labelKey as never)}</Label>
-            <Input type="number" min={0} value={resilience[key] !== undefined ? String(resilience[key]) : ""} onChange={(e) => updateField(key, e.target.value)} />
-          </div>
-        ))}
+        {FIELDS.map(({ key, labelKey }) => {
+          const value = resilience[key] !== undefined ? String(resilience[key]) : "";
+          const isDuration = key.endsWith("_ms");
+          return (
+            <div key={key} className="space-y-2">
+              <Label>{t(labelKey as never)}</Label>
+              {isDuration ? (
+                <NumberUnitInput type="number" min={0} unit="ms" value={value} humanReadable={humanizeNumberUnit(value, "milliseconds")} onChange={(e) => updateField(key, e.target.value)} />
+              ) : (
+                <Input type="number" min={0} value={value} onChange={(e) => updateField(key, e.target.value)} />
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

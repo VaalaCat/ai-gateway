@@ -1,11 +1,18 @@
 package tunnel
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"unicode/utf8"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 )
+
+var ErrInvalidOpenKind = errors.New("tunnel: invalid open stream kind")
 
 const (
 	DirectTunnelPath       = "/internal/agent/direct-tunnel"
@@ -139,6 +146,134 @@ type Open struct {
 	Hop            uint8                         `json:"hop"`
 	ResponseWindow int64                         `json:"response_window"`
 	Attempt        *attemptwire.AttemptProxyMeta `json:"attempt,omitempty"`
+	API            *apiattempt.APIAttemptMeta    `json:"api,omitempty"`
+	WebSocket      *WebSocketOpen                `json:"websocket,omitempty"`
+}
+
+const (
+	MaxWebSocketControlPayloadBytes = 125
+	WebSocketTextMessage            = 1
+	WebSocketBinaryMessage          = 2
+	WebSocketCloseProtocolError     = 1002
+)
+
+type WebSocketOpen struct {
+	ResponseWindow int64 `json:"response_window"`
+}
+
+type WebSocketAccepted struct {
+	RequestWindow  int64               `json:"request_window"`
+	Subprotocol    string              `json:"subprotocol,omitempty"`
+	ProviderStatus int                 `json:"provider_status,omitempty"`
+	Rejection      *WebSocketRejection `json:"rejection,omitempty"`
+}
+
+type WebSocketRejection struct {
+	StatusCode      int                 `json:"status_code"`
+	Header          map[string][]string `json:"header,omitempty"`
+	Body            []byte              `json:"body,omitempty"`
+	HeaderTruncated bool                `json:"header_truncated,omitempty"`
+	BodyTruncated   bool                `json:"body_truncated,omitempty"`
+}
+
+// ValidWebSocketRejectionStatus reports whether an ordinary HTTP response can
+// be the terminal result of a failed WebSocket upgrade.
+func ValidWebSocketRejectionStatus(status int) bool { return status >= 200 && status <= 599 }
+
+type WebSocketMessageStart struct {
+	MessageID uint64 `json:"message_id"`
+	Type      int    `json:"type"`
+}
+
+type WebSocketEventKind uint8
+
+const (
+	WebSocketMessageStartEvent WebSocketEventKind = iota + 1
+	WebSocketMessageDataEvent
+	WebSocketMessageEndEvent
+	WebSocketPingEvent
+	WebSocketPongEvent
+	WebSocketCloseEvent
+)
+
+type WebSocketEvent struct {
+	Kind      WebSocketEventKind
+	MessageID uint64
+	Type      int
+	Data      []byte
+	Code      int
+	Reason    string
+}
+
+func EncodeWebSocketClose(code int, reason string) ([]byte, error) {
+	if code == 0 {
+		if reason != "" {
+			return nil, ErrMalformedMetadata
+		}
+		return nil, nil
+	}
+	if !validWebSocketCloseCode(code) || !utf8.ValidString(reason) {
+		return nil, ErrMalformedMetadata
+	}
+	payload := make([]byte, 2+len(reason))
+	binary.BigEndian.PutUint16(payload, uint16(code))
+	copy(payload[2:], reason)
+	if len(payload) > MaxWebSocketControlPayloadBytes {
+		return nil, ErrPayloadTooLarge
+	}
+	return payload, nil
+}
+
+func DecodeWebSocketClose(payload []byte) (WebSocketEvent, error) {
+	if len(payload) == 0 {
+		return WebSocketEvent{Kind: WebSocketCloseEvent}, nil
+	}
+	if len(payload) < 2 || len(payload) > MaxWebSocketControlPayloadBytes {
+		return WebSocketEvent{}, ErrMalformedMetadata
+	}
+	code := int(binary.BigEndian.Uint16(payload[:2]))
+	if !validWebSocketCloseCode(code) || !utf8.Valid(payload[2:]) {
+		return WebSocketEvent{}, ErrMalformedMetadata
+	}
+	return WebSocketEvent{Kind: WebSocketCloseEvent, Code: code, Reason: string(payload[2:])}, nil
+}
+
+func validWebSocketCloseCode(code int) bool {
+	if code >= 3000 && code <= 4999 {
+		return true
+	}
+	return code >= 1000 && code <= 1013 && code != 1004 && code != 1005 && code != 1006
+}
+
+func ValidateWebSocketMessageType(messageType int) error {
+	if messageType != WebSocketTextMessage && messageType != WebSocketBinaryMessage {
+		return fmt.Errorf("tunnel: invalid websocket message type %d", messageType)
+	}
+	return nil
+}
+
+type OpenStreamKind uint8
+
+const (
+	OpenStreamProbe OpenStreamKind = iota + 1
+	OpenStreamAttempt
+	OpenStreamAPI
+)
+
+func (o Open) StreamKind() (OpenStreamKind, error) {
+	if o.ProbePolicy != "" {
+		if o.Attempt == nil && o.API == nil && o.IsConnectivityProbe() {
+			return OpenStreamProbe, nil
+		}
+		return 0, ErrInvalidOpenKind
+	}
+	if o.Attempt != nil && o.API == nil {
+		return OpenStreamAttempt, nil
+	}
+	if o.Attempt == nil && o.API != nil {
+		return OpenStreamAPI, nil
+	}
+	return 0, ErrInvalidOpenKind
 }
 
 func (o Open) IsConnectivityProbe() bool {
@@ -146,7 +281,7 @@ func (o Open) IsConnectivityProbe() bool {
 		o.Method == http.MethodGet && o.Path == "/ping" &&
 		len(o.Header) == 0 && o.BodyLength == 0 && o.RemainingNanos > 0 &&
 		o.TargetAgentID != "" && o.RouteID == 0 && o.Hop == 0 &&
-		o.ResponseWindow > 0 && o.ResponseWindow <= MaxV2StreamWindowBytes && o.Attempt == nil
+		o.ResponseWindow > 0 && o.ResponseWindow <= MaxV2StreamWindowBytes && o.Attempt == nil && o.API == nil
 }
 
 type Ready struct {

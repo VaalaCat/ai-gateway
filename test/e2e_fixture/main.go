@@ -16,6 +16,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/deliveryqueue"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -309,6 +310,9 @@ func seed(core, logs *gorm.DB) error {
 	if err := core.Create(&agents).Error; err != nil {
 		return err
 	}
+	if err := seedRouteWorkspace(core); err != nil {
+		return err
+	}
 
 	usageBuckets := make([]models.UsageHourlyBucket, 0, 7*24*24)
 	ttftHistograms := make([]models.UsageTTFTHistogram, 0, 7*24*24)
@@ -388,4 +392,37 @@ func seed(core, logs *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+func seedRouteWorkspace(core *gorm.DB) error {
+	service := models.APIService{
+		ID: 101, Slug: "route-workspace-e2e", Name: "Route Workspace E2E",
+		Description: "Deterministic responsive Route workspace fixture", Status: consts.StatusEnabled,
+	}
+	if err := core.Create(&service).Error; err != nil {
+		return err
+	}
+	backend := models.APIBackend{ID: 201, APIServiceID: service.ID, Name: "Primary Target"}
+	if err := core.Create(&backend).Error; err != nil {
+		return err
+	}
+	upstreams := []models.APIUpstream{
+		{ID: 301, BackendID: backend.ID, Name: "Primary Endpoint", BaseURL: "https://primary.weather.example/long-responsive-path", Weight: 1, AuthType: models.APIUpstreamAuthNone, Status: consts.StatusEnabled},
+		{ID: 302, BackendID: backend.ID, Name: "Disabled Backup", BaseURL: "https://backup.weather.example/long-responsive-path", Weight: 1, Priority: 1, AuthType: models.APIUpstreamAuthNone, Status: consts.StatusDisabled},
+	}
+	if err := core.Create(&upstreams).Error; err != nil {
+		return err
+	}
+	if err := core.Model(&models.APIUpstream{}).Where("id = ?", 302).Update("status", consts.StatusDisabled).Error; err != nil {
+		return err
+	}
+	route := models.APIRoute{
+		ID: 401, APIServiceID: service.ID, BackendID: backend.ID, Slug: "responsive-route-workspace",
+		Protocols:      datatypes.JSONSlice[models.APIProtocol]{models.APIProtocolHTTP},
+		AllowedMethods: datatypes.JSONSlice[string]{"GET"},
+		UpstreamPath:   "/weather", ForwardSubpath: true,
+		ExampleRequest: datatypes.NewJSONType(models.APIRequestExample{Method: "GET", Subpath: "/forecast", Query: "units=metric", Headers: map[string]string{"Accept": "application/json"}}),
+		Status:         consts.StatusEnabled,
+	}
+	return core.Create(&route).Error
 }

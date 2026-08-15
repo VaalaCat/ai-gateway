@@ -573,6 +573,214 @@ func TestListBuildsViewerWideFiltersBeforeApplyingSearchProviderAndKind(t *testi
 	require.Equal(t, MarketplaceHealthUnknown, response.Models[0].Real.AggregateStatus)
 }
 
+// Break caught: enriching the complete directory before slicing would send
+// off-page offers to the performance finder and waste work proportional to the
+// full catalog instead of the requested page.
+func TestListEnrichesPerformanceForCurrentPageOnly(t *testing.T) {
+	alphaOffer := handlerOffer(t, "alpha", OfferKindPlatform, 11)
+	betaOffer := handlerOffer(t, "beta", OfferKindPlatform, 12)
+	gammaOffer := handlerOffer(t, "gamma", OfferKindPlatform, 13)
+	performance := unavailableHandlerPerformance()
+	handler := testMarketplaceHandler(t, &fakeHandlerGate{user: scopedMarketplaceViewer(7, 23)})
+	handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{
+		handlerMarketplaceModel("gamma", "Gamma", "Provider", nil, nil, gammaOffer),
+		handlerMarketplaceModel("alpha", "Alpha", "Provider", nil, nil, alphaOffer),
+		handlerMarketplaceModel("beta", "Beta", "Provider", nil, nil, betaOffer),
+	}}
+	handler.performance = performance
+
+	response, err := handler.List(userMarketplaceContext(t, 7), ListRequest{
+		TokenID: 23,
+		PaginationQuery: api.PaginationQuery{
+			Page: 2, PageSize: 1,
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(3), response.Total)
+	require.Equal(t, 2, response.Page)
+	require.Equal(t, 1, response.PageSize)
+	require.Len(t, response.Models, 1)
+	require.Equal(t, "beta", response.Models[0].Real.ModelName)
+	require.Equal(t, []ModelOffer{betaOffer}, performance.offers)
+}
+
+// Break caught: a routing-only page must not make an empty or off-page real
+// performance query after directory pagination.
+func TestListSkipsPerformanceForRoutingOnlyPage(t *testing.T) {
+	calls := []string{}
+	alphaOffer := handlerOffer(t, "alpha", OfferKindPlatform, 11)
+	handler := testMarketplaceHandler(t, &fakeHandlerGate{user: scopedMarketplaceViewer(7, 23)})
+	handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{
+		handlerMarketplaceModel(
+			"alpha", "Alpha", "Provider", nil, nil, alphaOffer,
+		),
+	}}
+	handler.routing = &fakeHandlerRouting{models: []RoutingModel{{
+		ModelName: "route", DisplayName: "Route",
+		ReachableRealModels: []string{"alpha"},
+		FlattenedDestinations: []FlattenedDestination{{
+			ModelName: "alpha", Offers: []ModelOfferSummary{routingOfferSummary(alphaOffer)},
+		}},
+	}}}
+	handler.performance = &fakeHandlerPerformance{calls: &calls}
+
+	response, err := handler.List(userMarketplaceContext(t, 7), ListRequest{
+		TokenID: 23,
+		Kind:    ModelKindRouting,
+		PaginationQuery: api.PaginationQuery{
+			Page: 1, PageSize: 20,
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(1), response.Total)
+	require.Len(t, response.Models, 1)
+	require.Equal(t, ModelKindRouting, response.Models[0].Kind)
+	require.NotContains(t, calls, "performance")
+}
+
+// Break caught: deriving filters from the current page would make controls
+// omit providers that remain available on later pages.
+func TestListKeepsFullDirectoryFiltersAfterPaging(t *testing.T) {
+	handler := testMarketplaceHandler(t, &fakeHandlerGate{user: scopedMarketplaceViewer(7, 23)})
+	handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{
+		handlerMarketplaceModel(
+			"beta", "Beta", "Anthropic", nil, nil,
+			handlerOffer(t, "beta", OfferKindPlatform, 12),
+		),
+		handlerMarketplaceModel(
+			"alpha", "Alpha", "OpenAI", nil, nil,
+			handlerOffer(t, "alpha", OfferKindPlatform, 11),
+		),
+	}}
+
+	response, err := handler.List(userMarketplaceContext(t, 7), ListRequest{
+		TokenID: 23,
+		PaginationQuery: api.PaginationQuery{
+			Page: 1, PageSize: 1,
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(2), response.Total)
+	require.Len(t, response.Models, 1)
+	require.Equal(t, "alpha", response.Models[0].Real.ModelName)
+	require.Equal(t, []string{"Anthropic", "OpenAI"}, response.Filters.Providers)
+}
+
+// Break caught: treating a page-scoped performance error as a list error would
+// hide otherwise valid current-page catalog data instead of degrading it.
+func TestListKeepsCurrentPageWhenPerformanceFinderFails(t *testing.T) {
+	performance := &fakeHandlerPerformance{err: errors.New("performance finder failed")}
+	handler := testMarketplaceHandler(t, &fakeHandlerGate{user: scopedMarketplaceViewer(7, 23)})
+	handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{
+		handlerMarketplaceModel(
+			"alpha", "Alpha", "Provider", nil, nil,
+			handlerOffer(t, "alpha", OfferKindPlatform, 11),
+		),
+		handlerMarketplaceModel(
+			"beta", "Beta", "Provider", nil, nil,
+			handlerOffer(t, "beta", OfferKindPlatform, 12),
+		),
+	}}
+	handler.performance = performance
+
+	response, err := handler.List(userMarketplaceContext(t, 7), ListRequest{
+		TokenID: 23,
+		PaginationQuery: api.PaginationQuery{
+			Page: 2, PageSize: 1,
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, response.Models, 1)
+	require.Equal(t, "beta", response.Models[0].Real.ModelName)
+	require.Equal(t, PerformanceUnavailable, response.Models[0].Real.Performance.PerformanceStatus)
+	require.Equal(t, MarketplaceHealthUnknown, response.Models[0].Real.AggregateStatus)
+	require.Len(t, response.Models[0].Real.Performance.StatusHistory, 24)
+}
+
+// Break caught: changing compose itself to page-scoped enrichment would make
+// detail consumers lose performance for models outside an arbitrary first page.
+func TestComposeStillEnrichesPerformanceForCompleteDirectory(t *testing.T) {
+	alphaOffer := handlerOffer(t, "alpha", OfferKindPlatform, 11)
+	betaOffer := handlerOffer(t, "beta", OfferKindPlatform, 12)
+	performance := unavailableHandlerPerformance()
+	handler := testMarketplaceHandler(t, &fakeHandlerGate{})
+	handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{
+		handlerMarketplaceModel("alpha", "Alpha", "Provider", nil, nil, alphaOffer),
+		handlerMarketplaceModel("beta", "Beta", "Provider", nil, nil, betaOffer),
+	}}
+	handler.performance = performance
+
+	directory, err := handler.compose(
+		context.Background(), scopedMarketplaceViewer(7, 23), UsageWindow7Days, false,
+	)
+
+	require.NoError(t, err)
+	require.Len(t, directory.real, 2)
+	require.Equal(t, []ModelOffer{alphaOffer, betaOffer}, performance.offers)
+}
+
+// Break caught: changing the user mapper comparator independently from the
+// directory comparator would reverse same-name real/routing members.
+func TestMapUserListOrdersSameNameRealBeforeRouting(t *testing.T) {
+	directory := composedMarketplace{
+		real:    []composedRealModel{listPageReal("same", "Provider")},
+		routing: []RoutingModel{listPageRouting("same")},
+	}
+
+	response := mapUserList(directory, UserMarketplaceFiltersDTO{}, 2, 1, 20)
+
+	require.Equal(t, []MarketplaceModelKind{ModelKindReal, ModelKindRouting}, []MarketplaceModelKind{
+		response.Models[0].Kind,
+		response.Models[1].Kind,
+	})
+}
+
+// Break caught: changing the administrator mapper comparator independently
+// from pagination would reverse same-name real/routing members.
+func TestMapAdminListOrdersSameNameRealBeforeRouting(t *testing.T) {
+	directory := composedMarketplace{
+		real:    []composedRealModel{listPageReal("same", "Provider")},
+		routing: []RoutingModel{listPageRouting("same")},
+	}
+
+	response := mapAdminList(directory, AdminMarketplaceFiltersDTO{}, 2, 1, 20)
+
+	require.Equal(t, []MarketplaceModelKind{ModelKindReal, ModelKindRouting}, []MarketplaceModelKind{
+		response.Models[0].Kind,
+		response.Models[1].Kind,
+	})
+}
+
+// Break caught: the administrator path must share server-side pagination and
+// current-page enrichment without collapsing its dedicated DTO allowlist.
+func TestAdminListEnrichesPerformanceForCurrentPageOnly(t *testing.T) {
+	alphaOffer := handlerOffer(t, "alpha", OfferKindPlatform, 11)
+	betaOffer := handlerOffer(t, "beta", OfferKindPlatform, 12)
+	performance := unavailableHandlerPerformance()
+	handler := testMarketplaceHandler(t, &fakeHandlerGate{admin: MarketplaceViewer{AdminGlobal: true}})
+	handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{
+		handlerMarketplaceModel("alpha", "Alpha", "Provider", nil, nil, alphaOffer),
+		handlerMarketplaceModel("beta", "Beta", "Provider", nil, nil, betaOffer),
+	}}
+	handler.performance = performance
+
+	response, err := handler.AdminList(adminMarketplaceContext(t, 1), AdminListRequest{
+		PaginationQuery: api.PaginationQuery{Page: 2, PageSize: 1},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, int64(2), response.Total)
+	require.Equal(t, 2, response.Page)
+	require.Equal(t, 1, response.PageSize)
+	require.Len(t, response.Models, 1)
+	require.Equal(t, "beta", response.Models[0].Real.ModelName)
+	require.Equal(t, []ModelOffer{betaOffer}, performance.offers)
+}
+
 // Break caught: accepting a window outside the three specified values or
 // querying the catalog before validation would violate the HTTP contract.
 func TestDetailRejectsInvalidWindowAfterGateBeforeCatalog(t *testing.T) {
@@ -1022,6 +1230,124 @@ func TestAdminListKeepsUnavailableDiagnosticsOutOfPerformanceAndAggregate(t *tes
 	})
 }
 
+// Break caught: treating Token preview like the global diagnostic catalog
+// exposes models that the selected Token cannot actually reach online.
+func TestAdminTokenPreviewDropsUnavailableCatalogWhileGlobalRetainsDiagnostics(t *testing.T) {
+	unavailable := handlerOffer(t, "blocked-model", OfferKindPlatform, 22)
+	unavailable.Available = false
+	unavailable.Facts.DisabledReasons = []string{"not selected by online planner"}
+	model := handlerMarketplaceModel(
+		"blocked-model", "Blocked", "Provider", nil, nil, unavailable,
+	)
+
+	t.Run("global retains diagnostics", func(t *testing.T) {
+		handler := testMarketplaceHandler(t, &fakeHandlerGate{
+			admin: MarketplaceViewer{AdminGlobal: true},
+		})
+		handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{model}}
+		handler.performance = unavailableHandlerPerformance()
+
+		response, err := handler.AdminList(adminMarketplaceContext(t, 1), AdminListRequest{})
+
+		require.NoError(t, err)
+		require.Equal(t, int64(1), response.Total)
+		require.Len(t, response.Models, 1)
+		require.Len(t, response.Models[0].Real.Offers, 1)
+	})
+
+	t.Run("token preview drops list model", func(t *testing.T) {
+		preview := scopedMarketplaceViewer(7, 23)
+		handler := testMarketplaceHandler(t, &fakeHandlerGate{admin: preview})
+		handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{model}}
+
+		response, err := handler.AdminList(
+			adminMarketplaceContext(t, 1),
+			AdminListRequest{TokenID: uintPointer(23)},
+		)
+
+		require.NoError(t, err)
+		require.Equal(t, AdminModeTokenPreview, response.View.Mode)
+		require.Zero(t, response.Total)
+		require.Empty(t, response.Models)
+	})
+
+	t.Run("token preview rejects detail", func(t *testing.T) {
+		preview := scopedMarketplaceViewer(7, 23)
+		handler := testMarketplaceHandler(t, &fakeHandlerGate{admin: preview})
+		handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{model}}
+
+		_, err := handler.AdminDetail(
+			adminMarketplaceContext(t, 1),
+			AdminDetailRequest{TokenID: uintPointer(23), Model: "blocked-model", Window: "24h"},
+		)
+
+		requireMarketplaceAPIError(t, err, http.StatusNotFound, "", consts.ErrNotFound)
+	})
+}
+
+// Break caught: keeping an all-unreachable routing definition in Token preview
+// claims the selected Token can use a route that online planning cannot execute.
+func TestAdminTokenPreviewDropsUnreachableRoutingWhileGlobalRetainsDiagnostics(t *testing.T) {
+	unavailable := handlerOffer(t, "blocked-model", OfferKindPlatform, 22)
+	unavailable.Available = false
+	model := handlerMarketplaceModel(
+		"blocked-model", "Blocked", "Provider", nil, nil, unavailable,
+	)
+	route := RoutingModel{
+		ModelName:           "blocked-route",
+		DisplayName:         "Blocked route",
+		ReachableRealModels: []string{"blocked-model"},
+		RoutingWarnings:     []RoutingWarning{},
+		Guidance:            RoutingModelGuidanceViewReachableRealModels,
+	}
+
+	newHandler := func(viewer MarketplaceViewer) *Handler {
+		handler := testMarketplaceHandler(t, &fakeHandlerGate{admin: viewer})
+		handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{model}}
+		handler.routing = &fakeHandlerRouting{models: []RoutingModel{route}}
+		return handler
+	}
+
+	t.Run("global retains routing diagnostics", func(t *testing.T) {
+		handler := newHandler(MarketplaceViewer{AdminGlobal: true})
+
+		list, err := handler.AdminList(
+			adminMarketplaceContext(t, 1),
+			AdminListRequest{Kind: ModelKindRouting},
+		)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), list.Total)
+		require.Len(t, list.Models, 1)
+		require.Contains(t, list.Models[0].Routing.RoutingWarnings, RoutingWarningNoVisibleOffer)
+
+		detail, detailErr := handler.AdminDetail(
+			adminMarketplaceContext(t, 1),
+			AdminDetailRequest{Model: "blocked-route", Window: "24h"},
+		)
+		require.NoError(t, detailErr)
+		require.Equal(t, "blocked-route", detail.Model.Routing.ModelName)
+	})
+
+	t.Run("token preview drops routing list and detail", func(t *testing.T) {
+		preview := scopedMarketplaceViewer(7, 23)
+		handler := newHandler(preview)
+
+		list, err := handler.AdminList(
+			adminMarketplaceContext(t, 1),
+			AdminListRequest{TokenID: uintPointer(23), Kind: ModelKindRouting},
+		)
+		require.NoError(t, err)
+		require.Zero(t, list.Total)
+		require.Empty(t, list.Models)
+
+		_, detailErr := handler.AdminDetail(
+			adminMarketplaceContext(t, 1),
+			AdminDetailRequest{TokenID: uintPointer(23), Model: "blocked-route", Window: "24h"},
+		)
+		requireMarketplaceAPIError(t, detailErr, http.StatusNotFound, "", consts.ErrNotFound)
+	})
+}
+
 func assertUnknownAdminModelPerformance(
 	t *testing.T,
 	performance AdminModelPerformanceDTO,
@@ -1108,42 +1434,46 @@ func TestAdminGlobalAndTokenPreviewUseIndependentDiagnosticDTOWithoutCredentials
 	offer.Available = false
 	model := handlerMarketplaceModel("gpt-4o", "GPT", "OpenAI", nil, nil, offer)
 
-	for _, test := range []struct {
-		name      string
-		tokenID   *uint
-		viewer    MarketplaceViewer
-		wantMode  AdminMarketplaceMode
-		wantToken *AdminSelectedTokenDTO
-	}{
-		{name: "global", viewer: global, wantMode: AdminModeGlobal},
-		{name: "token preview", tokenID: uintPointer(23), viewer: preview, wantMode: AdminModeTokenPreview,
-			wantToken: &AdminSelectedTokenDTO{ID: 23, Name: "Preview"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			handler := testMarketplaceHandler(t, &fakeHandlerGate{admin: test.viewer})
-			handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{model}}
-			handler.routing = &fakeHandlerRouting{}
-			handler.performance = unavailableHandlerPerformance()
+	t.Run("global exposes safe diagnostics", func(t *testing.T) {
+		handler := testMarketplaceHandler(t, &fakeHandlerGate{admin: global})
+		handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{model}}
+		handler.routing = &fakeHandlerRouting{}
+		handler.performance = unavailableHandlerPerformance()
 
-			response, err := handler.AdminList(adminMarketplaceContext(t, 1), AdminListRequest{TokenID: test.tokenID})
-			require.NoError(t, err)
-			require.Equal(t, test.wantMode, response.View.Mode)
-			require.Equal(t, test.wantToken, response.View.SelectedToken)
-			diagnostic := response.Models[0].Real.Offers[0].Diagnostics
-			require.Equal(t, uint(21), diagnostic.PrivateChannelID)
-			require.Equal(t, "private-internal", diagnostic.InternalName)
-			require.Equal(t, uint(7), diagnostic.OwnerID)
-			require.Equal(t, "https://byok-admin.example", diagnostic.BaseURL)
-			require.Equal(t, []AdminEndpointPathDTO{{Endpoint: EndpointMessages, Path: "/v1/messages"}}, diagnostic.EndpointPaths)
+		response, err := handler.AdminList(adminMarketplaceContext(t, 1), AdminListRequest{})
+		require.NoError(t, err)
+		require.Equal(t, AdminModeGlobal, response.View.Mode)
+		require.Nil(t, response.View.SelectedToken)
+		require.Len(t, response.Models, 1)
+		diagnostic := response.Models[0].Real.Offers[0].Diagnostics
+		require.Equal(t, uint(21), diagnostic.PrivateChannelID)
+		require.Equal(t, "private-internal", diagnostic.InternalName)
+		require.Equal(t, uint(7), diagnostic.OwnerID)
+		require.Equal(t, "https://byok-admin.example", diagnostic.BaseURL)
+		require.Equal(t, []AdminEndpointPathDTO{{Endpoint: EndpointMessages, Path: "/v1/messages"}}, diagnostic.EndpointPaths)
 
-			payload, marshalErr := json.Marshal(response)
-			require.NoError(t, marshalErr)
-			require.NotContains(t, string(payload), `"channel_type"`)
-			for _, credential := range []string{"api-key-secret", "cipher-secret", "key_cipher", "key_last4"} {
-				require.NotContains(t, string(payload), credential)
-			}
-		})
-	}
+		payload, marshalErr := json.Marshal(response)
+		require.NoError(t, marshalErr)
+		require.NotContains(t, string(payload), `"channel_type"`)
+		for _, credential := range []string{"api-key-secret", "cipher-secret", "key_cipher", "key_last4"} {
+			require.NotContains(t, string(payload), credential)
+		}
+	})
+
+	t.Run("token preview omits unavailable diagnostics", func(t *testing.T) {
+		handler := testMarketplaceHandler(t, &fakeHandlerGate{admin: preview})
+		handler.catalog = &fakeHandlerCatalog{models: []MarketplaceModel{model}}
+
+		response, err := handler.AdminList(
+			adminMarketplaceContext(t, 1),
+			AdminListRequest{TokenID: uintPointer(23)},
+		)
+		require.NoError(t, err)
+		require.Equal(t, AdminModeTokenPreview, response.View.Mode)
+		require.Equal(t, &AdminSelectedTokenDTO{ID: 23, Name: "Preview"}, response.View.SelectedToken)
+		require.Zero(t, response.Total)
+		require.Empty(t, response.Models)
+	})
 }
 
 func TestMarketplaceDTOEmptyCollectionsMarshalAsArrays(t *testing.T) {

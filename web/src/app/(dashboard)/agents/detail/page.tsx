@@ -13,6 +13,7 @@ import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
 import { InflightTable } from "@/components/business/inflight-table";
 import { InflightBlockDetail } from "@/components/observability/inflight-block-detail";
+import { PageHeader } from "@/components/layout/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -201,9 +202,21 @@ function RuntimeTab({ agent }: { agent: AgentDetail }) {
 }
 
 export default function AgentDetailPage() {
+  const t = useTranslations("agents");
   const tc = useTranslations("common");
+  const router = useRouter();
+  const backAction = (
+    <Button type="button" variant="ghost" size="icon" className="shrink-0" aria-label={t("backToList")} onClick={() => router.push("/agents")}>
+      <ArrowLeft data-icon="inline-start" />
+    </Button>
+  );
   return (
-    <Suspense fallback={<div className="flex flex-col gap-3 py-8" aria-label={tc("loading")}><Skeleton className="h-8 w-48" /><Skeleton className="h-56 w-full" /></div>}>
+    <Suspense fallback={
+      <div className="flex min-w-0 flex-col">
+        <PageHeader title={t("title")} backAction={backAction} />
+        <div className="flex flex-col gap-3 py-8" aria-label={tc("loading")}><Skeleton className="h-8 w-48" /><Skeleton className="h-56 w-full" /></div>
+      </div>
+    }>
       <AgentDetailContent />
     </Suspense>
   );
@@ -221,6 +234,11 @@ function AgentDetailContent() {
     initialSnapshot: detail.data?.connection,
   });
   const fullSync = useFullSyncAgents();
+  const backAction = (
+    <Button type="button" variant="ghost" size="icon" className="shrink-0" aria-label={t("backToList")} onClick={() => router.push("/agents")}>
+      <ArrowLeft data-icon="inline-start" />
+    </Button>
+  );
 
   const runFullSync = async () => {
     if (!detail.data) return;
@@ -240,17 +258,33 @@ function AgentDetailContent() {
 
   if (detail.isError && !detail.data) {
     return (
-      <Alert variant="destructive" role="alert">
-        <AlertTitle>{t("detailLoadFailed")}</AlertTitle>
-        <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
-          <span>{t("detailLoadFailedDescription")}</span>
-          <Button type="button" variant="outline" size="sm" onClick={() => void detail.refetch()}>{t("retry")}</Button>
-        </AlertDescription>
-      </Alert>
+      <div className="flex min-w-0 flex-col">
+        <PageHeader title={t("title")} backAction={backAction} />
+        <Alert variant="destructive" role="alert">
+          <AlertTitle>{t("detailLoadFailed")}</AlertTitle>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>{t("detailLoadFailedDescription")}</span>
+            <Button type="button" variant="outline" size="sm" onClick={() => void detail.refetch()}>{t("retry")}</Button>
+          </AlertDescription>
+        </Alert>
+      </div>
     );
   }
-  if (detail.isLoading || !detail.data) {
-    return <div className="flex flex-col gap-3 py-8" aria-label={tc("loading")}><Skeleton className="h-8 w-48" /><Skeleton className="h-56 w-full" /></div>;
+  if (detail.isLoading) {
+    return (
+      <div className="flex min-w-0 flex-col">
+        <PageHeader title={t("title")} backAction={backAction} />
+        <div className="flex flex-col gap-3 py-8" aria-label={tc("loading")}><Skeleton className="h-8 w-48" /><Skeleton className="h-56 w-full" /></div>
+      </div>
+    );
+  }
+  if (!detail.data) {
+    return (
+      <div className="flex min-w-0 flex-col">
+        <PageHeader title={t("title")} backAction={backAction} />
+        <Alert role="alert"><AlertTitle>{tc("noData")}</AlertTitle></Alert>
+      </div>
+    );
   }
   const agent = detail.data;
   const snapshot = monitored.data ?? agent.connection;
@@ -261,36 +295,41 @@ function AgentDetailContent() {
       : undefined
   );
   return (
-    <div className="flex min-w-0 flex-col gap-4">
-      {detail.isError ? (
-        <Alert variant="destructive" role="alert">
-          <AlertTitle>{t("detailLoadFailed")}</AlertTitle>
-          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
-            <span>{t("detailLoadFailedDescription")}</span>
-            <Button type="button" variant="outline" size="sm" onClick={() => void detail.refetch()}>{t("retry")}</Button>
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      <header className="flex min-w-0 items-center gap-2">
-        <Button type="button" variant="ghost" size="icon" className="shrink-0" aria-label={t("backToList")} onClick={() => router.push("/agents")}>
-          <ArrowLeft data-icon="inline-start" />
-        </Button>
-        <h1 className="min-w-0 truncate text-lg font-semibold">{agent.name}</h1>
-        <AgentConnectionStatus kind="control" value={snapshot.control} />
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="ml-auto shrink-0"
-          onClick={() => void runFullSync()}
-          disabled={connectionStale || fullSync.isPending || snapshot.control.state !== "connected"}
-        >
-          {fullSync.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
-          {fullSync.isPending ? t("syncing") : t("fullSync")}
-        </Button>
-      </header>
-
-      <Tabs defaultValue="overview" className="min-w-0">
+    <div className="flex min-w-0 flex-col">
+      <PageHeader
+        title={agent.name}
+        backAction={backAction}
+        metadata={
+          <>
+            <AgentConnectionStatus kind="control" value={snapshot.control} />
+            <span className="font-mono text-xs text-muted-foreground">{agent.agent_id}</span>
+            {agent.tags ? <span className="text-xs text-muted-foreground">{agent.tags}</span> : null}
+          </>
+        }
+        actions={
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => void runFullSync()}
+            disabled={connectionStale || fullSync.isPending || snapshot.control.state !== "connected"}
+          >
+            {fullSync.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
+            {fullSync.isPending ? t("syncing") : t("fullSync")}
+          </Button>
+        }
+      />
+      <div className="flex min-w-0 flex-col gap-4">
+        {detail.isError ? (
+          <Alert variant="destructive" role="alert">
+            <AlertTitle>{t("detailLoadFailed")}</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+              <span>{t("detailLoadFailedDescription")}</span>
+              <Button type="button" variant="outline" size="sm" onClick={() => void detail.refetch()}>{t("retry")}</Button>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        <Tabs defaultValue="overview" className="min-w-0">
         <TabsList>
           <TabsTrigger value="overview">{t("overview")}</TabsTrigger>
           <TabsTrigger value="connections">{t("connections")}</TabsTrigger>
@@ -309,7 +348,8 @@ function AgentDetailContent() {
           />
         </TabsContent>
         <TabsContent value="runtime" className="mt-4"><RuntimeTab agent={agent} /></TabsContent>
-      </Tabs>
+        </Tabs>
+      </div>
     </div>
   );
 }

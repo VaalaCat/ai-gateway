@@ -25,9 +25,10 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	store.Append([]protocol.UsageLogEntry{{
 		RequestID: "s1", Timestamp: 1, AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
 	}})
-	u.retry.pushItem(retryItem{entry: protocol.UsageLogEntry{
+	retryEntry := protocol.UsageLogEntry{
 		RequestID: "r1", AutoDisableTriggers: []attemptproxy.ChannelAutoDisableTrigger{trigger},
-	},
+	}
+	u.retry.pushItem(retryItem{entry: protocol.ReportedUsage{LLM: &retryEntry},
 		attempts: 7, degrade: DegradeStripTrace, bytes: 10, nextAt: time.Now().Add(time.Hour)})
 	snap := &Snapshotter{Store: store, Uploader: u, Path: path, Logger: zap.NewNop()}
 	if err := snap.WriteNow(); err != nil {
@@ -46,7 +47,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("store=%d retry=%d, want 1/1", store2.Len(), u2.retry.Len())
 	}
 	it := u2.retry.snapshotTop(1)[0]
-	require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{trigger}, it.entry.AutoDisableTriggers)
+	require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{trigger}, it.entry.LLM.AutoDisableTriggers)
 	require.Equal(t, []attemptproxy.ChannelAutoDisableTrigger{trigger}, store2.PeekBatch(1)[0].AutoDisableTriggers)
 	if it.attempts != 7 || it.degrade != DegradeStripTrace {
 		t.Fatalf("retry item lost fields: %+v", it)
@@ -55,6 +56,34 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if it.nextAt.IsZero() {
 		t.Fatal("restored nextAt must be recomputed")
 	}
+}
+
+func TestSnapshotRoundTripPreservesMixedUsageTypeIdentityAndRetryState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage_backlog.snapshot.gz")
+	store := NewMemPendingUsageStore(100, zap.NewNop())
+	uploader := newTestUploader(t, "http://127.0.0.1:0")
+	llm := protocol.ReportedUsage{LLM: &protocol.UsageLogEntry{RequestID: "shared", Timestamp: 10}}
+	api := protocol.ReportedUsage{API: &protocol.APIUsageEntry{
+		RequestID: "shared", Timestamp: 20, ProviderDispatchKnown: true, ProviderDispatched: true,
+	}}
+	store.AppendReported([]protocol.ReportedUsage{llm, api})
+	retryAPI := protocol.ReportedUsage{API: &protocol.APIUsageEntry{RequestID: "retry-api", Timestamp: 5}}
+	uploader.retry.pushItem(retryItem{entry: retryAPI, attempts: 7, degrade: DegradeStripTrace, bytes: entrySize(retryAPI)})
+	require.NoError(t, (&Snapshotter{Store: store, Uploader: uploader, Path: path, Logger: zap.NewNop()}).WriteNow())
+
+	restoredStore := NewMemPendingUsageStore(100, zap.NewNop())
+	restoredUploader := newTestUploader(t, "http://127.0.0.1:0")
+	restored := &Snapshotter{Store: restoredStore, Uploader: restoredUploader, Path: path, Logger: zap.NewNop()}
+	count, err := restored.Restore()
+
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+	require.Equal(t, []protocol.ReportedUsage{llm, api}, restoredStore.PeekReportedBatch(10, true))
+	retry := restoredUploader.retry.snapshotAll()
+	require.Len(t, retry, 1)
+	require.True(t, retry[0].entry.IsAPI())
+	require.Equal(t, 7, retry[0].attempts)
+	require.Equal(t, DegradeStripTrace, retry[0].degrade)
 }
 
 func TestSnapshotEmptyDeletesFile(t *testing.T) {

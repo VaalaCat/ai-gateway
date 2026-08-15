@@ -95,6 +95,67 @@ func (s *Session) handleTargetOpen(ctx context.Context, frame wire.Frame) {
 	go target.run()
 }
 
+func (s *Session) handleAPITargetOpen(ctx context.Context, frame wire.Frame, open wire.Open) {
+	if err := s.admitAPITargetOpen(&open); err != nil {
+		s.rejectTargetOpen(ctx, frame.StreamID, pathFailureStage(err, "open"), err)
+		return
+	}
+	payload, err := wire.EncodeMetadata(open, s.limits.MaxMetadataBytes)
+	if err != nil {
+		s.rejectTargetOpen(ctx, frame.StreamID, "open", errStreamProtocol)
+		return
+	}
+	frame.Payload = payload
+	target := newAPITargetStream(s.limits, s.enqueueAPIFrame)
+	target.session = s
+	target.id = frame.StreamID
+	target.handler = s.opts.APITargetHandler
+	target.reserveIncoming = s.reserveIncoming
+	target.releaseIncoming = s.releaseIncoming
+	target.controlContext = s.apiControlContext
+	parent := s.ctx
+	if open.RemainingNanos > 0 {
+		parent, target.stopTTL = context.WithDeadlineCause(parent, s.opts.Now().Add(time.Duration(open.RemainingNanos)), context.DeadlineExceeded)
+	}
+	target.ctx, target.cancel = context.WithCancelCause(parent)
+	target.onDone = func() {
+		s.writer.Forget(target.id)
+		s.removeAPITarget(target)
+	}
+	if err := s.admitAPITarget(target); err != nil {
+		target.stopTTL()
+		target.cancel(err)
+		s.rejectTargetOpen(ctx, frame.StreamID, pathFailureStage(err, "admission"), err)
+		return
+	}
+	if err := target.acceptFrame(ctx, frame); err != nil {
+		target.terminate(err)
+		return
+	}
+	target.startCommitTimer()
+}
+
+func (s *Session) admitAPITargetOpen(open *wire.Open) error {
+	if s == nil || open == nil || s.opts.TargetHandler == nil || s.opts.APITargetHandler == nil ||
+		s.opts.Direction == SessionDirectionDirectOutgoing {
+		return errStreamProtocol
+	}
+	if s.opts.Direction == SessionDirectionDirectIncoming {
+		open.SourceAgentID = s.opts.BoundSourceAgentID
+		if open.SourceAgentID == "" || !s.opts.Now().Before(s.opts.AdmissionDeadline) ||
+			s.opts.SourceEnabled == nil || !s.opts.SourceEnabled(open.SourceAgentID) ||
+			s.opts.TargetStatusEnabled == nil || !s.opts.TargetStatusEnabled() {
+			return errTargetUnavailable
+		}
+	}
+	normalized, err := normalizeAPIWireOpen(*open, s.limits.InitialStreamWindow)
+	if err != nil {
+		return errStreamProtocol
+	}
+	*open = normalized
+	return s.opts.TargetHandler.ValidateAPIOpen(*open, s.opts.IngressKind)
+}
+
 func (s *Session) admitTargetOpen(open *wire.Open) error {
 	if s == nil || open == nil || s.opts.TargetHandler == nil || s.opts.Direction == SessionDirectionDirectOutgoing {
 		return errStreamProtocol

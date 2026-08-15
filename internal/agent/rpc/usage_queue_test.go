@@ -78,8 +78,12 @@ func TestHandleUsageQueue_HappyPath(t *testing.T) {
 
 func TestHandleUsageQueueOp_HappyPath(t *testing.T) {
 	r, _ := newTestReporter(t)
-	params := UsageQueueOpParams{Op: "retry_now", RequestIDs: nil, Level: 0}
+	params := UsageQueueOpParams{Op: "retry_now", QueueIDs: []string{}, RequestIDs: nil, Level: 0}
 	paramsJSON, _ := json.Marshal(params)
+	var decoded UsageQueueOpParams
+	if err := json.Unmarshal(paramsJSON, &decoded); err != nil || decoded.QueueIDs == nil {
+		t.Fatalf("explicit empty queue_ids lost across JSON: decoded=%+v err=%v", decoded, err)
+	}
 
 	res, err := HandleUsageQueueOp(r, paramsJSON)
 	if err != nil {

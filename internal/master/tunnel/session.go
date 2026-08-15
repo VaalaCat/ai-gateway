@@ -194,24 +194,22 @@ func (s *Session) dispatch(frame wire.Frame) error {
 }
 
 func (s *Session) handleOpen(frame wire.Frame) error {
+	var open wire.Open
+	if frame.Sequence != 1 || wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes) != nil {
+		return s.rejectStream(frame.StreamID, nil, "open", errProtocol)
+	}
+	kind, err := open.StreamKind()
+	if err != nil {
+		return s.rejectStream(frame.StreamID, nil, "open", errProtocol)
+	}
 	if !s.accepting.Load() || s.hub == nil {
 		_ = s.sendResetCode(frame.StreamID, consts.RouteErrorRelayNotReady, "admission")
 		return nil
 	}
-	var open wire.Open
-	if err := wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes); err != nil {
-		return s.rejectStream(frame.StreamID, nil, "open", err)
-	}
-	isProbe := open.IsConnectivityProbe()
-	bypassProbe := open.ProbePolicy == wire.ProbeBypassBusinessPolicy
-	if bypassProbe && !isProbe {
-		return s.rejectStream(frame.StreamID, nil, "open", errProtocol)
-	}
 	var target *Session
-	var err error
 	// behavior change: valid automatic probes share the business policy gate with attempts;
 	// only structurally valid manual probes bypass it.
-	if open.Attempt != nil || isProbe && !bypassProbe {
+	if kind != wire.OpenStreamProbe || open.ProbePolicy != wire.ProbeBypassBusinessPolicy {
 		target, err = s.hub.authorizeRelayOpen(s.ctx, s.agentID, open.TargetAgentID)
 		if err != nil {
 			_ = s.sendResetCode(frame.StreamID, masterResetCode(err), "policy")

@@ -11,6 +11,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ProviderAvatar } from "@/components/business/provider-avatar";
+import { PageHeader } from "@/components/layout/page-header";
 import {
   useFetchPricing, useApplyPricing,
   type FetchPricingResponse, type PricingRecommendation, type PricingValues, type PriceCandidate,
@@ -292,26 +293,26 @@ export default function PricingSyncPage() {
   };
 
   return (
-    <div className="space-y-4 max-w-4xl">
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" className="size-8 shrink-0" onClick={() => router.push("/models")}>
+    <div className="max-w-4xl">
+      <PageHeader
+        title={t("pricingSyncTitle")}
+        description={<>{t("changedCount", { count: changedRemaining })}{appliedCount > 0 && <span className="ml-2">· {t("appliedSummary", { count: appliedCount })}</span>}</>}
+        backAction={
+          <Button variant="ghost" size="icon" className="size-8 shrink-0" aria-label={tc("back")} onClick={() => router.push("/models")}>
             <ArrowLeft className="size-4" />
           </Button>
-          <h1 className="flex-1 truncate text-xl font-bold sm:text-2xl">{t("pricingSyncTitle")}</h1>
+        }
+        actions={
           <Button variant="outline" size="sm" className="shrink-0" onClick={() => load()} disabled={fetchPricing.isPending}>
             <RefreshCw className={`size-3.5 sm:mr-1.5 ${fetchPricing.isPending ? "animate-spin" : ""}`} />
             <span className="hidden sm:inline">{t("refetch")}</span>
           </Button>
-        </div>
-        <p className="text-muted-foreground text-sm">
-          {t("changedCount", { count: changedRemaining })}
-          {appliedCount > 0 && <span className="ml-2 text-green-600">· {t("appliedSummary", { count: appliedCount })}</span>}
-        </p>
-        {showSearch && (
-          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={tc("search")} className="h-9 w-full sm:w-60" />
-        )}
-      </div>
+        }
+      />
+      <div className="flex flex-col gap-4">
+      {showSearch && (
+        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={tc("search")} className="h-9 w-full sm:w-60" />
+      )}
 
       {resp?.source_errors && Object.entries(resp.source_errors).map(([s, e]) => (
         <p key={s} className="text-xs text-destructive">{s}: {e}</p>
@@ -424,6 +425,7 @@ export default function PricingSyncPage() {
             )}
           </div>
         )}
+      </div>
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layout/page-header";
 import { Separator } from "@/components/ui/separator";
 import {
   Tabs,
@@ -40,6 +41,7 @@ interface ObservabilityHeaderProps {
   scopeLabel?: string;
   scopeControls?: ReactNode;
   headerActions?: ReactNode;
+  showPageHeader?: boolean;
 }
 
 export function ObservabilityHeader({
@@ -54,6 +56,7 @@ export function ObservabilityHeader({
   scopeLabel,
   scopeControls,
   headerActions,
+  showPageHeader = true,
 }: ObservabilityHeaderProps) {
   const tRange = useTranslations("monitoring.range");
   const tb = useTranslations("billing");
@@ -82,11 +85,8 @@ export function ObservabilityHeader({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl font-bold">{title}</h1>
-          {subtitle && <p className="text-muted-foreground">{subtitle}</p>}
-        </div>
+      {showPageHeader ? <PageHeader title={title} description={subtitle} actions={headerActions} /> : null}
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-end">
         <div className="grid w-full grid-cols-[1fr_auto] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
           {showGranularity ? (
             <Tabs value={range.gran} onValueChange={handleGranChange}>
@@ -120,7 +120,6 @@ export function ObservabilityHeader({
                 <TooltipContent>{tb("refresh")}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
-            {headerActions}
           </div>
           <DateRangePicker
             value={{ startDate: startStr, endDate: endStr }}

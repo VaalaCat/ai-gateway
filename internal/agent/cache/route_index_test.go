@@ -171,26 +171,32 @@ func TestRouteIndex_ReplaceIsAtomic(t *testing.T) {
 		{ID: 2, SourceType: "token", SourceID: 42, AgentID: "old-default", Priority: 90},
 		{ID: 3, SourceType: "channel", SourceID: 7, Model: "model", AgentID: "old-channel-model", Priority: 80},
 		{ID: 4, SourceType: "channel", SourceID: 7, AgentID: "old-channel-default", Priority: 70},
+		{ID: 5, SourceType: models.AgentRouteSourceAPIService, SourceID: 8, AgentID: "old-api", Priority: 60},
 	}
 	next := []*models.AgentRoute{
 		{ID: 11, SourceType: "token", SourceID: 42, Model: "model", AgentID: "new-model", Priority: 100},
 		{ID: 12, SourceType: "token", SourceID: 42, AgentID: "new-default", Priority: 90},
 		{ID: 13, SourceType: "channel", SourceID: 7, Model: "model", AgentID: "new-channel-model", Priority: 80},
 		{ID: 14, SourceType: "channel", SourceID: 7, AgentID: "new-channel-default", Priority: 70},
+		{ID: 15, SourceType: models.AgentRouteSourceAPIRoute, SourceID: 9, AgentID: "new-api", Priority: 60},
 	}
 	oldState := &routeIndexState{
 		routes: map[uint]models.AgentRoute{
-			1: *old[0], 2: *old[1], 3: *old[2], 4: *old[3],
+			1: *old[0], 2: *old[1], 3: *old[2], 4: *old[3], 5: *old[4],
 		},
-		byToken:   map[uint][]uint{42: {1, 2}},
-		byChannel: map[uint][]uint{7: {3, 4}},
+		byToken:      map[uint][]uint{42: {1, 2}},
+		byChannel:    map[uint][]uint{7: {3, 4}},
+		byAPIService: map[uint][]uint{8: {5}},
+		byAPIRoute:   map[uint][]uint{},
 	}
 	nextState := &routeIndexState{
 		routes: map[uint]models.AgentRoute{
-			11: *next[0], 12: *next[1], 13: *next[2], 14: *next[3],
+			11: *next[0], 12: *next[1], 13: *next[2], 14: *next[3], 15: *next[4],
 		},
-		byToken:   map[uint][]uint{42: {11, 12}},
-		byChannel: map[uint][]uint{7: {13, 14}},
+		byToken:      map[uint][]uint{42: {11, 12}},
+		byChannel:    map[uint][]uint{7: {13, 14}},
+		byAPIService: map[uint][]uint{},
+		byAPIRoute:   map[uint][]uint{9: {15}},
 	}
 	idx.Replace(old)
 
@@ -476,11 +482,28 @@ func TestRouteIndexFindersAreNilSafe(t *testing.T) {
 	require.Nil(t, idx.FindAdminChannelRoute(9, "gpt-4o"))
 }
 
+func TestRouteIndexFindAPIRoutesKeepScopesSeparateAndRequireEmptyModel(t *testing.T) {
+	idx := NewRouteIndex()
+	idx.Replace([]*models.AgentRoute{
+		{ID: 1, SourceType: models.AgentRouteSourceAPIService, SourceID: 7, AgentID: "service"},
+		{ID: 2, SourceType: models.AgentRouteSourceAPIRoute, SourceID: 7, AgentID: "route"},
+		{ID: 3, SourceType: models.AgentRouteSourceAPIRoute, SourceID: 9, Model: "llm-only", AgentID: "wrong"},
+		{ID: 4, SourceType: models.AgentRouteSourceAPIRoute, SourceID: 9, AgentID: "right"},
+	})
+
+	require.Equal(t, "service", idx.FindAPIServiceRoute(7).AgentID)
+	require.Equal(t, "route", idx.FindAPIRouteRoute(7).AgentID)
+	require.Equal(t, "right", idx.FindAPIRouteRoute(9).AgentID)
+	require.Nil(t, idx.FindAPIServiceRoute(9))
+}
+
 func routeIndexStatesEqual(got, want *routeIndexState) bool {
 	return got != nil &&
 		reflect.DeepEqual(got.routes, want.routes) &&
 		reflect.DeepEqual(got.byToken, want.byToken) &&
-		reflect.DeepEqual(got.byChannel, want.byChannel)
+		reflect.DeepEqual(got.byChannel, want.byChannel) &&
+		reflect.DeepEqual(got.byAPIService, want.byAPIService) &&
+		reflect.DeepEqual(got.byAPIRoute, want.byAPIRoute)
 }
 
 func requireRouteIndexState(

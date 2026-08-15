@@ -1,6 +1,9 @@
 package dao
 
-import "github.com/VaalaCat/ai-gateway/internal/pkg/listfilter"
+import (
+	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/listfilter"
+)
 
 // ListOptions is shared pagination parameters.
 type ListOptions struct {
@@ -25,9 +28,12 @@ type UserListFilter struct {
 }
 
 type TokenListFilter struct {
-	Search string
-	UserID *uint
-	Status *int
+	Search      string
+	ID          *uint
+	UserID      *uint
+	Status      *int
+	UsableAt    *int64
+	APIRoleMode *models.APIRoleMode
 }
 
 type ChannelListFilter struct {
@@ -47,15 +53,15 @@ type ModelConfigListFilter struct {
 }
 
 type UsageLogListFilter struct {
-	listfilter.TimeWindow         // embed: Start/End int64 unix sec
-	UserID    *uint
-	TokenID   *uint
-	ChannelID *uint
-	ModelName string
-	Status    *int
-	OwnerType        *string // nil = no filter; "admin" | "private"
-	PrivateChannelID *uint
-	RequestID        string // 精确匹配(唯一索引);"" = 不过滤
+	listfilter.TimeWindow // embed: Start/End int64 unix sec
+	UserID                *uint
+	TokenID               *uint
+	ChannelID             *uint
+	ModelName             string
+	Status                *int
+	OwnerType             *string // nil = no filter; "admin" | "private"
+	PrivateChannelID      *uint
+	RequestID             string // 精确匹配(唯一索引);"" = 不过滤
 }
 
 type TokenTemplateListFilter struct {

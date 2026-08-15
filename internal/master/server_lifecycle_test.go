@@ -24,6 +24,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	masterapiusage "github.com/VaalaCat/ai-gateway/internal/master/apiusage"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
 	masterlogqueue "github.com/VaalaCat/ai-gateway/internal/master/logqueue"
 	msync "github.com/VaalaCat/ai-gateway/internal/master/sync"
@@ -262,6 +263,95 @@ func TestShutdownStopsStartedLogDeliveryWorker(t *testing.T) {
 	result := worker.Enqueue(masterlogqueue.LogBatch{})
 	require.True(t, result.Dropped)
 	require.Contains(t, result.Error, "not accepting")
+}
+
+type shutdownBlockingUsageSettler struct {
+	logs      *masterlogqueue.LogDeliveryWorker
+	started   chan struct{}
+	release   chan struct{}
+	accepted  chan bool
+	ctxCause  chan error
+	ctxDone   chan struct{}
+	startOnce sync.Once
+}
+
+func (s *shutdownBlockingUsageSettler) Settle(ctx context.Context, entry protocol.APIUsageEntry) (masterapiusage.APISettlement, error) {
+	s.startOnce.Do(func() { close(s.started) })
+	<-ctx.Done()
+	close(s.ctxDone)
+	<-s.release
+	s.ctxCause <- context.Cause(ctx)
+	result := s.logs.Enqueue(masterlogqueue.LogBatch{APIRequest: &models.APIRequestLog{RequestID: entry.RequestID}})
+	s.accepted <- result.Accepted
+	return masterapiusage.APISettlement{RequestID: entry.RequestID}, nil
+}
+
+// Production break caught: root shutdown cancellation must not abort an
+// acknowledged API usage settlement before its final log batch is admitted.
+func TestShutdownDrainsAPIUsageBeforeStoppingLogDelivery(t *testing.T) {
+	dir := t.TempDir()
+	coreDBPath := filepath.Join(dir, "core.db")
+	logDBPath := filepath.Join(dir, "log.db")
+	cfg := &config.MasterRuntimeConfig{
+		Master: config.MasterConfig{Listen: ":0", DBPath: coreDBPath, LogDBPath: logDBPath, JWTSecret: strings.Repeat("x", 32)},
+		Agent:  config.AgentConfig{CredentialsFile: filepath.Join(dir, "embedded.json")},
+	}
+	srv, err := New(cfg, zap.NewNop())
+	require.NoError(t, err)
+	require.NotNil(t, srv.usageDeliveryCtx)
+	require.NoError(t, srv.APIUsageWorker.Stop(t.Context()))
+
+	settler := &shutdownBlockingUsageSettler{
+		logs: srv.LogDeliveryWorker, started: make(chan struct{}), release: make(chan struct{}),
+		accepted: make(chan bool, 1), ctxCause: make(chan error, 1), ctxDone: make(chan struct{}),
+	}
+	queue := masterapiusage.NewQueue(masterapiusage.QueueOptions{Capacity: 1, DedupCapacity: 1})
+	worker := masterapiusage.NewWorker(masterapiusage.WorkerOptions{Queue: queue, Settler: settler, Poll: time.Millisecond})
+	worker.Start(srv.usageDeliveryCtx)
+	srv.APIUsageQueue = queue
+	srv.APIUsageWorker = worker
+	require.NoError(t, queue.Accept(t.Context(), "agent-a", []protocol.APIUsageEntry{{RequestID: "shutdown-final-log"}}))
+	<-settler.started
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, srv.Shutdown(shutdownCtx), context.DeadlineExceeded)
+	select {
+	case <-settler.ctxDone:
+	case <-time.After(time.Second):
+		t.Fatal("API worker was not canceled after shutdown deadline")
+	}
+	select {
+	case <-srv.Done():
+		t.Fatal("Server finalized before the API usage worker released its dependencies")
+	default:
+	}
+	coreSQL, err := srv.DB.DB()
+	require.NoError(t, err)
+	require.NoError(t, coreSQL.Ping(), "Core DB closed while API usage settlement was still running")
+	logSQL, err := srv.LogDB.DB()
+	require.NoError(t, err)
+	require.NoError(t, logSQL.Ping(), "Log DB closed while API usage settlement was still running")
+	close(settler.release)
+
+	require.ErrorIs(t, <-settler.ctxCause, context.Canceled)
+	require.True(t, <-settler.accepted, "final API log batch was rejected during shutdown")
+	select {
+	case <-srv.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("Server did not finish after the API usage worker exited")
+	}
+	require.Equal(t, 0, queue.Len())
+	require.ErrorIs(t, srv.Shutdown(t.Context()), context.DeadlineExceeded, "repeated shutdown returns the first shutdown result")
+
+	reopenedLogDB, err := gorm.Open(sqlite.Open(logDBPath), &gorm.Config{})
+	require.NoError(t, err)
+	reopenedSQL, err := reopenedLogDB.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopenedSQL.Close()) })
+	var count int64
+	require.NoError(t, reopenedLogDB.Model(&models.APIRequestLog{}).Where("request_id = ?", "shutdown-final-log").Count(&count).Error)
+	require.EqualValues(t, 1, count)
 }
 
 func TestNewActivatesSplitLayoutBeforeLogDeliveryAdmission(t *testing.T) {

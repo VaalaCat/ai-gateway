@@ -20,7 +20,7 @@ func TestRetryQueue_PushDueOrdering(t *testing.T) {
 		t.Fatalf("Len = %d, want 3", got)
 	}
 	due := q.due(now, 10)
-	if len(due) != 2 || due[0].entry.RequestID != "a" || due[1].entry.RequestID != "b" {
+	if len(due) != 2 || due[0].entry.RequestID() != "a" || due[1].entry.RequestID() != "b" {
 		t.Fatalf("due = %+v, want [a b]", due)
 	}
 	if got := q.Len(); got != 1 {
@@ -56,7 +56,7 @@ func TestRetryQueue_DueSkipsNotYetDueEvenIfNotAtHead(t *testing.T) {
 	q.push([]protocol.UsageLogEntry{entry("old-long-backoff")}, 5, now.Add(time.Hour))
 	q.push([]protocol.UsageLogEntry{entry("new-short-backoff")}, 1, now.Add(-time.Second))
 	due := q.due(now, 10)
-	if len(due) != 1 || due[0].entry.RequestID != "new-short-backoff" {
+	if len(due) != 1 || due[0].entry.RequestID() != "new-short-backoff" {
 		t.Fatalf("due = %+v, want only [new-short-backoff]", due)
 	}
 	if got := q.Len(); got != 1 {
@@ -80,7 +80,7 @@ func TestRetryQueue_OverflowDropsOldestLogged(t *testing.T) {
 		t.Fatalf("log fields = %v, want dropped=1 pending_len=2", fields)
 	}
 	due := q.due(time.Now().Add(time.Second), 10)
-	if len(due) != 2 || due[0].entry.RequestID != "b" || due[1].entry.RequestID != "c" {
+	if len(due) != 2 || due[0].entry.RequestID() != "b" || due[1].entry.RequestID() != "c" {
 		t.Fatalf("due = %+v, want oldest 'a' dropped, [b c] remain", due)
 	}
 }
@@ -130,7 +130,7 @@ func TestRetryQueueManagementOps(t *testing.T) {
 
 	// snapshotTop 按体积降序
 	top := q.snapshotTop(50)
-	if len(top) != 2 || top[0].entry.RequestID != "big" {
+	if len(top) != 2 || top[0].entry.RequestID() != "big" {
 		t.Fatalf("snapshotTop order wrong: %+v", top)
 	}
 	if q.totalBytes() <= 0 || q.oldestTimestamp() != 100 {
@@ -138,18 +138,18 @@ func TestRetryQueueManagementOps(t *testing.T) {
 	}
 
 	// retryNow 点名:只清 big 的退避
-	if n := q.retryNow([]string{"big"}); n != 1 {
+	if n := q.retryNow([]string{"llm:big"}); n != 1 {
 		t.Fatalf("retryNow hit = %d, want 1", n)
 	}
 	due := q.due(time.Now(), 10)
-	if len(due) != 1 || due[0].entry.RequestID != "big" {
+	if len(due) != 1 || due[0].entry.RequestID() != "big" {
 		t.Fatalf("only big should be due, got %+v", due)
 	}
 	q.pushItem(due[0]) // 放回
 
 	// degrade 就地剥离并缩体积
 	before := q.totalBytes()
-	if n := q.degrade([]string{"big"}, DegradeStripTrace); n != 1 {
+	if n := q.degrade([]string{"llm:big"}, DegradeStripTrace); n != 1 {
 		t.Fatalf("degrade hit = %d, want 1", n)
 	}
 	if q.totalBytes() >= before {
@@ -157,22 +157,37 @@ func TestRetryQueueManagementOps(t *testing.T) {
 	}
 	top = q.snapshotTop(50)
 	for _, it := range top {
-		if it.entry.RequestID == "big" && (it.degrade != DegradeStripTrace || it.entry.TraceData != "") {
+		if it.entry.RequestID() == "big" && (it.degrade != DegradeStripTrace || it.entry.LLM.TraceData != "") {
 			t.Fatalf("big not degraded in place: %+v", it)
 		}
 	}
 	// 只升不降
-	q.degrade([]string{"big"}, DegradeBillingOnly)
-	if n := q.degrade([]string{"big"}, DegradeStripTrace); n != 0 {
+	q.degrade([]string{"llm:big"}, DegradeBillingOnly)
+	if n := q.degrade([]string{"llm:big"}, DegradeStripTrace); n != 0 {
 		t.Fatal("downgrade attempt must be a no-op miss")
 	}
 
 	// remove
-	if n := q.remove([]string{"small", "ghost"}); n != 1 {
+	if n := q.remove([]string{"llm:small", "llm:ghost"}); n != 1 {
 		t.Fatalf("remove hit = %d, want 1", n)
 	}
 	if q.Len() != 1 {
 		t.Fatalf("len = %d, want 1", q.Len())
+	}
+}
+
+func TestRetryQueueRemoveUsesTypedQueueIdentity(t *testing.T) {
+	q := newRetryQueue(10, zap.NewNop())
+	llm := protocol.UsageLogEntry{RequestID: "shared"}
+	api := protocol.APIUsageEntry{RequestID: "shared"}
+	q.pushReported([]protocol.ReportedUsage{{LLM: &llm}, {API: &api}}, 1, time.Now().Add(time.Hour))
+
+	if n := q.remove([]string{"llm:shared"}); n != 1 {
+		t.Fatalf("remove hit = %d, want 1", n)
+	}
+	items := q.snapshotAll()
+	if len(items) != 1 || !items[0].entry.IsAPI() {
+		t.Fatalf("typed remove crossed usage types: %+v", items)
 	}
 }
 
@@ -192,10 +207,11 @@ func TestRetryNowAllAndEmptyQueue(t *testing.T) {
 
 func TestPushItemPreservesDegradeAndBytes(t *testing.T) {
 	q := newRetryQueue(10, zap.NewNop())
-	it := retryItem{entry: protocol.UsageLogEntry{RequestID: "a"}, attempts: 5,
+	entry := protocol.UsageLogEntry{RequestID: "a"}
+	it := retryItem{entry: protocol.ReportedUsage{LLM: &entry}, attempts: 5,
 		nextAt: time.Now().Add(time.Minute), bytes: 42, degrade: DegradeStripTrace}
 	q.pushItem(it)
-	q.retryNow([]string{"a"})
+	q.retryNow([]string{"llm:a"})
 	got := q.snapshotTop(1)[0]
 	if got.attempts != 5 || got.degrade != DegradeStripTrace || got.bytes != 42 {
 		t.Fatalf("pushItem lost fields: %+v", got)

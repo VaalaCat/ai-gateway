@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
@@ -260,6 +261,7 @@ func (c *ClaudeCodec) encodeNonStream(events <-chan codec.Event, w http.Response
 	var contentBlocks []claudeRespContent
 	var usage *claudeUsage
 	stopReason := consts.ClaudeStopEndTurn
+	sawToolCall := false
 
 	for ev := range events {
 		// Read finish reason at top of loop before switch
@@ -285,6 +287,7 @@ func (c *ClaudeCodec) encodeNonStream(events <-chan codec.Event, w http.Response
 			}
 		case codec.EventToolCallDelta:
 			if ev.Delta != nil && ev.Delta.ToolCall != nil {
+				sawToolCall = true
 				tc := ev.Delta.ToolCall
 				var input any
 				if tc.Arguments != "" {
@@ -320,6 +323,9 @@ func (c *ClaudeCodec) encodeNonStream(events <-chan codec.Event, w http.Response
 				}
 			}
 		}
+	}
+	if sawToolCall && stopReason == consts.ClaudeStopEndTurn {
+		stopReason = consts.ClaudeStopToolUse
 	}
 
 	resp := claudeResponse{
@@ -423,6 +429,28 @@ func (c *ClaudeCodec) encodeStream(events <-chan codec.Event, w http.ResponseWri
 	// fcBlockStates tracks tool_use content blocks keyed by callID for the
 	// EventToolCallStart / EventToolCallArgumentsDelta / EventToolCallEnd events.
 	fcBlockStates := map[string]*claudeFcBlockState{}
+	sawToolCall := false
+	closeOpenToolUseBlocks := func() error {
+		callIDs := make([]string, 0, len(fcBlockStates))
+		for callID := range fcBlockStates {
+			callIDs = append(callIDs, callID)
+		}
+		sort.Slice(callIDs, func(i, j int) bool {
+			return fcBlockStates[callIDs[i]].blockIndex < fcBlockStates[callIDs[j]].blockIndex
+		})
+		for _, callID := range callIDs {
+			state := fcBlockStates[callID]
+			stop := map[string]any{
+				"type":  sseconsts.ContentBlockStop,
+				"index": state.blockIndex,
+			}
+			delete(fcBlockStates, callID)
+			if err := writeSSE(sseconsts.ContentBlockStop, stop); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 
 	for ev := range events {
 		// CRITICAL: read FinishReason at TOP of loop before switch
@@ -522,6 +550,7 @@ func (c *ClaudeCodec) encodeStream(events <-chan codec.Event, w http.ResponseWri
 				continue
 			}
 			callID := ev.ToolCall.CallID
+			sawToolCall = true
 			if _, exists := fcBlockStates[callID]; exists {
 				continue // defensive: duplicate Start
 			}
@@ -623,6 +652,12 @@ func (c *ClaudeCodec) encodeStream(events <-chan codec.Event, w http.ResponseWri
 			// Close any open block
 			if err := closeBlock(&bs); err != nil {
 				return err
+			}
+			if err := closeOpenToolUseBlocks(); err != nil {
+				return err
+			}
+			if sawToolCall && stopReason == consts.ClaudeStopEndTurn {
+				stopReason = consts.ClaudeStopToolUse
 			}
 
 			// C10: message_delta with stop_reason and full usage

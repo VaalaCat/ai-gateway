@@ -98,6 +98,31 @@ The configuration file accepts these top-level keys:
 
 See [`config.example.yaml`](config.example.yaml) for a complete template.
 
+### Generic API Gateway
+
+Administrators configure Generic API services, routes, upstreams, access roles,
+Agent routes, and rate limiters from the dashboard. Clients invoke an enabled
+route with a normal API token at:
+
+```text
+/v1/api/{service_slug}/{route_slug}
+/v1/api/{service_slug}/{route_slug}/{subpath...}
+```
+
+The route controls the allowed HTTP Method, whether trailing subpaths are
+forwarded, and whether the protocol is HTTP or WebSocket. A token or its owner
+must receive an `invoke` permission for the matching `api_service` or
+`api_route`; quota and bound rate limiters are then applied automatically.
+`price_per_call` is an integer quota amount where `100000` equals USD 1 and `0`
+means free.
+
+For rolling upgrades, upgrade the Master before enabling Generic API traffic,
+then upgrade every Agent that can be selected as an execution Agent. A remote
+Agent must advertise `generic_api_execution_v1` (and
+`generic_api_websocket_v1` for WebSocket routes); otherwise the request is
+rejected with HTTP 503 before its body is forwarded. The Monitoring → Delivery
+page shows Agent usage drops, trace slimming, and the Master log backlog.
+
 ### Core and Log Databases
 
 The master stores application and billing-critical state in `core.db`, request,

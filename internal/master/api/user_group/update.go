@@ -8,8 +8,11 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/apirbac"
+	mastersync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
 	"go.uber.org/zap"
 	"gorm.io/datatypes"
@@ -102,6 +105,16 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (api.StatusResponse,
 	}
 	if h.Bus != nil {
 		_ = events.PublishEntity(context.Background(), h.Bus, events.EntityUserGroup, events.ActionUpdate, *updated)
+		roleSet, findErr := apirbac.NewRoleSetFinder(q.User(), q.Token(), q.APIRBAC()).FindUserGroup(c.RequestContext(), id)
+		if findErr != nil {
+			return api.StatusResponse{}, api.InternalError("load user group API roles failed", findErr)
+		}
+		if publishErr := mastersync.NewAPISyncActions(h.Bus, nil).PublishUserGroupRoleSet(
+			c.RequestContext(),
+			protocol.APIRoleSetFetchResult{PrincipalID: id, Exists: true, RoleSet: roleSet.APIRoleSet()},
+		); publishErr != nil {
+			return api.StatusResponse{}, api.InternalError("publish user group API roles failed", publishErr)
+		}
 	}
 
 	// §1.7: when an admin flips byok_enabled on the group, fan out a

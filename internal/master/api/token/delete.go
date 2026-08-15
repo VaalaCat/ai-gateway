@@ -7,6 +7,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
+	mastersync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"go.uber.org/zap"
@@ -29,20 +30,34 @@ func (h *Handler) Delete(c *app.Context, req api.IDPathRequest) (api.StatusRespo
 		return api.StatusResponse{}, api.NotFoundError(consts.ErrNotFound)
 	}
 
-	deletedRoutings, err := m.Token().DeleteWithRoutings(uint(id))
+	deletedRoutings, deletedManagedRoleID, err := m.Token().DeleteWithRoutings(uint(id))
 	if err != nil {
 		return api.StatusResponse{}, api.InternalError("delete token failed", err)
 	}
 
 	publishFailures := 0
 	var lastPublishErr error
-	for _, routing := range deletedRoutings {
-		if err := events.Publish(c.RequestContext(), c.GetBus(), events.ModelRoutingDeleteTopic, routing); err != nil {
+	publishCtx, cancelPublish := api.NewPostCommitPublishContext(c.RequestContext())
+	defer cancelPublish()
+	actions := mastersync.NewAPISyncActions(c.GetBus(), nil)
+	publishQuery := dao.NewAdminQuery(dao.NewContextWithContext(c.App, publishCtx))
+	if deletedManagedRoleID != 0 {
+		if err := actions.PublishRole(publishCtx, publishQuery, events.ActionDelete, deletedManagedRoleID); err != nil {
 			publishFailures++
 			lastPublishErr = err
 		}
 	}
-	if err := events.PublishTokenDelete(c.RequestContext(), c.GetBus(), *token); err != nil {
+	if err := actions.InvalidateTokenRoleSet(publishCtx, token.ID); err != nil {
+		publishFailures++
+		lastPublishErr = err
+	}
+	for _, routing := range deletedRoutings {
+		if err := events.Publish(publishCtx, c.GetBus(), events.ModelRoutingDeleteTopic, routing); err != nil {
+			publishFailures++
+			lastPublishErr = err
+		}
+	}
+	if err := events.PublishTokenDelete(publishCtx, c.GetBus(), *token); err != nil {
 		publishFailures++
 		lastPublishErr = err
 	}

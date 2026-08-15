@@ -14,6 +14,7 @@ type UserInfo struct {
 	TraceEnabled      bool                  // Agent 侧：Token 是否开启 trace
 	TraceMode         models.TokenTraceMode // Agent 侧：Token 成功请求的 trace 捕获范围
 	BYOKOnly          bool                  // Agent 侧：Token 是否限定只用 BYOK/私有渠道
+	APIRoleMode       models.APIRoleMode    // Agent 侧：Generic API 权限事实取 Token 还是 User effective RoleSet
 	TokenModels       []string              // Agent 侧：Token 允许的模型列表（空表示不限）
 	AllowedChannelIDs []uint                // Agent 侧：Token 允许的频道列表（空表示不限）
 

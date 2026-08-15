@@ -3,6 +3,7 @@ package dao
 import (
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"gorm.io/gorm"
 )
@@ -131,6 +132,153 @@ func TestTokenDAO(t *testing.T) {
 		_, err := q.GetByID(tk3.ID)
 		if err != gorm.ErrRecordNotFound {
 			t.Fatalf("expected ErrRecordNotFound, got %v", err)
+		}
+	})
+}
+
+func TestTokenDAO_ListUsableAt(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx).Token()
+
+	user := &models.User{Username: "usable-owner"}
+	otherUser := &models.User{Username: "usable-other"}
+	for _, candidate := range []*models.User{user, otherUser} {
+		if err := db.Create(candidate).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+	}
+
+	now := int64(1_800_000_000)
+	tokens := []models.Token{
+		{Name: "enabled-never", Key: "sk-never", UserID: user.ID, Status: consts.StatusEnabled, ExpiredAt: -1},
+		{Name: "enabled-zero", Key: "sk-zero", UserID: user.ID, Status: consts.StatusEnabled, ExpiredAt: 0},
+		{Name: "enabled-boundary", Key: "sk-boundary", UserID: user.ID, Status: consts.StatusEnabled, ExpiredAt: now},
+		{Name: "enabled-expired", Key: "sk-expired", UserID: user.ID, Status: consts.StatusEnabled, ExpiredAt: now - 1},
+		{Name: "disabled-future", Key: "sk-disabled", UserID: user.ID, Status: consts.StatusDisabled, ExpiredAt: now + 1},
+	}
+	for i := range tokens {
+		if err := db.Create(&tokens[i]).Error; err != nil {
+			t.Fatalf("seed token %q: %v", tokens[i].Name, err)
+		}
+	}
+	if err := db.Model(&tokens[4]).Update("status", consts.StatusDisabled).Error; err != nil {
+		t.Fatalf("disable token %q: %v", tokens[4].Name, err)
+	}
+	if err := db.Create(&models.Token{
+		Name: "other-owner-usable", Key: "sk-other-usable", UserID: otherUser.ID,
+		Status: consts.StatusEnabled, ExpiredAt: now + 1,
+	}).Error; err != nil {
+		t.Fatalf("seed other owner token: %v", err)
+	}
+
+	got, total, err := q.List(
+		ListOptions{Page: 1, PageSize: 10},
+		TokenListFilter{UserID: &user.ID, UsableAt: &now},
+	)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3", total)
+	}
+
+	want := map[string]bool{
+		"enabled-never":    true,
+		"enabled-zero":     true,
+		"enabled-boundary": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d usable tokens, want %d", len(got), len(want))
+	}
+	for _, token := range got {
+		if !want[token.Name] {
+			t.Fatalf("unexpected token %q returned", token.Name)
+		}
+		if token.UserID != user.ID {
+			t.Fatalf("token %q leaked owner %d, want %d", token.Name, token.UserID, user.ID)
+		}
+	}
+}
+
+// Break caught: callers that validate one Token must not load every visible
+// Token before applying ownership and usability filters.
+func TestTokenDAO_ListExactID(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	q := NewAdminQuery(ctx).Token()
+
+	owner := models.User{Username: "exact-token-owner"}
+	otherOwner := models.User{Username: "exact-token-other-owner"}
+	for _, user := range []*models.User{&owner, &otherOwner} {
+		if err := db.Create(user).Error; err != nil {
+			t.Fatalf("seed user: %v", err)
+		}
+	}
+	now := int64(1_800_000_000)
+	tokens := []models.Token{
+		{Name: "exact-current", Key: "sk-exact-current", UserID: owner.ID, Status: consts.StatusEnabled, ExpiredAt: now},
+		{Name: "exact-other-owner", Key: "sk-exact-other-owner", UserID: otherOwner.ID, Status: consts.StatusEnabled, ExpiredAt: now},
+		{Name: "exact-expired", Key: "sk-exact-expired", UserID: owner.ID, Status: consts.StatusEnabled, ExpiredAt: now - 1},
+		{Name: "exact-disabled", Key: "sk-exact-disabled", UserID: owner.ID, Status: consts.StatusDisabled, ExpiredAt: now + 1},
+	}
+	for i := range tokens {
+		if err := db.Create(&tokens[i]).Error; err != nil {
+			t.Fatalf("seed token %q: %v", tokens[i].Name, err)
+		}
+	}
+	if err := db.Model(&tokens[3]).Update("status", consts.StatusDisabled).Error; err != nil {
+		t.Fatalf("disable token: %v", err)
+	}
+
+	t.Run("returns the exact Token", func(t *testing.T) {
+		got, total, err := q.List(
+			ListOptions{Page: 1, PageSize: 10},
+			TokenListFilter{ID: &tokens[0].ID},
+		)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 1 || len(got) != 1 || got[0].ID != tokens[0].ID {
+			t.Fatalf("exact Token result = %#v, total %d", got, total)
+		}
+	})
+
+	t.Run("returns empty for a missing ID", func(t *testing.T) {
+		missingID := uint(999_999)
+		got, total, err := q.List(
+			ListOptions{Page: 1, PageSize: 10},
+			TokenListFilter{ID: &missingID},
+		)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 0 || len(got) != 0 {
+			t.Fatalf("missing Token result = %#v, total %d; want empty", got, total)
+		}
+	})
+
+	t.Run("combines exact ID with owner and usable filters", func(t *testing.T) {
+		for _, test := range []struct {
+			name    string
+			tokenID uint
+			want    int64
+		}{
+			{name: "current", tokenID: tokens[0].ID, want: 1},
+			{name: "other owner", tokenID: tokens[1].ID, want: 0},
+			{name: "expired", tokenID: tokens[2].ID, want: 0},
+			{name: "disabled", tokenID: tokens[3].ID, want: 0},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				got, total, err := q.List(
+					ListOptions{Page: 1, PageSize: 10},
+					TokenListFilter{ID: &test.tokenID, UserID: &owner.ID, UsableAt: &now},
+				)
+				if err != nil {
+					t.Fatalf("List: %v", err)
+				}
+				if total != test.want || int64(len(got)) != test.want {
+					t.Fatalf("result = %#v, total %d; want %d", got, total, test.want)
+				}
+			})
 		}
 	})
 }

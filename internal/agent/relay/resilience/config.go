@@ -12,6 +12,9 @@ type Config struct {
 	BreakerThreshold  int  // 连续失败多少次后 open
 	BreakerCooldownMs int  // open 后多久转 half-open
 	BreakerEnabled    bool // false = retry/fallback only; no circuit breaker state
+	// HalfOpenPermitLimit 为 0 时保留 LLM 现有的 threshold-derived 容量；
+	// Generic API 显式设为 1，保证严格单 probe。字段参与 Registry config fingerprint。
+	HalfOpenPermitLimit int
 }
 
 // ChannelResilience 复用 models 定义,避免循环 import。

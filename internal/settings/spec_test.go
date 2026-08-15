@@ -17,6 +17,40 @@ func TestDefaults_AllKeysPresent(t *testing.T) {
 	require.Equal(t, "1000", d["fallback_sleep_ms"])
 }
 
+func TestGenericAPITransportTimeoutSettingsSchema(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		field string
+		key   string
+		def   string
+	}{
+		{"APIUploadIdleTimeoutMs", "api_upload_idle_timeout_ms", "0"},
+		{"APIUpstreamDialTimeoutMs", "api_upstream_dial_timeout_ms", "30000"},
+		{"APIUpstreamTLSHandshakeTimeoutMs", "api_upstream_tls_handshake_timeout_ms", "10000"},
+		{"APIUpstreamResponseHeaderTimeoutMs", "api_upstream_response_header_timeout_ms", "0"},
+		{"APIWebSocketHandshakeTimeoutMs", "api_websocket_handshake_timeout_ms", "45000"},
+		{"APIWebSocketControlWriteTimeoutMs", "api_websocket_control_write_timeout_ms", "5000"},
+	}
+
+	typ := reflect.TypeFor[AgentSettings]()
+	defaults := Defaults()
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.key, func(t *testing.T) {
+			field, ok := typ.FieldByName(tt.field)
+			require.True(t, ok, "missing AgentSettings field")
+			require.Equal(t, reflect.Int, field.Type.Kind())
+			require.Equal(t, tt.def, defaults[tt.key])
+			require.NoError(t, Validate(tt.key, "0"))
+			require.NoError(t, Validate(tt.key, "3600000"))
+			require.Error(t, Validate(tt.key, "-1"))
+			require.Error(t, Validate(tt.key, "3600001"))
+			require.Error(t, Validate(tt.key, "not-a-number"))
+		})
+	}
+}
+
 func TestApply_KnownKey(t *testing.T) {
 	var s AgentSettings
 	require.NoError(t, Apply(&s, "fallback_sleep_ms", "2500"))
@@ -82,6 +116,9 @@ func TestKeys_DeclarationOrder(t *testing.T) {
 		"agent.control_health_recovery_samples",
 		"image_inline_fetch_timeout_sec", "image_inline_max_bytes", "image_inline_concurrency",
 		"image_inline_ssrf_guard", "image_inline_host_allowlist",
+		"api_upload_idle_timeout_ms", "api_upstream_dial_timeout_ms",
+		"api_upstream_tls_handshake_timeout_ms", "api_upstream_response_header_timeout_ms",
+		"api_websocket_handshake_timeout_ms", "api_websocket_control_write_timeout_ms",
 		"agent.relay_default_uri",
 		"agent.direct_max_sessions", "agent.direct_session_idle_timeout_seconds",
 		"agent.body_memory_threshold_bytes", "agent.body_hard_limit_bytes",

@@ -42,11 +42,13 @@ import { DurationCell } from "@/components/business/duration-cell";
 import { StreamBadge } from "@/components/business/status-badge";
 import { ModelName } from "@/components/business/model-name";
 import { TraceDetail } from "@/components/business/trace-detail";
+import { TraceRetentionNotice } from "@/components/business/trace-retention-notice";
 import { FallbackChain } from "@/components/business/fallback-chain";
 import { RateLimitSection } from "@/components/business/rate-limit-section";
 import { EntityLabel } from "@/components/business/entity-label";
 import { KpiGrid } from "@/components/business/kpi-grid";
 import { ObservabilityHeader } from "@/components/business/observability-header";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { ColumnVisibility } from "@/components/data-table/column-visibility";
 
 import { formatDuration, formatFactor, formatMoneyCompact } from "@/lib/utils/format";
@@ -81,8 +83,9 @@ const defaultColumnVisibility = {
 };
 
 export default function LogsPage() {
+  const t = useTranslations("logs");
   return (
-    <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+    <Suspense fallback={<PageLayoutSkeleton title={t("title")} description={t("description")} />}>
       <LogsPageContent />
     </Suspense>
   );
@@ -141,7 +144,8 @@ function LogsPageContent() {
       ? tsToDateStr(filterValues.start)
       : "";
     const endDate = isFiniteUnixSeconds(filterValues.end)
-      ? tsToDateStr(filterValues.end)
+      // behavior change: FilterValues.end is exclusive, while the calendar displays the selected prior day.
+      ? tsToDateStr(filterValues.end - 1)
       : "";
     if (!startDate && !endDate) return undefined;
 
@@ -565,6 +569,7 @@ function LogsPageContent() {
             hits={log.rate_limit_hits}
           />
         )}
+        <TraceRetentionNotice status={log.trace_retention_status} />
         {(log.fallback_chain?.length ?? 0) > 1 && (
           <FallbackChain chain={log.fallback_chain!} requestId={log.request_id} />
         )}
@@ -589,7 +594,11 @@ function LogsPageContent() {
         title={t("title")}
         subtitle={t("description")}
         range={headerRange}
-        onRangeChange={({ start, end }) => setFilterValues({ start, end })}
+        // behavior change: ObservabilityHeader emits an inclusive end; URL/query FilterValues use exclusive end.
+        onRangeChange={({ start, end }) => setFilterValues({
+          start,
+          end: dateStrToExclusiveEndTs(tsToDateStr(end)),
+        })}
         onRefresh={handlePageRefresh}
         refreshing={isFetching || insights.isFetching}
         showGranularity={false}

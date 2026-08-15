@@ -2,6 +2,7 @@
 package reporter
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -20,6 +21,15 @@ func autoDisableTrigger() attemptproxy.ChannelAutoDisableTrigger {
 
 func entry(id string) protocol.UsageLogEntry {
 	return protocol.UsageLogEntry{RequestID: id}
+}
+
+func reportedLLM(entries ...protocol.UsageLogEntry) []protocol.ReportedUsage {
+	out := make([]protocol.ReportedUsage, 0, len(entries))
+	for i := range entries {
+		item := entries[i]
+		out = append(out, protocol.ReportedUsage{LLM: &item})
+	}
+	return out
 }
 
 func TestMemStore_AppendPeekAck(t *testing.T) {
@@ -93,12 +103,12 @@ func TestMemStore_ConcurrentAppend(t *testing.T) {
 	s := NewMemPendingUsageStore(1000, zap.NewNop())
 	done := make(chan struct{})
 	for i := 0; i < 10; i++ {
-		go func() {
+		go func(worker int) {
 			for j := 0; j < 50; j++ {
-				s.Append([]protocol.UsageLogEntry{entry("x")})
+				s.Append([]protocol.UsageLogEntry{entry(fmt.Sprintf("x-%d-%d", worker, j))})
 			}
 			done <- struct{}{}
-		}()
+		}(i)
 	}
 	for i := 0; i < 10; i++ {
 		<-done
@@ -244,4 +254,15 @@ func TestBytesAndOldestTimestampTracking(t *testing.T) {
 	if s.Len() != 0 || s.Bytes() != 0 || s.OldestTimestamp() != 0 {
 		t.Fatalf("drained store should be zeroed: len=%d bytes=%d oldest=%d", s.Len(), s.Bytes(), s.OldestTimestamp())
 	}
+}
+
+func TestPendingUsageStoreAckUsesTypeAndRequestIDIdentity(t *testing.T) {
+	store := NewMemPendingUsageStore(10, zap.NewNop())
+	llm := protocol.ReportedUsage{LLM: &protocol.UsageLogEntry{RequestID: "shared", Timestamp: 100}}
+	api := protocol.ReportedUsage{API: &protocol.APIUsageEntry{RequestID: "shared", Timestamp: 200}}
+	store.AppendReported([]protocol.ReportedUsage{llm, api})
+
+	store.AckReported([]protocol.ReportedUsage{llm})
+
+	require.Equal(t, []protocol.ReportedUsage{api}, store.PeekReportedBatch(10, true))
 }

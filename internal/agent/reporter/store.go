@@ -12,17 +12,23 @@ import (
 // The Agent adapter retains the historical peek/ack contract while delegating
 // capacity, byte accounting and synchronization to deliveryqueue.Queue.
 type PendingUsageStore interface {
-	Append(entries []protocol.UsageLogEntry)
-	PeekBatch(max int) []protocol.UsageLogEntry
-	Ack(entries []protocol.UsageLogEntry)
+	AppendReported(entries []protocol.ReportedUsage)
+	PeekReportedBatch(max int, includeAPI bool) []protocol.ReportedUsage
+	AckReported(entries []protocol.ReportedUsage)
 	Len() int
 	Bytes() int
 	OldestTimestamp() int64
 }
 
+type GenericAPIUsageMetrics interface {
+	AddUsageDropped(uint64)
+	AddTraceSlimmed(uint64)
+}
+
 type MemPendingUsageStore struct {
-	queue  *deliveryqueue.Queue[protocol.UsageLogEntry]
-	logger *zap.Logger
+	queue   *deliveryqueue.Queue[protocol.ReportedUsage]
+	logger  *zap.Logger
+	metrics GenericAPIUsageMetrics
 }
 
 var _ PendingUsageStore = (*MemPendingUsageStore)(nil)
@@ -31,18 +37,26 @@ func NewMemPendingUsageStore(limit int, logger *zap.Logger) *MemPendingUsageStor
 	return NewMemPendingUsageStoreWithLimits(deliveryqueue.Limits{MaxEntries: limit}, logger)
 }
 
-func NewMemPendingUsageStoreWithLimits(limits deliveryqueue.Limits, logger *zap.Logger) *MemPendingUsageStore {
+func NewMemPendingUsageStoreWithLimits(
+	limits deliveryqueue.Limits,
+	logger *zap.Logger,
+	metric ...GenericAPIUsageMetrics,
+) *MemPendingUsageStore {
+	var metrics GenericAPIUsageMetrics
+	if len(metric) > 0 {
+		metrics = metric[0]
+	}
 	return &MemPendingUsageStore{
 		queue: deliveryqueue.New(
 			limits,
-			func(entry protocol.UsageLogEntry) int64 { return int64(entrySize(entry)) },
+			func(entry protocol.ReportedUsage) int64 { return int64(entrySize(entry)) },
 			nil,
 		),
-		logger: logger,
+		logger: logger, metrics: metrics,
 	}
 }
 
-func entrySize(entry protocol.UsageLogEntry) int {
+func entrySize(entry protocol.ReportedUsage) int {
 	encoded, err := json.Marshal(entry)
 	if err != nil {
 		return 0
@@ -50,55 +64,109 @@ func entrySize(entry protocol.UsageLogEntry) int {
 	return len(encoded)
 }
 
-func (s *MemPendingUsageStore) Append(entries []protocol.UsageLogEntry) {
+func (s *MemPendingUsageStore) AppendReported(entries []protocol.ReportedUsage) {
 	if len(entries) == 0 {
 		return
 	}
-	before := s.queue.Stats().Dropped
+	dropped := 0
+	apiDropped := 0
 	for _, entry := range entries {
-		s.queue.Enqueue(entry)
+		if !entry.Valid() {
+			s.logger.Error("invalid pending usage entry", zap.String("request_id", entry.RequestID()))
+			continue
+		}
+		result, evicted := s.queue.PutWithEvicted(
+			deliveryqueue.Item[protocol.ReportedUsage]{ID: entry.QueueID(), Value: entry},
+			deliveryqueue.Pending,
+		)
+		dropped += len(evicted)
+		for _, item := range evicted {
+			if item.Value.IsAPI() {
+				apiDropped++
+			}
+		}
+		if result.Conflict {
+			s.logger.Warn("duplicate pending usage entry ignored", zap.String("queue_id", entry.QueueID()))
+		}
 	}
-	after := s.queue.Stats()
-	if dropped := int(after.Dropped - before); dropped > 0 {
+	if dropped > 0 {
+		if s.metrics != nil && apiDropped > 0 {
+			s.metrics.AddUsageDropped(uint64(apiDropped))
+		}
+		after := s.queue.Stats()
 		s.logger.Error("pending usage store overflow, dropped oldest entries",
-			zap.Int("dropped", dropped), zap.Int("pending_len", after.Pending))
+			zap.Int("dropped", dropped), zap.Int("api_dropped", apiDropped), zap.Int("pending_len", after.Pending))
 	}
 }
 
-func (s *MemPendingUsageStore) PeekBatch(max int) []protocol.UsageLogEntry {
+func (s *MemPendingUsageStore) Dropped() uint64 {
+	if s == nil || s.queue == nil {
+		return 0
+	}
+	return s.queue.Stats().Dropped
+}
+
+func (s *MemPendingUsageStore) PeekReportedBatch(max int, includeAPI bool) []protocol.ReportedUsage {
 	if max <= 0 {
 		return nil
 	}
 	items := s.queue.Items(deliveryqueue.Pending)
-	if len(items) > max {
-		items = items[:max]
-	}
-	if len(items) == 0 {
-		return nil
-	}
-	out := make([]protocol.UsageLogEntry, len(items))
+	out := make([]protocol.ReportedUsage, 0, min(max, len(items)))
 	for i := range items {
-		out[i] = items[i].Value
+		if !includeAPI && items[i].Value.IsAPI() {
+			continue
+		}
+		out = append(out, items[i].Value)
+		if len(out) == max {
+			break
+		}
 	}
 	return out
 }
 
-func (s *MemPendingUsageStore) Ack(entries []protocol.UsageLogEntry) {
+func (s *MemPendingUsageStore) AckReported(entries []protocol.ReportedUsage) {
 	if len(entries) == 0 {
 		return
 	}
-	requestIDs := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		requestIDs[entry.RequestID] = struct{}{}
-	}
-	items := s.queue.Items(deliveryqueue.Pending)
 	ids := make([]string, 0, len(entries))
-	for _, item := range items {
-		if _, ok := requestIDs[item.Value.RequestID]; ok {
-			ids = append(ids, item.ID)
+	for _, entry := range entries {
+		if entry.Valid() {
+			ids = append(ids, entry.QueueID())
 		}
 	}
 	s.queue.Remove(ids...)
+}
+
+func (s *MemPendingUsageStore) Append(entries []protocol.UsageLogEntry) {
+	reported := make([]protocol.ReportedUsage, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		reported = append(reported, protocol.ReportedUsage{LLM: &entry})
+	}
+	s.AppendReported(reported)
+}
+
+func (s *MemPendingUsageStore) PeekBatch(max int) []protocol.UsageLogEntry {
+	reported := s.PeekReportedBatch(max, false)
+	if len(reported) == 0 {
+		return nil
+	}
+	logs := make([]protocol.UsageLogEntry, 0, len(reported))
+	for _, item := range reported {
+		if item.LLM != nil {
+			logs = append(logs, *item.LLM)
+		}
+	}
+	return logs
+}
+
+func (s *MemPendingUsageStore) Ack(entries []protocol.UsageLogEntry) {
+	reported := make([]protocol.ReportedUsage, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		reported = append(reported, protocol.ReportedUsage{LLM: &entry})
+	}
+	s.AckReported(reported)
 }
 
 func (s *MemPendingUsageStore) Len() int {
@@ -112,7 +180,7 @@ func (s *MemPendingUsageStore) Bytes() int {
 func (s *MemPendingUsageStore) OldestTimestamp() int64 {
 	var oldest int64
 	for _, item := range s.queue.Items(deliveryqueue.Pending) {
-		timestamp := item.Value.Timestamp
+		timestamp := item.Value.Timestamp()
 		if timestamp != 0 && (oldest == 0 || timestamp < oldest) {
 			oldest = timestamp
 		}

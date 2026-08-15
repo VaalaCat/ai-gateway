@@ -9,6 +9,7 @@ import (
 
 func TestDeleteTokenWithRoutings(t *testing.T) {
 	ctx, db := setupAdminContext(t)
+	require.NoError(t, db.AutoMigrate(&models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.RoleBinding{}))
 	token := models.Token{UserID: 1, Key: "sk-delete-routing", Name: "target"}
 	other := models.Token{UserID: 1, Key: "sk-delete-routing-other", Name: "other"}
 	require.NoError(t, db.Create(&token).Error)
@@ -21,7 +22,7 @@ func TestDeleteTokenWithRoutings(t *testing.T) {
 		require.NoError(t, db.Create(&routing).Error)
 	}
 
-	deleted, err := NewAdminMutation(ctx).Token().DeleteWithRoutings(token.ID)
+	deleted, _, err := NewAdminMutation(ctx).Token().DeleteWithRoutings(token.ID)
 	require.NoError(t, err)
 	require.Len(t, deleted, 2)
 	var tokenCount, targetRoutingCount, otherRoutingCount int64
@@ -35,13 +36,14 @@ func TestDeleteTokenWithRoutings(t *testing.T) {
 
 func TestDeleteTokenWithRoutingsRollsBack(t *testing.T) {
 	ctx, db := setupAdminContext(t)
+	require.NoError(t, db.AutoMigrate(&models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.RoleBinding{}))
 	token := models.Token{UserID: 1, Key: "sk-delete-routing-rollback", Name: "target"}
 	require.NoError(t, db.Create(&token).Error)
 	routing := models.ModelRouting{Name: "one", Scope: models.RoutingScopeToken, TokenID: token.ID, Members: "[]"}
 	require.NoError(t, db.Create(&routing).Error)
 	require.NoError(t, db.Exec(`CREATE TRIGGER block_token_delete BEFORE DELETE ON tokens BEGIN SELECT RAISE(ABORT, 'blocked'); END`).Error)
 
-	_, err := NewAdminMutation(ctx).Token().DeleteWithRoutings(token.ID)
+	_, _, err := NewAdminMutation(ctx).Token().DeleteWithRoutings(token.ID)
 	require.Error(t, err)
 	var tokenCount, routingCount int64
 	require.NoError(t, db.Model(&models.Token{}).Where("id = ?", token.ID).Count(&tokenCount).Error)

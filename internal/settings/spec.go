@@ -86,6 +86,14 @@ type AgentSettings struct {
 	ImageInlineSSRFGuard       int    `setting:"image_inline_ssrf_guard,1,0,1"`                  // 1=拦私网/环回/link-local/元数据 IP
 	ImageInlineHostAllowlist   string `setting:"image_inline_host_allowlist,"`                   // host 白名单(逗号/换行分隔;空=不限)
 
+	// Generic API 传输超时（毫秒）；0 表示关闭对应限制，不限制请求、body 或连接总时长。
+	APIUploadIdleTimeoutMs             int `setting:"api_upload_idle_timeout_ms,0,0,3600000"`
+	APIUpstreamDialTimeoutMs           int `setting:"api_upstream_dial_timeout_ms,30000,0,3600000"`
+	APIUpstreamTLSHandshakeTimeoutMs   int `setting:"api_upstream_tls_handshake_timeout_ms,10000,0,3600000"`
+	APIUpstreamResponseHeaderTimeoutMs int `setting:"api_upstream_response_header_timeout_ms,0,0,3600000"`
+	APIWebSocketHandshakeTimeoutMs     int `setting:"api_websocket_handshake_timeout_ms,45000,0,3600000"`
+	APIWebSocketControlWriteTimeoutMs  int `setting:"api_websocket_control_write_timeout_ms,5000,0,3600000"`
+
 	RelayDefaultURI             string `setting:"agent.relay_default_uri,"`
 	DirectMaxSessions           int    `setting:"agent.direct_max_sessions,256,1,4096"`
 	DirectSessionIdleTimeoutSec int    `setting:"agent.direct_session_idle_timeout_seconds,300,1,3600"`

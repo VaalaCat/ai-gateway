@@ -13,7 +13,7 @@ let smMql: MediaQueryList | null = null;
 let lgMql: MediaQueryList | null = null;
 
 function ensureMqls(): { sm: MediaQueryList; lg: MediaQueryList } | null {
-  if (typeof window === "undefined") return null;
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return null;
   smMql ??= window.matchMedia(SM_QUERY);
   lgMql ??= window.matchMedia(LG_QUERY);
   return { sm: smMql, lg: lgMql };

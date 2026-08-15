@@ -5,18 +5,25 @@ import { useTranslations } from "next-intl";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { ChannelForm } from "@/components/channel/channel-form";
 import { byokChannelAdapter } from "@/components/channel/channel-form/adapters/byok";
 
+function BYOKEditPageSkeleton() {
+  const t = useTranslations("byok");
+
+  return (
+    <PageLayoutSkeleton
+      title={t("editSheetTitle")}
+      description={t("sheetDescription")}
+      maxWidth="3xl"
+    />
+  );
+}
+
 export default function BYOKEditPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="flex items-center justify-center py-12 text-muted-foreground">
-          Loading...
-        </div>
-      }
-    >
+    <Suspense fallback={<BYOKEditPageSkeleton />}>
       <BYOKEditContent />
     </Suspense>
   );
@@ -37,7 +44,17 @@ function BYOKEditContent() {
     }
   }, [idValid, router, t]);
 
-  if (!idValid) return null;
+  if (!idValid) {
+    return (
+      <PageLayout
+        title={t("editSheetTitle")}
+        description={t("sheetDescription")}
+        maxWidth="3xl"
+      >
+        <p className="py-12 text-center text-muted-foreground">{t("notFound")}</p>
+      </PageLayout>
+    );
+  }
 
   return (
     <PageLayout

@@ -15,6 +15,13 @@ type agentRouteOverviewFixture struct {
 	routes  map[string]models.AgentRoute
 }
 
+func setupAgentRouteOverviewTest(t *testing.T) (Context, *gorm.DB) {
+	t.Helper()
+	ctx, db := setupAdminContext(t)
+	require.NoError(t, db.AutoMigrate(&models.APIService{}, &models.APIBackend{}, &models.APIRoute{}))
+	return ctx, db
+}
+
 func seedAgentRouteOverviewFixture(t *testing.T, db *gorm.DB) agentRouteOverviewFixture {
 	t.Helper()
 	token := models.Token{UserID: 1, Key: "overview-token-key", Name: "Finance Token", Status: 1}
@@ -41,7 +48,7 @@ func seedAgentRouteOverviewFixture(t *testing.T, db *gorm.DB) agentRouteOverview
 }
 
 func TestAgentRouteOverviewFiltersBeforePagination(t *testing.T) {
-	ctx, db := setupAdminContext(t)
+	ctx, db := setupAgentRouteOverviewTest(t)
 	fixture := seedAgentRouteOverviewFixture(t, db)
 	query := NewAdminQuery(ctx).AgentRoute()
 
@@ -88,7 +95,7 @@ func TestAgentRouteOverviewFiltersBeforePagination(t *testing.T) {
 }
 
 func TestAgentRouteOverviewProjectsJoinedNames(t *testing.T) {
-	ctx, db := setupAdminContext(t)
+	ctx, db := setupAgentRouteOverviewTest(t)
 	fixture := seedAgentRouteOverviewFixture(t, db)
 
 	rows, total, err := NewAdminQuery(ctx).AgentRoute().ListOverview(
@@ -110,10 +117,57 @@ func TestAgentRouteOverviewProjectsJoinedNames(t *testing.T) {
 	require.Empty(t, byID[fixture.routes["token_tag"].ID].AgentName)
 }
 
+func TestAgentRouteOverviewFiltersProjectsAndSearchesAPISources(t *testing.T) {
+	ctx, db := setupAgentRouteOverviewTest(t)
+	service := models.APIService{Slug: "weather", Name: "Weather Service", Status: 1}
+	require.NoError(t, db.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, db.Create(&backend).Error)
+	route := models.APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "forecast", Status: 1}
+	require.NoError(t, db.Create(&route).Error)
+	serviceRule := models.AgentRoute{
+		SourceType: models.AgentRouteSourceAPIService,
+		SourceID:   service.ID,
+		AgentTag:   "api-pool",
+		Priority:   50,
+	}
+	routeRule := models.AgentRoute{
+		SourceType: models.AgentRouteSourceAPIRoute,
+		SourceID:   route.ID,
+		AgentTag:   "api-pool",
+		Priority:   60,
+	}
+	require.NoError(t, db.Create(&serviceRule).Error)
+	require.NoError(t, db.Create(&routeRule).Error)
+	query := NewAdminQuery(ctx).AgentRoute()
+
+	tests := []struct {
+		name   string
+		filter AgentRouteOverviewFilter
+		wantID uint
+		nameOf string
+	}{
+		{name: "service type filter and name", filter: AgentRouteOverviewFilter{SourceType: models.AgentRouteSourceAPIService}, wantID: serviceRule.ID, nameOf: "Weather Service"},
+		{name: "route type filter and slug", filter: AgentRouteOverviewFilter{SourceType: models.AgentRouteSourceAPIRoute}, wantID: routeRule.ID, nameOf: "forecast"},
+		{name: "service name query", filter: AgentRouteOverviewFilter{Query: "Weather"}, wantID: serviceRule.ID, nameOf: "Weather Service"},
+		{name: "route slug query", filter: AgentRouteOverviewFilter{Query: "forecast"}, wantID: routeRule.ID, nameOf: "forecast"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows, total, err := query.ListOverview(ListOptions{Page: 1, PageSize: 20}, tt.filter)
+			require.NoError(t, err)
+			require.Equal(t, int64(1), total)
+			require.Len(t, rows, 1)
+			require.Equal(t, tt.wantID, rows[0].ID)
+			require.Equal(t, tt.nameOf, rows[0].SourceName)
+		})
+	}
+}
+
 func TestAgentRouteOverviewPreservesOrphanRows(t *testing.T) {
 	for _, sourceType := range []string{"token", "channel"} {
 		t.Run(sourceType, func(t *testing.T) {
-			ctx, db := setupAdminContext(t)
+			ctx, db := setupAgentRouteOverviewTest(t)
 			route := models.AgentRoute{
 				SourceType: sourceType,
 				SourceID:   999_999,
@@ -141,7 +195,7 @@ func TestAgentRouteOverviewDatabaseErrorsArePreserved(t *testing.T) {
 	sentinel := errors.New("forced overview failure")
 
 	t.Run("count", func(t *testing.T) {
-		ctx, db := setupAdminContext(t)
+		ctx, db := setupAgentRouteOverviewTest(t)
 		require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:fail_agent_route_overview_count", func(tx *gorm.DB) {
 			if _, ok := tx.Statement.Dest.(*int64); ok {
 				tx.AddError(sentinel)
@@ -152,7 +206,7 @@ func TestAgentRouteOverviewDatabaseErrorsArePreserved(t *testing.T) {
 	})
 
 	t.Run("find", func(t *testing.T) {
-		ctx, db := setupAdminContext(t)
+		ctx, db := setupAgentRouteOverviewTest(t)
 		require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:fail_agent_route_overview_find", func(tx *gorm.DB) {
 			if _, ok := tx.Statement.Dest.(*int64); !ok {
 				tx.AddError(sentinel)

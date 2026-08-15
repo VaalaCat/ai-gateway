@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -301,19 +301,25 @@ describe("ChannelBatchEditDialog", () => {
     render(<SessionDialogHarness onSucceeded={onSucceeded} />);
 
     await user.click(screen.getByLabelText("修改此字段：渠道标签"));
-    await user.type(screen.getByRole("textbox", { name: "渠道标签" }), "old draft");
+    fireEvent.change(screen.getByRole("textbox", { name: "渠道标签" }), {
+      target: { value: "old draft" },
+    });
     await user.click(screen.getByRole("button", { name: "应用到 1 个渠道" }));
     await user.click(screen.getByRole("button", { name: "Close" }));
     await user.click(screen.getByRole("button", { name: "用渠道 2 重新打开" }));
     await user.click(screen.getByLabelText("修改此字段：渠道标签"));
-    await user.type(screen.getByRole("textbox", { name: "渠道标签" }), "new draft");
+    fireEvent.change(screen.getByRole("textbox", { name: "渠道标签" }), {
+      target: { value: "new draft" },
+    });
 
     await act(async () => resolveOld({ updated_count: 1, updated_ids: [1] }));
 
-    expect(onSucceeded).toHaveBeenCalledWith({ updated_count: 1, updated_ids: [1] });
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "渠道标签" })).toHaveValue("new draft");
-    expect(screen.getByLabelText("修改此字段：渠道标签")).toBeChecked();
+    await waitFor(() => {
+      expect(onSucceeded).toHaveBeenCalledWith({ updated_count: 1, updated_ids: [1] });
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: "渠道标签" })).toHaveValue("new draft");
+      expect(screen.getByLabelText("修改此字段：渠道标签")).toBeChecked();
+    });
   });
 
   it("does not write an old request failure into a reopened different-ID session", async () => {
@@ -327,7 +333,9 @@ describe("ChannelBatchEditDialog", () => {
     await user.click(screen.getByRole("button", { name: "Close" }));
     await user.click(screen.getByRole("button", { name: "用渠道 2 重新打开" }));
     await user.click(screen.getByLabelText("修改此字段：渠道标签"));
-    await user.type(screen.getByRole("textbox", { name: "渠道标签" }), "new draft");
+    fireEvent.change(screen.getByRole("textbox", { name: "渠道标签" }), {
+      target: { value: "new draft" },
+    });
 
     await act(async () => rejectOld(new Error("old request failed")));
 

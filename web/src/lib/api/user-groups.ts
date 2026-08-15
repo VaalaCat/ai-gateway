@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
 import type { PaginatedResponse, UserGroup } from "../types";
 
@@ -11,7 +11,10 @@ interface ListParams {
   status?: string;
 }
 
-export function useUserGroups(params: ListParams = {}) {
+export function useUserGroups(
+  params: ListParams = {},
+  options?: Omit<UseQueryOptions<PaginatedResponse<UserGroup>>, "queryKey" | "queryFn">,
+) {
   const query = buildQuery({
     page: params.page,
     page_size: params.pageSize,
@@ -21,6 +24,7 @@ export function useUserGroups(params: ListParams = {}) {
   return useQuery({
     queryKey: ["user-groups", params],
     queryFn: () => api.get<PaginatedResponse<UserGroup>>(`/admin/user-groups${query}`),
+    ...options,
   });
 }
 

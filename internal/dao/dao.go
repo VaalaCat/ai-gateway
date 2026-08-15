@@ -57,6 +57,12 @@ type AdminQuery interface {
 	PrivateChannelShare() AdminPrivateChannelShareQuery
 	AdminScript() AdminScriptQuery
 	InviteCode() AdminInviteCodeQuery
+	APIService() APIServiceQuery
+	APIBackend() APIBackendQuery
+	APIRoute() APIRouteQuery
+	APIUpstream() APIUpstreamQuery
+	APIRBAC() APIRBACQuery
+	APIRequestLog() APIRequestLogQuery
 }
 
 type AdminMutation interface {
@@ -81,6 +87,11 @@ type AdminMutation interface {
 	PrivateChannelShare() AdminPrivateChannelShareMutation
 	AdminScript() AdminScriptMutation
 	InviteCode() AdminInviteCodeMutation
+	APIService() APIServiceMutation
+	APIBackend() APIBackendMutation
+	APIRoute() APIRouteMutation
+	APIUpstream() APIUpstreamMutation
+	APIRBAC() APIRBACMutation
 }
 
 // getBaseContext extracts *baseContext from any Context implementation.
@@ -155,6 +166,14 @@ func (q *compositeAdminQuery) AdminScript() AdminScriptQuery {
 func (q *compositeAdminQuery) InviteCode() AdminInviteCodeQuery {
 	return &adminInviteCodeQuery{ctx: q.ctx}
 }
+func (q *compositeAdminQuery) APIService() APIServiceQuery   { return &apiServiceQuery{ctx: q.ctx} }
+func (q *compositeAdminQuery) APIBackend() APIBackendQuery   { return &apiBackendQuery{ctx: q.ctx} }
+func (q *compositeAdminQuery) APIRoute() APIRouteQuery       { return &apiRouteQuery{ctx: q.ctx} }
+func (q *compositeAdminQuery) APIUpstream() APIUpstreamQuery { return &apiUpstreamQuery{ctx: q.ctx} }
+func (q *compositeAdminQuery) APIRBAC() APIRBACQuery         { return &apiRBACQuery{ctx: q.ctx} }
+func (q *compositeAdminQuery) APIRequestLog() APIRequestLogQuery {
+	return &apiRequestLogQuery{ctx: q.ctx}
+}
 
 type compositeAdminMutation struct{ ctx *baseContext }
 
@@ -215,3 +234,14 @@ func (m *compositeAdminMutation) AdminScript() AdminScriptMutation {
 func (m *compositeAdminMutation) InviteCode() AdminInviteCodeMutation {
 	return &adminInviteCodeMutation{ctx: m.ctx}
 }
+func (m *compositeAdminMutation) APIService() APIServiceMutation {
+	return &apiServiceMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) APIBackend() APIBackendMutation {
+	return &apiBackendMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) APIRoute() APIRouteMutation { return &apiRouteMutation{ctx: m.ctx} }
+func (m *compositeAdminMutation) APIUpstream() APIUpstreamMutation {
+	return &apiUpstreamMutation{ctx: m.ctx}
+}
+func (m *compositeAdminMutation) APIRBAC() APIRBACMutation { return &apiRBACMutation{ctx: m.ctx} }

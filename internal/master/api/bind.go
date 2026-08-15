@@ -6,7 +6,9 @@ import (
 	"io"
 	"strings"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/jsontext"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 )
 
 type BindMode int
@@ -21,7 +23,11 @@ const (
 	BindURIAndOptionalJSON
 	BindURIAndQuery
 	BindURIAndBodyMap
+	BindStrictJSONText
+	BindURIAndStrictJSONBodyMap
 )
+
+var errInvalidJSONTextEncoding = errors.New("JSON body must use valid UTF-8 and Unicode surrogate pairs")
 
 var _ RequestBinder = DefaultRequestBinder{}
 
@@ -84,7 +90,37 @@ func (DefaultRequestBinder) Bind(c *gin.Context, mode BindMode, req any) error {
 		}
 		setter.SetBodyMap(body)
 		return nil
+	case BindStrictJSONText:
+		return bindStrictJSONText(c, req)
+	case BindURIAndStrictJSONBodyMap:
+		if err := c.ShouldBindUri(req); err != nil {
+			return err
+		}
+		setter, ok := req.(BodyMapSetter)
+		if !ok {
+			return errors.New("request does not implement BodyMapSetter")
+		}
+		body := make(map[string]any)
+		if err := bindStrictJSONText(c, &body); err != nil {
+			return err
+		}
+		setter.SetBodyMap(body)
+		return nil
 	default:
 		return errors.New("unknown bind mode")
 	}
+}
+
+func bindStrictJSONText(c *gin.Context, req any) error {
+	if c.Request == nil || c.Request.Body == nil {
+		return io.EOF
+	}
+	payload, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return err
+	}
+	if !jsontext.ValidEncoding(payload) {
+		return errInvalidJSONTextEncoding
+	}
+	return binding.JSON.BindBody(payload, req)
 }

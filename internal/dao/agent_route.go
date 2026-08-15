@@ -104,7 +104,13 @@ func (q *adminAgentRouteQuery) ListOverview(opts ListOptions, filter AgentRouteO
 
 	rows := make([]AgentRouteOverview, 0)
 	err := db.Select(`ar.*,
-		CASE ar.source_type WHEN 'token' THEN tokens.name WHEN 'channel' THEN channels.name ELSE '' END AS source_name,
+		CASE ar.source_type
+			WHEN 'token' THEN tokens.name
+			WHEN 'channel' THEN channels.name
+			WHEN 'api_service' THEN api_services.name
+			WHEN 'api_route' THEN api_routes.slug
+			ELSE ''
+		END AS source_name,
 		COALESCE(agents.name, '') AS agent_name`).
 		Order("ar.priority DESC, ar.id DESC").
 		Offset(opts.Offset()).Limit(opts.PageSize).
@@ -114,8 +120,10 @@ func (q *adminAgentRouteQuery) ListOverview(opts ListOptions, filter AgentRouteO
 
 func buildAgentRouteOverviewQuery(db *gorm.DB, filter AgentRouteOverviewFilter) *gorm.DB {
 	db = db.Table("agent_routes AS ar").
-		Joins("LEFT JOIN tokens ON ar.source_type = ? AND tokens.id = ar.source_id", "token").
-		Joins("LEFT JOIN channels ON ar.source_type = ? AND channels.id = ar.source_id", "channel").
+		Joins("LEFT JOIN tokens ON ar.source_type = ? AND tokens.id = ar.source_id", models.AgentRouteSourceToken).
+		Joins("LEFT JOIN channels ON ar.source_type = ? AND channels.id = ar.source_id", models.AgentRouteSourceChannel).
+		Joins("LEFT JOIN api_services ON ar.source_type = ? AND api_services.id = ar.source_id", models.AgentRouteSourceAPIService).
+		Joins("LEFT JOIN api_routes ON ar.source_type = ? AND api_routes.id = ar.source_id", models.AgentRouteSourceAPIRoute).
 		Joins("LEFT JOIN agents ON agents.agent_id = ar.agent_id")
 	if filter.SourceType != "" {
 		db = db.Where("ar.source_type = ?", filter.SourceType)
@@ -131,8 +139,9 @@ func buildAgentRouteOverviewQuery(db *gorm.DB, filter AgentRouteOverviewFilter) 
 	}
 	if filter.Query != "" {
 		like := "%" + filter.Query + "%"
-		db = db.Where(`tokens.name LIKE ? OR channels.name LIKE ? OR ar.model LIKE ?
-			OR agents.name LIKE ? OR ar.agent_id LIKE ? OR ar.agent_tag LIKE ?`, like, like, like, like, like, like)
+		db = db.Where(`tokens.name LIKE ? OR channels.name LIKE ? OR api_services.name LIKE ? OR api_routes.slug LIKE ?
+			OR ar.model LIKE ? OR agents.name LIKE ? OR ar.agent_id LIKE ? OR ar.agent_tag LIKE ?`,
+			like, like, like, like, like, like, like, like)
 	}
 	return db
 }

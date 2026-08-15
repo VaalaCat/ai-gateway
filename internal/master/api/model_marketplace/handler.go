@@ -166,6 +166,18 @@ func (h *Handler) compose(
 	window UsageWindow,
 	retainDiagnostics bool,
 ) (composedMarketplace, error) {
+	directory, err := h.buildMarketplaceDirectory(ctx, viewer, retainDiagnostics)
+	if err != nil {
+		return composedMarketplace{}, err
+	}
+	return h.enrichMarketplacePerformance(ctx, directory, window)
+}
+
+func (h *Handler) buildMarketplaceDirectory(
+	ctx context.Context,
+	viewer MarketplaceViewer,
+	retainDiagnostics bool,
+) (composedMarketplace, error) {
 	if h == nil || h.catalog == nil || h.routing == nil || h.pricing == nil || h.performance == nil {
 		return composedMarketplace{}, errors.New("model marketplace handler dependencies are required")
 	}
@@ -205,39 +217,14 @@ func (h *Handler) compose(
 		viewer: viewer, real: make([]composedRealModel, 0, len(catalog)),
 		routing: append([]RoutingModel(nil), routingModels...),
 	}
-	allOffers := make([]ModelOffer, 0)
 	for _, model := range catalog {
 		composed, exists := priced.composedByName[model.ModelName]
 		if !exists {
 			return composedMarketplace{}, errors.New("priced marketplace model is required")
 		}
-		for _, offer := range composedOffers(composed) {
-			if offer.Available {
-				allOffers = append(allOffers, offer)
-			}
-		}
 		result.real = append(result.real, composed)
 	}
 	result.routing = filterRoutingModelsToPricedOffers(result.routing, priced.offerRefs, retainDiagnostics)
-	now := time.Now()
-	if h.clock != nil {
-		now = h.clock()
-	}
-	performance, performanceErr := h.performance.Find(ctx, allOffers, window, now)
-	performance = degradablePerformanceResult(performance, performanceErr, len(allOffers), window, now, true)
-	for index := range result.real {
-		projected, projectionErr := performanceForComposedModel(performance, result.real[index])
-		if projectionErr != nil {
-			degraded := degradablePerformanceResult(
-				projected, projectionErr, len(result.real[index].offers), window, now, false,
-			)
-			projected, projectionErr = performanceForComposedModel(degraded, result.real[index])
-			if projectionErr != nil {
-				return composedMarketplace{}, fmt.Errorf("project degraded model %q performance: %w", result.real[index].model.ModelName, projectionErr)
-			}
-		}
-		result.real[index].performance = projected
-	}
 	sort.Slice(result.real, func(i, j int) bool {
 		return result.real[i].model.ModelName < result.real[j].model.ModelName
 	})
@@ -245,6 +232,71 @@ func (h *Handler) compose(
 		return result.routing[i].ModelName < result.routing[j].ModelName
 	})
 	return result, nil
+}
+
+func (h *Handler) enrichMarketplacePerformance(
+	ctx context.Context,
+	directory composedMarketplace,
+	window UsageWindow,
+) (composedMarketplace, error) {
+	if h == nil || h.performance == nil {
+		return composedMarketplace{}, errors.New("model marketplace performance finder is required")
+	}
+	now := time.Now()
+	if h.clock != nil {
+		now = h.clock()
+	}
+	allOffers := make([]ModelOffer, 0)
+	for _, model := range directory.real {
+		for _, offer := range composedOffers(model) {
+			if offer.Available {
+				allOffers = append(allOffers, offer)
+			}
+		}
+	}
+	if len(allOffers) == 0 {
+		empty := emptyMarketplacePerformance(window, now)
+		for index := range directory.real {
+			projected, err := performanceForComposedModel(empty, directory.real[index])
+			if err != nil {
+				return composedMarketplace{}, fmt.Errorf(
+					"project empty model %q performance: %w",
+					directory.real[index].model.ModelName,
+					err,
+				)
+			}
+			directory.real[index].performance = projected
+		}
+		return directory, nil
+	}
+	performance, performanceErr := h.performance.Find(ctx, allOffers, window, now)
+	performance = degradablePerformanceResult(performance, performanceErr, len(allOffers), window, now, true)
+	for index := range directory.real {
+		projected, projectionErr := performanceForComposedModel(performance, directory.real[index])
+		if projectionErr != nil {
+			degraded := degradablePerformanceResult(
+				projected, projectionErr, len(directory.real[index].offers), window, now, false,
+			)
+			projected, projectionErr = performanceForComposedModel(degraded, directory.real[index])
+			if projectionErr != nil {
+				return composedMarketplace{}, fmt.Errorf("project degraded model %q performance: %w", directory.real[index].model.ModelName, projectionErr)
+			}
+		}
+		directory.real[index].performance = projected
+	}
+	return directory, nil
+}
+
+func emptyMarketplacePerformance(window UsageWindow, observedUntil time.Time) ModelPerformanceResult {
+	return ModelPerformanceResult{
+		PerformanceStatus: PerformanceAvailable,
+		ObservedUntil:     observedUntil.UTC(),
+		ModelStatus:       MarketplaceHealthUnknown,
+		Offers:            map[string]OfferPerformanceSnapshot{},
+		offerComponents:   map[string][]HourlyPerformanceComponents{},
+		projectionWindow:  window,
+		minSamples:        consts.ModelMarketplaceDefaultMinSamples,
+	}
 }
 
 func (h *Handler) buildPricedRealModels(

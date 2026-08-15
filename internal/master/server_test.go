@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,9 +18,12 @@ import (
 	agentauthcache "github.com/VaalaCat/ai-gateway/internal/agent/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/model_marketplace"
+	mastersync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
@@ -152,6 +157,79 @@ func TestNewConstructsOneGlobalModelPerformanceCache(t *testing.T) {
 	require.Equal(t, model_marketplace.PerformanceAvailable, status)
 	require.NotNil(t, snapshot)
 	require.Empty(t, snapshot.Offers)
+}
+
+func TestNewSeedsRepairsGatewayAdminRoleAndServesItThroughLazyRoleSetFetch(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.MasterRuntimeConfig{
+		Master: config.MasterConfig{
+			Listen: ":0", DBPath: filepath.Join(dir, "core.db"), LogDBPath: filepath.Join(dir, "log.db"),
+			JWTSecret: strings.Repeat("x", 32),
+		},
+		Agent: config.AgentConfig{CredentialsFile: filepath.Join(dir, "embedded-agent.json")},
+	}
+	srv, err := New(cfg, zap.NewNop())
+	require.NoError(t, err)
+
+	var roles []models.Role
+	require.NoError(t, srv.DB.Where("key = ?", models.GatewayAdminRoleKey).Find(&roles).Error)
+	require.Len(t, roles, 1)
+	role := roles[0]
+	require.True(t, role.BuiltIn)
+	require.Equal(t, consts.StatusEnabled, role.Status)
+	assertGatewayAdminGrants(t, srv.DB, role.ID)
+
+	admin := models.User{Username: "gateway-admin", Password: "x", Role: consts.RoleAdmin, Status: consts.StatusEnabled, GroupID: 1}
+	require.NoError(t, srv.DB.Create(&admin).Error)
+	token := models.Token{Key: "sk-gateway-admin", UserID: admin.ID, Status: consts.StatusEnabled, Name: "admin", APIRoleMode: models.APIRoleModeInherit}
+	require.NoError(t, srv.DB.Create(&token).Error)
+	handler, ok := mastersync.NewFetchRegistry(nil).Resolve(events.EntityToken)
+	require.True(t, ok)
+	_, side, found, err := handler.Fetch(context.Background(), dao.NewAdminQuery(dao.NewContext(srv.App)), token.Key)
+	require.NoError(t, err)
+	require.True(t, found)
+	var fetched protocol.TokenFetchSide
+	require.NoError(t, json.Unmarshal(side, &fetched))
+	require.NotNil(t, fetched.User)
+	require.Equal(t, admin.ID, fetched.User.ID)
+	roleSet, err := (mastersync.APIRoleSetFetcher{}).FetchUser(context.Background(), dao.NewAdminQuery(dao.NewContext(srv.App)), admin.ID)
+	require.NoError(t, err)
+	require.Contains(t, roleSet.RoleSet.RoleIDs, role.ID)
+
+	var permission models.Permission
+	require.NoError(t, srv.DB.Where("resource = ? AND resource_id = 0 AND action = ?", models.APIResourceService, models.APIPermissionInvoke).First(&permission).Error)
+	require.NoError(t, srv.DB.Where("role_id = ? AND permission_id = ?", role.ID, permission.ID).Delete(&models.RolePermission{}).Error)
+	extra := models.Permission{Resource: models.APIResourceService, ResourceID: 99, Action: models.APIPermissionInvoke}
+	require.NoError(t, srv.DB.Create(&extra).Error)
+	require.NoError(t, srv.DB.Create(&models.RolePermission{RoleID: role.ID, PermissionID: extra.ID}).Error)
+	require.NoError(t, srv.DB.Model(&models.Role{}).Where("id = ?", role.ID).Updates(map[string]any{
+		"built_in": false, "status": consts.StatusDisabled, "name": "drifted",
+	}).Error)
+	require.NoError(t, srv.Shutdown(context.Background()))
+
+	restarted, err := New(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = restarted.Shutdown(context.Background()) })
+	var repaired models.Role
+	require.NoError(t, restarted.DB.Where("key = ?", models.GatewayAdminRoleKey).First(&repaired).Error)
+	require.Equal(t, role.ID, repaired.ID)
+	require.True(t, repaired.BuiltIn)
+	require.Equal(t, consts.StatusEnabled, repaired.Status)
+	assertGatewayAdminGrants(t, restarted.DB, repaired.ID)
+}
+
+func assertGatewayAdminGrants(t *testing.T, db *gorm.DB, roleID uint) {
+	t.Helper()
+	var grants []models.Permission
+	require.NoError(t, db.Model(&models.Permission{}).
+		Joins("JOIN role_permissions ON role_permissions.permission_id = permissions.id").
+		Where("role_permissions.role_id = ?", roleID).
+		Order("permissions.resource, permissions.action").Find(&grants).Error)
+	actual := make([]string, 0, len(grants))
+	for _, grant := range grants {
+		actual = append(actual, fmt.Sprintf("%s:%d:%s", grant.Resource, grant.ResourceID, grant.Action))
+	}
+	require.Equal(t, []string{"api_service:0:invoke"}, actual)
 }
 
 func TestShutdownCancelsModelPerformanceRefresh(t *testing.T) {
@@ -498,6 +576,7 @@ func TestNewForwardTicketBootstrapEnablesSourceCache(t *testing.T) {
 	require.Equal(t, []string{
 		protocol.AgentCapabilityForwardV1,
 		protocol.AgentCapabilityTunnelV2,
+		protocol.MasterCapabilityGenericAPIUsageV1,
 	}, cache.Bootstrap().Capabilities)
 	var ticket agentauth.ForwardTicket
 	require.Eventually(t, func() bool {

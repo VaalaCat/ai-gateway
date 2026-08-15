@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusSelect } from "@/components/business/status-select";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
 import { ModelMappingInput } from "@/components/ui/model-mapping-input";
 import { RoleMappingEditor } from "@/components/channel/role-mapping-editor";
 import { LimitRulesEditor } from "./channel-form/limit-rules-editor";
@@ -48,6 +49,7 @@ import {
 } from "./channel-form/utils";
 import { useBatchEditChannels } from "@/lib/api/channels";
 import { cn } from "@/lib/utils";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 import type {
   BatchEditableChannelFields,
   BatchEditChannelRequest,
@@ -415,6 +417,18 @@ function renderFieldControl<K extends BatchEditableKey>(
           <p className="text-xs text-muted-foreground">{t("publicDisplayNameAutoPreview")}</p>
         ) : null}
       </div>
+    );
+  }
+
+  if (key === "price_ratio") {
+    return (
+      <NumberUnitInput
+        type="number"
+        aria-label={t(field.label)}
+        value={String(form[key])}
+        humanReadable={humanizeNumberUnit(String(form[key]), "ratio")}
+        onChange={(event) => setValue(key, event.target.value as BatchFormValue<K>)}
+      />
     );
   }
 

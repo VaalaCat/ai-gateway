@@ -450,6 +450,9 @@ func TestAgentDirtySameVersionCheckRetriesFullSync(t *testing.T) {
 		if call.Method == consts.RPCSyncGetVersion {
 			return marshalGetVersion(55), nil
 		}
+		if isTestAPIFullSyncEntity(call.Request.Entity) {
+			return emptyAPIFullSyncResponse(55), nil
+		}
 		response := protocol.FullSyncResponse{Version: 55}
 		if call.Request.Entity == events.EntityAgent {
 			response.BaseVersion = 55

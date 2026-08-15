@@ -8,10 +8,11 @@
     "test:e2e": "playwright test --config playwright.config.ts && playwright test --config playwright.degraded.config.ts",
     "test:unit": "tsx --test src/lib/utils/*.test.mjs && vitest run",
     "start": "next start",
-    "lint": "eslint && npm run check:i18n && npm run check:agent-transport-i18n && npm run check:downsample",
+    "lint": "eslint && npm run check:i18n && npm run check:agent-transport-i18n && npm run check:downsample && npm run check:page-headers",
     "check:i18n": "node scripts/check-i18n.mjs",
     "check:agent-transport-i18n": "node scripts/check-agent-transport-i18n.mjs",
-    "check:downsample": "node scripts/verify-data-glyph-downsample.mjs"
+    "check:downsample": "node scripts/verify-data-glyph-downsample.mjs",
+    "check:page-headers": "node scripts/check-dashboard-page-headers.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

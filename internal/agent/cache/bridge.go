@@ -55,7 +55,12 @@ func (b *WSBridge) Start() {
 			}
 			return nil, decodeErr
 		}
-		if push.Entity == events.EntityAgent || push.Entity == events.EntityAgentRoute {
+		ordered := push.Entity == events.EntityAgent || push.Entity == events.EntityAgentRoute
+		if b.Syncer != nil && b.Syncer.apiSync != nil {
+			_, apiEntity := b.Syncer.apiSync.resolve(push.Entity)
+			ordered = ordered || apiEntity
+		}
+		if ordered {
 			if b.Syncer == nil {
 				return nil, fmt.Errorf("syncer not initialized")
 			}
@@ -174,6 +179,9 @@ func (b *WSBridge) failSessionSync(expected *ControlSession, err error) bool {
 	return b.Syncer.withCurrentControlSession(expected, func() error {
 		b.Syncer.failAgentSync(err)
 		b.Syncer.failAgentRouteSync(err)
+		if b.Syncer.apiSync != nil {
+			b.Syncer.apiSync.markAllDirty()
+		}
 		return nil
 	}) == nil
 }

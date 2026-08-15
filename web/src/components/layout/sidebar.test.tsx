@@ -51,10 +51,22 @@ function authToken(userId: number, role: number) {
   return `header.${payload}.signature`;
 }
 
-function capabilities(modelMarketplace: boolean | undefined): CapabilitiesResponse {
+function capabilities(
+  modelMarketplace: boolean | undefined,
+  genericAPI?: Partial<NonNullable<CapabilitiesResponse["generic_api"]>>,
+): CapabilitiesResponse {
   return {
     token: { can_edit_model_whitelist: false },
     model_marketplace: modelMarketplace,
+    ...(genericAPI ? {
+      generic_api: {
+        services: false,
+        access: false,
+        logs: false,
+        websocket: false,
+        ...genericAPI,
+      },
+    } : {}),
   };
 }
 
@@ -126,5 +138,35 @@ describe("model marketplace navigation", () => {
     resolveBob(capabilities(false));
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("link", { name: "modelMarketplace" })).not.toBeInTheDocument();
+  });
+});
+
+describe("generic API navigation", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    apiGet.mockReset();
+  });
+
+  it("fails closed for an ordinary user without generic API capabilities", async () => {
+    window.localStorage.setItem("token", authToken(8, 1));
+    apiGet.mockResolvedValueOnce(capabilities(undefined));
+    renderSidebar();
+
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith("/capabilities"));
+    expect(screen.queryByRole("link", { name: "apiServices" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "apiLogs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "apiAccess" })).not.toBeInTheDocument();
+  });
+
+  it("shows each granted generic API entry without removing existing admin sections", async () => {
+    window.localStorage.setItem("token", authToken(7, 2));
+    apiGet.mockResolvedValueOnce(capabilities(undefined, { services: true, access: true, logs: true }));
+    renderSidebar();
+
+    expect(await screen.findByRole("link", { name: "apiServices" })).toHaveAttribute("href", "/api-services");
+    expect(screen.getByRole("link", { name: "apiLogs" })).toHaveAttribute("href", "/api-logs");
+    expect(screen.getByRole("link", { name: "apiAccess" })).toHaveAttribute("href", "/api-access");
+    expect(screen.getByRole("link", { name: "channels" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "maintenance" })).toBeInTheDocument();
   });
 });

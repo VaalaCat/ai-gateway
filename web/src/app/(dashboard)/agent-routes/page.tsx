@@ -18,6 +18,7 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,6 +30,34 @@ import { useAgentRoutesOverview, useDeleteAgentRoute } from "@/lib/api/agent-rou
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { PAGE_SIZES } from "@/lib/constants";
 import type { AgentRouteOverviewItem } from "@/lib/types";
+
+const SOURCE_TYPES = ["token", "channel", "api_service", "api_route"] as const;
+type AgentRouteSourceFilterType = (typeof SOURCE_TYPES)[number];
+const SOURCE_ENTITIES = {
+  token: "token",
+  channel: "channel",
+  api_service: "api-service",
+  api_route: "api-route",
+} as const satisfies Record<
+  AgentRouteSourceFilterType,
+  "token" | "channel" | "api-service" | "api-route"
+>;
+
+function isSourceFilterType(value: string | null): value is AgentRouteSourceFilterType {
+  return SOURCE_TYPES.some((type) => type === value);
+}
+
+function sourceTypeLabel(
+  sourceType: string,
+  t: ReturnType<typeof useTranslations>,
+) {
+  return {
+    token: t("token"),
+    channel: t("channel"),
+    api_service: t("sourceAPIService"),
+    api_route: t("sourceAPIRoute"),
+  }[sourceType] ?? sourceType;
+}
 
 function PriorityBadge({ priority }: { priority: number }) {
   if (priority >= 100) {
@@ -48,9 +77,10 @@ export default function AgentRoutesPage() {
   const tc = useTranslations("common");
   const searchParams = useSearchParams();
   const sourceType = searchParams.get("source_type");
-  const selectedSourceType = sourceType === "token" || sourceType === "channel"
-    ? sourceType
-    : undefined;
+  const selectedSourceType = isSourceFilterType(sourceType) ? sourceType : undefined;
+  const selectedSourceEntity = selectedSourceType
+    ? SOURCE_ENTITIES[selectedSourceType]
+    : "token";
 
   const filterSpec = useMemo(() => ({
     q: { kind: "text", placeholder: tc("search") },
@@ -59,14 +89,32 @@ export default function AgentRoutesPage() {
       options: [
         { value: "token", label: t("sourceToken") },
         { value: "channel", label: t("sourceChannel") },
+        { value: "api_service", label: t("sourceAPIService") },
+        { value: "api_route", label: t("sourceAPIRoute") },
       ],
       placeholder: t("filterBySourceType"),
     },
+    source_service_id: {
+      kind: "picker",
+      entity: "api-service",
+      label: t("sourceAPIService"),
+      visible: (context) => Boolean(context.isAPIRoute),
+    },
     source_id: {
       kind: "picker",
-      entity: selectedSourceType ?? "token",
+      entity: selectedSourceEntity,
       label: t("source"),
       visible: (context) => Boolean(context.hasSourceType),
+      ...(selectedSourceType === "api_route" ? {
+        pickerQuery: (values) => {
+          const apiServiceId = Number(values.source_service_id);
+          const validServiceID = Number.isSafeInteger(apiServiceId) && apiServiceId > 0;
+          return {
+            apiServiceId: validServiceID ? apiServiceId : undefined,
+            disabled: !validServiceID,
+          };
+        },
+      } : {}),
     },
     model: {
       kind: "text",
@@ -80,7 +128,7 @@ export default function AgentRoutesPage() {
       label: t("agentId"),
       advanced: true,
     },
-  } satisfies FilterSpec), [selectedSourceType, t, tc]);
+  } satisfies FilterSpec), [selectedSourceEntity, selectedSourceType, t, tc]);
 
   const [filterValues, setFilterValues] = useFilterState(filterSpec);
   const [page, pageSize, setPagination] = usePaginationState(PAGE_SIZES.DEFAULT);
@@ -89,6 +137,13 @@ export default function AgentRoutesPage() {
     if (
       Object.hasOwn(next, "source_type")
       && next.source_type !== filterValues.source_type
+    ) {
+      setFilterValues({ ...next, source_id: "", source_service_id: "" });
+      return;
+    }
+    if (
+      Object.hasOwn(next, "source_service_id")
+      && next.source_service_id !== filterValues.source_service_id
     ) {
       setFilterValues({ ...next, source_id: "" });
       return;
@@ -151,7 +206,7 @@ export default function AgentRoutesPage() {
       cell: ({ row }) => (
         <div className="flex items-center gap-2">
           <Badge variant="outline" className="capitalize">
-            {row.original.source_type === "token" ? t("token") : t("channel")}
+            {sourceTypeLabel(row.original.source_type, t)}
           </Badge>
           <span className="text-sm">{row.original.source_name}</span>
         </div>
@@ -208,11 +263,12 @@ export default function AgentRoutesPage() {
   ];
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="mt-1 text-muted-foreground">{t("description")}</p>
-      </div>
+    <PageLayout
+      title={t("title")}
+      description={t("description")}
+      maxWidth="full"
+    >
+      <div className="flex flex-col gap-4">
 
       <DataTable
         columns={columns}
@@ -228,7 +284,10 @@ export default function AgentRoutesPage() {
             spec={filterSpec}
             value={filterValues}
             onChange={handleFilterChange}
-            context={{ hasSourceType: Boolean(selectedSourceType) }}
+            context={{
+              hasSourceType: Boolean(selectedSourceType),
+              isAPIRoute: selectedSourceType === "api_route",
+            }}
             primaryAction={
               <Button onClick={openCreate}>
                 <Plus data-icon="inline-start" />
@@ -250,6 +309,7 @@ export default function AgentRoutesPage() {
         onOpenChange={(open) => { if (!open) setDeleteItem(null); }}
         onConfirm={handleDelete}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

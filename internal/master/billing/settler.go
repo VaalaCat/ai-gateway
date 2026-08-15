@@ -266,6 +266,7 @@ func (s *Settler) settleOne(ctx context.Context, agentID string, entry protocol.
 		RateLimitReason:    entry.RateLimitReason,
 		RateLimitHits:      datatypes.NewJSONSlice(entry.RateLimitHits),
 	}
+	log.TraceRetentionStatus = entry.TraceRetentionStatus
 
 	var inserted, depleted bool
 	var err error

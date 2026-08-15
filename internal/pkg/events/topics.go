@@ -7,21 +7,28 @@ import (
 
 // Entity 常量。
 const (
-	EntityToken          = "token"
-	EntityChannel        = "channel"
-	EntityModel          = "model"
-	EntityModelV1        = "model_config" // legacy full-sync entity name
-	EntitySetting        = "setting"
-	EntityAgent          = "agent"
-	EntityAgentRoute     = "agent_route"
-	EntityRequestLimiter = "request_limiter"
-	EntityLimiterBinding = "limiter_binding"
-	EntityModelRouting   = "model_routing"
-	EntityUserRoutings   = "user_routings"
-	EntityTokenRoutings  = "token_routings"
-	EntitySync           = "sync"
-	EntityUserGroup      = "user_group"
-	EntityUser           = "user"
+	EntityToken               = "token"
+	EntityChannel             = "channel"
+	EntityModel               = "model"
+	EntityModelV1             = "model_config" // legacy full-sync entity name
+	EntitySetting             = "setting"
+	EntityAgent               = "agent"
+	EntityAgentRoute          = "agent_route"
+	EntityRequestLimiter      = "request_limiter"
+	EntityLimiterBinding      = "limiter_binding"
+	EntityModelRouting        = "model_routing"
+	EntityUserRoutings        = "user_routings"
+	EntityTokenRoutings       = "token_routings"
+	EntitySync                = "sync"
+	EntityUserGroup           = "user_group"
+	EntityUser                = "user"
+	EntityAPIService          = "api_service"
+	EntityAPIRoute            = "api_route"
+	EntityAPIUpstream         = "api_upstream"
+	EntityAPIRole             = "api_role"
+	EntityUserGroupAPIRoleSet = "user_group_api_role_set"
+	EntityUserAPIRoleSet      = "user_api_role_set"
+	EntityTokenAPIRoleSet     = "token_api_role_set"
 
 	EntityPrivateChannel      = "private_channel"
 	EntityPrivateChannelShare = "private_channel_share"
@@ -91,6 +98,23 @@ const (
 	topicScriptCreate = "script.create"
 	topicScriptUpdate = "script.update"
 	topicScriptDelete = "script.delete"
+
+	topicAPIServiceCreate         = "api_service.create"
+	topicAPIServiceUpdate         = "api_service.update"
+	topicAPIServiceDelete         = "api_service.delete"
+	topicAPIRouteCreate           = "api_route.create"
+	topicAPIRouteUpdate           = "api_route.update"
+	topicAPIRouteDelete           = "api_route.delete"
+	topicAPIUpstreamCreate        = "api_upstream.create"
+	topicAPIUpstreamUpdate        = "api_upstream.update"
+	topicAPIUpstreamDelete        = "api_upstream.delete"
+	topicAPIRoleCreate            = "api_role.create"
+	topicAPIRoleUpdate            = "api_role.update"
+	topicAPIRoleDelete            = "api_role.delete"
+	topicUserAPIRolesSynced       = "user.api_roles_synced"
+	topicUserGroupAPIRolesSynced  = "user_group.api_roles_synced"
+	topicUserGroupAPIRolesDeleted = "user_group.api_roles_deleted"
+	topicTokenAPIRolesSynced      = "token.api_roles_synced"
 )
 
 const (
@@ -120,6 +144,14 @@ const (
 	patternSyncPrivateChannelAll = "sync.private_channel.*"
 
 	patternSyncScriptAll = "sync.script.*"
+
+	patternSyncAPIServiceAll          = "sync.api_service.*"
+	patternSyncAPIRouteAll            = "sync.api_route.*"
+	patternSyncAPIUpstreamAll         = "sync.api_upstream.*"
+	patternSyncAPIRoleAll             = "sync.api_role.*"
+	patternSyncUserAPIRoleSetAll      = "sync.user_api_role_set.*"
+	patternSyncUserGroupAPIRoleSetAll = "sync.user_group_api_role_set.*"
+	patternSyncTokenAPIRoleSetAll     = "sync.token_api_role_set.*"
 )
 
 func entityTopic(entity, action string) string {
@@ -216,6 +248,32 @@ var (
 	ScriptDeleteTopic = newTopic[models.AdminScript](topicScriptDelete)
 
 	SyncScriptAllPattern = newPattern[protocol.SyncPushParams](patternSyncScriptAll)
+
+	SyncAPIServiceAllPattern          = newPattern[protocol.SyncPushParams](patternSyncAPIServiceAll)
+	SyncAPIRouteAllPattern            = newPattern[protocol.SyncPushParams](patternSyncAPIRouteAll)
+	SyncAPIUpstreamAllPattern         = newPattern[protocol.SyncPushParams](patternSyncAPIUpstreamAll)
+	SyncAPIRoleAllPattern             = newPattern[protocol.SyncPushParams](patternSyncAPIRoleAll)
+	SyncUserAPIRoleSetAllPattern      = newPattern[protocol.SyncPushParams](patternSyncUserAPIRoleSetAll)
+	SyncUserGroupAPIRoleSetAllPattern = newPattern[protocol.SyncPushParams](patternSyncUserGroupAPIRoleSetAll)
+	SyncTokenAPIRoleSetAllPattern     = newPattern[protocol.SyncPushParams](patternSyncTokenAPIRoleSetAll)
+
+	APIServiceCreateTopic  = newTopic[protocol.SyncedAPIService](topicAPIServiceCreate)
+	APIServiceUpdateTopic  = newTopic[protocol.SyncedAPIService](topicAPIServiceUpdate)
+	APIServiceDeleteTopic  = newTopic[protocol.SyncedAPIService](topicAPIServiceDelete)
+	APIRouteCreateTopic    = newTopic[protocol.SyncedAPIRoute](topicAPIRouteCreate)
+	APIRouteUpdateTopic    = newTopic[protocol.SyncedAPIRoute](topicAPIRouteUpdate)
+	APIRouteDeleteTopic    = newTopic[protocol.SyncedAPIRoute](topicAPIRouteDelete)
+	APIUpstreamCreateTopic = newTopic[protocol.SyncedAPIUpstream](topicAPIUpstreamCreate)
+	APIUpstreamUpdateTopic = newTopic[protocol.SyncedAPIUpstream](topicAPIUpstreamUpdate)
+	APIUpstreamDeleteTopic = newTopic[protocol.SyncedAPIUpstream](topicAPIUpstreamDelete)
+	APIRoleCreateTopic     = newTopic[protocol.SyncedAPIRole](topicAPIRoleCreate)
+	APIRoleUpdateTopic     = newTopic[protocol.SyncedAPIRole](topicAPIRoleUpdate)
+	APIRoleDeleteTopic     = newTopic[protocol.SyncedAPIRole](topicAPIRoleDelete)
+
+	UserAPIRolesSyncedTopic       = newTopic[protocol.APIRoleSetInvalidate](topicUserAPIRolesSynced)
+	UserGroupAPIRolesSyncedTopic  = newTopic[protocol.APIRoleSetFetchResult](topicUserGroupAPIRolesSynced)
+	UserGroupAPIRolesDeletedTopic = newTopic[protocol.APIRoleSetFetchResult](topicUserGroupAPIRolesDeleted)
+	TokenAPIRolesSyncedTopic      = newTopic[protocol.APIRoleSetInvalidate](topicTokenAPIRolesSynced)
 )
 
 func SyncPushTopic(entity, action string) Topic[protocol.SyncPushParams] {

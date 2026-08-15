@@ -161,3 +161,68 @@ func TestLimiterIndex_RequestLevel_TieByPriorityThenID(t *testing.T) {
 	got := idx.EffectiveRequestLimiters(1, 1)
 	require.Equal(t, map[string]int64{"hi-prio": 20}, names(got))
 }
+
+func TestLimiterAPIServiceRouteUpstreamBindingsAllRemainEffective(t *testing.T) {
+	idx := NewLimiterIndex()
+	idx.LoadLimiters([]models.RequestLimiter{
+		{ID: 1, Name: "global", Enabled: true, Metric: models.LimiterMetricRate, KeyBy: models.LimiterKeyPerUser},
+		{ID: 2, Name: "service", Enabled: true, Metric: models.LimiterMetricRate, KeyBy: models.LimiterKeyShared},
+		{ID: 3, Name: "route", Enabled: true, Metric: models.LimiterMetricRate, KeyBy: models.LimiterKeyShared},
+		{ID: 4, Name: "upstream", Enabled: true, Metric: models.LimiterMetricConcurrency, KeyBy: models.LimiterKeyShared},
+	})
+	idx.LoadBindings([]models.LimiterBinding{
+		{ID: 1, LimiterID: 1, TargetType: models.LimiterTargetGlobal, Enabled: true},
+		{ID: 2, LimiterID: 2, TargetType: models.LimiterTargetAPIService, TargetID: 7, Enabled: true},
+		{ID: 3, LimiterID: 3, TargetType: models.LimiterTargetAPIRoute, TargetID: 9, Enabled: true},
+		{ID: 4, LimiterID: 4, TargetType: models.LimiterTargetAPIUpstream, TargetID: 11, Enabled: true},
+	})
+
+	source := idx.EffectiveSourceAPILimiters(5, 3, 7, 9)
+	require.ElementsMatch(t, []uint{1, 2, 3}, apiLimiterIDs(source))
+	require.Equal(t, []uint{4}, apiLimiterIDs(idx.EffectiveUpstreamAPILimiters(11)))
+	require.Empty(t, idx.EffectiveUpstreamAPILimiters(12))
+}
+
+func TestEffectiveSourceAPILimitersPreserveResolvedWinnerTarget(t *testing.T) {
+	idx := NewLimiterIndex()
+	idx.LoadLimiters([]models.RequestLimiter{
+		{ID: 1, Name: "global", Enabled: true, Metric: models.LimiterMetricRate, Capacity: 10, WindowMs: 60_000, KeyBy: models.LimiterKeyPerUser},
+		{ID: 2, Name: "group", Enabled: true, Metric: models.LimiterMetricRate, Capacity: 20, WindowMs: 60_000, KeyBy: models.LimiterKeyPerUser},
+		{ID: 3, Name: "user", Enabled: true, Metric: models.LimiterMetricRate, Capacity: 30, WindowMs: 60_000, KeyBy: models.LimiterKeyPerUser},
+	})
+	idx.LoadBindings([]models.LimiterBinding{
+		{ID: 1, LimiterID: 1, TargetType: models.LimiterTargetGlobal, Enabled: true},
+		{ID: 2, LimiterID: 2, TargetType: models.LimiterTargetUserGroup, TargetID: 7, Enabled: true},
+		{ID: 3, LimiterID: 3, TargetType: models.LimiterTargetUser, TargetID: 5, Enabled: true},
+	})
+
+	tests := []struct {
+		name        string
+		userID      uint
+		groupID     uint
+		wantType    string
+		wantID      uint
+		wantLimiter uint
+	}{
+		{name: "user winner", userID: 5, groupID: 7, wantType: models.LimiterTargetUser, wantID: 5, wantLimiter: 3},
+		{name: "group winner", userID: 6, groupID: 7, wantType: models.LimiterTargetUserGroup, wantID: 7, wantLimiter: 2},
+		{name: "global winner", userID: 6, groupID: 8, wantType: models.LimiterTargetGlobal, wantID: 0, wantLimiter: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := idx.EffectiveSourceAPILimiters(test.userID, test.groupID, 70, 90)
+			require.Len(t, got, 1)
+			require.Equal(t, test.wantLimiter, got[0].Limiter.ID)
+			require.Equal(t, test.wantType, got[0].TargetType)
+			require.Equal(t, test.wantID, got[0].TargetID)
+		})
+	}
+}
+
+func apiLimiterIDs(values []APILimiter) []uint {
+	ids := make([]uint, 0, len(values))
+	for _, value := range values {
+		ids = append(ids, value.Limiter.ID)
+	}
+	return ids
+}

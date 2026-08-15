@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
-import { SettingNumberInput } from '@/components/system/setting-number-input';
+import { NumberUnitInput } from '@/components/business/number-unit-input';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
@@ -30,7 +30,7 @@ import { Plus, X, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSettings, useUpdateSettings } from '@/lib/api/system';
 import { useBYOKSystemBaseURLs, useBaseURLUsage } from '@/lib/api/byok-system-baseurls';
-import { humanizeSettingNumber } from '@/lib/utils/system-setting-number';
+import { humanizeNumberUnit } from '@/lib/utils/number-unit';
 import { useTranslations } from 'next-intl';
 
 type BYOKSettings = Record<string, string>;
@@ -169,7 +169,7 @@ function BYOKSettingsEditor({ settings }: { settings: BYOKSettings | undefined }
         {billingMode === 'service_fee' && (
           <div className="space-y-1">
             <Label>{t('feeRatio')}</Label>
-            <SettingNumberInput
+            <NumberUnitInput
               type="number"
               step="0.01"
               min={0}
@@ -177,7 +177,7 @@ function BYOKSettingsEditor({ settings }: { settings: BYOKSettings | undefined }
               value={feeRatio}
               onChange={(e) => setFeeRatio(Number(e.target.value))}
               className="w-40"
-              humanReadable={humanizeSettingNumber(feeRatio, "ratio")}
+              humanReadable={humanizeNumberUnit(feeRatio, "ratio")}
             />
             <div className="text-xs text-muted-foreground">
               {t('feeRatioDesc')}

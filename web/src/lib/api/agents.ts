@@ -170,13 +170,14 @@ export interface GoroutineDump {
 
 export function useAgents(
   params: PaginatedParams = {},
-  options: { retainPreviousData?: boolean } = {},
+  options: { retainPreviousData?: boolean; enabled?: boolean } = {},
 ) {
   const [retainedData, setRetainedData] = useState<PaginatedResponse<AgentListItem>>();
   const query = useQuery({
     queryKey: agentQueryKeys.list(params),
     queryFn: ({ signal }) => fetchAgents(params, signal),
     placeholderData: options.retainPreviousData ? keepPreviousData : undefined,
+    enabled: options.enabled ?? true,
     refetchInterval: (query) => agentListPollInterval(query.state.data?.data),
   });
   useEffect(() => {

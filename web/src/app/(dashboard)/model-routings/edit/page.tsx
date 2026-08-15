@@ -2,14 +2,20 @@
 
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { RoutingForm } from "@/components/model-routing/routing-form";
+import { PageLayout } from "@/components/layout/page-layout";
 import { useAuth } from "@/lib/auth";
 
 export default function EditPage() {
+  const t = useTranslations("modelRoutings");
+  const tc = useTranslations("common");
   return (
-    <Suspense fallback={<div className="text-muted-foreground">Loading...</div>}>
-      <Inner />
-    </Suspense>
+    <PageLayout title={t("editTitle")} maxWidth="full">
+      <Suspense fallback={<div className="text-muted-foreground">{tc("loading")}</div>}>
+        <Inner />
+      </Suspense>
+    </PageLayout>
   );
 }
 

@@ -1,8 +1,10 @@
 package limiter
 
 import (
+	"sync/atomic"
 	"testing"
 
+	"github.com/sourcegraph/conc/pool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -62,6 +64,40 @@ func TestMemStore_RateFixedWindow(t *testing.T) {
 
 	require.False(t, s.TryRate(k, 0, 1000)) // cap<=0 → 拒
 	require.False(t, s.TryRate(k, 2, 0))    // window<=0 → 拒
+}
+
+func TestMemStoreRateBatchAtomicUnderHighConcurrency(t *testing.T) {
+	const (
+		capacity = int64(500)
+		attempts = 1_000
+	)
+	store := NewMemStore()
+	first := BucketKey{LimiterID: 1, Bucket: "api_service:7:shared"}
+	second := BucketKey{LimiterID: 2, Bucket: "api_route:9:shared"}
+	requests := []RateRequest{
+		{Key: first, Capacity: capacity, WindowMs: 60_000},
+		{Key: second, Capacity: capacity, WindowMs: 60_000},
+	}
+	var admitted atomic.Int64
+	workers := pool.New().WithMaxGoroutines(64)
+	for range attempts {
+		workers.Go(func() {
+			if _, ok := store.TryRateBatch(requests); ok {
+				admitted.Add(1)
+			}
+		})
+	}
+	workers.Wait()
+
+	require.Equal(t, capacity, admitted.Load())
+	usage := make(map[BucketKey]int64)
+	for _, bucket := range store.SnapshotBuckets() {
+		if bucket.IsRate {
+			usage[bucket.Key] = bucket.Occupied
+		}
+	}
+	require.Equal(t, admitted.Load(), usage[first])
+	require.Equal(t, admitted.Load(), usage[second])
 }
 
 func TestMemStore_SnapshotBuckets(t *testing.T) {

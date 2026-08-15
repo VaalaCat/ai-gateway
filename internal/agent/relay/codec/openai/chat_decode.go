@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	sseconsts "github.com/VaalaCat/ai-gateway/internal/consts/sse"
 )
 
@@ -18,6 +19,40 @@ type chatToolCallAggState struct {
 	callID      string
 	name        string
 	accumulated strings.Builder
+}
+
+// completeOpenChatToolCalls closes every structured tool call still tracked by
+// the stream decoder. A terminal Chat chunk may use "stop" for a forced named
+// tool, so lifecycle completion must follow the observed tool states rather
+// than one provider-specific finish_reason value.
+func completeOpenChatToolCalls(ch chan<- codec.Event, states map[int]*chatToolCallAggState) int {
+	indices := make([]int, 0, len(states))
+	for index := range states {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+
+	for _, index := range indices {
+		state := states[index]
+		ch <- codec.Event{
+			Type: codec.EventToolCallEnd,
+			ToolCall: &codec.StreamingToolCall{
+				CallID:    state.callID,
+				Index:     index,
+				Arguments: state.accumulated.String(),
+			},
+		}
+		delete(states, index)
+	}
+	return len(indices)
+}
+
+func canonicalChatFinishReason(reason string, completedToolCalls int) string {
+	if completedToolCalls > 0 &&
+		(reason == "" || reason == consts.FinishReasonStop || reason == consts.FinishReasonToolCalls) {
+		return consts.FinishReasonToolCalls
+	}
+	return reason
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +284,7 @@ func (c *ChatCodec) decodeNonStream(resp *http.Response, ch chan<- codec.Event) 
 
 	if len(oaiResp.Choices) > 0 {
 		choice := oaiResp.Choices[0]
+		toolCallCount := 0
 		if choice.Message != nil {
 			if choice.Message.ReasoningContent != "" {
 				ch <- codec.Event{
@@ -277,6 +313,7 @@ func (c *ChatCodec) decodeNonStream(resp *http.Response, ch chan<- codec.Event) 
 				}
 			}
 			for _, tc := range choice.Message.ToolCalls {
+				toolCallCount++
 				ch <- codec.Event{
 					Type: codec.EventToolCallDelta,
 					Delta: &codec.DeltaPayload{
@@ -290,7 +327,7 @@ func (c *ChatCodec) decodeNonStream(resp *http.Response, ch chan<- codec.Event) 
 			}
 		}
 		if choice.FinishReason != nil {
-			ch <- codec.Event{FinishReason: *choice.FinishReason}
+			ch <- codec.Event{FinishReason: canonicalChatFinishReason(*choice.FinishReason, toolCallCount)}
 		}
 	}
 
@@ -439,28 +476,12 @@ func (c *ChatCodec) decodeStream(resp *http.Response, ch chan<- codec.Event) {
 					}
 				}
 			}
-			// O1: Store finish_reason from stream chunks (attached to EventDone below)
+			// A non-empty finish_reason marks a terminal choice. Close observed tool
+			// states regardless of whether the provider calls the reason "stop" or
+			// "tool_calls"; forced named tools commonly use the former.
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
-				finishReason = *choice.FinishReason
-			}
-			// Emit EventToolCallEnd for each open tool state when finish_reason == "tool_calls".
-			if choice.FinishReason != nil && *choice.FinishReason == "tool_calls" {
-				indices := make([]int, 0, len(toolStates))
-				for idx := range toolStates {
-					indices = append(indices, idx)
-				}
-				sort.Ints(indices)
-				for _, idx := range indices {
-					state := toolStates[idx]
-					ch <- codec.Event{
-						Type: codec.EventToolCallEnd,
-						ToolCall: &codec.StreamingToolCall{
-							CallID:    state.callID,
-							Index:     idx,
-							Arguments: state.accumulated.String(),
-						},
-					}
-				}
+				completed := completeOpenChatToolCalls(ch, toolStates)
+				finishReason = canonicalChatFinishReason(*choice.FinishReason, completed)
 			}
 		}
 
@@ -472,6 +493,8 @@ func (c *ChatCodec) decodeStream(resp *http.Response, ch chan<- codec.Event) {
 	if err := scanner.Err(); err != nil {
 		ch <- codec.Event{Type: codec.EventError, Error: &codec.ErrorPayload{Message: "stream read error: " + err.Error()}}
 	}
+	completed := completeOpenChatToolCalls(ch, toolStates)
+	finishReason = canonicalChatFinishReason(finishReason, completed)
 
 	ch <- codec.Event{Type: codec.EventDone, FinishReason: finishReason}
 }

@@ -94,11 +94,14 @@ func (r *Registry) sweep(now time.Time) {
 }
 
 func buildBreaker(cfg Config) circuitbreaker.CircuitBreaker[state.AttemptResult] {
-	return circuitbreaker.NewBuilder[state.AttemptResult]().
+	builder := circuitbreaker.NewBuilder[state.AttemptResult]().
 		WithFailureThreshold(uint(cfg.BreakerThreshold)).
 		WithDelay(time.Duration(cfg.BreakerCooldownMs) * time.Millisecond).
 		HandleIf(func(r state.AttemptResult, _ error) bool {
 			return Classify(r).CountToBreaker
-		}).
-		Build()
+		})
+	if cfg.HalfOpenPermitLimit > 0 {
+		builder.WithSuccessThresholdRatio(1, uint(cfg.HalfOpenPermitLimit))
+	}
+	return builder.Build()
 }

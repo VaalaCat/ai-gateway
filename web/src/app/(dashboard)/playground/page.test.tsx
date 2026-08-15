@@ -1,4 +1,4 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import PlaygroundPage from "./page";
@@ -41,4 +41,12 @@ it("aborts the available-model request when the playground unmounts", async () =
 
   expect(requestSignal).toBeInstanceOf(AbortSignal);
   expect(requestSignal?.aborted).toBe(true);
+});
+
+it("uses the shared PageHeader without changing the chat panel", () => {
+  render(<PlaygroundPage />);
+
+  const header = screen.getByTestId("page-header");
+  expect(header).toHaveTextContent("title");
+  expect(header.parentElement).toHaveClass("h-full");
 });

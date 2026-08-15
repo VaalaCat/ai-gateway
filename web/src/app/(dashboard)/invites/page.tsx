@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, type ReactNode, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
@@ -14,6 +14,8 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -47,6 +49,28 @@ import {
   useAdminDeleteInviteCode,
 } from "@/lib/api/invite-codes";
 import type { InviteCodeRow } from "@/lib/types";
+
+function InvitesPageLayout({ children }: { children: ReactNode }) {
+  const t = useTranslations("invites");
+
+  return (
+    <PageLayout title={t("title")} description={t("description")} maxWidth="full">
+      {children}
+    </PageLayout>
+  );
+}
+
+function InvitesPageSkeleton() {
+  const t = useTranslations("invites");
+
+  return (
+    <PageLayoutSkeleton
+      title={t("title")}
+      description={t("description")}
+      maxWidth="full"
+    />
+  );
+}
 
 function CreateInviteDialog() {
   const t = useTranslations("invites");
@@ -258,26 +282,30 @@ function InvitesPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdmin, t, tc]);
 
-  if (!config) return null;
+  if (!config) return <InvitesPageSkeleton />;
 
   if (!config.invite_enabled) {
     return (
-      <Card>
-        <CardContent className="pt-6 text-center text-muted-foreground">
-          {t("disabled")}
-        </CardContent>
-      </Card>
+      <InvitesPageLayout>
+        <Card>
+          <CardContent className="pt-6 text-center text-muted-foreground">
+            {t("disabled")}
+          </CardContent>
+        </Card>
+      </InvitesPageLayout>
     );
   }
 
   const canCreate = isAdmin || (config.invite_user_max_codes ?? 0) > 0;
   if (!canCreate) {
     return (
-      <Card>
-        <CardContent className="pt-6 text-center text-muted-foreground">
-          {t("unavailable")}
-        </CardContent>
-      </Card>
+      <InvitesPageLayout>
+        <Card>
+          <CardContent className="pt-6 text-center text-muted-foreground">
+            {t("unavailable")}
+          </CardContent>
+        </Card>
+      </InvitesPageLayout>
     );
   }
 
@@ -286,11 +314,8 @@ function InvitesPageInner() {
   const pageCount = Math.ceil(total / pageSize) || 1;
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
+    <InvitesPageLayout>
+      <div className="space-y-4">
       <DataTable
         columns={columns}
         data={rows}
@@ -316,13 +341,14 @@ function InvitesPageInner() {
         }}
         onConfirm={confirmDelete}
       />
-    </div>
+      </div>
+    </InvitesPageLayout>
   );
 }
 
 export default function InvitesPage() {
   return (
-    <Suspense>
+    <Suspense fallback={<InvitesPageSkeleton />}>
       <InvitesPageInner />
     </Suspense>
   );

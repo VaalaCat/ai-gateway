@@ -11,9 +11,19 @@ import (
 )
 
 type routeIndexState struct {
-	routes    map[uint]models.AgentRoute
-	byToken   map[uint][]uint
-	byChannel map[uint][]uint
+	routes       map[uint]models.AgentRoute
+	byToken      map[uint][]uint
+	byChannel    map[uint][]uint
+	byAPIService map[uint][]uint
+	byAPIRoute   map[uint][]uint
+}
+
+func (ri *RouteIndex) FindAPIServiceRoute(serviceID uint) *models.AgentRoute {
+	return ri.find(ri.state.Load(), models.AgentRouteSourceAPIService, serviceID, "")
+}
+
+func (ri *RouteIndex) FindAPIRouteRoute(routeID uint) *models.AgentRoute {
+	return ri.find(ri.state.Load(), models.AgentRouteSourceAPIRoute, routeID, "")
 }
 
 // RouteIndex 封装 Agent 路由规则的存储和索引。
@@ -46,10 +56,14 @@ func (ri *RouteIndex) find(state *routeIndexState, sourceType string, sourceID u
 
 	var routeIDs []uint
 	switch sourceType {
-	case "token":
+	case models.AgentRouteSourceToken:
 		routeIDs = state.byToken[sourceID]
-	case "channel":
+	case models.AgentRouteSourceChannel:
 		routeIDs = state.byChannel[sourceID]
+	case models.AgentRouteSourceAPIService:
+		routeIDs = state.byAPIService[sourceID]
+	case models.AgentRouteSourceAPIRoute:
+		routeIDs = state.byAPIRoute[sourceID]
 	default:
 		return nil
 	}
@@ -144,9 +158,11 @@ func (ri *RouteIndex) deleteLocked(routeID uint) {
 
 func newRouteIndexState() *routeIndexState {
 	return &routeIndexState{
-		routes:    make(map[uint]models.AgentRoute),
-		byToken:   make(map[uint][]uint),
-		byChannel: make(map[uint][]uint),
+		routes:       make(map[uint]models.AgentRoute),
+		byToken:      make(map[uint][]uint),
+		byChannel:    make(map[uint][]uint),
+		byAPIService: make(map[uint][]uint),
+		byAPIRoute:   make(map[uint][]uint),
 	}
 }
 
@@ -160,16 +176,26 @@ func buildRouteIndexState(routes []*models.AgentRoute) *routeIndexState {
 	}
 	for routeID, route := range state.routes {
 		switch route.SourceType {
-		case "token":
+		case models.AgentRouteSourceToken:
 			state.byToken[route.SourceID] = append(state.byToken[route.SourceID], routeID)
-		case "channel":
+		case models.AgentRouteSourceChannel:
 			state.byChannel[route.SourceID] = append(state.byChannel[route.SourceID], routeID)
+		case models.AgentRouteSourceAPIService:
+			state.byAPIService[route.SourceID] = append(state.byAPIService[route.SourceID], routeID)
+		case models.AgentRouteSourceAPIRoute:
+			state.byAPIRoute[route.SourceID] = append(state.byAPIRoute[route.SourceID], routeID)
 		}
 	}
 	for _, routeIDs := range state.byToken {
 		sortRouteIDsByPriority(routeIDs, state.routes)
 	}
 	for _, routeIDs := range state.byChannel {
+		sortRouteIDsByPriority(routeIDs, state.routes)
+	}
+	for _, routeIDs := range state.byAPIService {
+		sortRouteIDsByPriority(routeIDs, state.routes)
+	}
+	for _, routeIDs := range state.byAPIRoute {
 		sortRouteIDsByPriority(routeIDs, state.routes)
 	}
 	return state
@@ -190,27 +216,43 @@ func cloneRouteIndexState(current *routeIndexState) *routeIndexState {
 	for sourceID, routeIDs := range current.byChannel {
 		next.byChannel[sourceID] = append([]uint(nil), routeIDs...)
 	}
+	for sourceID, routeIDs := range current.byAPIService {
+		next.byAPIService[sourceID] = append([]uint(nil), routeIDs...)
+	}
+	for sourceID, routeIDs := range current.byAPIRoute {
+		next.byAPIRoute[sourceID] = append([]uint(nil), routeIDs...)
+	}
 	return next
 }
 
 func (state *routeIndexState) addToSourceIndex(routeID uint) {
 	route := state.routes[routeID]
 	switch route.SourceType {
-	case "token":
+	case models.AgentRouteSourceToken:
 		state.byToken[route.SourceID] = append(state.byToken[route.SourceID], routeID)
 		sortRouteIDsByPriority(state.byToken[route.SourceID], state.routes)
-	case "channel":
+	case models.AgentRouteSourceChannel:
 		state.byChannel[route.SourceID] = append(state.byChannel[route.SourceID], routeID)
 		sortRouteIDsByPriority(state.byChannel[route.SourceID], state.routes)
+	case models.AgentRouteSourceAPIService:
+		state.byAPIService[route.SourceID] = append(state.byAPIService[route.SourceID], routeID)
+		sortRouteIDsByPriority(state.byAPIService[route.SourceID], state.routes)
+	case models.AgentRouteSourceAPIRoute:
+		state.byAPIRoute[route.SourceID] = append(state.byAPIRoute[route.SourceID], routeID)
+		sortRouteIDsByPriority(state.byAPIRoute[route.SourceID], state.routes)
 	}
 }
 
 func (state *routeIndexState) removeFromSourceIndex(route models.AgentRoute) {
 	switch route.SourceType {
-	case "token":
+	case models.AgentRouteSourceToken:
 		removeRouteID(state.byToken, route.SourceID, route.ID)
-	case "channel":
+	case models.AgentRouteSourceChannel:
 		removeRouteID(state.byChannel, route.SourceID, route.ID)
+	case models.AgentRouteSourceAPIService:
+		removeRouteID(state.byAPIService, route.SourceID, route.ID)
+	case models.AgentRouteSourceAPIRoute:
+		removeRouteID(state.byAPIRoute, route.SourceID, route.ID)
 	}
 }
 

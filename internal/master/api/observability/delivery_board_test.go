@@ -28,8 +28,12 @@ func TestGetDeliveryBoardAggregates(t *testing.T) {
 				return nil, errors.New("agent timeout")
 			}
 			return json.RawMessage(`{"store_len":3,"store_bytes":100,"retry_len":1,"retry_bytes":50,
+					"store_dropped":4,"retry_dropped":2,"trace_slimmed":3,
 				"oldest_ts":42,"last_success_at":99,"last_error":"","inflight":0,
-				"items":[{"request_id":"r1","bytes":50,"attempts":4,"degrade_level":1,"next_at":123}]}`), nil
+				"items":[
+					{"request_id":"shared","queue_id":"llm:shared","usage_type":"llm","bytes":50,"attempts":4,"degrade_level":1,"next_at":123},
+					{"request_id":"shared","queue_id":"api:shared","usage_type":"api","bytes":40,"attempts":2,"degrade_level":0,"next_at":124}
+				]}`), nil
 		},
 	}
 
@@ -41,14 +45,20 @@ func TestGetDeliveryBoardAggregates(t *testing.T) {
 		t.Fatalf("agents=%d failed=%d, want 1/1", len(resp.Agents), len(resp.FailedAgents))
 	}
 	row := resp.Agents[0]
-	if row.StoreLen != 3 || row.TotalBytes != 150 || len(row.Items) != 1 {
+	// behavior change: the board names shared queue drops separately from the
+	// API-only trace slim counter.
+	if row.StoreLen != 3 || row.TotalBytes != 150 || row.SharedUsageDropped != 6 || row.APITraceSlimmed != 3 || len(row.Items) != 2 {
 		t.Fatalf("row mapping wrong: %+v", row)
 	}
 	if row.AgentID == 0 || row.AgentName != "edge-a" {
 		t.Fatalf("row identity wrong: %+v", row)
 	}
-	if row.Items[0].RequestID != "r1" || row.Items[0].DegradeLevel != 1 || row.Items[0].NextAt != 123 {
+	if row.Items[0].RequestID != "shared" || row.Items[0].QueueID != "llm:shared" || row.Items[0].UsageType != "llm" ||
+		row.Items[0].DegradeLevel != 1 || row.Items[0].NextAt != 123 {
 		t.Fatalf("item mapping wrong: %+v", row.Items[0])
+	}
+	if row.Items[1].RequestID != "shared" || row.Items[1].QueueID != "api:shared" || row.Items[1].UsageType != "api" {
+		t.Fatalf("typed item identity collapsed: %+v", row.Items)
 	}
 	if resp.FailedAgents[0].AgentName != "edge-b" {
 		t.Fatalf("failed agent wrong: %+v", resp.FailedAgents[0])

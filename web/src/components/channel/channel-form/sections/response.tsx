@@ -1,11 +1,12 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { JsonField } from "@/components/business/json-field";
 import { FieldTip } from "@/components/business/field-tip";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 import { ChannelForm } from "../types";
 
 export interface ResponseSectionProps {
@@ -28,7 +29,7 @@ export function ResponseSection({ form, setForm, hiddenFields }: ResponseSection
       {!hiddenFields?.has("price_ratio") && (
         <div className="space-y-2">
           <Label>{t("priceRatio")}<FieldTip text={t("priceRatioTip")} /></Label>
-          <Input type="number" step="0.01" min="0" max="1000" value={form.price_ratio} disabled={form.free} onChange={(e) => setForm({ ...form, price_ratio: e.target.value })} />
+          <NumberUnitInput type="number" step="0.01" min="0" max="1000" value={form.price_ratio} humanReadable={humanizeNumberUnit(form.price_ratio, "ratio")} disabled={form.free} onChange={(e) => setForm({ ...form, price_ratio: e.target.value })} />
         </div>
       )}
     </div>

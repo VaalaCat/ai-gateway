@@ -3,17 +3,26 @@ package token
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 )
 
-type Handler struct{}
+type Handler struct {
+	clock func() time.Time
+}
 
 type ListRequest struct {
 	api.PaginationQuery
-	Search string `form:"search"`
-	UserID string `form:"user_id"`
-	Status string `form:"status"`
+	Search       string `form:"search"`
+	UserID       string `form:"user_id"`
+	TokenID      *uint  `form:"token_id"`
+	Status       string `form:"status"`
+	UsableOnly   bool   `form:"usable_only"`
+	APIRoleMode  string `form:"api_role_mode"`
+	APIServiceID *uint  `form:"api_service_id"`
+	APIRouteID   *uint  `form:"api_route_id"`
 }
 
 type CreateRequest struct {
@@ -32,6 +41,11 @@ type CreateRequest struct {
 type UpdateRequest struct {
 	ID     string         `uri:"id" binding:"required"`
 	Fields map[string]any `json:"-"`
+}
+
+type APIRoleUpdateRequest struct {
+	Mode    models.APIRoleMode `json:"api_role_mode"`
+	RoleIDs []uint             `json:"api_role_ids"`
 }
 
 func (r *UpdateRequest) SetBodyMap(fields map[string]any) {

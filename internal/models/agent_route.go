@@ -1,5 +1,12 @@
 package models
 
+const (
+	AgentRouteSourceToken      = "token"
+	AgentRouteSourceChannel    = "channel"
+	AgentRouteSourceAPIService = "api_service"
+	AgentRouteSourceAPIRoute   = "api_route"
+)
+
 // AgentRoute 定义 Agent 路由规则。
 // 管理员可为 Token 或 Channel 配置请求应转发到哪个 Agent 节点/组。
 type AgentRoute struct {
@@ -17,17 +24,26 @@ type AgentRoute struct {
 // CalcPriority 根据 SourceType 和 Model 计算优先级。
 func (r *AgentRoute) CalcPriority() int {
 	switch r.SourceType {
-	case "token":
+	case AgentRouteSourceToken:
 		if r.Model != "" {
 			return 100
 		}
 		return 90
-	case "channel":
+	case AgentRouteSourceChannel:
 		if r.Model != "" {
 			return 80
 		}
 		return 70
+	case AgentRouteSourceAPIRoute:
+		if r.Model == "" {
+			return 60
+		}
+	case AgentRouteSourceAPIService:
+		if r.Model == "" {
+			return 50
+		}
 	default:
 		return 0
 	}
+	return 0
 }

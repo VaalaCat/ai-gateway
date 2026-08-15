@@ -13,6 +13,7 @@ type Token struct {
 	TemplateID        *uint                     `gorm:"index" json:"template_id"`
 	TraceEnabled      bool                      `gorm:"default:false" json:"trace_enabled"`
 	TraceMode         TokenTraceMode            `gorm:"size:16;default:full" json:"trace_mode"`
+	APIRoleMode       APIRoleMode               `gorm:"size:16;not null;default:inherit;check:chk_tokens_api_role_mode,api_role_mode IN ('inherit','explicit')" json:"api_role_mode"`
 	BYOKOnly          bool                      `gorm:"default:false" json:"byok_only"`
 	AllowedChannelIDs datatypes.JSONSlice[uint] `gorm:"type:text" json:"allowed_channel_ids"`
 	CreatedAt         int64                     `gorm:"autoCreateTime" json:"created_at"`

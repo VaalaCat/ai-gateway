@@ -42,6 +42,10 @@ type Store struct {
 	userRoutings           entitycache.EntityCache[uint, *protocol.UserRoutingMap]
 	tokenRoutings          entitycache.EntityCache[uint, *protocol.TokenRoutingMap]
 	visiblePrivateChannels entitycache.EntityCache[uint, *protocol.VisiblePrivateChannelSet]
+	userAPIRoleSets        entitycache.EntityCache[uint, *protocol.APIRoleSet]
+	tokenAPIRoleSets       entitycache.EntityCache[uint, *protocol.APIRoleSet]
+
+	APIIndex *APIIndex
 
 	RouteIndex *RouteIndex
 
@@ -74,6 +78,7 @@ type Store struct {
 
 	onChannelChange []func(old, new *models.Channel)
 	cacheLifecycle  *entitycache.Lifecycle
+	syncHandlers    map[string]func(string, []byte)
 }
 
 // NewStore 装配 agent 端缓存 Store。
@@ -93,6 +98,7 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		directAddressLatest:   make(map[string]directAddressVersion),
 		directAddressOverlays: make(map[string]string),
 		userGroups:            entitycache.NewFullCache[uint, *models.UserGroup](),
+		APIIndex:              NewAPIIndex(),
 		RouteIndex:            NewRouteIndex(),
 		LimiterIndex:          NewLimiterIndex(),
 		cacheLifecycle:        cacheLifecycle,
@@ -174,7 +180,14 @@ func NewStore(client app.WSClient, cfg config.AgentCacheConfig) *Store {
 		panic(err)
 	}
 	s.tokenRoutings = tokenRoutings
-	s.tokenStore = newTokenStoreLRU(client, s.users, s.tokenRoutings, tokenCap, negTTL, refreshCfg, cacheLifecycle)
+
+	s.userAPIRoleSets = newAPIRoleSetLRU(client, false, userCap, negTTL, refreshCfg, cacheLifecycle)
+	s.tokenAPIRoleSets = newAPIRoleSetLRU(client, true, tokenCap, negTTL, refreshCfg, cacheLifecycle)
+	s.registerAPIRoleSetInvalidationHandlers()
+	s.tokenStore = newTokenStoreLRU(
+		client, s.users, s.tokenRoutings,
+		tokenCap, negTTL, refreshCfg, cacheLifecycle,
+	)
 
 	pchanCap := cfg.PrivateChannelsCapacity
 	if pchanCap <= 0 {
@@ -231,11 +244,46 @@ func newUserLRU(client app.WSClient, capacity int, negTTL time.Duration, refresh
 	})
 }
 
-func newTokenStoreLRU(client app.WSClient, users entitycache.EntityCache[uint, *protocol.SyncedUser], tokenRoutings entitycache.EntityCache[uint, *protocol.TokenRoutingMap], capacity int, negTTL time.Duration, refreshCfg func() entitycache.RefreshConfig, lifecycle *entitycache.Lifecycle) *tokenStore {
+func newAPIRoleSetLRU(
+	client app.WSClient,
+	token bool,
+	capacity int,
+	negativeTTL time.Duration,
+	refresh func() entitycache.RefreshConfig,
+	lifecycle *entitycache.Lifecycle,
+) entitycache.EntityCache[uint, *protocol.APIRoleSet] {
+	var loader entitycache.Loader[uint, *protocol.APIRoleSet]
+	if client != nil {
+		if token {
+			loader = &loaders.TokenAPIRoleSetLoader{Client: client}
+		} else {
+			loader = &loaders.UserAPIRoleSetLoader{Client: client}
+		}
+	}
+	cache, err := entitycache.NewLRUCache(entitycache.Config[uint, *protocol.APIRoleSet]{
+		Capacity: capacity, Loader: loader, NegativeTTL: negativeTTL, Refresh: refresh, Lifecycle: lifecycle,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return cache
+}
+
+func newTokenStoreLRU(
+	client app.WSClient,
+	users entitycache.EntityCache[uint, *protocol.SyncedUser],
+	tokenRoutings entitycache.EntityCache[uint, *protocol.TokenRoutingMap],
+	capacity int,
+	negTTL time.Duration,
+	refreshCfg func() entitycache.RefreshConfig,
+	lifecycle *entitycache.Lifecycle,
+) *tokenStore {
 	ts := &tokenStore{}
 	var loader entitycache.Loader[string, *models.Token]
 	if client != nil {
-		loader = &loaders.TokenLoader{Client: client, Users: users, TokenRoutings: tokenRoutings}
+		loader = &loaders.TokenLoader{
+			Client: client, Users: users, TokenRoutings: tokenRoutings,
+		}
 	}
 	primary, err := entitycache.NewLRUCache(entitycache.Config[string, *models.Token]{
 		Capacity:    capacity,
@@ -304,6 +352,10 @@ func (s *Store) GetTokenByID(ctx context.Context, id uint) *models.Token {
 	return t
 }
 
+func (s *Store) FindTokenByID(ctx context.Context, id uint) (*models.Token, bool, error) {
+	return s.tokenStore.GetByID(ctx, id)
+}
+
 func (s *Store) DeleteTokenByID(id uint) {
 	s.tokenStore.DeleteByID(id)
 }
@@ -317,9 +369,41 @@ func (s *Store) GetUser(ctx context.Context, id uint) *protocol.SyncedUser {
 	return u
 }
 
+func (s *Store) FindUser(ctx context.Context, id uint) (*protocol.SyncedUser, bool, error) {
+	return s.users.Get(ctx, id)
+}
+
 func (s *Store) SetUser(u *protocol.SyncedUser) { s.users.Set(u.ID, u) }
 func (s *Store) DeleteUser(id uint)             { s.users.Delete(id) }
 func (s *Store) UserCount() int                 { return s.users.Len() }
+
+func (s *Store) FindUserAPIRoleSet(ctx context.Context, id uint) (*protocol.APIRoleSet, bool, error) {
+	return s.userAPIRoleSets.Get(ctx, id)
+}
+
+func (s *Store) FindTokenAPIRoleSet(ctx context.Context, id uint) (*protocol.APIRoleSet, bool, error) {
+	return s.tokenAPIRoleSets.Get(ctx, id)
+}
+
+func (s *Store) SetUserAPIRoleSet(id uint, roleSet *protocol.APIRoleSet) {
+	if roleSet != nil {
+		s.userAPIRoleSets.Set(id, roleSet)
+	}
+}
+
+func (s *Store) SetTokenAPIRoleSet(id uint, roleSet *protocol.APIRoleSet) {
+	if roleSet != nil {
+		s.tokenAPIRoleSets.Set(id, roleSet)
+	}
+}
+
+func (s *Store) DeleteUserAPIRoleSet(id uint)  { s.userAPIRoleSets.Delete(id) }
+func (s *Store) DeleteTokenAPIRoleSet(id uint) { s.tokenAPIRoleSets.Delete(id) }
+
+func (s *Store) ClearAPIRoleSets() {
+	s.userAPIRoleSets.Clear()
+	s.tokenAPIRoleSets.Clear()
+}
 
 // SetUserQuota 更新已缓存 user 的 Quota 字段;用于配额扣减后的原地刷新。
 // 若 user 不在缓存中则静默忽略（不触发 loader 拉取）。
@@ -823,6 +907,10 @@ func (s *Store) GetSystemTestToken() *models.Token {
 // === HandleSyncEvent ===
 
 func (s *Store) HandleSyncEvent(entity, action string, data []byte) {
+	if handler := s.syncHandlers[entity]; handler != nil {
+		handler(action, data)
+		return
+	}
 	switch entity {
 	case events.EntityToken:
 		var token models.Token

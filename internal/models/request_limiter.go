@@ -1,5 +1,12 @@
 package models
 
+import (
+	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
+
 // RequestLimiter 是一条请求级限流策略：限什么资源、限多少、额度怎么分、超了怎么办。
 // 绑定关系另见 LimiterBinding；执行见 internal/agent/relay/limiter。
 type RequestLimiter struct {
@@ -34,6 +41,8 @@ type RequestLimiter struct {
 //     (如 per_model) 需要新数据从热路径透传进来；
 //  3. limiter.bucketOf() 的 switch —— 其 default 会把未识别 KeyBy 静默并入 "shared" 桶。
 const (
+	MaxRateLimitHitNameBytes = 128
+
 	LimiterMetricConcurrency = "concurrency"
 	LimiterMetricRate        = "rate"
 
@@ -51,6 +60,36 @@ const (
 	LimiterActionWait   = "wait"
 )
 
+// ValidRateLimitText reports whether a limiter-owned text fact is safe to
+// persist and carry on the wire without normalization or replacement.
+func ValidRateLimitText(value string, maxBytes int, allowEmpty bool) bool {
+	if value == "" {
+		return allowEmpty
+	}
+	if maxBytes < 1 || len(value) > maxBytes || !utf8.ValidString(value) || value != strings.TrimSpace(value) {
+		return false
+	}
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return false
+		}
+	}
+	return true
+}
+
+func ValidRequestLimiterName(value string) bool {
+	return ValidRateLimitText(value, MaxRateLimitHitNameBytes, false)
+}
+
+// WireSafeRequestLimiterName preserves a valid persisted name and gives legacy
+// invalid rows a stable, traceable fallback without changing the limiter ID.
+func WireSafeRequestLimiterName(limiterID uint, persistedName string) string {
+	if ValidRequestLimiterName(persistedName) {
+		return persistedName
+	}
+	return "limiter-" + strconv.FormatUint(uint64(limiterID), 10)
+}
+
 // ChannelKeyed 报告该 KeyBy 是否依赖具体渠道（决定落请求级还是尝试级闸门）。
 func (l *RequestLimiter) ChannelKeyed() bool {
 	return l.KeyBy == LimiterKeyPerChannel || l.KeyBy == LimiterKeyPerChannelUser
@@ -64,6 +103,9 @@ func (l *RequestLimiter) ChannelKeyed() bool {
 //   - per_channel       → global / channel（按渠道分桶）
 //   - per_channel_user  → global / channel（按渠道×用户分桶，挂载点仍是渠道）
 func ValidBindingTarget(keyBy, targetType string) bool {
+	if IsAPILimiterTarget(targetType) {
+		return keyBy == LimiterKeyShared || keyBy == LimiterKeyPerUser || keyBy == LimiterKeyPerGroup
+	}
 	switch keyBy {
 	case LimiterKeyShared:
 		return targetType == LimiterTargetGlobal
@@ -75,6 +117,12 @@ func ValidBindingTarget(keyBy, targetType string) bool {
 		return targetType == LimiterTargetGlobal || targetType == LimiterTargetChannel
 	}
 	return false
+}
+
+// ValidAPILimiterBinding is the write-side contract for API resource bindings.
+// ChannelScope belongs only to the LLM channel hot path and must be empty here.
+func ValidAPILimiterBinding(limiter RequestLimiter, targetType string) bool {
+	return IsAPILimiterTarget(targetType) && limiter.ChannelScope == "" && ValidBindingTarget(limiter.KeyBy, targetType)
 }
 
 // ValidAction 报告超容量处置方式是否合法（reject 拒绝 / wait 排队）。

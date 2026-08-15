@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { Loader2, MoreHorizontal, Search, SlidersHorizontal } from "lucide-react";
@@ -32,6 +32,7 @@ import { useDebounce } from "@/hooks/use-debounce";
 import { useAuth } from "@/lib/auth";
 import {
   buildCompleteDateRange,
+  dateStrToExclusiveEndTs,
   dateStrToTs,
   isFiniteUnixSeconds,
   tsToDateStr,
@@ -58,6 +59,10 @@ interface FilterableToolbarProps {
   secondaryContent?: ReactNode;
   /** 桌面端筛选区独占一行，actions 在下一行右对齐。 */
   filtersOnOwnRow?: boolean;
+  /** 仅为本工具栏拥有的移动端 portal 交互项提供舒适触控尺寸。 */
+  mobileTouchSize?: "comfortable";
+  /** 移动端让首个主筛选项独占整行，适合搜索框后接短筛选与操作的复杂表格。 */
+  firstFilterFullWidthOnMobile?: boolean;
 }
 
 export function FilterableToolbar({
@@ -69,6 +74,8 @@ export function FilterableToolbar({
   secondaryActions,
   secondaryContent,
   filtersOnOwnRow = false,
+  mobileTouchSize,
+  firstFilterFullWidthOnMobile = false,
 }: FilterableToolbarProps) {
   const tc = useTranslations("common");
   const { isAdmin } = useAuth();
@@ -99,6 +106,7 @@ export function FilterableToolbar({
           className={cn(
             "contents min-w-0 flex-1 sm:flex sm:flex-row sm:flex-wrap sm:items-end",
             filtersOnOwnRow ? "sm:gap-2 md:basis-full" : "sm:gap-3",
+            firstFilterFullWidthOnMobile && "[&>:first-child]:col-span-2 sm:[&>:first-child]:col-span-1",
           )}
         >
           {primary.map(([key, def]) => (
@@ -108,6 +116,7 @@ export function FilterableToolbar({
               def={def}
               value={value}
               onChange={onChange}
+              mobileTouchSize={mobileTouchSize}
             />
           ))}
         </div>
@@ -130,17 +139,18 @@ export function FilterableToolbar({
               onChange={onChange}
               count={activeAdvancedCount}
               label={tc("filters")}
+              mobileTouchSize={mobileTouchSize}
             />
           )}
           {secondaryContent}
           {secondary.length > 0 && (
             <div className="sm:hidden">
-              <ToolbarActionsMenu actions={secondary} label={tc("more")} />
+              <ToolbarActionsMenu actions={secondary} label={tc("more")} mobileTouchSize={mobileTouchSize} />
             </div>
           )}
           <div className="hidden sm:contents">
             {shouldCollapse ? (
-              <ToolbarActionsMenu actions={secondary} label={tc("more")} />
+              <ToolbarActionsMenu actions={secondary} label={tc("more")} mobileTouchSize={mobileTouchSize} />
             ) : (
               secondary.map((a, i) => <ToolbarActionButton key={i} action={a} />)
             )}
@@ -159,12 +169,14 @@ interface FilterControlProps {
   onChange: (next: Partial<FilterValues>) => void;
   /** Popover 纵向布局:控件 w-full,不加 sm 宽度节奏。 */
   fullWidth?: boolean;
+  mobileTouchSize?: "comfortable";
 }
 
-function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterControlProps) {
+function FilterControl({ fieldKey, def, value, onChange, fullWidth, mobileTouchSize }: FilterControlProps) {
   const tc = useTranslations("common");
   const tep = useTranslations("entityPicker");
   const tb = useTranslations("billing");
+  const controlId = useId();
   if (def.kind === "time") {
     return (
       <TimeRangeFilter
@@ -177,16 +189,20 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
     );
   }
   if (def.kind === "picker") {
+    const pickerQuery = def.pickerQuery?.(value);
     const label = def.label ?? def.placeholder ?? tep(`label.${def.entity}` as never) ?? fieldKey;
     return (
-      <FilterField label={label} className="w-full sm:w-auto">
+      <FilterField label={label} htmlFor={controlId} className="w-full sm:w-auto">
         <EntityPicker
+          id={controlId}
           key={def.entity}
           entity={def.entity}
           size="sm"
           value={String(value[fieldKey] ?? "")}
           onChange={(v) => onChange({ [fieldKey]: v })}
-          placeholder={tc("all")}
+          placeholder={def.placeholder ?? tc("all")}
+          apiServiceId={pickerQuery?.apiServiceId}
+          disabled={pickerQuery?.disabled}
           className={cn(
             "w-full [&_button[role=combobox]]:h-9 sm:[&_button[role=combobox]]:h-8",
             !fullWidth && "sm:w-40",
@@ -200,17 +216,17 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
     const includeAll = def.includeAll !== false;
     const label = def.label ?? def.placeholder ?? fieldKey;
     return (
-      <FilterField label={label} className="w-full sm:w-auto">
+      <FilterField label={label} htmlFor={controlId} className="w-full sm:w-auto">
         <Select
           value={current || "__all__"}
           onValueChange={(v) =>
             onChange({ [fieldKey]: v === "__all__" ? "" : v })
           }
         >
-          <SelectTrigger size="sm" className={cn("!h-9 w-full sm:!h-8", !fullWidth && "sm:w-40")}>
+          <SelectTrigger id={controlId} size="sm" className={cn("!h-9 w-full sm:!h-8", !fullWidth && "sm:w-40")}>
             <SelectValue placeholder={def.placeholder} />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent mobileTouchSize={mobileTouchSize}>
             <SelectGroup>
               {includeAll && (
                 <SelectItem value="__all__">{tc("all")}</SelectItem>
@@ -229,14 +245,17 @@ function FilterControl({ fieldKey, def, value, onChange, fullWidth }: FilterCont
   return (
     <FilterField
       label={def.label ?? def.placeholder ?? fieldKey}
+      htmlFor={controlId}
       className="w-full sm:w-auto"
     >
       <DebouncedTextFilter
         placeholder={def.placeholder}
+        id={controlId}
         value={String(value[fieldKey] ?? "")}
         debounceMs={def.debounceMs ?? 300}
         onChange={(v) => onChange({ [fieldKey]: v })}
         fullWidth={fullWidth}
+        controlWidth={def.controlWidth}
       />
     </FilterField>
   );
@@ -253,7 +272,8 @@ interface TimeRangeFilterProps {
 function TimeRangeFilter({ value, onChange, label, maxDays, fullWidth }: TimeRangeFilterProps) {
   const displayRange = buildCompleteDateRange(
     isFiniteUnixSeconds(value.start) ? tsToDateStr(value.start) : "",
-    isFiniteUnixSeconds(value.end) ? tsToDateStr(value.end) : "",
+    // behavior change: an exclusive next-midnight end displays the selected prior calendar day.
+    isFiniteUnixSeconds(value.end) ? tsToDateStr(value.end - 1) : "",
     maxDays,
   );
 
@@ -266,7 +286,8 @@ function TimeRangeFilter({ value, onChange, label, maxDays, fullWidth }: TimeRan
           // behavior change: update both URL bounds atomically.
           onChange({
             start: dateStrToTs(completeRange.startDate, false),
-            end: dateStrToTs(completeRange.endDate, true),
+            // behavior change: consumers filter with created_at < end, so use next local midnight.
+            end: dateStrToExclusiveEndTs(completeRange.endDate),
           });
         }}
         placeholder={label}
@@ -282,19 +303,23 @@ function TimeRangeFilter({ value, onChange, label, maxDays, fullWidth }: TimeRan
 }
 
 interface DebouncedTextProps {
+  id?: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   debounceMs: number;
   fullWidth?: boolean;
+  controlWidth?: "compact" | "default";
 }
 
 function DebouncedTextFilter({
+  id,
   value,
   onChange,
   placeholder,
   debounceMs,
   fullWidth,
+  controlWidth = "default",
 }: DebouncedTextProps) {
   const [draft, setDraft] = useState(() => ({ baseline: value, value }));
   const onChangeRef = useRef(onChange);
@@ -314,9 +339,13 @@ function DebouncedTextFilter({
   }, [debounced, value]);
 
   return (
-    <div className={cn("relative w-full", !fullWidth && "sm:w-56")}>
+    <div className={cn(
+      "relative w-full",
+      !fullWidth && (controlWidth === "compact" ? "sm:w-32" : "sm:w-56"),
+    )}>
       <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
       <Input
+        id={id}
         placeholder={placeholder}
         value={currentDraft.value}
         onChange={(e) => setDraft({ baseline: value, value: e.target.value })}
@@ -391,7 +420,7 @@ function ToolbarActionMenuItem({ action }: { action: ToolbarAction }) {
   );
 }
 
-function ToolbarActionsMenu({ actions, label }: { actions: ToolbarAction[]; label: string }) {
+function ToolbarActionsMenu({ actions, label, mobileTouchSize }: { actions: ToolbarAction[]; label: string; mobileTouchSize?: "comfortable" }) {
   if (actions.length === 0) return null;
   return (
     <DropdownMenu>
@@ -401,7 +430,7 @@ function ToolbarActionsMenu({ actions, label }: { actions: ToolbarAction[]; labe
           <span>{label}</span>
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      <DropdownMenuContent align="end" mobileTouchSize={mobileTouchSize}>
         <DropdownMenuGroup>
           {actions.map((action, index) => (
             <ToolbarActionMenuItem key={index} action={action} />
@@ -418,9 +447,10 @@ interface AdvancedFiltersPopoverProps {
   onChange: (next: Partial<FilterValues>) => void;
   count: number;
   label: string;
+  mobileTouchSize?: "comfortable";
 }
 
-function AdvancedFiltersPopover({ entries, value, onChange, count, label }: AdvancedFiltersPopoverProps) {
+function AdvancedFiltersPopover({ entries, value, onChange, count, label, mobileTouchSize }: AdvancedFiltersPopoverProps) {
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -450,6 +480,7 @@ function AdvancedFiltersPopover({ entries, value, onChange, count, label }: Adva
             value={value}
             onChange={onChange}
             fullWidth
+            mobileTouchSize={mobileTouchSize}
           />
         ))}
       </PopoverContent>

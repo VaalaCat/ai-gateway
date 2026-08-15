@@ -34,6 +34,7 @@ export const STORAGE_KEYS = {
 export const HTTP_HEADERS = {
   CONTENT_TYPE: "Content-Type",
   AUTHORIZATION: "Authorization",
+  SERVER_TIME_MS: "X-Vaala-Server-Time-Ms",
 } as const;
 
 // Chat message roles

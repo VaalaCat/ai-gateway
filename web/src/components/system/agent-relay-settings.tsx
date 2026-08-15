@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +24,7 @@ import {
   type AgentRelaySettingsPatch,
 } from "@/lib/api/system";
 import { parseOptionalRelayURI } from "@/lib/utils/relay-uri";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 
 const DEFAULT_URI_KEY = "agent.relay_default_uri";
 const PROBE_SUCCESS_TTL_KEY = "agent.connectivity_probe_success_ttl_seconds";
@@ -162,12 +164,14 @@ export function AgentRelaySettings() {
             <FieldGroup className="grid min-w-0 gap-4 sm:grid-cols-3">
               <Field data-invalid={successTTLError || undefined} data-disabled={update.isPending || undefined}>
                 <FieldLabel htmlFor="agent-probe-success-ttl">{t("probeSuccessTtl")}</FieldLabel>
-                <Input
+                <NumberUnitInput
                   id="agent-probe-success-ttl"
                   type="number"
                   min={30}
                   max={3600}
                   value={successTTL}
+                  unit="s"
+                  humanReadable={humanizeNumberUnit(successTTL, "seconds")}
                   disabled={update.isPending}
                   aria-invalid={successTTLError}
                   onChange={(event) => setSuccessTTLDraft(event.target.value)}
@@ -177,12 +181,14 @@ export function AgentRelaySettings() {
               </Field>
               <Field data-invalid={retryMinError || undefined} data-disabled={update.isPending || undefined}>
                 <FieldLabel htmlFor="agent-probe-retry-min">{t("probeRetryMin")}</FieldLabel>
-                <Input
+                <NumberUnitInput
                   id="agent-probe-retry-min"
                   type="number"
                   min={5}
                   max={300}
                   value={retryMin}
+                  unit="s"
+                  humanReadable={humanizeNumberUnit(retryMin, "seconds")}
                   disabled={update.isPending}
                   aria-invalid={retryMinError}
                   onChange={(event) => setRetryMinDraft(event.target.value)}
@@ -192,12 +198,14 @@ export function AgentRelaySettings() {
               </Field>
               <Field data-invalid={retryMaxError || undefined} data-disabled={update.isPending || undefined}>
                 <FieldLabel htmlFor="agent-probe-retry-max">{t("probeRetryMax")}</FieldLabel>
-                <Input
+                <NumberUnitInput
                   id="agent-probe-retry-max"
                   type="number"
                   min={5}
                   max={3600}
                   value={retryMax}
+                  unit="s"
+                  humanReadable={humanizeNumberUnit(retryMax, "seconds")}
                   disabled={update.isPending}
                   aria-invalid={retryMaxError}
                   onChange={(event) => setRetryMaxDraft(event.target.value)}

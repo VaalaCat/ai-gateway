@@ -29,6 +29,19 @@ type PermitStore interface {
 	RemoveWaiter(key BucketKey)
 }
 
+// RateRequest 描述一个需要在同一 admission 中提交的固定窗口速率计数。
+type RateRequest struct {
+	Key      BucketKey
+	Capacity int64
+	WindowMs int
+}
+
+// RateBatchStore 供 Generic API 在全部并发名额就绪后原子提交速率计数。
+// rejectedIndex 仅在 ok=false 时有效，对应 requests 中首条无法提交的规则。
+type RateBatchStore interface {
+	TryRateBatch(requests []RateRequest) (rejectedIndex int, ok bool)
+}
+
 var noopRelease = func() {}
 
 type semaphore struct {
@@ -45,10 +58,11 @@ type window struct {
 
 // MemStore 是进程内 PermitStore。每 agent 建一个、跨请求复用（同 resilience.Registry）。
 type MemStore struct {
-	conc  utils.SyncMap[BucketKey, *semaphore]
-	rate  utils.SyncMap[BucketKey, *window]
-	waits utils.SyncMap[BucketKey, *bucketWait]
-	now   func() int64 // 可注入时钟(测试)，默认 time.Now().UnixMilli
+	conc   utils.SyncMap[BucketKey, *semaphore]
+	rate   utils.SyncMap[BucketKey, *window]
+	waits  utils.SyncMap[BucketKey, *bucketWait]
+	rateMu sync.Mutex
+	now    func() int64 // 可注入时钟(测试)，默认 time.Now().UnixMilli
 }
 
 func NewMemStore() *MemStore {
@@ -93,22 +107,55 @@ func (s *MemStore) getSem(key BucketKey, capacity int64) *semaphore {
 }
 
 func (s *MemStore) TryRate(key BucketKey, capacity int64, windowMs int) bool {
-	if capacity <= 0 || windowMs <= 0 {
-		return false
+	_, ok := s.TryRateBatch([]RateRequest{{Key: key, Capacity: capacity, WindowMs: windowMs}})
+	return ok
+}
+
+func (s *MemStore) TryRateBatch(requests []RateRequest) (int, bool) {
+	if len(requests) == 0 {
+		return -1, true
 	}
-	w, _ := s.rate.LoadOrStore(key, &window{})
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+
+	type pendingRate struct {
+		window *window
+		start  int64
+		count  int64
+	}
+	pending := make(map[BucketKey]*pendingRate, len(requests))
+	order := make([]BucketKey, 0, len(requests))
 	now := s.now()
-	if now-w.start >= int64(windowMs) {
-		w.start = now
-		w.count = 0
+	for index, request := range requests {
+		if request.Capacity <= 0 || request.WindowMs <= 0 {
+			return index, false
+		}
+		staged, exists := pending[request.Key]
+		if !exists {
+			w, _ := s.rate.LoadOrStore(request.Key, &window{})
+			w.mu.Lock()
+			staged = &pendingRate{window: w, start: w.start, count: w.count}
+			w.mu.Unlock()
+			pending[request.Key] = staged
+			order = append(order, request.Key)
+		}
+		if now-staged.start >= int64(request.WindowMs) {
+			staged.start = now
+			staged.count = 0
+		}
+		if staged.count >= request.Capacity {
+			return index, false
+		}
+		staged.count++
 	}
-	if w.count >= capacity {
-		return false
+	for _, key := range order {
+		staged := pending[key]
+		staged.window.mu.Lock()
+		staged.window.start = staged.start
+		staged.window.count = staged.count
+		staged.window.mu.Unlock()
 	}
-	w.count++
-	return true
+	return -1, true
 }
 
 type bucketWait struct {
@@ -174,6 +221,7 @@ func (s *MemStore) SnapshotBuckets() []BucketUsage {
 		get(k).Occupied = sem.occupied.Load()
 		return true
 	})
+	s.rateMu.Lock()
 	s.rate.Range(func(k BucketKey, w *window) bool {
 		w.mu.Lock()
 		b := get(k)
@@ -183,6 +231,7 @@ func (s *MemStore) SnapshotBuckets() []BucketUsage {
 		w.mu.Unlock()
 		return true
 	})
+	s.rateMu.Unlock()
 	s.waits.Range(func(k BucketKey, bw *bucketWait) bool {
 		get(k).Waiters = bw.waiters.Load()
 		return true

@@ -60,6 +60,11 @@ func TestNewFetchRegistry_RegistersTokenAndUser(t *testing.T) {
 // setupSyncDB 创建内存 SQLite DB，完成 AutoMigrate，返回 (AdminQuery, AdminMutation)。
 // 不依赖 master 包，避免 import cycle。
 func setupSyncDB(t *testing.T) (dao.AdminQuery, dao.AdminMutation) {
+	q, m, _ := setupSyncDBWithDatabase(t)
+	return q, m
+}
+
+func setupSyncDBWithDatabase(t *testing.T) (dao.AdminQuery, dao.AdminMutation, *gorm.DB) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -68,12 +73,18 @@ func setupSyncDB(t *testing.T) (dao.AdminQuery, dao.AdminMutation) {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	if err := db.AutoMigrate(
+		&models.APIService{}, &models.APIBackend{}, &models.APIRoute{}, &models.APIUpstream{},
+		&models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.RoleBinding{},
+	); err != nil {
+		t.Fatalf("migrate generic API fixtures: %v", err)
+	}
 	if err := models.SeedDefaultUserGroup(db); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	app := &dbApp{db: db}
 	ctx := dao.NewContext(app)
-	return dao.NewAdminQuery(ctx), dao.NewAdminMutation(ctx)
+	return dao.NewAdminQuery(ctx), dao.NewAdminMutation(ctx), db
 }
 
 func TestTokenFetchHandler_Found_IncludesSyncedUser(t *testing.T) {
@@ -171,6 +182,49 @@ func TestTokenFetchHandler_GroupIDZeroNormalizedToDefault(t *testing.T) {
 	}
 	if tokenSide.User == nil || tokenSide.User.GroupID != 1 {
 		t.Fatalf("GroupID=0 should normalize to 1 (default group), got %+v", tokenSide.User)
+	}
+}
+
+func TestTokenFetchHandler_SystemTokenDoesNotRequireOwner(t *testing.T) {
+	q, m := setupSyncDB(t)
+	for _, test := range []struct {
+		name string
+		mode models.APIRoleMode
+	}{
+		{name: "inherit", mode: models.APIRoleModeInherit},
+		{name: "explicit", mode: models.APIRoleModeExplicit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			token := &models.Token{
+				Key: "sk-system-" + test.name, UserID: 0, Status: consts.StatusEnabled,
+				Name: "system-" + test.name, APIRoleMode: test.mode,
+			}
+			if err := m.Token().Create(token); err != nil {
+				t.Fatal(err)
+			}
+
+			data, side, found, err := tokenFetchHandler{}.Fetch(context.Background(), q, token.Key)
+			if err != nil || !found {
+				t.Fatalf("Fetch err=%v found=%v", err, found)
+			}
+			var got models.Token
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ID != token.ID || got.UserID != 0 {
+				t.Fatalf("token mismatch: %+v", got)
+			}
+			var tokenSide protocol.TokenFetchSide
+			if err := json.Unmarshal(side, &tokenSide); err != nil {
+				t.Fatal(err)
+			}
+			if tokenSide.User != nil {
+				t.Fatalf("system token must not require owner facts: %+v", tokenSide)
+			}
+			if tokenSide.TokenRoutings == nil {
+				t.Fatal("system token must include token routings")
+			}
+		})
 	}
 }
 

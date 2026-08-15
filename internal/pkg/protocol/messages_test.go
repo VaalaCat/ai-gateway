@@ -10,6 +10,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCapabilitiesNormalizationKeepsLexicographicallySmallestBoundedSetForLargeInput(t *testing.T) {
@@ -145,6 +146,20 @@ func TestAuthBootstrapAndTicketMessagesJSONRoundTrip(t *testing.T) {
 			t.Fatalf("capabilities round trip = %#v, want %#v", got, want)
 		}
 	})
+}
+
+func TestGenericAPIUsageMasterCapabilityNameAndBootstrapRoundTrip(t *testing.T) {
+	require.Equal(t, "generic_api_usage_v1", MasterCapabilityGenericAPIUsageV1)
+	want := AuthBootstrapResponse{Capabilities: []string{MasterCapabilityGenericAPIUsageV1}}
+	raw, err := json.Marshal(want)
+	require.NoError(t, err)
+	var got AuthBootstrapResponse
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.Equal(t, want.Capabilities, got.Capabilities)
+}
+
+func TestGenericAPIWebSocketAgentCapabilityName(t *testing.T) {
+	require.Equal(t, "generic_api_websocket_v1", AgentCapabilityGenericAPIWebSocketV1)
 }
 
 func TestHeartbeatCapabilitiesJSONCompatibility(t *testing.T) {

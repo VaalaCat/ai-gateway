@@ -52,6 +52,7 @@ func TestAuthBootstrapAndTicketClaimsUseAuthenticatedAgent(t *testing.T) {
 	wantCapabilities := []string{
 		protocol.AgentCapabilityForwardV1,
 		protocol.AgentCapabilityTunnelV2,
+		protocol.MasterCapabilityGenericAPIUsageV1,
 	}
 	require.Equal(t, wantCapabilities, bootstrap.Capabilities)
 	require.Equal(t, []agentauth.PublicKey{srv.Signer.PublicKey()}, bootstrap.SigningKeys)

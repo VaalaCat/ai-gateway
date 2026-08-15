@@ -13,6 +13,7 @@ import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -559,11 +560,8 @@ export default function ModelsPage() {
   // --- Render ---
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground text-sm mt-0.5">{t("description")}</p>
-      </div>
+    <PageLayout title={t("title")} description={t("description")} maxWidth="full">
+      <div className="space-y-4">
 
       <DataTable
         columns={columns}
@@ -670,6 +668,7 @@ export default function ModelsPage() {
         onOpenChange={(open) => { if (!open) setDeleteItem(null); }}
         onConfirm={handleDelete}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

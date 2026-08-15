@@ -13,6 +13,13 @@ import (
 type candidate struct {
 	limiter    *models.RequestLimiter
 	targetType string
+	targetID   uint
+}
+
+type APILimiter struct {
+	Limiter    *models.RequestLimiter
+	TargetType string
+	TargetID   uint
 }
 
 // LimiterIndex 持有同步下发的 limiters + bindings，重建候选索引，
@@ -23,10 +30,13 @@ type LimiterIndex struct {
 	limiters map[uint]*models.RequestLimiter
 	bindings map[uint]*models.LimiterBinding
 
-	global    []candidate
-	byGroup   map[uint][]candidate
-	byUser    map[uint][]candidate
-	byChannel map[uint][]candidate // channel 绑定按 admin Channel.ID
+	global        []candidate
+	byGroup       map[uint][]candidate
+	byUser        map[uint][]candidate
+	byChannel     map[uint][]candidate // channel 绑定按 admin Channel.ID
+	byAPIService  map[uint][]APILimiter
+	byAPIRoute    map[uint][]APILimiter
+	byAPIUpstream map[uint][]APILimiter
 }
 
 func NewLimiterIndex() *LimiterIndex {
@@ -92,6 +102,9 @@ func (li *LimiterIndex) rebuild() {
 	li.byGroup = map[uint][]candidate{}
 	li.byUser = map[uint][]candidate{}
 	li.byChannel = map[uint][]candidate{}
+	li.byAPIService = map[uint][]APILimiter{}
+	li.byAPIRoute = map[uint][]APILimiter{}
+	li.byAPIUpstream = map[uint][]APILimiter{}
 	for _, b := range li.bindings {
 		if !b.Enabled {
 			continue
@@ -100,7 +113,7 @@ func (li *LimiterIndex) rebuild() {
 		if !ok || !l.Enabled {
 			continue
 		}
-		c := candidate{limiter: l, targetType: b.TargetType}
+		c := candidate{limiter: l, targetType: b.TargetType, targetID: b.TargetID}
 		switch b.TargetType {
 		case models.LimiterTargetGlobal:
 			li.global = append(li.global, c)
@@ -110,8 +123,50 @@ func (li *LimiterIndex) rebuild() {
 			li.byUser[b.TargetID] = append(li.byUser[b.TargetID], c)
 		case models.LimiterTargetChannel:
 			li.byChannel[b.TargetID] = append(li.byChannel[b.TargetID], c)
+		case models.LimiterTargetAPIService:
+			li.byAPIService[b.TargetID] = append(li.byAPIService[b.TargetID], APILimiter{Limiter: l, TargetType: b.TargetType, TargetID: b.TargetID})
+		case models.LimiterTargetAPIRoute:
+			li.byAPIRoute[b.TargetID] = append(li.byAPIRoute[b.TargetID], APILimiter{Limiter: l, TargetType: b.TargetType, TargetID: b.TargetID})
+		case models.LimiterTargetAPIUpstream:
+			li.byAPIUpstream[b.TargetID] = append(li.byAPIUpstream[b.TargetID], APILimiter{Limiter: l, TargetType: b.TargetType, TargetID: b.TargetID})
 		}
 	}
+}
+
+func (li *LimiterIndex) EffectiveSourceAPILimiters(userID, groupID, serviceID, routeID uint) []APILimiter {
+	li.mu.RLock()
+	defer li.mu.RUnlock()
+	base := make([]candidate, 0, len(li.global)+len(li.byGroup[groupID])+len(li.byUser[userID]))
+	base = append(base, li.global...)
+	base = append(base, li.byGroup[groupID]...)
+	base = append(base, li.byUser[userID]...)
+	resolved := resolveCandidates(base, func(l *models.RequestLimiter) bool { return !l.ChannelKeyed() })
+	out := make([]APILimiter, 0, len(resolved)+len(li.byAPIService[serviceID])+len(li.byAPIRoute[routeID]))
+	for _, winner := range resolved {
+		out = append(out, APILimiter{Limiter: winner.limiter, TargetType: winner.targetType, TargetID: winner.targetID})
+	}
+	out = append(out, li.byAPIService[serviceID]...)
+	out = append(out, li.byAPIRoute[routeID]...)
+	return cloneAPILimiters(out)
+}
+
+func (li *LimiterIndex) EffectiveUpstreamAPILimiters(upstreamID uint) []APILimiter {
+	li.mu.RLock()
+	defer li.mu.RUnlock()
+	return cloneAPILimiters(li.byAPIUpstream[upstreamID])
+}
+
+func cloneAPILimiters(values []APILimiter) []APILimiter {
+	out := make([]APILimiter, 0, len(values))
+	for _, value := range values {
+		if value.Limiter == nil {
+			continue
+		}
+		copy := *value.Limiter
+		value.Limiter = &copy
+		out = append(out, value)
+	}
+	return out
 }
 
 // EffectiveRequestLimiters 返回请求级（KeyBy 不依赖渠道）的生效 limiter。
@@ -151,6 +206,15 @@ func scopeMatches(scope, src string) bool {
 
 // resolve 实现 §6.1：按 (Metric,KeyBy) 维度分组，每组取绑定最具体的一条。
 func resolve(cands []candidate, keep func(*models.RequestLimiter) bool) []*models.RequestLimiter {
+	winners := resolveCandidates(cands, keep)
+	out := make([]*models.RequestLimiter, 0, len(winners))
+	for _, winner := range winners {
+		out = append(out, winner.limiter)
+	}
+	return out
+}
+
+func resolveCandidates(cands []candidate, keep func(*models.RequestLimiter) bool) []candidate {
 	type dim struct{ metric, keyBy string }
 	best := map[dim]candidate{}
 	for _, c := range cands {
@@ -162,9 +226,9 @@ func resolve(cands []candidate, keep func(*models.RequestLimiter) bool) []*model
 			best[d] = c
 		}
 	}
-	out := make([]*models.RequestLimiter, 0, len(best))
+	out := make([]candidate, 0, len(best))
 	for _, c := range best {
-		out = append(out, c.limiter)
+		out = append(out, c)
 	}
 	return out
 }

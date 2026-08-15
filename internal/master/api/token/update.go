@@ -1,21 +1,28 @@
 package token
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	apiaccessgrant "github.com/VaalaCat/ai-gateway/internal/master/api/api_access_grant"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
+	"github.com/VaalaCat/ai-gateway/internal/master/apirbac"
+	mastersync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error) {
@@ -24,7 +31,6 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 
 	daoCtx := dao.NewContextWithContext(c.App, c.RequestContext())
 	q := dao.NewAdminQuery(daoCtx)
-	m := dao.NewAdminMutation(daoCtx)
 
 	existing, err := q.Token().GetByID(uint(id))
 	if err != nil {
@@ -41,6 +47,12 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 	}
 	delete(updates, "id")
 	delete(updates, "key") // key is immutable
+	apiRoleUpdate, err := parseAPIRoleUpdate(updates)
+	if err != nil {
+		return models.Token{}, api.BadRequestError(err.Error(), err)
+	}
+	delete(updates, "api_role_mode")
+	delete(updates, "api_role_ids")
 
 	if v, ok := updates["status"]; ok {
 		if err := api.ValidateStatusValue(v); err != nil {
@@ -149,19 +161,105 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Token, error
 		updates["allowed_channel_ids"] = datatypes.JSONSlice[uint](ids)
 	}
 
-	if err := m.Token().Update(uint(id), updates); err != nil {
+	deletedManagedRoleID, err := applyTokenUpdate(daoCtx, c.RequestContext(), scope, existing.ID, updates, apiRoleUpdate)
+	if err != nil {
+		if errors.Is(err, dao.ErrTokenNotFoundOrOwnershipChanged) {
+			return models.Token{}, api.NotFoundError(consts.ErrNotFound)
+		}
+		if errors.Is(err, apirbac.ErrRoleOutsideUserSet) {
+			return models.Token{}, api.ForbiddenError(err.Error())
+		}
+		if errors.Is(err, apirbac.ErrRoleNotAssignable) {
+			return models.Token{}, api.BadRequestError(err.Error(), err)
+		}
 		return models.Token{}, api.InternalError("update token failed", err)
 	}
 
-	token, err := q.Token().GetByID(uint(id))
+	publishCtx, cancelPublish := context.WithTimeout(context.WithoutCancel(c.RequestContext()), 10*time.Second)
+	defer cancelPublish()
+	publishQuery := dao.NewAdminQuery(dao.NewContextWithContext(c.App, publishCtx))
+	token, err := publishQuery.Token().GetByID(uint(id))
 	if err != nil {
 		return models.Token{}, api.InternalError("update token failed", err)
 	}
 
-	if err := events.PublishTokenUpdate(c.RequestContext(), c.GetBus(), *token); err != nil {
+	if err := events.PublishTokenUpdate(publishCtx, c.GetBus(), *token); err != nil {
 		return models.Token{}, api.InternalError("publish token.update failed", err)
 	}
+	if apiRoleUpdate != nil {
+		actions := mastersync.NewAPISyncActions(c.GetBus(), nil)
+		query := publishQuery
+		if deletedManagedRoleID != 0 {
+			if err := actions.PublishRole(publishCtx, query, events.ActionDelete, deletedManagedRoleID); err != nil {
+				return models.Token{}, api.InternalError("publish deleted managed API role failed", err)
+			}
+		}
+		if err := actions.InvalidateTokenRoleSet(publishCtx, token.ID); err != nil {
+			return models.Token{}, api.InternalError("publish token API roles failed", err)
+		}
+	}
 	return *token, nil
+}
+
+func applyTokenUpdate(
+	daoCtx dao.Context,
+	requestCtx context.Context,
+	scope *middleware.RequestScope,
+	tokenID uint,
+	updates map[string]any,
+	roleUpdate *APIRoleUpdateRequest,
+) (uint, error) {
+	if roleUpdate == nil {
+		return 0, dao.NewAdminMutation(daoCtx).Token().Update(tokenID, updates)
+	}
+	var deletedManagedRoleID uint
+	err := dao.RunInCoreTx[dao.Context](daoCtx, func(txCtx dao.Context) error {
+		db := txCtx.GetCoreDB()
+		query := dao.NewAdminQuery(txCtx)
+		administrator := scope == nil || scope.IsAdmin
+		current, err := query.Token().GetByID(tokenID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return dao.ErrTokenNotFoundOrOwnershipChanged
+		}
+		if err != nil {
+			return err
+		}
+		if !administrator && current.UserID != scope.UserID {
+			return dao.ErrTokenNotFoundOrOwnershipChanged
+		}
+		validator := apirbac.NewTokenRoleAssignmentValidator(query.User(), query.Token(), query.APIRBAC())
+		if err := validator.Validate(requestCtx, current.UserID, roleUpdate.RoleIDs, administrator); err != nil {
+			return err
+		}
+		updates["api_role_mode"] = roleUpdate.Mode
+		mutation := dao.NewAdminMutation(txCtx)
+		if err := updateTokenRoleMode(mutation.Token(), current.ID, scope, administrator, updates); err != nil {
+			return err
+		}
+		if roleUpdate.Mode == models.APIRoleModeInherit {
+			removedID, err := apiaccessgrant.RemoveManagedRole(db, apiaccessgrant.PrincipalRef{Type: models.APIPrincipalToken, ID: tokenID})
+			if err != nil {
+				return err
+			}
+			deletedManagedRoleID = removedID
+			return mutation.APIRBAC().ReplaceRoleBindingsByPrincipal(models.APIPrincipalToken, tokenID, nil)
+		}
+		return mutation.APIRBAC().ReplaceCustomRoleBindingsByPrincipal(models.APIPrincipalToken, tokenID, roleUpdate.RoleIDs)
+	})
+	return deletedManagedRoleID, err
+}
+
+func updateTokenRoleMode(
+	tokens dao.AdminTokenMutation,
+	tokenID uint,
+	scope *middleware.RequestScope,
+	administrator bool,
+	updates map[string]any,
+) error {
+	if administrator {
+		return tokens.UpdateExisting(tokenID, updates)
+	}
+	return tokens.UpdateOwned(tokenID, scope.UserID, updates)
 }
 
 func normalizeAllowedChannelIDs(v any) ([]uint, error) {

@@ -5,15 +5,18 @@ import type { EntityAdapter, EntityListParams } from "../types";
 
 export const tokenAdapter: EntityAdapter<Token> = {
   name: "token",
-  useList: ({ search, scope, page_size, ownerUserId }: EntityListParams) => {
+  useList: ({ search, scope, page_size, ownerUserId, enabled = true }: EntityListParams) => {
     const { user } = useAuth();
     // scope === "self" → 带上当前用户 user_id 过滤；"all" → 不带，后端返回全部（仅 admin）。
     const effectiveUserID = ownerUserId ?? (scope === "self" ? user?.user_id : undefined);
-    return useTokens({
-      search,
-      page_size,
-      ...(effectiveUserID ? { user_id: effectiveUserID } : {}),
-    }) as ReturnType<EntityAdapter<Token>["useList"]>;
+    return useTokens(
+      {
+        search,
+        page_size,
+        ...(effectiveUserID ? { user_id: effectiveUserID } : {}),
+      },
+      { enabled },
+    ) as ReturnType<EntityAdapter<Token>["useList"]>;
   },
   useOne: (id) =>
     useToken(id ? Number(id) : 0) as ReturnType<EntityAdapter<Token>["useOne"]>,

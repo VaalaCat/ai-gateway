@@ -65,6 +65,7 @@ export function OverviewTab() {
         onRefresh={handleRefresh}
         refreshing={isFetching}
         showGranularity
+        showPageHeader={false}
       />
 
       {/* Row 1: 4 KPI */}

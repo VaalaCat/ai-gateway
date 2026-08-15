@@ -59,7 +59,19 @@ func (s *tokenStore) DeleteByID(id uint) {
 
 // Get 按 key 取 token。
 func (s *tokenStore) Get(ctx context.Context, key string) (*models.Token, bool, error) {
-	return s.primary.Get(ctx, key)
+	token, found, err := s.primary.Get(ctx, key)
+	if found && token != nil {
+		s.indexLoaded(token)
+	}
+	return token, found, err
+}
+
+func (s *tokenStore) indexLoaded(token *models.Token) {
+	s.byID.Store(token.ID, token.Key)
+	current, ok := s.primary.Peek(token.Key)
+	if !ok || current == nil || current.ID != token.ID {
+		s.byID.Delete(token.ID)
+	}
 }
 
 // GetByID 按 id 取 token：先查 byID 拿 key，再查主存储。

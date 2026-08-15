@@ -100,6 +100,50 @@ func TestAdminUserMutationUpdateQuotaConcurrentBoundary(t *testing.T) {
 	require.Equal(t, int64(math.MaxInt64), storedQuota)
 }
 
+func TestAdminUserQueryListByIDs(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	query := NewAdminQuery(ctx).User()
+	alice := &models.User{Username: "list-by-ids-alice"}
+	bob := &models.User{Username: "list-by-ids-bob"}
+	require.NoError(t, db.Create(alice).Error)
+	require.NoError(t, db.Create(bob).Error)
+
+	t.Run("returns each requested owner once", func(t *testing.T) {
+		users, err := query.ListByIDs([]uint{bob.ID, alice.ID, bob.ID})
+		require.NoError(t, err)
+		require.ElementsMatch(t, []uint{alice.ID, bob.ID}, []uint{users[0].ID, users[1].ID})
+	})
+
+	t.Run("empty input skips the database query", func(t *testing.T) {
+		const callbackName = "test:list_users_by_empty_ids"
+		queries := 0
+		require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+			if tx.Statement.Table == "users" {
+				queries++
+			}
+		}))
+		t.Cleanup(func() { require.NoError(t, db.Callback().Query().Remove(callbackName)) })
+
+		users, err := query.ListByIDs(nil)
+		require.NoError(t, err)
+		require.Empty(t, users)
+		require.Zero(t, queries)
+	})
+
+	t.Run("returns the batch query error", func(t *testing.T) {
+		const callbackName = "test:fail_list_users_by_ids"
+		require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+			if tx.Statement.Table == "users" {
+				_ = tx.AddError(errors.New("forced owner batch failure"))
+			}
+		}))
+		t.Cleanup(func() { require.NoError(t, db.Callback().Query().Remove(callbackName)) })
+
+		_, err := query.ListByIDs([]uint{alice.ID})
+		require.EqualError(t, err, "forced owner batch failure")
+	})
+}
+
 func TestUserDAO(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx).User()

@@ -351,6 +351,40 @@ func TestClaude2Chat_ToolChoice(t *testing.T) {
 	}
 }
 
+func TestClaude2Chat_NamedToolChoicePreservesMessageBoundaries(t *testing.T) {
+	body := `{
+		"model":"claude-sonnet-4",
+		"max_tokens":1024,
+		"system":"Follow the repository instructions.",
+		"messages":[{"role":"user","content":"List the files"}],
+		"tools":[{"name":"list_files","description":"List files","input_schema":{"type":"object","properties":{}}}],
+		"tool_choice":{"type":"tool","name":"list_files"}
+	}`
+	result := roundTripRequest(t, codec.ProtocolClaude, codec.ProtocolOpenAIChat, body)
+
+	msgs := mustGetArray(t, result, "messages")
+	if len(msgs) != 2 {
+		t.Fatalf("messages count = %d, want exactly system + user", len(msgs))
+	}
+	system := msgs[0].(map[string]any)
+	user := msgs[1].(map[string]any)
+	if system["role"] != "system" || system["content"] != "Follow the repository instructions." {
+		t.Fatalf("system message was not preserved as a separate message: %#v", system)
+	}
+	if user["role"] != "user" || user["content"] != "List the files" {
+		t.Fatalf("user message was not preserved as a separate message: %#v", user)
+	}
+
+	choice, ok := result["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice = %#v, want named function object", result["tool_choice"])
+	}
+	function, ok := choice["function"].(map[string]any)
+	if !ok || choice["type"] != "function" || function["name"] != "list_files" {
+		t.Fatalf("tool_choice = %#v, want function list_files", choice)
+	}
+}
+
 // TestClaude2Chat_DropsEmptyAssistantTextBlock: 完整 Anthropic→OpenAI 路径，忠实复现
 // 用户场景——历史 assistant 消息含空文本块，出站不得产生非法 {"type":"text"}。
 func TestClaude2Chat_DropsEmptyAssistantTextBlock(t *testing.T) {

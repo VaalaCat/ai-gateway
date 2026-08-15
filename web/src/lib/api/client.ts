@@ -1,4 +1,5 @@
 import { STORAGE_KEYS, HTTP_HEADERS } from "@/lib/constants";
+import { receivedMonotonicMs, tokenServerTimeAxis } from "./server-time";
 
 export class ApiError extends Error {
   constructor(
@@ -11,8 +12,13 @@ export class ApiError extends Error {
   }
 }
 
+export interface StatusResponse {
+  status: string;
+}
+
 class ApiClient {
   private baseURL: string;
+  private requestSequence = 0;
 
   constructor(baseURL: string = "") {
     this.baseURL = baseURL;
@@ -62,7 +68,17 @@ class ApiClient {
   }
 
   async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const requestSequence = ++this.requestSequence;
     const res = await this.requestResponse(path, options);
+
+    if (isSuccessfulTokenRead(path, options.method)) {
+      tokenServerTimeAxis.observeHeader(
+        res.headers.get(HTTP_HEADERS.SERVER_TIME_MS),
+        Date.now(),
+        receivedMonotonicMs(),
+        requestSequence,
+      );
+    }
 
     return res.json();
   }
@@ -71,8 +87,9 @@ class ApiClient {
     return this.request<T>(path);
   }
 
-  post<T>(path: string, body: unknown): Promise<T> {
+  post<T>(path: string, body: unknown, options: Omit<RequestInit, "method" | "body"> = {}): Promise<T> {
     return this.request<T>(path, {
+      ...options,
       method: "POST",
       body: JSON.stringify(body),
     });
@@ -102,6 +119,12 @@ class ApiClient {
   delete<T>(path: string): Promise<T> {
     return this.request<T>(path, { method: "DELETE" });
   }
+}
+
+function isSuccessfulTokenRead(path: string, method?: string) {
+  if (method !== undefined && method.toUpperCase() !== "GET") return false;
+  const pathname = path.split("?", 1)[0];
+  return pathname === "/tokens" || /^\/tokens\/\d+$/.test(pathname);
 }
 
 export const api = new ApiClient("/api");

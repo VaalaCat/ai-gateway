@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -22,6 +23,37 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
+
+func TestLLMRecorderBehaviorMatchesBeforeExtraction(t *testing.T) {
+	r := NewRecorder(CaptureFull, 8)
+	inbound := httptest.NewRequest(http.MethodPost, "/v1/chat", nil)
+	inbound.Header.Set("Authorization", "Bearer inbound-secret")
+	r.WithInbound(inbound, []byte("llm-request"))
+	outbound := httptest.NewRequest(http.MethodPost, "https://upstream.example/v1/chat", nil)
+	outbound.Header.Set("X-Api-Key", "channel-secret")
+	r.WithOutbound(outbound, []byte("llm-request"), &models.Channel{Key: "channel-secret"})
+	r.WithUpstreamStatus(&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Set-Cookie": {"secret"}}})
+	r.SetUpstreamBody([]byte("llm-response"))
+	r.WithPassthrough()
+	record := r.Finalize()
+	got := map[string]any{
+		"inbound_path": record.InboundPath, "inbound_authorization": record.InboundHeaders.Get("Authorization"),
+		"inbound_body": record.InboundBody, "outbound_path": record.OutboundPath,
+		"outbound_api_key": record.OutboundHeaders.Get("X-Api-Key"), "outbound_body": record.OutboundBody,
+		"upstream_status": record.UpstreamStatus, "response_cookie": record.ResponseHeaders.Get("Set-Cookie"),
+		"upstream_body": record.UpstreamBody, "client_body": record.ClientResponseBody, "verbose": record.Verbose,
+	}
+	gotRaw, err := json.Marshal(got)
+	require.NoError(t, err)
+	got = nil
+	require.NoError(t, json.Unmarshal(gotRaw, &got))
+
+	wantRaw, err := os.ReadFile("testdata/recorder_behavior.golden.json")
+	require.NoError(t, err)
+	var want map[string]any
+	require.NoError(t, json.Unmarshal(wantRaw, &want))
+	require.Equal(t, want, got)
+}
 
 func TestCaptureModeFromContext(t *testing.T) {
 	tests := []struct {
@@ -144,6 +176,37 @@ func TestRecorderEffectiveCaptureMode(t *testing.T) {
 				if rec.ResponseHeaders.Get("X-Test") != "response" {
 					t.Fatalf("non-sensitive response header was lost: %v", rec.ResponseHeaders)
 				}
+			}
+		})
+	}
+}
+
+func TestRecorderRetentionStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     CaptureMode
+		fail     bool
+		truncate bool
+		want     models.TraceRetentionStatus
+	}{
+		{name: "disabled", mode: CaptureOff, want: models.TraceRetentionDisabled},
+		{name: "headers only", mode: CaptureHeaders, want: models.TraceRetentionHeadersOnly},
+		{name: "full", mode: CaptureFull, want: models.TraceRetentionFull},
+		{name: "failure forces full", mode: CaptureOff, fail: true, want: models.TraceRetentionFull},
+		{name: "body truncated", mode: CaptureFull, truncate: true, want: models.TraceRetentionBodyTruncated},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := populatedRecorder(t, tc.mode)
+			if tc.fail {
+				r.WithFail(StageUpstreamStatus, errors.New("failed"))
+			}
+			if tc.truncate {
+				r.maxBodySize = 4
+			}
+			record := r.Finalize()
+			if got := r.RetentionStatus(record); got != tc.want {
+				t.Fatalf("RetentionStatus() = %q, want %q", got, tc.want)
 			}
 		})
 	}

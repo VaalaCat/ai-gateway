@@ -28,6 +28,7 @@ func attachTraceData(e *protocol.UsageLogEntry, rec *trace.Recorder) {
 	}
 	// Recorder.Finalize 永不返 nil（契约，见 trace/recorder.go）—— 无需 nil 防御。
 	record := rec.Finalize()
+	e.TraceRetentionStatus = rec.RetentionStatus(record)
 
 	e.ErrorStage = string(record.FailStage)
 	e.InboundDecodeMs = state.MsOf(record.Timings[trace.StageInboundDecode])

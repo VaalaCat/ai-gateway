@@ -59,6 +59,7 @@ type HubOptions struct {
 	MasterInstanceID  string
 	Capabilities      []string
 	AgentTicketSigner AgentTicketSigner
+	AcceptAPIUsage    func(context.Context, string, []protocol.APIUsageEntry) error
 }
 
 type controlRequestHandler func(context.Context, *ws.Conn, string, uint64, *jsonrpc.Request)
@@ -119,6 +120,7 @@ type Hub struct {
 	nonEmptyCapabilitySessions int
 	sendCapabilityUpdate       func(*ws.Conn, protocol.AgentCapabilitiesUpdate) error
 	sendDirectAddressesUpdate  func(*ws.Conn, protocol.AgentDirectAddressesUpdate) error
+	sendNotification           func(*ws.Conn, string, any) error
 	closePeerUpdateConn        func(*ws.Conn) error
 
 	pending    map[string]pendingCall // requestID -> pending call (response channel + owning conn)
@@ -126,6 +128,7 @@ type Hub struct {
 	nextCallID atomic.Int64
 
 	fetchRegistry               *FetchRegistry
+	apiFullSyncRegistry         *APIFullSyncRegistry
 	closeOnce                   gosync.Once
 	done                        chan struct{}
 	closing                     bool
@@ -147,7 +150,8 @@ type Hub struct {
 
 	// SettleUsage 数据面同步结算入口;非 nil 时 HTTP 摄取只在落库成功后才 200 ——
 	// ack=已持久化。nil 时回退老的异步 publish 语义(兼容未接线的构造)。
-	SettleUsage func(ctx context.Context, agentID string, logs []protocol.UsageLogEntry) error
+	SettleUsage    func(ctx context.Context, agentID string, logs []protocol.UsageLogEntry) error
+	AcceptAPIUsage func(ctx context.Context, agentID string, entries []protocol.APIUsageEntry) error
 }
 
 func NewHub(
@@ -170,6 +174,7 @@ func NewHub(
 		now:                 time.Now,
 		pending:             make(map[string]pendingCall),
 		fetchRegistry:       NewFetchRegistry(cipher),
+		apiFullSyncRegistry: NewAPIFullSyncRegistry(cipher, getVersion),
 		done:                make(chan struct{}),
 		sessionChange:       make(chan struct{}, 1),
 		pendingConnections:  make(map[*ws.Conn]struct{}),
@@ -177,6 +182,12 @@ func NewHub(
 		masterInstanceID:    opts.MasterInstanceID,
 		masterCapabilities:  protocol.NormalizeAgentCapabilities(opts.Capabilities),
 		agentTicketSigner:   opts.AgentTicketSigner,
+		AcceptAPIUsage:      opts.AcceptAPIUsage,
+	}
+	if opts.AcceptAPIUsage != nil {
+		h.masterCapabilities = protocol.NormalizeAgentCapabilities(append(
+			h.masterCapabilities, protocol.MasterCapabilityGenericAPIUsageV1,
+		))
 	}
 	h.controlRequestHandlers = h.newControlRequestHandlers()
 	return h
@@ -789,6 +800,12 @@ func (h *Hub) newControlRequestHandlers() map[string]controlRequestHandler {
 		},
 		consts.RPCSyncFetchEntity: func(ctx context.Context, conn *ws.Conn, _ string, _ uint64, req *jsonrpc.Request) {
 			h.handleFetchEntity(ctx, conn, req)
+		},
+		consts.RPCSyncFetchUserAPIRoles: func(ctx context.Context, conn *ws.Conn, _ string, _ uint64, req *jsonrpc.Request) {
+			h.handleAPIRoleSetFetch(ctx, conn, req, (APIRoleSetFetcher{}).FetchUser)
+		},
+		consts.RPCSyncFetchTokenAPIRoles: func(ctx context.Context, conn *ws.Conn, _ string, _ uint64, req *jsonrpc.Request) {
+			h.handleAPIRoleSetFetch(ctx, conn, req, (APIRoleSetFetcher{}).FetchToken)
 		},
 		consts.RPCReportUsage: func(ctx context.Context, _ *ws.Conn, agentID string, _ uint64, req *jsonrpc.Request) {
 			h.handleUsageReport(ctx, agentID, req)
@@ -1618,6 +1635,16 @@ func (h *Hub) handleFullSync(ctx context.Context, conn *ws.Conn, req *jsonrpc.Re
 
 	daoCtx := dao.NewContextWithContext(h.App, ctx)
 	q := dao.NewAdminQuery(daoCtx)
+	if handler, ok := h.apiFullSyncRegistry.Resolve(params.Entity); ok {
+		response, err := handler.FullSync(ctx, q, params)
+		if err != nil {
+			conn.SendResponse(jsonrpc.NewErrorResponse(req.ID, jsonrpc.ErrInternal, err.Error()))
+			return
+		}
+		rpcResponse, _ := jsonrpc.NewResponse(req.ID, response)
+		conn.SendResponse(rpcResponse)
+		return
+	}
 
 	var items []byte
 	var total int64
@@ -1985,8 +2012,7 @@ func extractIP(remoteAddr string) string {
 
 // Broadcast sends a notification to all connected agents.
 // 复制 conns snapshot 后释放 RLock，再 fan-out。
-// 每条 conn 的 SendNotification 是非阻塞 enqueue（见 ws.Conn.WriteJSON），
-// 病 conn 队列满会自己 Close，不会拖累其他 conn 或新接入。
+// 每条 conn 的 SendNotification 是非阻塞 enqueue（见 ws.Conn.SendNotification）。
 func (h *Hub) Broadcast(method string, params any) {
 	h.mu.RLock()
 	conns := make(map[string]*ws.Conn, len(h.sessions))
@@ -1995,12 +2021,24 @@ func (h *Hub) Broadcast(method string, params any) {
 	}
 	h.mu.RUnlock()
 
+	failed := make(map[*ws.Conn]struct{})
 	for agentID, conn := range conns {
-		if err := conn.SendNotification(method, params); err != nil {
+		var err error
+		if h.sendNotification != nil {
+			err = h.sendNotification(conn, method, params)
+		} else {
+			err = conn.SendNotification(method, params)
+		}
+		if err != nil {
 			h.Logger.Warn("broadcast enqueue failed",
 				zap.String("agent", agentID), zap.Error(err))
+			// behavior change: a lost sync.push requires reconnect/full recovery.
+			if method == consts.RPCSyncPush {
+				failed[conn] = struct{}{}
+			}
 		}
 	}
+	h.closeFailedPeerUpdateConnections(failed)
 }
 
 // ConnectedAgents returns the number of connected agents

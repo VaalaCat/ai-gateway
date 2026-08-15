@@ -149,6 +149,7 @@ describe("AgentsPage list states", () => {
     const { container } = render(<AgentsPage />);
 
     expect(screen.getByText("loadingAgents")).toBeInTheDocument();
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
     expect(container.querySelector("[data-slot=skeleton]")).toBeInTheDocument();
     expect(screen.queryByText("noData")).not.toBeInTheDocument();
   });
@@ -165,6 +166,7 @@ describe("AgentsPage list states", () => {
     render(<AgentsPage />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("listLoadFailed");
+    expect(screen.getByTestId("page-header")).toBeInTheDocument();
     expect(screen.queryByText("noData")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "retry" }));
     expect(refetch).toHaveBeenCalledTimes(1);

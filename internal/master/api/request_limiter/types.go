@@ -1,8 +1,14 @@
 package request_limiter
 
-import "github.com/VaalaCat/ai-gateway/internal/master/api"
+import (
+	"sync"
 
-type Handler struct{}
+	"github.com/VaalaCat/ai-gateway/internal/master/api"
+)
+
+type Handler struct {
+	mutationMu sync.Mutex
+}
 
 type ListRequest struct {
 	api.PaginationQuery

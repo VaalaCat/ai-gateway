@@ -225,6 +225,7 @@ func coreModels() []any {
 		&UserGroup{}, &OAuthProvider{}, &OAuthIdentity{}, &ModelRouting{}, &PrivateChannel{},
 		&PrivateChannelShare{}, &AdminScript{}, &InviteCode{}, &InviteRedemption{},
 		&MasterSigningKey{}, &BillingLog{}, &HistoryMigration{}, &HistoryCursor{},
+		&APIService{}, &APIBackend{}, &APIRoute{}, &APIUpstream{}, &Role{}, &Permission{}, &RolePermission{}, &RoleBinding{},
 	}
 }
 
@@ -235,6 +236,7 @@ func logModels() []any {
 		&UsageUserTPSHistogram{},
 		&LogHistoryAggregateMerge{}, &HistoryCursor{}, &TokenDailyBilling{},
 		&ChannelDailyBilling{}, &DailyBillingBackfill{},
+		&APIRequestLog{}, &APIRequestTrace{},
 	}
 }
 

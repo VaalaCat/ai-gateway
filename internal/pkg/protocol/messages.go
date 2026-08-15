@@ -11,18 +11,21 @@ import (
 )
 
 const (
-	FullSyncMaxPageSize             = 500
-	AgentFullSyncSnapshotContractV1 = "agent_full_sync_v1"
-	AgentCapabilitiesMaxCount       = 32
-	AgentCapabilityMaxLength        = 64
-	AgentAuthSigningKeysMaxCount    = 8
-	AgentAuthKeyIDMaxLength         = 128
-	AgentAuthAlgorithmEdDSA         = "EdDSA"
-	AgentCapabilityTunnelV2         = "agent_tunnel_v2"
-	AgentCapabilityForwardV1        = "agent_forward_ticket_v1"
-	AgentCapabilityDirectTunnelV1   = "agent_direct_tunnel_v1"
-	AgentCapabilityRelayHTTPPingV1  = "agent_relay_http_ping_v1"
-	AgentCapabilityTokenRoutingV1   = "agent_token_routing_v1"
+	FullSyncMaxPageSize                  = 500
+	AgentFullSyncSnapshotContractV1      = "agent_full_sync_v1"
+	AgentCapabilitiesMaxCount            = 32
+	AgentCapabilityMaxLength             = 64
+	AgentAuthSigningKeysMaxCount         = 8
+	AgentAuthKeyIDMaxLength              = 128
+	AgentAuthAlgorithmEdDSA              = "EdDSA"
+	AgentCapabilityTunnelV2              = "agent_tunnel_v2"
+	AgentCapabilityForwardV1             = "agent_forward_ticket_v1"
+	AgentCapabilityDirectTunnelV1        = "agent_direct_tunnel_v1"
+	AgentCapabilityRelayHTTPPingV1       = "agent_relay_http_ping_v1"
+	AgentCapabilityTokenRoutingV1        = "agent_token_routing_v1"
+	AgentCapabilityGenericAPIExecutionV1 = "generic_api_execution_v1"
+	AgentCapabilityGenericAPIWebSocketV1 = "generic_api_websocket_v1"
+	MasterCapabilityGenericAPIUsageV1    = "generic_api_usage_v1"
 )
 
 type AuthBootstrapResponse struct {
@@ -131,9 +134,53 @@ type ForceFullSyncResponse struct {
 }
 
 type UsageReport struct {
-	AgentID string          `json:"agent_id"`
-	Logs    []UsageLogEntry `json:"logs"`
+	AgentID     string          `json:"agent_id"`
+	Logs        []UsageLogEntry `json:"logs,omitempty"`
+	APIRequests []APIUsageEntry `json:"api_requests,omitempty"`
 }
+
+// ReportedUsage is the internal strongly typed queue item. Exactly one member
+// must be non-nil; wire reports split the union back into their two arrays.
+type ReportedUsage struct {
+	LLM *UsageLogEntry `json:"llm,omitempty"`
+	API *APIUsageEntry `json:"api,omitempty"`
+}
+
+func (usage ReportedUsage) Valid() bool {
+	return (usage.LLM != nil) != (usage.API != nil) && usage.RequestID() != ""
+}
+
+func (usage ReportedUsage) RequestID() string {
+	if usage.LLM != nil {
+		return usage.LLM.RequestID
+	}
+	if usage.API != nil {
+		return usage.API.RequestID
+	}
+	return ""
+}
+
+func (usage ReportedUsage) QueueID() string {
+	if usage.LLM != nil {
+		return "llm:" + usage.LLM.RequestID
+	}
+	if usage.API != nil {
+		return "api:" + usage.API.RequestID
+	}
+	return ""
+}
+
+func (usage ReportedUsage) Timestamp() int64 {
+	if usage.LLM != nil {
+		return usage.LLM.Timestamp
+	}
+	if usage.API != nil {
+		return usage.API.Timestamp
+	}
+	return 0
+}
+
+func (usage ReportedUsage) IsAPI() bool { return usage.API != nil && usage.LLM == nil }
 
 type UsageLogEntry struct {
 	RequestID          string  `json:"request_id"`
@@ -169,6 +216,8 @@ type UsageLogEntry struct {
 	Other            string `json:"other"`
 	TokenSource      string `json:"token_source,omitempty"`
 	RoutingName      string `json:"routing_name,omitempty"`
+
+	TraceRetentionStatus models.TraceRetentionStatus `json:"trace_retention_status,omitempty"`
 
 	// Channel affinity（渠道缓存粘性）
 	AffinityStatus   string `json:"affinity_status,omitempty"` // "hit" | "fallback" | "none" | ""

@@ -69,6 +69,23 @@ func (h *TargetHandler) ValidateOpen(open wire.Open, ingressKind string) error {
 	if _, err := h.validateCommittedOpen(open); err != nil {
 		return err
 	}
+	return h.validateIngressPolicy(open, ingressKind)
+}
+
+func (h *TargetHandler) ValidateAPIOpen(open wire.Open, ingressKind string) error {
+	if h == nil || h.directInboundEnabled == nil || h.relayInboundEnabled == nil || h.sourceEnabled == nil {
+		return errTargetUnavailable
+	}
+	if !validTunnelIngressKind(ingressKind) || h.agentID == "" || open.TargetAgentID != h.agentID {
+		return errTargetMetadata
+	}
+	if _, err := normalizeAPIWireOpen(open, wire.MaxV2StreamWindowBytes); err != nil {
+		return errTargetMetadata
+	}
+	return h.validateIngressPolicy(open, ingressKind)
+}
+
+func (h *TargetHandler) validateIngressPolicy(open wire.Open, ingressKind string) error {
 	if !h.sourceEnabled(open.SourceAgentID) {
 		return errTargetUnavailable
 	}

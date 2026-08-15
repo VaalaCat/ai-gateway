@@ -37,8 +37,10 @@ import (
 	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/dao"
 	masteragentauth "github.com/VaalaCat/ai-gateway/internal/master/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/master/billing"
+	mastersync "github.com/VaalaCat/ai-gateway/internal/master/sync"
 	mastertunnel "github.com/VaalaCat/ai-gateway/internal/master/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
@@ -328,6 +330,28 @@ func (*visiblePrivateChannelClient) OnNotification(string, app.NotificationHandl
 func (*visiblePrivateChannelClient) Notify(string, any) error                       { return nil }
 func (*visiblePrivateChannelClient) Close() error                                   { return nil }
 func (*visiblePrivateChannelClient) ReadLoop()                                      {}
+
+type fetchEntityHandlerClient struct {
+	query   dao.AdminQuery
+	handler mastersync.FetchHandler
+}
+
+func (c *fetchEntityHandlerClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	request, ok := params.(protocol.FetchEntityRequest)
+	if method != consts.RPCSyncFetchEntity || !ok || request.Entity != events.EntityToken || c.handler == nil {
+		return nil, errors.New("unexpected token cache RPC")
+	}
+	data, side, found, err := c.handler.Fetch(ctx, c.query, request.Key)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(protocol.FetchEntityResponse{Data: data, Side: side, Found: found})
+}
+
+func (*fetchEntityHandlerClient) OnNotification(string, app.NotificationHandler) {}
+func (*fetchEntityHandlerClient) Notify(string, any) error                       { return nil }
+func (*fetchEntityHandlerClient) Close() error                                   { return nil }
+func (*fetchEntityHandlerClient) ReadLoop()                                      {}
 
 type agentRouteProviderProbe struct {
 	calls         atomic.Int32
@@ -762,6 +786,44 @@ func TestAgentRelayDirectBoundAttemptPreservesSourceModelAndMode(t *testing.T) {
 		sourceScript: 1, sourcePlanner: 1, sourceRequestLimiter: 1,
 		targetAttemptLimiter: 1, sourcePublisher: 1,
 	})
+}
+
+// Break caught: the target Agent authenticates the original bearer token on a
+// real relay attempt. API RBAC DAO failure must not turn that cold LLM token
+// load into a relay failure.
+func TestAPIRBACIsolationRealRelayAuthenticatesColdToken(t *testing.T) {
+	client := &fetchEntityHandlerClient{}
+	f := newAgentRouteSocketFixtureWithTargetClient(t, http.StatusOK, client)
+	user := models.User{
+		Username: "relay-rbac-isolation", Password: "x", GroupID: models.DefaultUserGroupID,
+		Status: consts.StatusEnabled,
+	}
+	require.NoError(t, f.db.Create(&user).Error)
+	token := models.Token{
+		ID: 1, Key: "route-token", Name: "route-token", UserID: user.ID,
+		Status: consts.StatusEnabled, ExpiredAt: -1, APIRoleMode: models.APIRoleModeInherit,
+	}
+	require.NoError(t, f.db.Create(&token).Error)
+	require.NoError(t, f.db.Migrator().DropTable(&models.RoleBinding{}))
+	handler, ok := mastersync.NewFetchRegistry(nil).Resolve(events.EntityToken)
+	require.True(t, ok)
+	client.query = dao.NewAdminQuery(dao.NewContext(&agentRouteDBProvider{db: f.db}))
+	client.handler = handler
+	f.target.Store.SetUserGroup(&models.UserGroup{
+		ID: models.DefaultUserGroupID, Name: "default", Status: consts.StatusEnabled,
+	})
+	f.target.Store.DeleteToken(token.Key)
+	f.source.Store.APIIndex.MarkDirty(events.EntityAPIRole)
+	f.target.Store.APIIndex.MarkDirty(events.EntityAPIRole)
+	require.ErrorIs(t, f.source.Store.APIIndex.RequireReady(), agentcache.ErrAPICacheNotReady)
+	require.ErrorIs(t, f.target.Store.APIIndex.RequireReady(), agentcache.ErrAPICacheNotReady)
+	f.configureSourceRoute("target", "", f.targetAgent.URL)
+
+	status, body := f.request("")
+
+	require.Equal(t, http.StatusOK, status, body)
+	require.Equal(t, int32(1), f.targetProviderCalls.Load())
+	require.Zero(t, f.sourceProviderCalls.Load())
 }
 
 // behavior change: the source owns the complete attempt plan; a route on B

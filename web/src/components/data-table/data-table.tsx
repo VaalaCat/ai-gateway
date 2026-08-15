@@ -68,6 +68,7 @@ interface DataTableProps<TData, TValue> {
   page?: number;
   pageSize?: number;
   pageCount?: number;
+  paginationDisabled?: boolean;
   onPaginationChange?: (page: number, pageSize: number) => void;
   toolbar?: DataTableToolbar<TData>;
   defaultColumnVisibility?: VisibilityState;
@@ -81,6 +82,24 @@ interface DataTableProps<TData, TValue> {
   onExpandedStateChange?: (state: ExpandedState) => void;
   getRowId?: (row: TData, index: number) => string;
   tableLayout?: "auto" | "fixed";
+  expandedRowWidth?: "table" | "viewport";
+  showFooter?: boolean;
+}
+
+function ownsRowInteraction(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest(
+    "button,a,input,textarea,select,[role=button],[role=menuitem],[data-row-interaction]",
+  ));
+}
+
+function shouldToggleExpandedRow(event: React.MouseEvent) {
+  if (ownsRowInteraction(event.target)) return false;
+  const selection = window.getSelection();
+  return !selection || selection.isCollapsed;
+}
+
+function shouldToggleExpandedRowFromKeyboard(event: React.KeyboardEvent) {
+  return !ownsRowInteraction(event.target) && (event.key === "Enter" || event.key === " ");
 }
 
 export function DataTable<TData, TValue>({
@@ -91,6 +110,7 @@ export function DataTable<TData, TValue>({
   page = 1,
   pageSize = 10,
   pageCount = 1,
+  paginationDisabled = false,
   onPaginationChange,
   toolbar,
   defaultColumnVisibility,
@@ -104,6 +124,8 @@ export function DataTable<TData, TValue>({
   onColumnVisibilityChange,
   getRowId,
   tableLayout = "auto",
+  expandedRowWidth = "table",
+  showFooter = true,
 }: DataTableProps<TData, TValue>) {
   const t = useTranslations("common");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -206,7 +228,13 @@ export function DataTable<TData, TValue>({
           </div>
         )}
         <div className="rounded-md border overflow-x-auto">
-          <Table className={cn(tableLayout === "fixed" && "table-fixed")}>
+          <Table
+            className={cn(tableLayout === "fixed" && "table-fixed")}
+            containerProps={{
+              "data-expanded-row-width": expandedRowWidth,
+              className: cn(expandedRowWidth === "viewport" && "@container/data-table"),
+            }}
+          >
             {tableLayout === "fixed" ? (
               <colgroup>
                 {table.getVisibleLeafColumns().map((column) => (
@@ -222,7 +250,13 @@ export function DataTable<TData, TValue>({
               {table.getHeaderGroups().map((headerGroup) => (
                 <TableRow key={headerGroup.id}>
                   {headerGroup.headers.map((header) => (
-                    <TableHead key={header.id} className="whitespace-nowrap">
+                    <TableHead
+                      key={header.id}
+                      className={cn(
+                        "whitespace-nowrap",
+                        (header.column.columnDef.meta as { headerClassName?: string } | undefined)?.headerClassName,
+                      )}
+                    >
                       {header.isPlaceholder
                         ? null
                         : flexRender(
@@ -248,6 +282,7 @@ export function DataTable<TData, TValue>({
               ) : table.getRowModel().rows.length > 0 ? (
                 table.getRowModel().rows.map((row) => {
                   const isExpanded = row.getIsExpanded();
+                  const toggleExpandedRow = () => row.toggleExpanded();
                   return (
                     <Fragment key={row.id}>
                       <TableRow
@@ -256,10 +291,25 @@ export function DataTable<TData, TValue>({
                           renderExpandedRow && isExpanded && "bg-muted/40",
                         )}
                         data-state={isExpanded ? "expanded" : undefined}
-                        onClick={renderExpandedRow ? () => row.toggleExpanded() : undefined}
+                        tabIndex={renderExpandedRow ? 0 : undefined}
+                        aria-expanded={renderExpandedRow ? isExpanded : undefined}
+                        onClick={renderExpandedRow ? (event) => {
+                          if (shouldToggleExpandedRow(event)) toggleExpandedRow();
+                        } : undefined}
+                        onKeyDown={renderExpandedRow ? (event) => {
+                          if (!shouldToggleExpandedRowFromKeyboard(event)) return;
+                          if (event.key === " ") event.preventDefault();
+                          toggleExpandedRow();
+                        } : undefined}
                       >
                         {row.getVisibleCells().map((cell) => (
-                          <TableCell key={cell.id} className="whitespace-nowrap">
+                          <TableCell
+                            key={cell.id}
+                            className={cn(
+                              "whitespace-nowrap",
+                              (cell.column.columnDef.meta as { cellClassName?: string } | undefined)?.cellClassName,
+                            )}
+                          >
                             {flexRender(
                               cell.column.columnDef.cell,
                               cell.getContext()
@@ -269,8 +319,18 @@ export function DataTable<TData, TValue>({
                       </TableRow>
                       {isExpanded && renderExpandedRow && (
                         <TableRow>
-                          <TableCell colSpan={row.getVisibleCells().length} className="bg-muted/50 p-4">
-                            {renderExpandedRow(row)}
+                          <TableCell
+                            colSpan={row.getVisibleCells().length}
+                            className={cn("bg-muted/50", expandedRowWidth === "table" ? "p-4" : "p-0")}
+                          >
+                            {expandedRowWidth === "viewport" ? (
+                              <div
+                                data-slot="data-table-expanded-content"
+                                className="sticky left-0 w-[100cqw] p-4"
+                              >
+                                {renderExpandedRow(row)}
+                              </div>
+                            ) : renderExpandedRow(row)}
                           </TableCell>
                         </TableRow>
                       )}
@@ -290,7 +350,7 @@ export function DataTable<TData, TValue>({
             </TableBody>
           </Table>
         </div>
-        <div className="flex items-center justify-between">
+        {showFooter ? <div className="flex items-center justify-between">
           <div className="text-sm text-muted-foreground">
             {total !== undefined && t("total", { count: total })}
           </div>
@@ -299,10 +359,11 @@ export function DataTable<TData, TValue>({
               page={page}
               pageSize={pageSize}
               pageCount={pageCount}
+              disabled={paginationDisabled}
               onPaginationChange={onPaginationChange}
             />
           )}
-        </div>
+        </div> : null}
       </div>
     </TooltipProvider>
   );

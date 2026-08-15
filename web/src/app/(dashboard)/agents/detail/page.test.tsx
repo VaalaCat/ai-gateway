@@ -100,10 +100,13 @@ describe("AgentDetailPage", () => {
     const user = userEvent.setup();
     render(<AgentDetailPage />);
 
+    expect(screen.getByTestId("page-header")).toHaveTextContent("Agent A");
+    expect(screen.getByTestId("page-header")).toHaveTextContent("agent-a");
+    expect(screen.getByTestId("page-header")).toHaveTextContent("edge");
     expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("data-state", "active");
     expect(screen.getByRole("tab", { name: "Connections" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Runtime" })).toBeInTheDocument();
-    expect(screen.getByText("agent-a")).toBeInTheDocument();
+    expect(screen.getAllByText("agent-a")).toHaveLength(2);
 
     await user.click(screen.getByRole("tab", { name: "Connections" }));
     expect(screen.getByText(/Authoritative connection panel/)).toBeInTheDocument();
@@ -151,9 +154,21 @@ describe("AgentDetailPage", () => {
     const user = userEvent.setup();
     render(<AgentDetailPage />);
 
+    expect(screen.getByTestId("page-header")).toHaveTextContent("title");
     expect(screen.getByRole("alert")).toHaveTextContent("detailLoadFailed");
     await user.click(screen.getByRole("button", { name: "retry" }));
     expect(detailQueryState.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a stable no-data header instead of a loading skeleton after a completed empty query", () => {
+    detailQueryState.data = undefined;
+    detailQueryState.isLoading = false;
+    detailQueryState.isError = false;
+    render(<AgentDetailPage />);
+
+    expect(screen.getByTestId("page-header")).toHaveTextContent("title");
+    expect(screen.getByRole("alert")).toHaveTextContent("noData");
+    expect(screen.queryByLabelText("loading")).not.toBeInTheDocument();
   });
 
   it("keeps operations enabled when only the detail refetch fails and monitoring is fresh", async () => {
@@ -163,6 +178,7 @@ describe("AgentDetailPage", () => {
     const user = userEvent.setup();
     render(<AgentDetailPage />);
 
+    expect(screen.getByTestId("page-header")).toHaveTextContent("Agent A");
     expect(screen.getByRole("alert")).toHaveTextContent("detailLoadFailed");
     expect(screen.getByRole("button", { name: "Full sync" })).toBeEnabled();
     await user.click(screen.getByRole("tab", { name: "Connections" }));

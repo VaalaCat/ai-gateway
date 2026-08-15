@@ -65,6 +65,29 @@ func TestTokenStore_GetByKeyMissNoFetcher(t *testing.T) {
 	}
 }
 
+func TestTokenStore_ColdKeyLoadPopulatesByID(t *testing.T) {
+	token := &models.Token{ID: 17, Key: "sk-cold", UserID: 3, Status: 1}
+	primary, err := entitycache.NewLRUCache(entitycache.Config[string, *models.Token]{
+		Capacity: 2,
+		Loader: entitycache.LoaderFunc[string, *models.Token](func(context.Context, string) (*models.Token, error) {
+			return token, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := newTokenStore(primary, nil)
+
+	got, ok, err := ts.Get(context.Background(), token.Key)
+	if err != nil || !ok || got.ID != token.ID {
+		t.Fatalf("cold Get = %+v, %v, %v", got, ok, err)
+	}
+	byID, ok, err := ts.GetByID(context.Background(), token.ID)
+	if err != nil || !ok || byID.Key != token.Key {
+		t.Fatalf("GetByID after cold key load = %+v, %v, %v", byID, ok, err)
+	}
+}
+
 func TestTokenStore_LRUEvictAlsoClearsByID(t *testing.T) {
 	ts := newTokenStoreWithLRU(t, 2)
 

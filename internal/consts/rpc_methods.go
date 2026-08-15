@@ -9,6 +9,8 @@ const (
 	RPCSyncForceFullSync       = "sync.forceFullSync"
 	RPCSyncAutoAddrUpdate      = "sync.autoAddrUpdate"
 	RPCSyncFetchEntity         = "sync.fetchEntity"
+	RPCSyncFetchUserAPIRoles   = "sync.fetch_user_api_roles"
+	RPCSyncFetchTokenAPIRoles  = "sync.fetch_token_api_roles"
 	RPCSyncUserQuota           = "sync.userQuota"
 	RPCSyncAgentCapabilities   = "sync.agentCapabilities"
 	RPCAgentAuthBootstrap      = "agent.authBootstrap"

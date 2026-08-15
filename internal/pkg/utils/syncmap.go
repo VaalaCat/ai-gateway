@@ -116,6 +116,13 @@ func (s *SyncMap[K, V]) Delete(key K) {
 	delete(s.m, key)
 }
 
+// Clear removes all entries while keeping the map ready for reuse.
+func (s *SyncMap[K, V]) Clear() {
+	s.mu.Lock()
+	s.m = make(map[K]V)
+	s.mu.Unlock()
+}
+
 // Range calls f sequentially for each key and value present in the map. If f returns false, range stops the iteration.
 //
 // Range does not necessarily correspond to any consistent snapshot of the Map's contents: no key will be visited more

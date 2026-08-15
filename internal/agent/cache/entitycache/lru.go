@@ -54,9 +54,10 @@ type loadOutcome[V any] struct {
 }
 
 type loadFlight[V any] struct {
-	done    chan struct{}
-	outcome loadOutcome[V]
-	closed  bool
+	done               chan struct{}
+	outcome            loadOutcome[V]
+	mutationGeneration uint64
+	closed             bool
 }
 
 // LRUCache 基于 hashicorp/golang-lru，带 Loader、负缓存、metrics。
@@ -74,9 +75,11 @@ type LRUCache[K comparable, V any] struct {
 	loadErrors    atomic.Int64
 	invalidations atomic.Int64
 
-	loadMu      sync.Mutex
-	loadFlights map[K]*loadFlight[V]
-	loadLimit   int
+	loadMu        sync.Mutex
+	loadFlights   map[K]*loadFlight[V]
+	loadLimit     int
+	mutations     map[K]uint64
+	mutationEpoch uint64
 
 	refresher  *Refresher[K, V]
 	refreshCfg func() RefreshConfig
@@ -106,6 +109,7 @@ func NewLRUCache[K comparable, V any](cfg Config[K, V]) (*LRUCache[K, V], error)
 		lifecycle:   cfg.Lifecycle,
 		loadFlights: make(map[K]*loadFlight[V]),
 		loadLimit:   loadLimit,
+		mutations:   make(map[K]uint64),
 	}
 	if c.lifecycle == nil {
 		c.lifecycle = NewLifecycle()
@@ -219,7 +223,7 @@ func (c *LRUCache[K, V]) beginLoad(key K) (*loadFlight[V], bool, error) {
 	if len(c.loadFlights) >= c.loadLimit {
 		return nil, false, ErrLoadLimitReached
 	}
-	flight := &loadFlight[V]{done: make(chan struct{})}
+	flight := &loadFlight[V]{done: make(chan struct{}), mutationGeneration: c.mutations[key]}
 	c.loadFlights[key] = flight
 	return flight, true, nil
 }
@@ -236,17 +240,27 @@ func (c *LRUCache[K, V]) finishLoad(key K, flight *loadFlight[V], outcome loadOu
 		c.loadMu.Unlock()
 		return
 	}
+	// behavior change: invalidation and cold-load publication share this lock,
+	// so an invalidated flight can neither refill the cache nor return stale data.
+	if outcome.err == nil || errors.Is(outcome.err, ErrNotFound) {
+		if c.mutations[key] != flight.mutationGeneration {
+			var zero V
+			outcome = loadOutcome[V]{value: zero, err: ErrLoadInvalidated}
+		} else if errors.Is(outcome.err, ErrNotFound) {
+			c.storeNegative(key)
+		} else {
+			c.store(key, outcome.value)
+		}
+	}
 	flight.outcome = outcome
 	flight.closed = true
+	if c.loadFlights[key] == flight {
+		delete(c.loadFlights, key)
+		delete(c.mutations, key)
+	}
 	c.loadMu.Unlock()
 
 	close(flight.done)
-
-	c.loadMu.Lock()
-	if c.loadFlights[key] == flight {
-		delete(c.loadFlights, key)
-	}
-	c.loadMu.Unlock()
 }
 
 func (c *LRUCache[K, V]) runLoad(parent context.Context, key K) loadOutcome[V] {
@@ -255,13 +269,11 @@ func (c *LRUCache[K, V]) runLoad(parent context.Context, key K) loadOutcome[V] {
 	v, err := c.loader.Load(lctx, key)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			c.storeNegative(key)
 			return loadOutcome[V]{err: ErrNotFound}
 		}
 		c.loadErrors.Add(1)
 		return loadOutcome[V]{err: err}
 	}
-	c.store(key, v)
 	return loadOutcome[V]{value: v, found: true}
 }
 
@@ -338,8 +350,7 @@ func (c *LRUCache[K, V]) Apply(action Action, key K, value V) {
 			c.store(key, value)
 		}
 	case ActionDelete:
-		c.invalidations.Add(1)
-		c.cache.Remove(key)
+		c.Delete(key)
 	}
 }
 
@@ -351,7 +362,48 @@ func (c *LRUCache[K, V]) Set(key K, value V) {
 // Delete 删除。
 func (c *LRUCache[K, V]) Delete(key K) {
 	c.invalidations.Add(1)
+	c.loadMu.Lock()
+	if c.loadFlights[key] != nil {
+		c.mutations[key]++
+	} else {
+		delete(c.mutations, key)
+	}
+	c.mutationEpoch++
 	c.cache.Remove(key)
+	c.loadMu.Unlock()
+}
+
+// Clear purges positive and negative entries and invalidates every active
+// cold load. Only active-flight generations are retained, so bookkeeping is
+// bounded by MaxConcurrentLoads and is removed when each flight completes.
+func (c *LRUCache[K, V]) Clear() {
+	c.loadMu.Lock()
+	// behavior change: session-wide invalidation also fences token side warms.
+	c.mutationEpoch++
+	nextMutations := make(map[K]uint64, len(c.loadFlights))
+	for key, flight := range c.loadFlights {
+		nextMutations[key] = flight.mutationGeneration + 1
+	}
+	c.mutations = nextMutations
+	c.invalidations.Add(int64(c.cache.Len()))
+	c.cache.Purge()
+	c.loadMu.Unlock()
+}
+
+func (c *LRUCache[K, V]) MutationEpoch() uint64 {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	return c.mutationEpoch
+}
+
+func (c *LRUCache[K, V]) SetIfMutationEpoch(epoch uint64, key K, value V) bool {
+	c.loadMu.Lock()
+	defer c.loadMu.Unlock()
+	if c.mutationEpoch != epoch {
+		return false
+	}
+	c.store(key, value)
+	return true
 }
 
 // Len 返回当前条目数（包含负缓存）。
@@ -388,3 +440,4 @@ func (c *LRUCache[K, V]) Stats() Stats {
 
 // 编译期断言：LRUCache 实现 EntityCache。
 var _ EntityCache[string, int] = (*LRUCache[string, int])(nil)
+var _ MutationEpochCache[string, int] = (*LRUCache[string, int])(nil)

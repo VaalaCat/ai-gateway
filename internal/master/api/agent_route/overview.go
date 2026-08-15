@@ -6,6 +6,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
@@ -60,8 +61,8 @@ func (r OverviewRequest) Filter() (dao.AgentRouteOverviewFilter, error) {
 	filter := dao.AgentRouteOverviewFilter{
 		Query: r.Query, SourceType: r.SourceType, Model: r.Model, AgentID: r.AgentID,
 	}
-	if r.SourceType != "" && r.SourceType != "token" && r.SourceType != "channel" {
-		return filter, api.BadRequestError("source_type must be token or channel", nil)
+	if r.SourceType != "" && !validAgentRouteSourceType(r.SourceType) {
+		return filter, api.BadRequestError("source_type must be token, channel, api_service, or api_route", nil)
 	}
 	if r.SourceID == "" {
 		return filter, nil
@@ -76,4 +77,14 @@ func (r OverviewRequest) Filter() (dao.AgentRouteOverviewFilter, error) {
 	sourceID := uint(id)
 	filter.SourceID = &sourceID
 	return filter, nil
+}
+
+func validAgentRouteSourceType(sourceType string) bool {
+	switch sourceType {
+	case models.AgentRouteSourceToken, models.AgentRouteSourceChannel,
+		models.AgentRouteSourceAPIService, models.AgentRouteSourceAPIRoute:
+		return true
+	default:
+		return false
+	}
 }

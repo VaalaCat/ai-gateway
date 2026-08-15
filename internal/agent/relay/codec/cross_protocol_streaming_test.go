@@ -448,3 +448,64 @@ func TestCrossProtocolStreamingToolCall(t *testing.T) {
 		}
 	}
 }
+
+// TestChatToClaude_NamedToolStopProducesCompleteToolUse reproduces vLLM's
+// named-tool terminal shape. Anthropic's streaming contract requires every
+// tool_use block to stop before message_delta, and a response that asks the
+// client to execute a tool must finish with stop_reason="tool_use".
+func TestChatToClaude_NamedToolStopProducesCompleteToolUse(t *testing.T) {
+	upstreamSSE := strings.Join([]string{
+		`data: {"id":"chatcmpl-vllm","object":"chat.completion.chunk","model":"deepseek-v4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl-vllm","object":"chat.completion.chunk","model":"deepseek-v4","choices":[{"index":0,"delta":{"reasoning_content":"I should inspect the repository."},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl-vllm","object":"chat.completion.chunk","model":"deepseek-v4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_list","type":"function","function":{"name":"list_files","arguments":"{\"path\":\".\"}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl-vllm","object":"chat.completion.chunk","model":"deepseek-v4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+
+	chatCodec := codec.GetOutbound(codec.ProtocolOpenAIChat)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+	}
+	eventCh, err := chatCodec.DecodeResponse(resp, true)
+	if err != nil {
+		t.Fatalf("DecodeResponse: %v", err)
+	}
+	var events []codec.Event
+	for ev := range eventCh {
+		events = append(events, ev)
+	}
+
+	claudeCodec := codec.GetInbound(codec.ProtocolClaude)
+	rawSSE := encodeEventsForProto(t, claudeCodec, events)
+	records := parseCrossSSE(rawSSE)
+
+	assertClaudeSSEToolCallShape(t, records, "vllm_named_tool_stop")
+
+	var toolStopPosition, messageDeltaPosition = -1, -1
+	var stopReason string
+	for i, rec := range records {
+		switch rec.Event {
+		case "content_block_stop":
+			if idx, ok := rec.Data["index"].(float64); ok && idx == 1 {
+				toolStopPosition = i
+			}
+		case "message_delta":
+			messageDeltaPosition = i
+			if delta, ok := rec.Data["delta"].(map[string]any); ok {
+				stopReason, _ = delta["stop_reason"].(string)
+			}
+		}
+	}
+	if toolStopPosition < 0 {
+		t.Fatal("Anthropic stream is missing content_block_stop for tool_use index 1")
+	}
+	if messageDeltaPosition < 0 || toolStopPosition > messageDeltaPosition {
+		t.Fatalf("tool_use must stop before message_delta: tool_stop=%d message_delta=%d", toolStopPosition, messageDeltaPosition)
+	}
+	if stopReason != "tool_use" {
+		t.Fatalf("Anthropic stop_reason = %q, want tool_use", stopReason)
+	}
+}

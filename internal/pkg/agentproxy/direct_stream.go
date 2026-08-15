@@ -27,6 +27,25 @@ type DirectAttemptStreamOpener interface {
 	) (app.AttemptStream, error)
 }
 
+// DirectHTTPAPIStreamOpener opens a Generic API stream to a frozen direct target.
+type DirectHTTPAPIStreamOpener interface {
+	OpenHTTPAPIStream(
+		context.Context,
+		DirectSessionTarget,
+		app.APIOpen,
+	) (app.HTTPAPIStream, error)
+}
+
+// DirectWebSocketAPIStreamOpener opens one Generic API WebSocket stream to a
+// frozen direct target. Implementations must not retry or choose another path.
+type DirectWebSocketAPIStreamOpener interface {
+	OpenWebSocketAPIStream(
+		context.Context,
+		DirectSessionTarget,
+		app.WebSocketOpen,
+	) (app.WebSocketAPIStream, error)
+}
+
 // DirectTransportIdentity is an opaque fingerprint of the peer address,
 // effective proxy, and credential generation. It is safe to use as a circuit
 // key because it never contains their raw values.
@@ -48,6 +67,25 @@ type DirectAttemptStreamReservation interface {
 	AddressFingerprint() string
 	OpenAttemptStream(context.Context, app.AttemptStreamRequest) (app.AttemptStream, error)
 	Release()
+}
+
+// DirectHTTPAPIStreamReservation owns one acquired session admission for a
+// Generic API stream. Release is idempotent.
+type DirectHTTPAPIStreamReservation interface {
+	TransportIdentity() DirectTransportIdentity
+	AddressFingerprint() string
+	OpenHTTPAPIStream(context.Context, app.APIOpen) (app.HTTPAPIStream, error)
+	Release()
+}
+
+// DirectHTTPAPITransport freezes the pool inputs used by one Generic API stream.
+type DirectHTTPAPITransport interface {
+	TransportIdentity() DirectTransportIdentity
+	AcquireHTTPAPIStream(context.Context) (DirectHTTPAPIStreamReservation, error)
+}
+
+type DirectHTTPAPITransportBuilder interface {
+	BuildDirectHTTPAPITransport(context.Context, DirectSessionTarget) (DirectHTTPAPITransport, error)
 }
 
 // DirectAttemptTransportBuilder builds a frozen transport for a Direct target.

@@ -12,6 +12,7 @@ import (
 )
 
 func (h *Handler) Get(c *app.Context, req api.IDPathRequest) (models.Token, error) {
+	writeServerTimeHeader(c, h.now())
 	id, _ := strconv.ParseUint(req.ID, 10, 64)
 	scope := middleware.GetScope(c.Context)
 

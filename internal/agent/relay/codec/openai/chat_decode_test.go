@@ -549,6 +549,56 @@ func TestChatStreamDecode_ToolCallEventsCorrectShape(t *testing.T) {
 	require.NoError(t, codec.AssertStreamingToolCallInvariant(events))
 }
 
+// TestChatStreamDecode_TerminalChunkClosesOpenToolCalls covers the terminal
+// shape emitted by vLLM for a forced named tool. OpenAI Chat represents the
+// call itself in delta.tool_calls; the terminal finish_reason must not be used
+// as the only signal for closing the already-open structured tool call.
+//
+// vLLM currently emits finish_reason="stop" for a named tool choice, while
+// auto/required tool choices use finish_reason="tool_calls". All three cases
+// below are complete structured tool calls and must satisfy the IR lifecycle:
+// Start -> zero or more ArgumentsDelta -> End.
+func TestChatStreamDecode_TerminalChunkClosesOpenToolCalls(t *testing.T) {
+	tests := []struct {
+		name   string
+		chunks []string
+	}{
+		{
+			name: "single tool with split arguments",
+			chunks: []string{
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\""}}]}}]}`,
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Tokyo\"}"}}]}}]}`,
+			},
+		},
+		{
+			name: "single tool with empty object arguments",
+			chunks: []string{
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_list","type":"function","function":{"name":"list_files","arguments":"{}"}}]}}]}`,
+			},
+		},
+		{
+			name: "parallel tools",
+			chunks: []string{
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"}},{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":"{\"timezone\":\"UTC\"}"}}]}}]}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := append([]string{}, tt.chunks...)
+			lines = append(lines,
+				`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+				``,
+			)
+			events := collectStreamEvents(t, strings.Join(lines, "\n\n"))
+
+			require.NoError(t, codec.AssertStreamingToolCallInvariant(events))
+		})
+	}
+}
+
 func TestChatStreamDecode_NoEmptyContentDelta(t *testing.T) {
 	// delta.content == null should not emit EventContentDelta
 	sse := strings.Join([]string{

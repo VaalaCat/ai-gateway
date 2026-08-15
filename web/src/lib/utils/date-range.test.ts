@@ -105,6 +105,23 @@ describe("timestamp conversion", () => {
     expect(tsToDateStr(end)).toBe("2026-11-02");
   });
 
+  // behavior change: end-exclusive local calendar ranges must preserve a DST fallback day.
+  it("uses calendar midnight instead of a fixed 24 hours across DST fallback", () => {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      const start = dateStrToTs("2026-11-01", false);
+      const end = dateStrToExclusiveEndTs("2026-11-01");
+      expect(end - start).toBe(25 * 60 * 60);
+      expect(tsToDateStr(end - 1)).toBe("2026-11-01");
+      expect(tsToDateStr(end)).toBe("2026-11-02");
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+    expect(process.env.TZ).toBe(originalTimezone);
+  });
+
   it.each(["", "2026-02-31", "2026-7-20"])(
     "returns zero exclusive end for invalid date string %s",
     (value) => expect(dateStrToExclusiveEndTs(value)).toBe(0),

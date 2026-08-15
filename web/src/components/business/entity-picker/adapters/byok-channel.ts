@@ -9,15 +9,15 @@ import type { EntityAdapter, EntityListParams } from "../types";
 
 export const byokChannelAdapter: EntityAdapter<BYOKChannelDetail> = {
   name: "byok-channel",
-  useList: ({ search, scope, page_size }: EntityListParams) => {
+  useList: ({ search, scope, page_size, enabled = true }: EntityListParams) => {
     const isAdmin = scope === "all";
     const adminQ = useAdminBYOKChannels(
       { search, page_size },
-      { enabled: isAdmin },
+      { enabled: enabled && isAdmin },
     );
     const selfQ = useBYOKChannels(
       { search, page_size },
-      { enabled: !isAdmin },
+      { enabled: enabled && !isAdmin },
     );
     return (isAdmin ? adminQ : selfQ) as ReturnType<EntityAdapter<BYOKChannelDetail>["useList"]>;
   },

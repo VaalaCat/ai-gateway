@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -43,4 +44,60 @@ func SeedBYOKSettings(db *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+const (
+	gatewayAdminRoleName        = "Gateway Admin"
+	gatewayAdminRoleDescription = "Built-in administrator for generic API gateway resources"
+)
+
+// SeedGatewayAdminRole keeps the built-in generic API administrator role and
+// its global invoke grant present. It intentionally never creates a binding:
+// Master derives this role into every administrator's effective API RoleSet.
+func SeedGatewayAdminRole(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var role Role
+		err := tx.Where("key = ?", GatewayAdminRoleKey).First(&role).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			role = Role{
+				Key:         GatewayAdminRoleKey,
+				Name:        gatewayAdminRoleName,
+				Description: gatewayAdminRoleDescription,
+				BuiltIn:     true,
+				Status:      consts.StatusEnabled,
+			}
+			if err := tx.Create(&role).Error; err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		default:
+			if err := tx.Model(&role).Updates(map[string]any{
+				"name": gatewayAdminRoleName, "description": gatewayAdminRoleDescription,
+				"built_in": true, "status": consts.StatusEnabled,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		grants := []Permission{
+			{Resource: APIResourceService, ResourceID: 0, Action: APIPermissionInvoke},
+		}
+		permissionIDs := make([]uint, 0, len(grants))
+		for _, grant := range grants {
+			permission := grant
+			if err := tx.Where(Permission{
+				Resource: grant.Resource, ResourceID: grant.ResourceID, Action: grant.Action,
+			}).FirstOrCreate(&permission).Error; err != nil {
+				return err
+			}
+			permissionIDs = append(permissionIDs, permission.ID)
+			binding := RolePermission{RoleID: role.ID, PermissionID: permission.ID}
+			if err := tx.Where(RolePermission{RoleID: role.ID, PermissionID: permission.ID}).FirstOrCreate(&binding).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("role_id = ? AND permission_id NOT IN ?", role.ID, permissionIDs).Delete(&RolePermission{}).Error
+	})
 }

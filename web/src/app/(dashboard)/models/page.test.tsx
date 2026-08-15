@@ -239,3 +239,12 @@ it("reports a metadata source failure instead of claiming full sync success", as
   ));
   expect(state.toastSuccess).not.toHaveBeenCalled();
 });
+
+it("uses the shared page header without changing the model toolbar action", () => {
+  render(<ModelsPage />);
+
+  expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  expect(screen.getByRole("heading", { level: 1 })).toHaveClass("tracking-tight");
+  expect(screen.getByTestId("page-header")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "syncFromChannels" })).toBeInTheDocument();
+});

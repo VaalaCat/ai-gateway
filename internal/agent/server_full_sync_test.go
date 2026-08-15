@@ -14,6 +14,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -29,6 +30,15 @@ type requestedFullSyncClient struct {
 	releaseFirst   chan struct{}
 	secondFinished chan struct{}
 	finishOnce     sync.Once
+	apiRequests    map[int][]protocol.FullSyncRequest
+}
+
+var requestedFullSyncAPIEntities = []string{
+	events.EntityAPIService,
+	events.EntityAPIRoute,
+	events.EntityAPIUpstream,
+	events.EntityAPIRole,
+	events.EntityUserGroupAPIRoleSet,
 }
 
 func (c *requestedFullSyncClient) OnNotification(method string, handler app.NotificationHandler) {
@@ -70,6 +80,9 @@ func (c *requestedFullSyncClient) Call(ctx context.Context, method string, param
 
 	c.mu.Lock()
 	pass := c.currentPass
+	if isRequestedFullSyncAPIEntity(req.Entity) {
+		c.apiRequests[pass] = append(c.apiRequests[pass], req)
+	}
 	c.mu.Unlock()
 	resp := protocol.FullSyncResponse{
 		Items:   []byte("[]"),
@@ -86,6 +99,12 @@ func (c *requestedFullSyncClient) Call(ctx context.Context, method string, param
 		resp.Keyset = true
 		resp.BaseVersion = int64(pass)
 		resp.SnapshotContract = protocol.AgentFullSyncSnapshotContractV1
+	}
+	if isRequestedFullSyncAPIEntity(req.Entity) {
+		resp.Page = 0
+		resp.Keyset = true
+		resp.BaseVersion = int64(pass)
+		resp.SnapshotContract = protocol.APIFullSyncSnapshotContractV1
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {
@@ -107,10 +126,35 @@ func (c *requestedFullSyncClient) passes() int {
 	return c.pass
 }
 
+func (c *requestedFullSyncClient) apiRequestsForPass(pass int) []protocol.FullSyncRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]protocol.FullSyncRequest(nil), c.apiRequests[pass]...)
+}
+
 func (c *requestedFullSyncClient) inlineHandler(method string) app.NotificationHandler {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.inlineHandlers[method]
+}
+
+func isRequestedFullSyncAPIEntity(entity string) bool {
+	for _, candidate := range requestedFullSyncAPIEntities {
+		if entity == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func requireRequestedFullSyncPass(t *testing.T, started <-chan int, want int) {
+	t.Helper()
+	select {
+	case got := <-started:
+		require.Equal(t, want, got)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("requested full-sync pass %d did not start", want)
+	}
 }
 
 func TestRequestedFullSyncCoalesces100RequestsIntoRunningAndPendingPass(t *testing.T) {
@@ -120,6 +164,7 @@ func TestRequestedFullSyncCoalesces100RequestsIntoRunningAndPendingPass(t *testi
 		passStarted:    make(chan int, 2),
 		releaseFirst:   make(chan struct{}),
 		secondFinished: make(chan struct{}),
+		apiRequests:    make(map[int][]protocol.FullSyncRequest),
 	}
 	store := cache.NewStore(nil, config.AgentCacheConfig{})
 	bus := eventbus.NewMemoryBus()
@@ -133,6 +178,25 @@ func TestRequestedFullSyncCoalesces100RequestsIntoRunningAndPendingPass(t *testi
 	serverCtx, cancelServer := context.WithCancel(context.Background())
 	server := &Server{Syncer: syncer}
 	workerDone := server.startRequestedFullSyncWorker(serverCtx)
+	var releaseFirstOnce sync.Once
+	releaseFirst := func() {
+		releaseFirstOnce.Do(func() { close(client.releaseFirst) })
+	}
+	stopWorker := func() bool {
+		cancelServer()
+		releaseFirst()
+		select {
+		case <-workerDone:
+			return true
+		case <-time.After(5 * time.Second):
+			return false
+		}
+	}
+	t.Cleanup(func() {
+		if !stopWorker() {
+			t.Error("requested full-sync worker did not stop during test cleanup")
+		}
+	})
 	bridge := cache.NewWSBridge(client, store, bus, zap.NewNop())
 	bridge.Syncer = syncer
 	bridge.Start()
@@ -142,7 +206,7 @@ func TestRequestedFullSyncCoalesces100RequestsIntoRunningAndPendingPass(t *testi
 	connectionCtx, cancelConnection := context.WithCancel(serverCtx)
 	_, err := handler(connectionCtx, nil)
 	require.NoError(t, err)
-	require.Equal(t, 1, <-client.passStarted)
+	requireRequestedFullSyncPass(t, client.passStarted, 1)
 
 	start := make(chan struct{})
 	var handlerErrors atomic.Int64
@@ -158,19 +222,42 @@ func TestRequestedFullSyncCoalesces100RequestsIntoRunningAndPendingPass(t *testi
 		}()
 	}
 	close(start)
-	requests.Wait()
+	requestsDone := make(chan struct{})
+	go func() {
+		requests.Wait()
+		close(requestsDone)
+	}()
+	select {
+	case <-requestsDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("99 concurrent requested full-sync handlers did not finish")
+	}
 	require.Zero(t, handlerErrors.Load())
 	cancelConnection()
 	<-connectionCtx.Done()
 
-	close(client.releaseFirst)
-	require.Equal(t, 2, <-client.passStarted)
-	<-client.secondFinished
-	cancelServer()
+	releaseFirst()
+	requireRequestedFullSyncPass(t, client.passStarted, 2)
 	select {
-	case <-workerDone:
+	case <-client.secondFinished:
 	case <-time.After(5 * time.Second):
-		t.Fatal("requested full-sync worker did not stop after cancellation")
+		t.Fatal("requested full-sync pass 2 did not reach the script entity")
 	}
+	require.NoError(t, store.APIIndex.RequireReady())
+	for pass := 1; pass <= 2; pass++ {
+		requests := client.apiRequestsForPass(pass)
+		require.Len(t, requests, len(requestedFullSyncAPIEntities))
+		entities := make([]string, 0, len(requests))
+		for _, request := range requests {
+			entities = append(entities, request.Entity)
+			require.Zero(t, request.Page)
+			require.Equal(t, protocol.FullSyncMaxPageSize, request.PageSize)
+			require.Zero(t, request.AfterID)
+			require.Zero(t, request.SnapshotMaxID)
+			require.Zero(t, request.BaseVersion)
+		}
+		require.ElementsMatch(t, requestedFullSyncAPIEntities, entities)
+	}
+	require.True(t, stopWorker(), "requested full-sync worker did not stop after cancellation")
 	require.Equal(t, 2, client.passes())
 }

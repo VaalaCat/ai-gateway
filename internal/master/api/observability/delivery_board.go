@@ -8,6 +8,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/api/monitoring"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/sourcegraph/conc/pool"
@@ -16,6 +17,8 @@ import (
 // DeliveryQueueItem 与 agent 侧 reporter.QueueItemSnapshot(旁路重试队列单条记录)同构。
 type DeliveryQueueItem struct {
 	RequestID    string `json:"request_id"`
+	QueueID      string `json:"queue_id,omitempty"`
+	UsageType    string `json:"usage_type,omitempty"`
 	Bytes        int    `json:"bytes"`
 	Attempts     int    `json:"attempts"`
 	DegradeLevel int    `json:"degrade_level"`
@@ -32,32 +35,41 @@ type agentQueueSnapshot struct {
 	LastSuccessAt int64               `json:"last_success_at"`
 	LastError     string              `json:"last_error"`
 	Inflight      int                 `json:"inflight"`
+	StoreDropped  uint64              `json:"store_dropped"`
+	RetryDropped  uint64              `json:"retry_dropped"`
+	TraceSlimmed  uint64              `json:"trace_slimmed"`
 	Items         []DeliveryQueueItem `json:"items"`
 }
 
 // AgentQueueRow 是看板一行:单个 agent 的 usage 投递两级队列快照。
 type AgentQueueRow struct {
-	AgentID       uint                `json:"agent_id"`
-	AgentName     string              `json:"agent_name"`
-	StoreLen      int                 `json:"store_len"`
-	RetryLen      int                 `json:"retry_len"`
-	TotalBytes    int                 `json:"total_bytes"` // store_bytes+retry_bytes
-	OldestTs      int64               `json:"oldest_ts"`
-	LastSuccessAt int64               `json:"last_success_at"`
-	LastError     string              `json:"last_error"`
-	Inflight      int                 `json:"inflight"`
-	Items         []DeliveryQueueItem `json:"items"`
+	AgentID            uint                `json:"agent_id"`
+	AgentName          string              `json:"agent_name"`
+	StoreLen           int                 `json:"store_len"`
+	RetryLen           int                 `json:"retry_len"`
+	TotalBytes         int                 `json:"total_bytes"` // store_bytes+retry_bytes
+	OldestTs           int64               `json:"oldest_ts"`
+	LastSuccessAt      int64               `json:"last_success_at"`
+	LastError          string              `json:"last_error"`
+	Inflight           int                 `json:"inflight"`
+	SharedUsageDropped uint64              `json:"shared_usage_dropped"`
+	APITraceSlimmed    uint64              `json:"api_trace_slimmed"`
+	Items              []DeliveryQueueItem `json:"items"`
 }
 
 type DeliveryBoardResponse struct {
-	Agents       []AgentQueueRow `json:"agents"`
-	FailedAgents []FailedAgent   `json:"failed_agents"`
+	Agents       []AgentQueueRow       `json:"agents"`
+	FailedAgents []FailedAgent         `json:"failed_agents"`
+	LogBacklog   monitoring.LogBacklog `json:"log_backlog"`
 }
 
 // GetDeliveryBoard 扇出 agent.usageQueue 到所有在线 agent,汇总成每 agent 一行的投递
 // 看板(镜像 GetBreakerBoard 的扇出/隔离/排序骨架)。
 func (h *Handler) GetDeliveryBoard(c *app.Context, _ api.EmptyRequest) (DeliveryBoardResponse, error) {
 	resp := DeliveryBoardResponse{Agents: []AgentQueueRow{}, FailedAgents: []FailedAgent{}}
+	if h != nil && h.LogBacklogSnapshot != nil {
+		resp.LogBacklog = h.LogBacklogSnapshot()
+	}
 	if h.HubCall == nil || h.GetOnlineAgentIDs == nil {
 		return resp, api.InternalError("hub not available", nil)
 	}
@@ -99,12 +111,14 @@ func (h *Handler) GetDeliveryBoard(c *app.Context, _ api.EmptyRequest) (Delivery
 			return nodeRes{ag: ag, row: AgentQueueRow{
 				AgentID: ag.ID, AgentName: ag.Name,
 				StoreLen: snap.StoreLen, RetryLen: snap.RetryLen,
-				TotalBytes:    snap.StoreBytes + snap.RetryBytes,
-				OldestTs:      snap.OldestTs,
-				LastSuccessAt: snap.LastSuccessAt,
-				LastError:     snap.LastError,
-				Inflight:      snap.Inflight,
-				Items:         snap.Items,
+				TotalBytes:         snap.StoreBytes + snap.RetryBytes,
+				OldestTs:           snap.OldestTs,
+				LastSuccessAt:      snap.LastSuccessAt,
+				LastError:          snap.LastError,
+				Inflight:           snap.Inflight,
+				SharedUsageDropped: snap.StoreDropped + snap.RetryDropped,
+				APITraceSlimmed:    snap.TraceSlimmed,
+				Items:              snap.Items,
 			}}
 		})
 	}

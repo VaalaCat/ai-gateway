@@ -15,6 +15,7 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import { usePaginationState } from "@/components/data-table/use-pagination-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -237,11 +238,12 @@ export default function UserGroupsPage() {
   ];
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("subtitle")}</p>
-      </div>
+    <PageLayout
+      title={t("title")}
+      description={t("subtitle")}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       <DataTable
         columns={columns}
@@ -318,6 +320,7 @@ export default function UserGroupsPage() {
         title={t("deleteConfirmTitle")}
         description={t("deleteConfirmDesc")}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

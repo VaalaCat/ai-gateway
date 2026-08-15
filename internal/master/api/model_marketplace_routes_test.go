@@ -2,8 +2,10 @@ package api_test
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -19,7 +21,7 @@ import (
 
 // Break caught: registering either marketplace endpoint outside its required
 // authentication/administrator group would make these status boundaries fail.
-func TestMarketplaceRoutesUseUserAndAdministratorMiddleware(t *testing.T) {
+func TestModelMarketplaceRoutesUseUserAndAdministratorMiddleware(t *testing.T) {
 	srv := setupTestMaster(t)
 
 	for _, path := range []string{
@@ -52,7 +54,7 @@ func TestMarketplaceRoutesUseUserAndAdministratorMiddleware(t *testing.T) {
 
 // Break caught: binding required query fields before the feature gate would
 // return 400 and/or touch SQL instead of the required zero-read 404.
-func TestMarketplaceDisabledUserHTTPReturns404WithoutDatabaseQueries(t *testing.T) {
+func TestModelMarketplaceRoutesDisabledUserHTTPReturns404WithoutDatabaseQueries(t *testing.T) {
 	srv := setupTestMaster(t)
 	srv.App.GetMasterSettings().Update(map[string]string{
 		consts.SettingKeyModelMarketplaceEnabled: "false",
@@ -82,7 +84,7 @@ func TestMarketplaceDisabledUserHTTPReturns404WithoutDatabaseQueries(t *testing.
 
 // Break caught: route wiring to the wrong gate or a conditional admin mapper
 // would fail one of the ordinary/global/preview/error boundaries below.
-func TestMarketplaceHTTPListDetailAdminAndTokenErrorMatrix(t *testing.T) {
+func TestModelMarketplaceRoutesHTTPListDetailAdminAndTokenErrorMatrix(t *testing.T) {
 	srv := setupTestMaster(t)
 	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
 	adminJWT := loginHelper(t, srv, "admin", "admin123")
@@ -98,26 +100,40 @@ func TestMarketplaceHTTPListDetailAdminAndTokenErrorMatrix(t *testing.T) {
 			InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"},
 		}),
 	}
+	secondaryModel := models.ModelConfig{
+		ModelName: "claude-3", Status: consts.StatusEnabled,
+		InputPrice: 1, OutputPrice: 2, CacheReadPrice: 3, CacheWritePrice: 4,
+		SyncedMetadata: datatypes.NewJSONType(models.ModelMetadata{
+			DisplayName: "Claude 3", Provider: "Anthropic",
+			InputModalities: []string{"text"}, OutputModalities: []string{"text"},
+		}),
+	}
 	channel := models.Channel{
 		ChannelCore: models.ChannelCore{
 			Name: "internal-secret-channel", Status: consts.StatusEnabled,
 			BaseURL: "https://secret.internal.example", Endpoints: `{"chat_completions":"/secret/chat"}`,
 		},
-		PublicDisplayName: "Platform", Models: "gpt-4o", Key: "api-key-secret", PriceRatio: 1,
+		PublicDisplayName: "Platform", Models: "gpt-4o,claude-3", Key: "api-key-secret", PriceRatio: 1,
 	}
 	token := models.Token{
 		UserID: 7, Key: "marketplace-token-secret", Name: "Production",
 		Status: consts.StatusEnabled, ExpiredAt: -1,
 	}
 	require.NoError(t, srv.DB.Create(&model).Error)
+	require.NoError(t, srv.DB.Create(&secondaryModel).Error)
 	require.NoError(t, srv.DB.Create(&channel).Error)
 	require.NoError(t, srv.DB.Create(&token).Error)
 	// Publish through the handler's supported planner publisher. The HTTP
 	// fixture needs a runtime candidate because ordinary views fail closed when
 	// the embedded Agent planner has not committed yet.
 	srv.ModelMarketplaceHandler.SetModelOfferPlanFinder(marketplaceRoutePlanFinder{
-		candidate: relayplan.ModelOfferCandidate{
-			RealModel: "gpt-4o", Source: state.SourceAdmin, SourceID: channel.ID,
+		candidates: map[string]relayplan.ModelOfferCandidate{
+			"claude-3": {
+				RealModel: "claude-3", Source: state.SourceAdmin, SourceID: channel.ID,
+			},
+			"gpt-4o": {
+				RealModel: "gpt-4o", Source: state.SourceAdmin, SourceID: channel.ID,
+			},
 		},
 	})
 	userJWT, err := middleware.GenerateToken(
@@ -129,13 +145,16 @@ func TestMarketplaceHTTPListDetailAdminAndTokenErrorMatrix(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	listPath := "/api/model-marketplace?token_id=" + itoa(int(token.ID))
+	listPath := "/api/model-marketplace?token_id=" + itoa(int(token.ID)) + "&page=2&page_size=1"
 	detailBasePath := "/api/model-marketplace/detail?token_id=" + itoa(int(token.ID))
 	detailPath := detailBasePath + "&model=gpt-4o&window=24h"
 	list := reqHelper(srv, userJWT, http.MethodGet, listPath, nil)
 	require.Equal(t, http.StatusOK, list.Code, list.Body.String())
 	listBody := jsonBody(t, list)
 	require.Equal(t, []string{"id", "name"}, sortedHTTPJSONKeys(t, listBody["selected_token"]))
+	require.Equal(t, float64(2), listBody["page"])
+	require.Equal(t, float64(1), listBody["page_size"])
+	require.Equal(t, float64(2), listBody["total"])
 	requireMarketplaceHTTPModelPerformance(t, listBody, "24h", 24, false)
 	for _, forbidden := range []string{"request_count", "success_count", "channel_id", "private_channel_id"} {
 		require.NotContains(t, list.Body.String(), forbidden)
@@ -147,14 +166,62 @@ func TestMarketplaceHTTPListDetailAdminAndTokenErrorMatrix(t *testing.T) {
 	require.Equal(t, http.StatusOK, detail7Days.Code, detail7Days.Body.String())
 	requireMarketplaceHTTPModelPerformance(t, jsonBody(t, detail7Days), "7d", 28, false)
 
-	global := reqHelper(srv, adminJWT, http.MethodGet, "/api/admin/model-marketplace", nil)
+	global := reqHelper(srv, adminJWT, http.MethodGet, "/api/admin/model-marketplace?page=2&page_size=1", nil)
 	require.Equal(t, http.StatusOK, global.Code, global.Body.String())
 	globalBody := jsonBody(t, global)
 	require.Equal(t, "global", globalBody["view"].(map[string]any)["mode"])
+	require.Equal(t, float64(2), globalBody["page"])
+	require.Equal(t, float64(1), globalBody["page_size"])
+	require.Equal(t, float64(2), globalBody["total"])
 	requireMarketplaceHTTPModelPerformance(t, globalBody, "24h", 24, true)
 	preview := reqHelper(srv, adminJWT, http.MethodGet, "/api/admin/model-marketplace?token_id="+itoa(int(token.ID)), nil)
 	require.Equal(t, http.StatusOK, preview.Code, preview.Body.String())
 	require.Equal(t, "token_preview", jsonBody(t, preview)["view"].(map[string]any)["mode"])
+
+	invalidPagination := reqHelper(
+		srv,
+		userJWT,
+		http.MethodGet,
+		"/api/model-marketplace?token_id="+itoa(int(token.ID))+"&page=0&page_size=999",
+		nil,
+	)
+	require.Equal(t, http.StatusOK, invalidPagination.Code, invalidPagination.Body.String())
+	invalidPaginationBody := jsonBody(t, invalidPagination)
+	require.Equal(t, float64(1), invalidPaginationBody["page"])
+	require.Equal(t, float64(20), invalidPaginationBody["page_size"])
+	require.Equal(t, float64(2), invalidPaginationBody["total"])
+
+	// Break caught: a maximum representable page must stay observable in the
+	// response while yielding an empty page, never a recovered slice panic/500.
+	overflowPage := strconv.Itoa(math.MaxInt)
+	for _, test := range []struct {
+		name string
+		path string
+	}{
+		{
+			name: "user",
+			path: "/api/model-marketplace?token_id=" + itoa(int(token.ID)) +
+				"&page=" + overflowPage + "&page_size=100",
+		},
+		{
+			name: "admin",
+			path: "/api/admin/model-marketplace?page=" + overflowPage + "&page_size=100",
+		},
+	} {
+		t.Run("maximum page "+test.name, func(t *testing.T) {
+			jwt := userJWT
+			if test.name == "admin" {
+				jwt = adminJWT
+			}
+			response := reqHelper(srv, jwt, http.MethodGet, test.path, nil)
+			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			body := jsonBody(t, response)
+			require.Empty(t, body["models"])
+			require.Equal(t, float64(2), body["total"])
+			require.Equal(t, float64(math.MaxInt), body["page"])
+			require.Equal(t, float64(100), body["page_size"])
+		})
+	}
 
 	crossUser := reqHelper(srv, otherJWT, http.MethodGet, listPath, nil)
 	require.Equal(t, http.StatusNotFound, crossUser.Code, crossUser.Body.String())
@@ -171,6 +238,114 @@ func TestMarketplaceHTTPListDetailAdminAndTokenErrorMatrix(t *testing.T) {
 	}).Error)
 	expired := reqHelper(srv, userJWT, http.MethodGet, listPath, nil)
 	require.Equal(t, http.StatusUnprocessableEntity, expired.Code, expired.Body.String())
+}
+
+// Break caught: an administrator Token preview that retains diagnostic-only
+// models does not match the selected Token's effective online channel scope.
+func TestAdminModelMarketplaceTokenPreviewUsesEffectiveChannelCatalog(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginHelper(t, srv, "admin", "admin123")
+	srv.App.GetMasterSettings().Update(map[string]string{
+		consts.SettingKeyModelMarketplaceEnabled: "true",
+	})
+
+	allowedModel := models.ModelConfig{
+		ModelName: "allowed-model", Status: consts.StatusEnabled, InputPrice: 1, OutputPrice: 1,
+	}
+	blockedModel := models.ModelConfig{
+		ModelName: "blocked-model", Status: consts.StatusEnabled, InputPrice: 1, OutputPrice: 1,
+	}
+	mixedModel := models.ModelConfig{
+		ModelName: "mixed-model", Status: consts.StatusEnabled, InputPrice: 1, OutputPrice: 1,
+	}
+	allowedChannel := models.Channel{
+		ChannelCore: models.ChannelCore{
+			Name: "allowed", Status: consts.StatusEnabled,
+			BaseURL:   "https://allowed.invalid",
+			Endpoints: `{"chat_completions":"/v1/chat/completions"}`,
+		},
+		PublicDisplayName: "Allowed", Models: "allowed-model,mixed-model", PriceRatio: 1,
+	}
+	blockedChannel := models.Channel{
+		ChannelCore: models.ChannelCore{
+			Name: "blocked", Status: consts.StatusEnabled,
+			BaseURL:   "https://blocked.invalid",
+			Endpoints: `{"chat_completions":"/v1/chat/completions"}`,
+		},
+		PublicDisplayName: "Blocked", Models: "blocked-model,mixed-model", PriceRatio: 1,
+	}
+	require.NoError(t, srv.DB.Create(&allowedModel).Error)
+	require.NoError(t, srv.DB.Create(&blockedModel).Error)
+	require.NoError(t, srv.DB.Create(&mixedModel).Error)
+	require.NoError(t, srv.DB.Create(&allowedChannel).Error)
+	require.NoError(t, srv.DB.Create(&blockedChannel).Error)
+	require.NoError(t, srv.DB.Model(&models.UserGroup{}).
+		Where("id = ?", models.DefaultUserGroupID).
+		Update("allowed_channel_ids", datatypes.JSONSlice[uint]{allowedChannel.ID}).Error)
+	token := models.Token{
+		UserID: 7, Key: "restricted-channel-token", Name: "Restricted",
+		Status: consts.StatusEnabled, ExpiredAt: -1,
+		AllowedChannelIDs: datatypes.JSONSlice[uint]{allowedChannel.ID, blockedChannel.ID},
+	}
+	require.NoError(t, srv.DB.Create(&token).Error)
+	srv.ModelMarketplaceHandler.SetModelOfferPlanFinder(marketplaceRoutePlanFinderMany{
+		candidates: map[string][]relayplan.ModelOfferCandidate{
+			"allowed-model": {{
+				RealModel: "allowed-model", Source: state.SourceAdmin, SourceID: allowedChannel.ID,
+			}},
+			"blocked-model": {{
+				RealModel: "blocked-model", Source: state.SourceAdmin, SourceID: blockedChannel.ID,
+			}},
+			"mixed-model": {
+				{RealModel: "mixed-model", Source: state.SourceAdmin, SourceID: allowedChannel.ID},
+				{RealModel: "mixed-model", Source: state.SourceAdmin, SourceID: blockedChannel.ID},
+			},
+		},
+	})
+
+	preview := reqHelper(
+		srv, adminJWT, http.MethodGet,
+		"/api/admin/model-marketplace?token_id="+itoa(int(token.ID)), nil,
+	)
+	require.Equal(t, http.StatusOK, preview.Code, preview.Body.String())
+	previewBody := jsonBody(t, preview)
+	require.Equal(t, "token_preview", previewBody["view"].(map[string]any)["mode"])
+	require.Equal(t, float64(token.ID),
+		previewBody["view"].(map[string]any)["selected_token"].(map[string]any)["id"])
+	require.Equal(t, float64(2), previewBody["total"])
+	require.Equal(t, []string{"allowed-model", "mixed-model"}, marketplaceHTTPRealModelNames(t, previewBody))
+	mixed := marketplaceHTTPRealModel(t, previewBody, "mixed-model")
+	mixedOffers := mixed["offers"].([]any)
+	require.Len(t, mixedOffers, 1)
+	mixedOffer := mixedOffers[0].(map[string]any)
+	require.Equal(t, true, mixedOffer["available"])
+	require.Equal(t, float64(allowedChannel.ID),
+		mixedOffer["diagnostics"].(map[string]any)["channel_id"])
+
+	blockedDetail := reqHelper(
+		srv, adminJWT, http.MethodGet,
+		"/api/admin/model-marketplace/detail?token_id="+itoa(int(token.ID))+"&model=blocked-model&window=24h", nil,
+	)
+	require.Equal(t, http.StatusNotFound, blockedDetail.Code, blockedDetail.Body.String())
+
+	require.NoError(t, srv.DB.Model(&models.Token{}).Where("id = ?", token.ID).
+		Update("allowed_channel_ids", datatypes.JSONSlice[uint]{}).Error)
+	require.NoError(t, srv.DB.Model(&models.UserGroup{}).
+		Where("id = ?", models.DefaultUserGroupID).
+		Update("allowed_channel_ids", datatypes.JSONSlice[uint]{}).Error)
+	unrestricted := reqHelper(
+		srv, adminJWT, http.MethodGet,
+		"/api/admin/model-marketplace?token_id="+itoa(int(token.ID)), nil,
+	)
+	require.Equal(t, http.StatusOK, unrestricted.Code, unrestricted.Body.String())
+	unrestrictedBody := jsonBody(t, unrestricted)
+	require.Equal(t, float64(3), unrestrictedBody["total"])
+	require.Len(t, marketplaceHTTPRealModel(t, unrestrictedBody, "mixed-model")["offers"].([]any), 2)
+
+	global := reqHelper(srv, adminJWT, http.MethodGet, "/api/admin/model-marketplace", nil)
+	require.Equal(t, http.StatusOK, global.Code, global.Body.String())
+	require.Equal(t, float64(3), jsonBody(t, global)["total"])
 }
 
 func requireMarketplaceHTTPModelPerformance(t *testing.T, body map[string]any, window string, bucketCount int, admin bool) {
@@ -198,7 +373,7 @@ func requireMarketplaceHTTPModelPerformance(t *testing.T, body map[string]any, w
 
 // Break caught: removing the ordinary-view fail-closed branch would make a
 // missing embedded Agent planner expose a stale Master catalog as available.
-func TestMarketplaceHTTPFailsClosedWithEmptyListAndDetail404WhenPlannerUnavailable(t *testing.T) {
+func TestModelMarketplaceRoutesHTTPFailsClosedWithEmptyListAndDetail404WhenPlannerUnavailable(t *testing.T) {
 	srv := setupTestMaster(t)
 	srv.App.GetMasterSettings().Update(map[string]string{
 		consts.SettingKeyModelMarketplaceEnabled: "true",
@@ -231,7 +406,7 @@ func TestMarketplaceHTTPFailsClosedWithEmptyListAndDetail404WhenPlannerUnavailab
 }
 
 type marketplaceRoutePlanFinder struct {
-	candidate relayplan.ModelOfferCandidate
+	candidates map[string]relayplan.ModelOfferCandidate
 }
 
 func (f marketplaceRoutePlanFinder) Find(
@@ -239,11 +414,12 @@ func (f marketplaceRoutePlanFinder) Find(
 	query relayplan.ModelOfferPlanQuery,
 ) (relayplan.ModelOfferPlan, error) {
 	plan := relayplan.ModelOfferPlan{RequestModel: query.Model}
-	if query.Model != f.candidate.RealModel {
+	candidate, exists := f.candidates[query.Model]
+	if !exists {
 		return plan, nil
 	}
 	plan.RealModels = []string{query.Model}
-	plan.Candidates = []relayplan.ModelOfferCandidate{f.candidate}
+	plan.Candidates = []relayplan.ModelOfferCandidate{candidate}
 	return plan, nil
 }
 
@@ -257,4 +433,44 @@ func sortedHTTPJSONKeys(t *testing.T, value any) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+func marketplaceHTTPRealModelNames(t *testing.T, body map[string]any) []string {
+	t.Helper()
+	items := body["models"].([]any)
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		real := item.(map[string]any)["real"].(map[string]any)
+		names = append(names, real["model_name"].(string))
+	}
+	slices.Sort(names)
+	return names
+}
+
+func marketplaceHTTPRealModel(t *testing.T, body map[string]any, modelName string) map[string]any {
+	t.Helper()
+	items := body["models"].([]any)
+	for _, item := range items {
+		real := item.(map[string]any)["real"].(map[string]any)
+		if real["model_name"] == modelName {
+			return real
+		}
+	}
+	t.Fatalf("real model %q not found", modelName)
+	return nil
+}
+
+type marketplaceRoutePlanFinderMany struct {
+	candidates map[string][]relayplan.ModelOfferCandidate
+}
+
+func (f marketplaceRoutePlanFinderMany) Find(
+	_ context.Context,
+	query relayplan.ModelOfferPlanQuery,
+) (relayplan.ModelOfferPlan, error) {
+	return relayplan.ModelOfferPlan{
+		RequestModel: query.Model,
+		RealModels:   []string{query.Model},
+		Candidates:   append([]relayplan.ModelOfferCandidate(nil), f.candidates[query.Model]...),
+	}, nil
 }

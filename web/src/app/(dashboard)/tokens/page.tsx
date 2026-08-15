@@ -15,6 +15,8 @@ import { FilterableToolbar } from "@/components/data-table/filterable-toolbar";
 import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
+import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,6 +35,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { TagInput } from "@/components/ui/tag-input";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { AgentRouteEditor } from "@/components/agent-route-editor";
 
 import { StatusBadge } from "@/components/business/status-badge";
@@ -58,13 +61,14 @@ import { formatErrorToast } from "@/lib/api/error-toast";
 import { buildQuery } from "@/lib/api/client";
 import { useTokens, useCreateToken, useUpdateToken, useDeleteToken } from "@/lib/api/tokens";
 import { useEnabledTokenTemplates } from "@/lib/api/token-templates";
+import { useAPIRoleBindings, useAPIRoles } from "@/lib/api/api-access";
 import { useAuth } from "@/lib/auth";
 import { PAGE_SIZES } from "@/lib/constants";
 import { parseModels, serializeModels } from "@/lib/parse-models";
 import { formatSuccessRate, formatMoneyCompact } from "@/lib/utils/format";
 import { MoneyCell } from "@/components/business/money-cell";
 import { buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
-import type { BillingTokenRow, Token, TokenTraceMode } from "@/lib/types";
+import type { APIRoleMode, BillingTokenRow, Token, TokenTraceMode } from "@/lib/types";
 
 function isWeakToken(token: string): boolean {
   const value = token.trim();
@@ -89,8 +93,9 @@ function logHref(tokenId: number): string {
 }
 
 export default function TokensPage() {
+  const t = useTranslations("tokens");
   return (
-    <Suspense fallback={<div className="flex items-center justify-center py-12 text-muted-foreground">Loading...</div>}>
+    <Suspense fallback={<PageLayoutSkeleton title={t("title")} description={t("description")} />}>
       <TokensPageContent />
     </Suspense>
   );
@@ -211,13 +216,15 @@ function TokensPageContent() {
   const updateMutation = useUpdateToken();
   const deleteMutation = useDeleteToken();
   const { data: enabledTemplatesData } = useEnabledTokenTemplates();
+  const { data: apiRolesData } = useAPIRoles({ page_size: 1000 }, { enabled: isAdmin });
+  const { data: apiRoleBindingsData } = useAPIRoleBindings({ page_size: 1000 }, { enabled: isAdmin });
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editItem, setEditItem] = useState<Token | null>(null);
   const [deleteItem, setDeleteItem] = useState<Token | null>(null);
 
   const [createForm, setCreateForm] = useState({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, trace_mode: "full" as TokenTraceMode, byok_only: false, allowed_channel_ids: [] as number[] });
-  const [editForm, setEditForm] = useState({ user_id: "", name: "", status: "1", expired_at: "", models: "", trace_enabled: false, trace_mode: "full" as TokenTraceMode, byok_only: false, allowed_channel_ids: [] as number[] });
+  const [editForm, setEditForm] = useState({ user_id: "", name: "", status: "1", expired_at: "", models: "", trace_enabled: false, trace_mode: "full" as TokenTraceMode, byok_only: false, allowed_channel_ids: [] as number[], api_role_mode: "inherit" as APIRoleMode, api_role_ids: [] as number[] });
   const [weakKeyConfirmOpen, setWeakKeyConfirmOpen] = useState(false);
   const [pendingWeakKeyCreate, setPendingWeakKeyCreate] = useState<null | typeof createForm>(null);
 
@@ -294,6 +301,8 @@ function TokensPageContent() {
           trace_mode: editForm.trace_mode,
           byok_only: editForm.byok_only,
           allowed_channel_ids: editForm.allowed_channel_ids,
+          api_role_mode: editForm.api_role_mode,
+          api_role_ids: editForm.api_role_mode === "explicit" ? editForm.api_role_ids : [],
         });
       } else {
         await updateMutation.mutateAsync({
@@ -335,6 +344,10 @@ function TokensPageContent() {
       trace_mode: token.trace_mode === "headers" ? "headers" : "full",
       byok_only: token.byok_only ?? false,
       allowed_channel_ids: token.allowed_channel_ids ?? [],
+      api_role_mode: token.api_role_mode === "explicit" ? "explicit" : "inherit",
+      api_role_ids: (apiRoleBindingsData?.data ?? [])
+        .filter((binding) => binding.principal_type === "token" && binding.principal_id === token.id)
+        .map((binding) => binding.role_id),
     });
     setEditItem(token);
   };
@@ -489,11 +502,13 @@ function TokensPageContent() {
   ], [tb]);
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
+    <PageLayout
+      title={t("title")}
+      description={t("description")}
+      actions={<Button size="sm" onClick={() => { setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, trace_mode: "full", byok_only: false, allowed_channel_ids: [] }); setCreateOpen(true); }}><Plus className="mr-2 size-4" />{t("createToken")}</Button>}
+      maxWidth="full"
+    >
+      <div className="space-y-4">
 
       <DataTable
         columns={columns}
@@ -510,12 +525,6 @@ function TokensPageContent() {
             spec={filterSpec}
             value={filterValues}
             onChange={setFilterValues}
-            primaryAction={
-              <Button size="sm" onClick={() => { setCreateForm({ user_id: String(user?.user_id ?? ""), name: "", key: "", expired_at: "", models: "", template_id: 0, trace_enabled: false, trace_mode: "full", byok_only: false, allowed_channel_ids: [] }); setCreateOpen(true); }}>
-                <Plus className="mr-2 size-4" />
-                {t("createToken")}
-              </Button>
-            }
           />
         }
         expandedState={expandedState}
@@ -835,6 +844,32 @@ function TokensPageContent() {
               </div>
               <p className="text-xs text-muted-foreground">{t("byokOnlyTip")}</p>
             </div>
+            {isAdmin ? (
+              <div className="space-y-2 rounded-md border p-3">
+                <Label>{t("apiRoleMode")}</Label>
+                <div className="flex gap-2">
+                  <Button type="button" variant={editForm.api_role_mode === "inherit" ? "secondary" : "outline"} size="sm" onClick={() => setEditForm((current) => ({ ...current, api_role_mode: "inherit" }))}>{t("apiRoleModeInherit")}</Button>
+                  <Button type="button" variant={editForm.api_role_mode === "explicit" ? "secondary" : "outline"} size="sm" onClick={() => setEditForm((current) => ({ ...current, api_role_mode: "explicit" }))}>{t("apiRoleModeExplicit")}</Button>
+                </div>
+                <div className="space-y-2">
+                  {(apiRolesData?.data ?? []).filter((role) => role.status === 1).map((role) => (
+                    <label key={role.id} className="flex items-center gap-2 text-sm">
+                      <Checkbox
+                        checked={editForm.api_role_ids.includes(role.id)}
+                        disabled={editForm.api_role_mode === "inherit"}
+                        onCheckedChange={(checked) => setEditForm((current) => ({
+                          ...current,
+                          api_role_ids: checked
+                            ? [...current.api_role_ids, role.id]
+                            : current.api_role_ids.filter((id) => id !== role.id),
+                        }))}
+                      />
+                      {role.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
           {isAdmin && editItem && <AgentRouteEditor sourceType="token" sourceId={editItem.id} />}
           <DialogFooter>
@@ -862,6 +897,7 @@ function TokensPageContent() {
         title={t("weakKeyWarningTitle")}
         description={t("weakKeyWarningDesc")}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

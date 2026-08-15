@@ -134,6 +134,9 @@ func TestUserGroup_CountUsers(t *testing.T) {
 
 func TestUserGroup_DeleteAndReassign(t *testing.T) {
 	ctx, _ := setupAdminContext(t)
+	if err := ctx.GetCoreDB().AutoMigrate(&models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.RoleBinding{}); err != nil {
+		t.Fatal(err)
+	}
 	q := NewAdminQuery(ctx)
 	m := NewAdminMutation(ctx)
 
@@ -160,7 +163,7 @@ func TestUserGroup_DeleteAndReassign(t *testing.T) {
 		memberIDs = append(memberIDs, u.ID)
 	}
 
-	affected, err := m.UserGroup().DeleteAndReassign(g.ID)
+	affected, _, err := m.UserGroup().DeleteAndReassign(g.ID)
 	if err != nil {
 		t.Fatalf("DeleteAndReassign: %v", err)
 	}
@@ -185,7 +188,7 @@ func TestUserGroup_DeleteAndReassign(t *testing.T) {
 func TestUserGroup_DeleteDefault_Rejected(t *testing.T) {
 	ctx, _ := setupAdminContext(t)
 	m := NewAdminMutation(ctx)
-	if _, err := m.UserGroup().DeleteAndReassign(1); err == nil {
+	if _, _, err := m.UserGroup().DeleteAndReassign(1); err == nil {
 		t.Fatalf("expected error deleting default group, got nil")
 	}
 }

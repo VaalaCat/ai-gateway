@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/stretchr/testify/require"
@@ -199,6 +200,33 @@ func TestUploadTimeoutFor(t *testing.T) {
 	}
 }
 
+func TestSlimOversizedAPITracePreservesIdentityDispatchAndRateLimitFacts(t *testing.T) {
+	entry := protocol.APIUsageEntry{
+		RequestID: "api-large", APIServiceID: 7, APIRouteID: 9, APIUpstreamID: 11,
+		ProviderDispatchKnown: true, ProviderDispatched: true, RequestBytes: 123, ResponseBytes: 456,
+		RateLimitDecision: "rejected", RateLimitHitTotal: 1,
+		RateLimitHits: []models.RateLimitHit{{LimiterID: 3, Name: "limit", Dimension: "rate/shared", Bucket: "api", Decision: "rejected"}},
+		Trace: &protocol.APITraceEntry{ResponseBody: &apiattempt.APIBodyCapture{
+			Captured: true, Data: strings.Repeat("x", slimThresholdBytes+1024),
+			CapturedBytes: slimThresholdBytes + 1024, TotalBytes: slimThresholdBytes + 1024,
+		}},
+	}
+	usage := protocol.ReportedUsage{API: &entry}
+
+	got := slimOversizedReportedUsage([]protocol.ReportedUsage{usage}, zap.NewNop())
+
+	require.Len(t, got, 1)
+	require.NotNil(t, got[0].API)
+	require.Equal(t, "api-large", got[0].API.RequestID)
+	require.True(t, got[0].API.ProviderDispatchKnown)
+	require.True(t, got[0].API.ProviderDispatched)
+	require.Equal(t, int64(123), got[0].API.RequestBytes)
+	require.Equal(t, int64(456), got[0].API.ResponseBytes)
+	require.Equal(t, "rejected", got[0].API.RateLimitDecision)
+	require.Equal(t, 1, got[0].API.RateLimitHitTotal)
+	require.Less(t, entrySize(got[0]), entrySize(usage))
+}
+
 func degradeFixture() protocol.UsageLogEntry {
 	return protocol.UsageLogEntry{
 		RequestID: "req-x", UserID: 7, ModelName: "m", PromptTokens: 10,
@@ -229,6 +257,9 @@ func TestApplyDegradeStripTrace(t *testing.T) {
 	if other["foo"] != "bar" {
 		t.Fatal("existing Other keys must survive marker merge")
 	}
+	if e.TraceRetentionStatus != models.TraceRetentionStripped {
+		t.Fatalf("retention status = %q, want trace_stripped", e.TraceRetentionStatus)
+	}
 }
 
 func TestApplyDegradeBillingOnly(t *testing.T) {
@@ -244,6 +275,30 @@ func TestApplyDegradeBillingOnly(t *testing.T) {
 	json.Unmarshal([]byte(e.Other), &other)
 	if other["degrade"] != "billing_only" {
 		t.Fatalf("marker = %v, want billing_only", other["degrade"])
+	}
+	if e.TraceRetentionStatus != models.TraceRetentionBillingOnly {
+		t.Fatalf("retention status = %q, want billing_only", e.TraceRetentionStatus)
+	}
+}
+
+func TestSlimEntryMarksBodyTrimmedWithoutDowngrading(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		before models.TraceRetentionStatus
+		want   models.TraceRetentionStatus
+	}{
+		{name: "full becomes trimmed", before: models.TraceRetentionFull, want: models.TraceRetentionBodyTrimmed},
+		{name: "empty becomes trimmed", want: models.TraceRetentionBodyTrimmed},
+		{name: "stripped stays stripped", before: models.TraceRetentionStripped, want: models.TraceRetentionStripped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := degradeFixture()
+			e.TraceRetentionStatus = tc.before
+			slimEntry(&e)
+			if e.TraceRetentionStatus != tc.want {
+				t.Fatalf("retention status = %q, want %q", e.TraceRetentionStatus, tc.want)
+			}
+		})
 	}
 }
 

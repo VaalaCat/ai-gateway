@@ -17,28 +17,42 @@ import (
 
 var ErrModelNotAllowed = errors.New(consts.ErrModelNotAllowed)
 
+type TokenAuthFailure struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+type TokenAuthFailureWriter func(*gin.Context, TokenAuthFailure)
+
 func TokenAuth(store *cache.Store) gin.HandlerFunc {
+	return TokenAuthWithFailureWriter(store, nil)
+}
+
+// TokenAuthWithFailureWriter keeps TokenAuth's authentication and identity
+// semantics while allowing a route family to choose its own failure envelope.
+func TokenAuthWithFailureWriter(store *cache.Store, failureWriter TokenAuthFailureWriter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := extractAPIKey(c)
 		if key == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": consts.ErrMissingAPIKey})
+			writeFailure(c, failureWriter, TokenAuthFailure{Status: http.StatusUnauthorized, Code: "missing_api_key", Message: consts.ErrMissingAPIKey})
 			return
 		}
 
 		token := store.GetToken(c.Request.Context(), key)
 		if token == nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": consts.ErrInvalidAPIKey})
+			writeFailure(c, failureWriter, TokenAuthFailure{Status: http.StatusUnauthorized, Code: "invalid_api_key", Message: consts.ErrInvalidAPIKey})
 			return
 		}
 
 		if token.Status != consts.StatusEnabled {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": consts.ErrTokenDisabled})
+			writeFailure(c, failureWriter, TokenAuthFailure{Status: http.StatusForbidden, Code: "token_disabled", Message: consts.ErrTokenDisabled})
 			return
 		}
 
 		// Check expiry
 		if token.ExpiredAt > 0 && token.ExpiredAt < time.Now().Unix() {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": consts.ErrTokenExpired})
+			writeFailure(c, failureWriter, TokenAuthFailure{Status: http.StatusForbidden, Code: "token_expired", Message: consts.ErrTokenExpired})
 			return
 		}
 
@@ -49,6 +63,7 @@ func TokenAuth(store *cache.Store) gin.HandlerFunc {
 			TraceEnabled: token.TraceEnabled,
 			TraceMode:    token.TraceMode,
 			BYOKOnly:     token.BYOKOnly,
+			APIRoleMode:  token.APIRoleMode,
 		}
 
 		// Parse token models for /v1/models filtering.
@@ -82,7 +97,7 @@ func TokenAuth(store *cache.Store) gin.HandlerFunc {
 		}
 
 		if models.UserGroupAccessDisabled(group) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "user group disabled"})
+			writeFailure(c, failureWriter, TokenAuthFailure{Status: http.StatusForbidden, Code: "user_group_disabled", Message: "user group disabled"})
 			return
 		}
 
@@ -101,6 +116,14 @@ func TokenAuth(store *cache.Store) gin.HandlerFunc {
 		c.Set(consts.CtxKeyUserInfo, userInfo)
 		c.Next()
 	}
+}
+
+func writeFailure(c *gin.Context, writer TokenAuthFailureWriter, failure TokenAuthFailure) {
+	if writer != nil {
+		writer(c, failure)
+		return
+	}
+	c.AbortWithStatusJSON(failure.Status, gin.H{"error": failure.Message})
 }
 
 func AuthorizeModel(user *app.UserInfo, model string) error {

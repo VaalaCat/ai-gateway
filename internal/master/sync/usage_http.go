@@ -58,6 +58,35 @@ func (h *Hub) HandleUsageHTTP(c *gin.Context) {
 	// agent_id 是不可信输入,不覆盖会让已认证 agent 冒领/误标到别的 agent 名下。
 	report.AgentID = agentID
 
+	if len(report.APIRequests) > 0 {
+		if len(report.Logs) > 0 && h.SettleUsage == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage settler unavailable"})
+			return
+		}
+		if len(report.Logs) > 0 {
+			if err := h.SettleUsage(c.Request.Context(), agentID, report.Logs); err != nil {
+				h.Logger.Error("usage http ingest settle failed before api acceptance",
+					zap.String("agent_id", agentID), zap.Int("batch_size", len(report.Logs)), zap.Error(err))
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "settle failed"})
+				return
+			}
+		}
+		if h.AcceptAPIUsage == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "api usage acceptance unavailable"})
+			return
+		}
+		if err := h.AcceptAPIUsage(c.Request.Context(), agentID, report.APIRequests); err != nil {
+			h.Logger.Error("api usage acceptance failed after llm settlement",
+				zap.String("agent_id", agentID), zap.Int("batch_size", len(report.APIRequests)), zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "api usage acceptance failed"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"accepted_logs": len(report.Logs), "accepted_api_requests": len(report.APIRequests),
+		})
+		return
+	}
+
 	if h.SettleUsage != nil {
 		if err := h.SettleUsage(c.Request.Context(), agentID, report.Logs); err != nil {
 			// ④ 诊断打点:结算失败不 ack,agent 会带着数据重试(request_id 去重保证幂等)
@@ -66,7 +95,7 @@ func (h *Hub) HandleUsageHTTP(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "settle failed"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"accepted": len(report.Logs)})
+		c.JSON(http.StatusOK, gin.H{"accepted": len(report.Logs), "accepted_logs": len(report.Logs), "accepted_api_requests": 0})
 		return
 	}
 	// 未接线兜底:异步 publish(老语义,ack≠持久化)
@@ -78,5 +107,5 @@ func (h *Hub) HandleUsageHTTP(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ingest failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"accepted": len(report.Logs)})
+	c.JSON(http.StatusOK, gin.H{"accepted": len(report.Logs), "accepted_logs": len(report.Logs), "accepted_api_requests": 0})
 }

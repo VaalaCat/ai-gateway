@@ -29,10 +29,12 @@ export interface User {
 }
 
 export type TokenTraceMode = "full" | "headers";
+export type APIRoleMode = "inherit" | "explicit";
 
 export interface Token {
   id: number;
   user_id: number;
+	owner_username?: string;
   key: string;
   name: string;
   status: number;
@@ -41,6 +43,7 @@ export interface Token {
   template_id?: number;
   trace_enabled: boolean;
   trace_mode: TokenTraceMode;
+  api_role_mode?: APIRoleMode;
   byok_only?: boolean;
   created_at: number;
   updated_at: number;
@@ -688,6 +691,7 @@ export interface UsageLog {
   error_message: string;
   other: string;
   has_trace: boolean;
+  trace_retention_status?: TraceRetentionStatus;
   created_at: number;
   fallback_chain?: Array<{
     seq: number;
@@ -710,6 +714,15 @@ export interface UsageLog {
   rate_limit_reason?: string;
   rate_limit_hits?: RateLimitHit[];
 }
+
+export type TraceRetentionStatus =
+  | "full"
+  | "headers_only"
+  | "body_truncated"
+  | "body_trimmed"
+  | "trace_stripped"
+  | "billing_only"
+  | "disabled";
 
 /** 一条限流规则在某次请求里的命中明细，对应后端 models.RateLimitHit。 */
 export interface RateLimitHit {
@@ -1309,9 +1322,16 @@ export type LimiterKeyBy =
   | "per_group"
   | "per_channel"
   | "per_channel_user";
-export type LimiterChannelScope = "admin" | "private" | "all";
+export type LimiterChannelScope = "admin" | "private" | "all" | "";
 export type LimiterAction = "reject" | "wait";
-export type LimiterTargetType = "global" | "channel" | "user_group" | "user";
+export type LimiterTargetType =
+  | "global"
+  | "channel"
+  | "user_group"
+  | "user"
+  | "api_service"
+  | "api_route"
+  | "api_upstream";
 
 export interface RequestLimiter {
   id: number;
@@ -1445,6 +1465,8 @@ export interface RecentHealthResponse {
 }
 export interface DeliveryQueueItem {
   request_id: string;
+  queue_id?: string;
+  usage_type?: "llm" | "api";
   bytes: number;
   attempts: number;
   degrade_level: number;
@@ -1460,15 +1482,29 @@ export interface AgentQueueRow {
   last_success_at: number;
   last_error: string;
   inflight: number;
+  shared_usage_dropped: number;
+  api_trace_slimmed: number;
   items: DeliveryQueueItem[];
+}
+export interface LogBacklog {
+  pending: number;
+  retry: number;
+  inflight: number;
+  bytes: number;
+  oldest_seconds: number;
+  dropped: number;
+  last_error: string;
+  schema_ready: boolean;
 }
 export interface DeliveryBoardResponse {
   agents: AgentQueueRow[];
   failed_agents: { agent_id: number; agent_name: string; error: string }[];
+  log_backlog: LogBacklog;
 }
 export interface DeliveryOpRequest {
   agent_id: number;
   op: "retry_now" | "degrade" | "drop";
+  queue_ids?: string[];
   request_ids?: string[];
   level?: number;
 }

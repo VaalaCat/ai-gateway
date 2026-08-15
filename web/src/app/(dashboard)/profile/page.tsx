@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
+import { PageLayout } from "@/components/layout/page-layout";
 
 import { ProfileFormDialog } from "@/components/business/profile-form-dialog";
 
@@ -32,11 +33,8 @@ export default function ProfilePage() {
 
   if (isLoading || !profile) {
     return (
-      <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold">{t("title")}</h1>
-          <p className="text-muted-foreground mt-1">{t("description")}</p>
-        </div>
+      <PageLayout title={t("title")} description={t("description")} maxWidth="full">
+        <div className="space-y-6">
         <Card>
           <CardContent className="pt-6 space-y-4">
             <Skeleton className="h-20 w-full" />
@@ -53,16 +51,14 @@ export default function ProfilePage() {
             <Skeleton className="h-32 w-full" />
           </CardContent>
         </Card>
-      </div>
+        </div>
+      </PageLayout>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">{t("title")}</h1>
-        <p className="text-muted-foreground mt-1">{t("description")}</p>
-      </div>
+    <PageLayout title={t("title")} description={t("description")} maxWidth="full">
+      <div className="space-y-6">
 
       <ProfileHero
         profile={profile}
@@ -87,6 +83,7 @@ export default function ProfilePage() {
         }}
         fallbackInitial={profile.username}
       />
-    </div>
+      </div>
+    </PageLayout>
   );
 }

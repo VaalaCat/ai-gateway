@@ -44,7 +44,10 @@ func (l *TokenLoader) Load(ctx context.Context, key string) (*models.Token, erro
 
 // warmSideUser 解析 Side 字段并把 SyncedUser 写入关联缓存。
 // Side 为空或解析失败时静默跳过——loader 主流程不受影响。
-func (l *TokenLoader) warmSide(tokenID uint, side json.RawMessage) {
+func (l *TokenLoader) warmSide(
+	tokenID uint,
+	side json.RawMessage,
+) {
 	if len(side) == 0 {
 		return
 	}

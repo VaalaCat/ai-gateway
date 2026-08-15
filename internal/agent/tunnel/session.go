@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
@@ -64,27 +65,29 @@ const (
 )
 
 type SessionOptions struct {
-	Logger              *zap.Logger
-	Metrics             *pkgmetrics.AgentRelayMetrics
-	PingInterval        time.Duration
-	PongTimeout         time.Duration
-	WriteTimeout        time.Duration
-	OpenCommitTimeout   time.Duration
-	WindowStallTimeout  time.Duration
-	TombstoneTTL        time.Duration
-	TombstoneLimit      int
-	TargetHandler       *TargetHandler
-	Direction           SessionDirection
-	IngressKind         string
-	BoundSourceAgentID  string
-	AdmissionDeadline   time.Time
-	SourceEnabled       func(string) bool
-	TargetStatusEnabled func() bool
-	Now                 func() time.Time
-	clock               sessionClock
-	directLogs          *directLogs
-	directSourceAgentID string
-	directTargetAgentID string
+	Logger                 *zap.Logger
+	Metrics                *pkgmetrics.AgentRelayMetrics
+	PingInterval           time.Duration
+	PongTimeout            time.Duration
+	WriteTimeout           time.Duration
+	OpenCommitTimeout      time.Duration
+	WindowStallTimeout     time.Duration
+	TombstoneTTL           time.Duration
+	TombstoneLimit         int
+	TargetHandler          *TargetHandler
+	APITargetHandler       APITargetHandler
+	WebSocketTargetHandler WebSocketTargetHandler
+	Direction              SessionDirection
+	IngressKind            string
+	BoundSourceAgentID     string
+	AdmissionDeadline      time.Time
+	SourceEnabled          func(string) bool
+	TargetStatusEnabled    func() bool
+	Now                    func() time.Time
+	clock                  sessionClock
+	directLogs             *directLogs
+	directSourceAgentID    string
+	directTargetAgentID    string
 }
 
 type sessionConn interface {
@@ -120,10 +123,14 @@ type Session struct {
 	initErr     error
 	state       sessionState
 
-	streamsMu  sync.Mutex
-	streams    map[wire.StreamID]*Stream
-	targets    map[wire.StreamID]*targetStream
-	tombstones *tombstoneStore
+	streamsMu        sync.Mutex
+	streams          map[wire.StreamID]*Stream
+	targets          map[wire.StreamID]*targetStream
+	apiSources       map[wire.StreamID]*APIStream
+	apiTargets       map[wire.StreamID]*APITargetStream
+	webSocketSources map[wire.StreamID]*WebSocketStream
+	webSocketTargets map[wire.StreamID]*WebSocketTargetStream
+	tombstones       *tombstoneStore
 
 	unknownDataTimes  []time.Time
 	bufferMu          sync.Mutex
@@ -174,7 +181,8 @@ func newSessionValue(conn sessionConn, generation uint64, limits wire.Limits, op
 		conn: conn, generation: generation, limits: limits, opts: opts,
 		started: make(chan struct{}), done: make(chan struct{}), streams: make(map[wire.StreamID]*Stream),
 		connCloseDone: make(chan struct{}),
-		targets:       make(map[wire.StreamID]*targetStream), accepting: true, idleSince: now, activityNow: opts.Now, activity: make(chan struct{}, 1),
+		targets:       make(map[wire.StreamID]*targetStream), apiSources: make(map[wire.StreamID]*APIStream),
+		apiTargets: make(map[wire.StreamID]*APITargetStream), webSocketSources: make(map[wire.StreamID]*WebSocketStream), webSocketTargets: make(map[wire.StreamID]*WebSocketTargetStream), accepting: true, idleSince: now, activityNow: opts.Now, activity: make(chan struct{}, 1),
 		tombstones:   newTombstoneStore(opts.TombstoneLimit, opts.TombstoneTTL, opts.clock.Now),
 		recentErrors: diagnostics.NewRing(diagnostics.DefaultRingCapacity),
 	}
@@ -185,7 +193,7 @@ func (s *Session) Generation() uint64 { return s.generation }
 func (s *Session) StreamCount() int {
 	s.streamsMu.Lock()
 	defer s.streamsMu.Unlock()
-	return len(s.streams) + len(s.targets)
+	return len(s.streams) + len(s.targets) + len(s.apiSources) + len(s.apiTargets) + len(s.webSocketSources) + len(s.webSocketTargets)
 }
 
 func (s *Session) setAccepting(accepting bool) {
@@ -365,7 +373,7 @@ func validateSessionOptions(opts SessionOptions) (SessionOptions, error) {
 		if opts.IngressKind == "" {
 			opts.IngressKind = agentproxy.IngressKindDirectTunnel
 		}
-		if opts.IngressKind != agentproxy.IngressKindDirectTunnel || opts.TargetHandler != nil ||
+		if opts.IngressKind != agentproxy.IngressKindDirectTunnel || opts.TargetHandler != nil || opts.APITargetHandler != nil ||
 			opts.BoundSourceAgentID != "" || !opts.AdmissionDeadline.IsZero() || opts.SourceEnabled != nil ||
 			opts.TargetStatusEnabled != nil {
 			return opts, errSessionOptions
@@ -498,6 +506,34 @@ func (s *Session) dispatch(ctx context.Context, frame wire.Frame) error {
 			return context.Cause(ctx)
 		}
 	}
+	if source := s.lookupAPISource(frame.StreamID); source != nil {
+		if frame.Type == wire.FrameOpen {
+			return nil
+		}
+		_ = source.acceptFrame(ctx, frame)
+		return nil
+	}
+	if source := s.lookupWebSocketSource(frame.StreamID); source != nil {
+		if frame.Type == wire.FrameOpen {
+			return nil
+		}
+		_ = source.acceptFrame(ctx, frame)
+		return nil
+	}
+	if target := s.lookupAPITarget(frame.StreamID); target != nil {
+		if frame.Type == wire.FrameOpen {
+			return nil
+		}
+		_ = target.acceptFrame(ctx, frame)
+		return nil
+	}
+	if target := s.lookupWebSocketTarget(frame.StreamID); target != nil {
+		if frame.Type == wire.FrameOpen {
+			return nil
+		}
+		_ = target.acceptFrame(ctx, frame)
+		return nil
+	}
 	if target := s.lookupTarget(frame.StreamID); target != nil {
 		if frame.Type == wire.FrameOpen {
 			return nil
@@ -549,13 +585,59 @@ func (s *Session) dispatch(ctx context.Context, frame wire.Frame) error {
 		return nil
 	}
 	if frame.Type == wire.FrameOpen {
-		s.handleTargetOpen(ctx, frame)
+		s.handleIncomingOpen(ctx, frame)
 		return nil
 	}
 	if frame.Type == wire.FrameResponseData || frame.Type == wire.FrameRequestData {
 		return s.handleUnknownData(ctx, frame.StreamID)
 	}
 	return fmt.Errorf("%w: frame %d for unknown stream", errProtocol, frame.Type)
+}
+
+func (s *Session) handleIncomingOpen(ctx context.Context, frame wire.Frame) {
+	var open wire.Open
+	if frame.Sequence != 1 || wire.DecodeMetadata(frame.Payload, &open, s.limits.MaxMetadataBytes) != nil {
+		s.rejectTargetOpen(ctx, frame.StreamID, "open", errStreamProtocol)
+		return
+	}
+	kind, err := open.StreamKind()
+	if err != nil {
+		s.rejectTargetOpen(ctx, frame.StreamID, "open", errStreamProtocol)
+		return
+	}
+	if kind == wire.OpenStreamAPI {
+		if open.API != nil && open.API.Protocol == "websocket" {
+			s.handleWebSocketTargetOpen(ctx, frame)
+			return
+		}
+		s.handleAPITargetOpen(ctx, frame, open)
+		return
+	}
+	s.handleTargetOpen(ctx, frame)
+}
+
+func (s *Session) handleWebSocketTargetOpen(ctx context.Context, frame wire.Frame) {
+	if s.opts.WebSocketTargetHandler == nil {
+		s.rejectTargetOpen(ctx, frame.StreamID, "websocket", errStreamProtocol)
+		return
+	}
+	target := newWebSocketTargetStream(frame.StreamID, s.limits, s.enqueueAPIFrame)
+	target.onDone = func() { s.writer.Forget(frame.StreamID); s.removeWebSocketTarget(target) }
+	target.onActive = func() {
+		go func() {
+			if err := s.opts.WebSocketTargetHandler.ServeWebSocketAPI(s.ctx, target); err != nil {
+				target.terminate(err, true)
+			}
+		}()
+	}
+	if err := s.admitWebSocketTarget(target); err != nil {
+		s.rejectTargetOpen(ctx, frame.StreamID, "websocket", err)
+		return
+	}
+	if err := target.acceptFrame(ctx, frame); err != nil {
+		target.terminate(err, true)
+		return
+	}
 }
 
 func (s *Session) handleUnknownData(ctx context.Context, id wire.StreamID) error {
@@ -605,6 +687,107 @@ func (s *Session) OpenAttemptStream(ctx context.Context, req agentproxy.AttemptS
 		return nil, errSessionDirection
 	}
 	return s.openAttemptStream(ctx, req)
+}
+
+func (s *Session) OpenHTTPAPIStream(ctx context.Context, open app.APIOpen) (app.HTTPAPIStream, error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if s == nil || s.opts.Direction == SessionDirectionDirectIncoming {
+		return nil, errSessionDirection
+	}
+	if err := s.initializationError(); err != nil {
+		return nil, err
+	}
+	if !validateAPIOpen(open) {
+		return nil, errProtocol
+	}
+	if err := s.waitStarted(ctx); err != nil {
+		return nil, err
+	}
+	s.stateMu.Lock()
+	sessionCtx := s.ctx
+	s.stateMu.Unlock()
+	if sessionCtx == nil || context.Cause(sessionCtx) != nil {
+		return nil, errSessionClosed
+	}
+	id, err := wire.NewStreamID()
+	if err != nil {
+		return nil, err
+	}
+	stream := newAPIStream(id, s.limits, s.enqueueAPIFrame)
+	stream.controlContext = s.apiControlContext
+	stream.reserveIncoming = s.reserveIncoming
+	stream.releaseIncoming = s.releaseIncoming
+	stream.onDone = func() {
+		s.writer.Forget(id)
+		s.removeAPISource(stream)
+	}
+	if err = s.admitAPISource(stream); err != nil {
+		stream.terminate(err, true)
+		return nil, err
+	}
+	if err = stream.Open(ctx, open); err != nil {
+		stream.Cancel(err)
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (s *Session) OpenWebSocketAPIStream(ctx context.Context, open app.WebSocketOpen) (app.WebSocketAPIStream, error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if s == nil || s.opts.Direction == SessionDirectionDirectIncoming {
+		return nil, errSessionDirection
+	}
+	if err := s.initializationError(); err != nil {
+		return nil, err
+	}
+	if !isValidWebSocketOpen(open) {
+		return nil, errProtocol
+	}
+	if err := s.waitStarted(ctx); err != nil {
+		return nil, err
+	}
+	id, err := wire.NewStreamID()
+	if err != nil {
+		return nil, err
+	}
+	stream := newWebSocketStream(id, s.limits, s.enqueueAPIFrame)
+	stream.onDone = func() { s.writer.Forget(id); s.removeWebSocketSource(stream) }
+	if err = s.admitWebSocketSource(stream); err != nil {
+		stream.terminate(err, true)
+		return nil, err
+	}
+	if _, err = stream.Open(ctx, open); err != nil {
+		stream.Close()
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (s *Session) enqueueAPIFrame(ctx context.Context, frame wire.Frame) error {
+	s.stateMu.Lock()
+	w := s.writer
+	s.stateMu.Unlock()
+	if w == nil {
+		return errSessionClosed
+	}
+	if frame.Type == wire.FrameCancel || frame.Type == wire.FrameReset {
+		return w.Replace(ctx, frame, nil)
+	}
+	return w.Enqueue(ctx, frame, nil)
+}
+
+func (s *Session) apiControlContext() (context.Context, func()) {
+	s.stateMu.Lock()
+	ctx := s.ctx
+	s.stateMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return withClockTimeoutCause(ctx, s.opts.clock, s.opts.WriteTimeout, errControlSendTimeout)
 }
 
 func (s *Session) openAttemptStream(ctx context.Context, req agentproxy.AttemptStreamRequest) (*Stream, error) {
@@ -732,12 +915,12 @@ func durationNanos(duration time.Duration) int64 {
 func (s *Session) admitStream(stream *Stream) error {
 	s.admissionMu.Lock()
 	s.streamsMu.Lock()
-	if _, exists := s.streams[stream.id]; exists || s.targets[stream.id] != nil {
+	if s.streamExistsLocked(stream.id) {
 		s.streamsMu.Unlock()
 		s.admissionMu.Unlock()
 		return errDuplicateStreamID
 	}
-	if s.limits.MaxConcurrentStreams <= 0 || len(s.streams)+len(s.targets) >= s.limits.MaxConcurrentStreams {
+	if s.limits.MaxConcurrentStreams <= 0 || s.streamCountLocked() >= s.limits.MaxConcurrentStreams {
 		s.streamsMu.Unlock()
 		s.admissionMu.Unlock()
 		return errStreamLimit
@@ -765,6 +948,137 @@ func (s *Session) lookupTarget(id wire.StreamID) *targetStream {
 	return s.targets[id]
 }
 
+func (s *Session) lookupAPISource(id wire.StreamID) *APIStream {
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+	return s.apiSources[id]
+}
+
+func (s *Session) lookupAPITarget(id wire.StreamID) *APITargetStream {
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+	return s.apiTargets[id]
+}
+
+func (s *Session) lookupWebSocketSource(id wire.StreamID) *WebSocketStream {
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+	return s.webSocketSources[id]
+}
+
+func (s *Session) lookupWebSocketTarget(id wire.StreamID) *WebSocketTargetStream {
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+	return s.webSocketTargets[id]
+}
+
+func (s *Session) streamExistsLocked(id wire.StreamID) bool {
+	return s.streams[id] != nil || s.targets[id] != nil || s.apiSources[id] != nil || s.apiTargets[id] != nil || s.webSocketSources[id] != nil || s.webSocketTargets[id] != nil
+}
+
+func (s *Session) streamCountLocked() int {
+	return len(s.streams) + len(s.targets) + len(s.apiSources) + len(s.apiTargets) + len(s.webSocketSources) + len(s.webSocketTargets)
+}
+
+func (s *Session) admitWebSocketSource(stream *WebSocketStream) error {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	if s.streamExistsLocked(stream.id) {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errDuplicateStreamID
+	}
+	if s.limits.MaxConcurrentStreams <= 0 || s.streamCountLocked() >= s.limits.MaxConcurrentStreams {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errStreamLimit
+	}
+	s.webSocketSources[stream.id] = stream
+	s.activeStreams++
+	s.idleSince = time.Time{}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	return nil
+}
+
+func (s *Session) admitWebSocketTarget(target *WebSocketTargetStream) error {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	if !s.accepting {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errSessionClosed
+	}
+	if s.streamExistsLocked(target.id) {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errDuplicateStreamID
+	}
+	if s.limits.MaxConcurrentStreams <= 0 || s.streamCountLocked() >= s.limits.MaxConcurrentStreams {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errStreamLimit
+	}
+	s.webSocketTargets[target.id] = target
+	s.activeStreams++
+	s.idleSince = time.Time{}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	return nil
+}
+
+func (s *Session) admitAPISource(stream *APIStream) error {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	if s.streamExistsLocked(stream.id) {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errDuplicateStreamID
+	}
+	if s.limits.MaxConcurrentStreams <= 0 || s.streamCountLocked() >= s.limits.MaxConcurrentStreams {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errStreamLimit
+	}
+	s.apiSources[stream.id] = stream
+	s.activeStreams++
+	s.idleSince = time.Time{}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() {
+		s.opts.Metrics.AddDirectStreams(1)
+	}
+	return nil
+}
+
+func (s *Session) admitAPITarget(target *APITargetStream) error {
+	s.admissionMu.Lock()
+	if !s.accepting {
+		s.admissionMu.Unlock()
+		return errSessionClosed
+	}
+	s.streamsMu.Lock()
+	if s.streamExistsLocked(target.id) {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errDuplicateStreamID
+	}
+	if s.limits.MaxConcurrentStreams <= 0 || s.streamCountLocked() >= s.limits.MaxConcurrentStreams {
+		s.streamsMu.Unlock()
+		s.admissionMu.Unlock()
+		return errStreamLimit
+	}
+	s.apiTargets[target.id] = target
+	s.activeStreams++
+	s.idleSince = time.Time{}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() {
+		s.opts.Metrics.AddDirectStreams(1)
+	}
+	return nil
+}
+
 func (s *Session) admitTarget(target *targetStream) error {
 	s.admissionMu.Lock()
 	// behavior change: incoming OPEN admission is atomic with replacement/drain shutdown.
@@ -773,12 +1087,12 @@ func (s *Session) admitTarget(target *targetStream) error {
 		return errSessionClosed
 	}
 	s.streamsMu.Lock()
-	if s.streams[target.id] != nil || s.targets[target.id] != nil {
+	if s.streamExistsLocked(target.id) {
 		s.streamsMu.Unlock()
 		s.admissionMu.Unlock()
 		return errDuplicateStreamID
 	}
-	if s.limits.MaxConcurrentStreams <= 0 || len(s.streams)+len(s.targets) >= s.limits.MaxConcurrentStreams {
+	if s.limits.MaxConcurrentStreams <= 0 || s.streamCountLocked() >= s.limits.MaxConcurrentStreams {
 		s.streamsMu.Unlock()
 		s.admissionMu.Unlock()
 		return errStreamLimit
@@ -834,6 +1148,76 @@ func (s *Session) removeStream(stream *Stream) {
 		s.tombstones.Add(stream.id)
 		s.signalActivity()
 	}
+}
+
+func (s *Session) removeAPISource(stream *APIStream) {
+	removed := false
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	if current := s.apiSources[stream.id]; current == stream {
+		delete(s.apiSources, stream.id)
+		removed = true
+		s.activeStreams--
+		s.startIdleLocked()
+	}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if removed {
+		if s.isDirect() {
+			s.opts.Metrics.AddDirectStreams(-1)
+		}
+		s.tombstones.Add(stream.id)
+		s.signalActivity()
+	}
+}
+
+func (s *Session) removeAPITarget(target *APITargetStream) {
+	removed := false
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	if current := s.apiTargets[target.id]; current == target {
+		delete(s.apiTargets, target.id)
+		removed = true
+		s.activeStreams--
+		s.startIdleLocked()
+	}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if removed {
+		if s.isDirect() {
+			s.opts.Metrics.AddDirectStreams(-1)
+		}
+		s.tombstones.Add(target.id)
+		s.signalActivity()
+	}
+}
+
+func (s *Session) removeWebSocketSource(stream *WebSocketStream) {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	if s.webSocketSources[stream.id] == stream {
+		delete(s.webSocketSources, stream.id)
+		s.activeStreams--
+		s.startIdleLocked()
+		s.tombstones.Add(stream.id)
+	}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	s.signalActivity()
+}
+
+func (s *Session) removeWebSocketTarget(target *WebSocketTargetStream) {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	if s.webSocketTargets[target.id] == target {
+		delete(s.webSocketTargets, target.id)
+		s.activeStreams--
+		s.startIdleLocked()
+		s.tombstones.Add(target.id)
+	}
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	s.signalActivity()
 }
 
 func (s *Session) waitStarted(ctx context.Context) error {
@@ -910,11 +1294,27 @@ func (s *Session) finalize(w *fairWriter) {
 	<-w.Done()
 	streams := s.clearStreams()
 	targets := s.clearTargets()
+	apiSources := s.clearAPISources()
+	apiTargets := s.clearAPITargets()
+	webSocketSources := s.clearWebSocketSources()
+	webSocketTargets := s.clearWebSocketTargets()
 	for _, stream := range streams {
 		stream.Cancel(s.cause())
 	}
 	for _, target := range targets {
 		target.Cancel(s.cause())
+	}
+	for _, stream := range apiSources {
+		stream.Cancel(s.cause())
+	}
+	for _, target := range apiTargets {
+		target.Cancel(s.cause())
+	}
+	for _, stream := range webSocketSources {
+		stream.terminate(s.cause(), true)
+	}
+	for _, target := range webSocketTargets {
+		target.terminate(s.cause(), true)
 	}
 	for _, stream := range streams {
 		<-stream.Done()
@@ -922,11 +1322,83 @@ func (s *Session) finalize(w *fairWriter) {
 	for _, target := range targets {
 		<-target.Done()
 	}
+	for _, stream := range apiSources {
+		<-stream.Done()
+	}
+	for _, target := range apiTargets {
+		<-target.Done()
+	}
 	<-s.connCloseDone
 	s.stateMu.Lock()
 	s.state = sessionStateDone
 	s.stateMu.Unlock()
 	s.doneOnce.Do(func() { close(s.done) })
+}
+
+func (s *Session) clearAPISources() []*APIStream {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	streams := make([]*APIStream, 0, len(s.apiSources))
+	for _, stream := range s.apiSources {
+		streams = append(streams, stream)
+	}
+	clear(s.apiSources)
+	s.activeStreams -= len(streams)
+	s.startIdleLocked()
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() && len(streams) > 0 {
+		s.opts.Metrics.AddDirectStreams(-float64(len(streams)))
+	}
+	return streams
+}
+
+func (s *Session) clearAPITargets() []*APITargetStream {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	targets := make([]*APITargetStream, 0, len(s.apiTargets))
+	for _, target := range s.apiTargets {
+		targets = append(targets, target)
+	}
+	clear(s.apiTargets)
+	s.activeStreams -= len(targets)
+	s.startIdleLocked()
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	if s.isDirect() && len(targets) > 0 {
+		s.opts.Metrics.AddDirectStreams(-float64(len(targets)))
+	}
+	return targets
+}
+
+func (s *Session) clearWebSocketSources() []*WebSocketStream {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	streams := make([]*WebSocketStream, 0, len(s.webSocketSources))
+	for _, stream := range s.webSocketSources {
+		streams = append(streams, stream)
+	}
+	clear(s.webSocketSources)
+	s.activeStreams -= len(streams)
+	s.startIdleLocked()
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	return streams
+}
+
+func (s *Session) clearWebSocketTargets() []*WebSocketTargetStream {
+	s.admissionMu.Lock()
+	s.streamsMu.Lock()
+	targets := make([]*WebSocketTargetStream, 0, len(s.webSocketTargets))
+	for _, target := range s.webSocketTargets {
+		targets = append(targets, target)
+	}
+	clear(s.webSocketTargets)
+	s.activeStreams -= len(targets)
+	s.startIdleLocked()
+	s.streamsMu.Unlock()
+	s.admissionMu.Unlock()
+	return targets
 }
 
 func (s *Session) clearTargets() []*targetStream {

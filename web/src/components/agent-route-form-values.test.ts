@@ -31,9 +31,50 @@ describe("createAgentRouteFormValues", () => {
       targetValue: "canary",
     });
   });
+
+  it.each(["api_service", "api_route"] as const)(
+    "keeps %s as an editable generic API source",
+    (sourceType) => {
+      expect(initial({
+        source_type: sourceType,
+        source_id: 19,
+        model: "",
+        agent_id: "agent-east",
+        agent_tag: "",
+      })).toMatchObject({ sourceType, sourceId: "19" });
+    },
+  );
 });
 
 describe("buildAgentRoutePayload", () => {
+  it("builds agent route payloads for api_service and api_route without changing token/channel payloads", () => {
+    const cases = [
+      { sourceType: "token", sourceId: "17" },
+      { sourceType: "channel", sourceId: "18" },
+      { sourceType: "api_service", sourceId: "19" },
+      { sourceType: "api_route", sourceId: "20" },
+    ] as const;
+
+    for (const { sourceType, sourceId } of cases) {
+      expect(build({
+        sourceType,
+        sourceId,
+        model: "",
+        targetType: "agent_id",
+        targetValue: "agent-east",
+      })).toEqual({
+        ok: true,
+        payload: {
+          source_type: sourceType,
+          source_id: Number(sourceId),
+          model: "",
+          agent_id: "agent-east",
+          agent_tag: "",
+        },
+      });
+    }
+  });
+
   it("trims create values and explicitly clears agent_tag for an agent target", () => {
     expect(build({
       sourceType: "token",

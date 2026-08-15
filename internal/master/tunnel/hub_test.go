@@ -2050,7 +2050,9 @@ func TestSwitchDoesNotResetRealTargetAgentBeforeOpenDelivery(t *testing.T) {
 			name: "prepare OPEN deadline",
 			trigger: func(t *testing.T, f *relayE2EFixture, source, _ *Session, id wire.StreamID) *Switch {
 				payload, err := wire.EncodeMetadata(wire.Open{
-					Method: http.MethodPost, Path: "/v1/responses", TargetAgentID: "target", RemainingNanos: 1,
+					ProbePolicy: wire.ProbeBypassBusinessPolicy,
+					Method:      http.MethodGet, Path: "/ping", Header: map[string][]string{}, BodyLength: 0,
+					TargetAgentID: "target", RemainingNanos: 1, ResponseWindow: f.limits.InitialStreamWindow,
 				}, f.limits.MaxMetadataBytes)
 				require.NoError(t, err)
 				require.NoError(t, source.handleOpen(wire.Frame{
@@ -2150,7 +2152,11 @@ func TestHubRelayE2ETargetEligibilityFailuresResetSource(t *testing.T) {
 			f := newRelayE2EFixture(t, agents)
 			source, _ := f.connect("source")
 			defer source.Close()
-			payload, err := wire.EncodeMetadata(wire.Open{TargetAgentID: "target"}, f.limits.MaxMetadataBytes)
+			payload, err := wire.EncodeMetadata(wire.Open{
+				ProbePolicy: wire.ProbeBypassBusinessPolicy,
+				Method:      http.MethodGet, Path: "/ping", Header: map[string][]string{}, BodyLength: 0,
+				TargetAgentID: "target", RemainingNanos: int64(time.Second), ResponseWindow: f.limits.InitialStreamWindow,
+			}, f.limits.MaxMetadataBytes)
 			require.NoError(t, err)
 			writeRelayFrame(t, source, f.limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: wire.StreamID{71}, Sequence: 1, Payload: payload})
 			_, reset := readRelayReset(t, source, f.limits)

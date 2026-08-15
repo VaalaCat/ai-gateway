@@ -93,6 +93,7 @@ type Syncer struct {
 	Bus              app.EventBus
 	Logger           *zap.Logger
 	FullSyncInterval time.Duration
+	apiSync          *apiSyncCoordinator
 	mu               sync.Mutex // first in lock order; protects controlSession
 	controlSession   *ControlSession
 	nextGeneration   uint64
@@ -119,6 +120,9 @@ func NewSyncer(store *Store, client app.WSClient, bus app.EventBus, logger *zap.
 		FullSyncInterval: interval,
 		fullSyncRequests: make(chan *ControlSession, 1),
 	}
+	if store != nil && store.APIIndex != nil {
+		s.apiSync = newAPISyncCoordinator(store.APIIndex)
+	}
 	if client != nil {
 		s.BeginControlSession(client)
 	}
@@ -138,6 +142,16 @@ func (s *Syncer) BeginControlSession(client app.WSClient) *ControlSession {
 	var previous *ControlSession
 	s.mu.Lock()
 	previous = s.controlSession
+	// behavior change: readiness becomes dirty before the replacement lease is
+	// externally visible. Lock order is s.mu -> API sync state -> API index.
+	if s.apiSync != nil {
+		s.apiSync.markAllDirty()
+	}
+	// behavior change: a new or cleared control lease invalidates every cached
+	// principal RoleSet before the session mutation becomes visible.
+	if s.Store != nil {
+		s.Store.ClearAPIRoleSets()
+	}
 	if client == nil {
 		s.controlSession = nil
 		s.mu.Unlock()
@@ -175,6 +189,14 @@ func (s *Syncer) EndControlSession(expected *ControlSession) bool {
 	if s.controlSession != expected {
 		s.mu.Unlock()
 		return false
+	}
+	// behavior change: fail closed before clearing the current lease.
+	if s.apiSync != nil {
+		s.apiSync.markAllDirty()
+	}
+	// behavior change: only the current lease may clear principal RoleSets.
+	if s.Store != nil {
+		s.Store.ClearAPIRoleSets()
 	}
 	s.controlSession = nil
 	s.mu.Unlock()
@@ -274,6 +296,11 @@ func (s *Syncer) fullSyncForSession(ctx context.Context, expected *ControlSessio
 	if err := s.fullSyncEntityForSession(ctx, expected, "setting"); err != nil {
 		return err
 	}
+	for _, entity := range apiFullCacheEntities {
+		if err := s.fullSyncAPIEntityForSession(ctx, expected, entity); err != nil {
+			return err
+		}
+	}
 	if err := s.fullSyncAgentsForSession(ctx, expected); err != nil {
 		if errors.Is(err, ErrControlSessionChanged) {
 			return err
@@ -342,6 +369,11 @@ func (s *Syncer) fullSyncEntity(ctx context.Context, entity string) error {
 }
 
 func (s *Syncer) fullSyncEntityForSession(ctx context.Context, expected *ControlSession, entity string) error {
+	if s.apiSync != nil {
+		if _, ok := s.apiSync.resolve(entity); ok {
+			return s.fullSyncAPIEntityForSession(ctx, expected, entity)
+		}
+	}
 	if entity == events.EntityAgentRoute {
 		return s.fullSyncAgentRoutesForSession(ctx, expected)
 	}
@@ -379,6 +411,17 @@ func (s *Syncer) fullSyncEntityForSession(ctx context.Context, expected *Control
 		page++
 	}
 	return nil
+}
+
+func (s *Syncer) fullSyncAPIEntityForSession(
+	ctx context.Context,
+	expected *ControlSession,
+	entity string,
+) error {
+	if s.apiSync == nil {
+		return errors.New("API sync coordinator not initialized")
+	}
+	return s.apiSync.fullSync(ctx, s, expected, entity)
 }
 
 func (s *Syncer) commitFullSyncPage(expected *ControlSession, entity string, resp protocol.FullSyncResponse) error {
@@ -899,6 +942,11 @@ func (s *Syncer) ApplySyncPushForSession(
 }
 
 func (s *Syncer) applySyncPushLocked(expected *ControlSession, params protocol.SyncPushParams) error {
+	if s.apiSync != nil {
+		if _, ok := s.apiSync.resolve(params.Entity); ok {
+			return s.apiSync.applyPush(s, expected, params)
+		}
+	}
 	if params.Entity == events.EntityAgent {
 		switch params.Action {
 		case events.ActionCreate, events.ActionUpdate, events.ActionDelete:
@@ -1072,6 +1120,13 @@ func (s *Syncer) SubscribeEvents() error {
 		events.SyncModelRoutingAllPattern,
 		events.SyncPrivateChannelAllPattern,
 		events.SyncScriptAllPattern,
+		events.SyncAPIServiceAllPattern,
+		events.SyncAPIRouteAllPattern,
+		events.SyncAPIUpstreamAllPattern,
+		events.SyncAPIRoleAllPattern,
+		events.SyncUserAPIRoleSetAllPattern,
+		events.SyncUserGroupAPIRoleSetAllPattern,
+		events.SyncTokenAPIRoleSetAllPattern,
 	}
 
 	var subscriptions []eventbus.Subscription
@@ -1155,12 +1210,16 @@ func (s *Syncer) checkVersion(ctx context.Context) {
 
 	routesDirty := s.agentRouteDirty.Load()
 	agentsDirty := s.agentsDirty.Load()
-	if resp.Version != s.Store.Version() || routesDirty || agentsDirty {
+	// behavior change: an incomplete API projection retries even when the
+	// global Master and Agent versions are equal.
+	apiDirty := s.apiSync != nil && s.apiSync.AnyDirty()
+	if resp.Version != s.Store.Version() || routesDirty || agentsDirty || apiDirty {
 		s.Logger.Info("cache divergence, triggering full sync",
 			zap.Int64("local", s.Store.Version()),
 			zap.Int64("remote", resp.Version),
 			zap.Bool("agents_dirty", agentsDirty),
 			zap.Bool("agent_routes_dirty", routesDirty),
+			zap.Bool("api_dirty", apiDirty),
 		)
 		_ = s.FullSyncForSession(ctx, expected)
 	}

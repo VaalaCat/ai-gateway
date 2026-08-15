@@ -47,6 +47,11 @@ func (c *FullCache[K, V]) Delete(key K) {
 	c.m.Delete(key)
 }
 
+// Clear 删除所有条目。
+func (c *FullCache[K, V]) Clear() {
+	c.m.Clear()
+}
+
 // Len 返回条目数。
 func (c *FullCache[K, V]) Len() int {
 	return c.m.Len()

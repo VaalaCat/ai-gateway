@@ -7,6 +7,7 @@ import { Loader2, Bug } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useLogTrace } from "@/lib/api/logs";
+import { TraceContentBlock } from "./trace-content-block";
 
 interface TraceDetailProps {
   requestId: string;
@@ -33,20 +34,13 @@ function CollapsibleSection({
         {open ? "▼" : "▶"} {title}
       </button>
       {open && (
-        <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-2 text-xs font-mono">
-          {tryFormatJSON(content)}
-        </pre>
+        <TraceContentBlock
+          content={content}
+          className="mt-1 rounded-md border bg-muted/50 p-2"
+        />
       )}
     </div>
   );
-}
-
-function tryFormatJSON(text: string): string {
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2);
-  } catch {
-    return text;
-  }
 }
 
 export function TraceDetail({ requestId, attemptIndex }: TraceDetailProps) {

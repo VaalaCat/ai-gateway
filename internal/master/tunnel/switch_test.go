@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	pkgmetrics "github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
@@ -164,6 +165,81 @@ func TestSwitchRewritesSourceOwnershipAndReducesDeadline(t *testing.T) {
 	require.Equal(t, "source-real", got.SourceAgentID)
 	require.Less(t, got.RemainingNanos, open.RemainingNanos)
 	require.Greater(t, got.RemainingNanos, int64(0))
+}
+
+func TestSwitchWebSocketFramesAreOpaqueAndBidirectional(t *testing.T) {
+	h := NewHub(HubOptions{InstanceID: "master-a", Limits: testLimits()})
+	source, sourceConn := liveTestSession(h, "source", 1)
+	target, targetConn := liveTestSession(h, "target", 2)
+	sw := newTestSwitch(h, source, target, wire.StreamID{71})
+	meta := apiattempt.APIAttemptMeta{Protocol: apiattempt.APIProtocolWebSocket}
+	openPayload, err := wire.EncodeMetadata(wire.Open{
+		Method: "GET", Path: "/ws", RequestID: "ws", TargetAgentID: "target", ResponseWindow: 1024,
+		API: &meta, WebSocket: &wire.WebSocketOpen{ResponseWindow: 1024},
+	}, testLimits().MaxMetadataBytes)
+	require.NoError(t, err)
+	require.NoError(t, sw.accept(source, source.generation, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: sw.id, Sequence: 1, Payload: openPayload,
+	}))
+	forwarded := decodeCapturedFrame(t, <-targetConn.writes)
+	require.Equal(t, wire.FrameOpen, forwarded.Type)
+
+	startPayload, err := wire.EncodeMetadata(wire.WebSocketMessageStart{MessageID: 1, Type: wire.WebSocketTextMessage}, testLimits().MaxMetadataBytes)
+	require.NoError(t, err)
+	require.NoError(t, sw.accept(target, target.generation, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameWebSocketMessageStart, StreamID: sw.id, Sequence: 1, Payload: startPayload,
+	}))
+	forwarded = decodeCapturedFrame(t, <-sourceConn.writes)
+	require.Equal(t, wire.FrameWebSocketMessageStart, forwarded.Type)
+
+	require.NoError(t, sw.accept(source, source.generation, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameWebSocketPing, StreamID: sw.id, Sequence: 2, Payload: []byte("keepalive"),
+	}))
+	forwarded = decodeCapturedFrame(t, <-targetConn.writes)
+	require.Equal(t, wire.FrameWebSocketPing, forwarded.Type)
+	sw.Cancel(context.Canceled)
+	<-sw.Done()
+	source.Cancel(context.Canceled)
+	target.Cancel(context.Canceled)
+}
+
+func TestSwitchWebSocketCloseWaitsForTerminalAPIResult(t *testing.T) {
+	h := NewHub(HubOptions{InstanceID: "master-a", Limits: testLimits()})
+	source, sourceConn := liveTestSession(h, "source", 1)
+	target, targetConn := liveTestSession(h, "target", 2)
+	t.Cleanup(func() { source.Cancel(nil); target.Cancel(nil) })
+	sw := newTestSwitch(h, source, target, wire.StreamID{72})
+	meta := apiattempt.APIAttemptMeta{Protocol: apiattempt.APIProtocolWebSocket}
+	openPayload, err := wire.EncodeMetadata(wire.Open{
+		Method: http.MethodGet, Path: "/ws", RequestID: "ws-result", TargetAgentID: "target", ResponseWindow: 1024,
+		API: &meta, WebSocket: &wire.WebSocketOpen{ResponseWindow: 1024},
+	}, testLimits().MaxMetadataBytes)
+	require.NoError(t, err)
+	require.NoError(t, sw.accept(source, source.generation, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: sw.id, Sequence: 1, Payload: openPayload,
+	}))
+	require.Equal(t, wire.FrameOpen, decodeCapturedFrame(t, <-targetConn.writes).Type)
+
+	closePayload, err := wire.EncodeWebSocketClose(1000, "done")
+	require.NoError(t, err)
+	require.NoError(t, sw.accept(target, target.generation, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameWebSocketClose, StreamID: sw.id, Sequence: 1, Payload: closePayload,
+	}))
+	require.Equal(t, wire.FrameWebSocketClose, decodeCapturedFrame(t, <-sourceConn.writes).Type)
+	select {
+	case <-sw.Done():
+		t.Fatal("WebSocket Close terminated the switch before APIResult")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	resultPayload := []byte(`{"provider_dispatch_known":true}`)
+	require.NoError(t, sw.accept(target, target.generation, wire.Frame{
+		Version: wire.ProtocolVersion, Type: wire.FrameAPIResult, StreamID: sw.id, Sequence: 2, Payload: resultPayload,
+	}))
+	resultFrame := decodeCapturedFrame(t, <-sourceConn.writes)
+	require.Equal(t, wire.FrameAPIResult, resultFrame.Type)
+	require.Equal(t, resultPayload, resultFrame.Payload)
+	requireClosed(t, sw.Done(), "WebSocket APIResult terminal")
 }
 
 func TestSwitchPrepareOpenPreservesBoundAttemptWhileRewritingSource(t *testing.T) {

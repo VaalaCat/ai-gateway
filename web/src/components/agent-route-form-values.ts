@@ -1,4 +1,4 @@
-export type AgentRouteSourceType = "token" | "channel";
+export type AgentRouteSourceType = "token" | "channel" | "api_service" | "api_route";
 export type AgentRouteTargetType = "agent_id" | "agent_tag";
 
 export interface AgentRouteFormValues {
@@ -32,9 +32,7 @@ interface EditableAgentRoute {
 export function createAgentRouteFormValues(
   route: EditableAgentRoute | null,
 ): AgentRouteFormValues {
-  const sourceType: AgentRouteSourceType = route?.source_type === "channel"
-    ? "channel"
-    : "token";
+  const sourceType: AgentRouteSourceType = agentRouteSourceTypeOf(route?.source_type);
   const targetType: AgentRouteTargetType = route?.agent_tag
     ? "agent_tag"
     : "agent_id";
@@ -48,6 +46,17 @@ export function createAgentRouteFormValues(
       ? (targetType === "agent_tag" ? route.agent_tag : route.agent_id)
       : "",
   };
+}
+
+function agentRouteSourceTypeOf(sourceType: string | undefined): AgentRouteSourceType {
+  switch (sourceType) {
+    case "channel":
+    case "api_service":
+    case "api_route":
+      return sourceType;
+    default:
+      return "token";
+  }
 }
 
 export function buildAgentRoutePayload(

@@ -15,8 +15,10 @@ import { useFilterState } from "@/components/data-table/use-filter-state";
 import type { FilterSpec } from "@/components/data-table/filter-spec";
 import type { ToolbarAction } from "@/components/data-table/toolbar-actions";
 import { Button } from "@/components/ui/button";
+import { PageLayout } from "@/components/layout/page-layout";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
+import { NumberUnitInput } from "@/components/business/number-unit-input";
 import { Label } from "@/components/ui/label";
 import {
   Dialog,
@@ -48,6 +50,7 @@ import { BackgroundRefreshStatus } from "@/components/business/background-refres
 import { AgentConnectionStatus } from "@/components/business/agent-connection-status";
 import { AgentEditDialog } from "@/components/business/agent-edit-dialog";
 import { formatErrorToast } from "@/lib/api/error-toast";
+import { humanizeNumberUnit } from "@/lib/utils/number-unit";
 
 import {
   Collapsible,
@@ -326,20 +329,21 @@ export default function AgentsPage() {
   ];
 
   return (
-    <div className="flex flex-col gap-4">
-      <Collapsible>
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">{t("title")}</h1>
-            <p className="text-muted-foreground mt-1">{t("description")}</p>
-          </div>
+    <Collapsible>
+      <PageLayout
+        title={t("title")}
+        description={t("description")}
+        actions={
           <CollapsibleTrigger asChild>
             <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground shrink-0">
               <Info className="size-3.5" />
               {t("usageGuide")}
             </Button>
           </CollapsibleTrigger>
-        </div>
+        }
+        maxWidth="full"
+      >
+        <div className="flex flex-col gap-4">
         <CollapsibleContent>
           <div className="mt-3 flex flex-col gap-3 rounded-md border p-4">
             <p className="text-sm text-muted-foreground">{t("usageGuideDesc")}</p>
@@ -385,7 +389,6 @@ export default function AgentsPage() {
             </div>
           </div>
         </CollapsibleContent>
-      </Collapsible>
 
       {initialLoading ? (
         <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -568,9 +571,11 @@ export default function AgentsPage() {
             {!enrollToken ? (
               <div className="flex flex-col gap-2">
                 <Label>{t("ttl")}</Label>
-                <Input
+                <NumberUnitInput
                   type="number"
                   value={enrollTTL}
+                  unit="s"
+                  humanReadable={humanizeNumberUnit(enrollTTL, "seconds")}
                   onChange={(e) => setEnrollTTL(e.target.value)}
                 />
               </div>
@@ -626,6 +631,8 @@ export default function AgentsPage() {
         onOpenChange={(open) => { if (!open) setDeleteItem(null); }}
         onConfirm={handleDelete}
       />
-    </div>
+        </div>
+      </PageLayout>
+    </Collapsible>
   );
 }

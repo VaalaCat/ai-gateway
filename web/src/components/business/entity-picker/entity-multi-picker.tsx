@@ -30,6 +30,8 @@ interface EntityMultiPickerProps {
   disabled?: boolean;
   className?: string;
   scope?: AdminScope;
+  /** 限制 Generic API 子资源候选/回显到指定 Service。 */
+  apiServiceId?: number;
   /** 从下拉可选项中排除的 value（如已绑定项）。默认不排除，向后兼容。 */
   excludeIds?: string[];
 }
@@ -42,14 +44,24 @@ export function EntityMultiPicker({
   disabled,
   className,
   scope = "self",
+  apiServiceId,
   excludeIds,
 }: EntityMultiPickerProps) {
   const t = useTranslations("entityPicker");
   const adapter = ENTITY_ADAPTERS[entity] as unknown as EntityAdapter<unknown>;
 
-  const [open, setOpen] = useState(false);
-  const { search, setSearch, items, isLoading, getValue, renderItem } =
-    useEntityOptions(adapter, { scope, pageSize: PAGE_SIZE });
+  const [popoverState, setPopoverState] = useState({ disabled, open: false });
+  if (popoverState.disabled !== disabled) {
+    setPopoverState({ disabled, open: false });
+  }
+  const isOpen = popoverState.open && !disabled;
+  const { search, setSearch, items, isLoading, isError, refetch, getValue, renderItem } =
+    useEntityOptions(adapter, {
+      scope,
+      pageSize: PAGE_SIZE,
+      ...(apiServiceId !== undefined ? { apiServiceId } : {}),
+      enabled: isOpen,
+    });
 
   const excludeSet = new Set(excludeIds ?? []);
   const visibleItems = items.filter((it) => !excludeSet.has(getValue(it)));
@@ -62,12 +74,15 @@ export function EntityMultiPicker({
 
   return (
     <div className={cn("space-y-2", className)}>
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={isOpen}
+        onOpenChange={(nextOpen) => setPopoverState({ disabled, open: !disabled && nextOpen })}
+      >
         <PopoverTrigger asChild>
           <Button
             variant="outline"
             role="combobox"
-            aria-expanded={open}
+            aria-expanded={isOpen}
             disabled={disabled}
             className="w-full justify-between font-normal text-body"
           >
@@ -88,6 +103,24 @@ export function EntityMultiPicker({
               {isLoading ? (
                 <div className="px-3 py-6 text-center text-sm text-muted-foreground">
                   {t("loading")}
+                </div>
+              ) : isError ? (
+                <div
+                  data-slot="entity-picker-error"
+                  data-state="error"
+                  className="flex flex-col items-center gap-2 px-3 py-6 text-center text-sm text-muted-foreground"
+                >
+                  <span>{t("loadFailed")}</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    data-slot="entity-picker-retry"
+                    data-state="error"
+                    onClick={() => void refetch()}
+                  >
+                    {t("retry")}
+                  </Button>
                 </div>
               ) : visibleItems.length === 0 ? (
                 <CommandEmpty>{t("noResults")}</CommandEmpty>
@@ -124,6 +157,7 @@ export function EntityMultiPicker({
                 entity={entity}
                 id={v}
                 scope={scope}
+                apiServiceId={apiServiceId}
                 showId={false}
                 hover={false}
                 className="truncate"

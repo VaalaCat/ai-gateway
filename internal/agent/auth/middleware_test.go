@@ -42,6 +42,29 @@ func (*cancelAwareTokenClient) Notify(string, any) error                       {
 func (*cancelAwareTokenClient) Close() error                                   { return nil }
 func (*cancelAwareTokenClient) ReadLoop()                                      {}
 
+type coldSystemTokenClient struct {
+	token models.Token
+}
+
+func (c *coldSystemTokenClient) Call(_ context.Context, _ string, _ any) (json.RawMessage, error) {
+	data, err := json.Marshal(c.token)
+	if err != nil {
+		return nil, err
+	}
+	side, err := json.Marshal(protocol.TokenFetchSide{
+		SchemaVersion: protocol.TokenFetchSideSchemaV1,
+		TokenRoutings: &protocol.TokenRoutingMap{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(protocol.FetchEntityResponse{Found: true, Data: data, Side: side})
+}
+func (*coldSystemTokenClient) OnNotification(string, app.NotificationHandler) {}
+func (*coldSystemTokenClient) Notify(string, any) error                       { return nil }
+func (*coldSystemTokenClient) Close() error                                   { return nil }
+func (*coldSystemTokenClient) ReadLoop()                                      {}
+
 func TestTokenAuthCacheLoadHonorsRequestCancellation(t *testing.T) {
 	client := &cancelAwareTokenClient{entered: make(chan struct{}), release: make(chan struct{})}
 	defer close(client.release)
@@ -94,6 +117,33 @@ func TestValidToken(t *testing.T) {
 
 	if w.Code != 200 {
 		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestTokenAuthPopulatesAPIRoleModeFact(t *testing.T) {
+	store := cache.NewStore(nil, config.AgentCacheConfig{})
+	store.SetToken(&models.Token{
+		ID: 1, Key: "sk-api-role", UserID: 7, Status: 1, ExpiredAt: -1,
+		APIRoleMode: models.APIRoleModeExplicit,
+	})
+	router := gin.New()
+	var mode models.APIRoleMode
+	router.GET("/test", TokenAuth(store), func(c *gin.Context) {
+		value, _ := c.Get(consts.CtxKeyUserInfo)
+		mode = value.(*app.UserInfo).APIRoleMode
+		c.Status(http.StatusOK)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/test", nil)
+	request.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+"sk-api-role")
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if mode != models.APIRoleModeExplicit {
+		t.Fatalf("APIRoleMode = %q", mode)
 	}
 }
 
@@ -433,6 +483,33 @@ func TestTokenAuth_SystemTestTokenSkipsUserLookup(t *testing.T) {
 	// 关键断言：UserID=0 不应触发 user cache 查询。
 	if miss := store.CacheSnapshot()["user"].Misses; miss != 0 {
 		t.Fatalf("user cache Misses = %d, want 0 (system test token must not probe user cache)", miss)
+	}
+}
+
+func TestTokenAuth_ColdSystemTokensAuthenticateWithoutOwner(t *testing.T) {
+	for _, mode := range []models.APIRoleMode{models.APIRoleModeInherit, models.APIRoleModeExplicit} {
+		t.Run(string(mode), func(t *testing.T) {
+			key := "tk-cold-system-" + string(mode)
+			client := &coldSystemTokenClient{token: models.Token{
+				ID: 10, UserID: 0, Key: key, Name: "system", Status: consts.StatusEnabled,
+				ExpiredAt: -1, APIRoleMode: mode,
+			}}
+			store := cache.NewStore(client, config.AgentCacheConfig{})
+			defer store.Close()
+			store.SetUserGroup(&models.UserGroup{ID: models.DefaultUserGroupID, Status: consts.StatusEnabled})
+
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/test", nil)
+			request.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+key)
+			setupRouter(store).ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+			}
+			if misses := store.CacheSnapshot()["user"].Misses; misses != 0 {
+				t.Fatalf("user cache misses = %d, want 0", misses)
+			}
+		})
 	}
 }
 

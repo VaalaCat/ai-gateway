@@ -11,6 +11,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/diagnostics"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"go.uber.org/zap"
@@ -265,6 +266,42 @@ func (m *Manager) openAttemptStream(ctx context.Context, req agentproxy.AttemptS
 	}
 	defer session.releaseAdmission()
 	return session.OpenAttemptStream(ctx, req)
+}
+
+func (m *Manager) OpenHTTPAPIStream(ctx context.Context, open agentproxy.APIOpen) (agentproxy.HTTPAPIStream, error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if m == nil || m.opts.RelayOutboundEnabled == nil || !m.opts.RelayOutboundEnabled() {
+		return nil, newPathPolicyError(consts.RouteErrorSourceRelayOutboundDisabled)
+	}
+	session := m.activeRef.Load()
+	if session == nil {
+		return nil, errRelayNotAvailable
+	}
+	if !session.acquireAdmission() {
+		return nil, errRelayNotAccepting
+	}
+	defer session.releaseAdmission()
+	return session.OpenHTTPAPIStream(ctx, open)
+}
+
+func (m *Manager) OpenWebSocketAPIStream(ctx context.Context, open app.WebSocketOpen) (app.WebSocketAPIStream, error) {
+	if ctx == nil {
+		return nil, errNilContext
+	}
+	if m == nil || m.opts.RelayOutboundEnabled == nil || !m.opts.RelayOutboundEnabled() {
+		return nil, newPathPolicyError(consts.RouteErrorSourceRelayOutboundDisabled)
+	}
+	session := m.activeRef.Load()
+	if session == nil {
+		return nil, errRelayNotAvailable
+	}
+	if !session.acquireAdmission() {
+		return nil, errRelayNotAccepting
+	}
+	defer session.releaseAdmission()
+	return session.OpenWebSocketAPIStream(ctx, open)
 }
 
 func (m *Manager) OpenProbeStream(ctx context.Context, req agentproxy.ProbeStreamRequest) (agentproxy.ProbeStream, error) {

@@ -11,12 +11,23 @@ const localeFiles = {
 
 const sampleValues: Record<string, string | number | Date> = {
   count: 2,
+  size: 20,
   max: 5,
   input: "$1.00",
   output: "$2.00",
   cacheRead: "$0.50",
   cacheWrite: "$0.75",
   value: "99.90%",
+  bytes: 1024,
+  name: "Example Token",
+  weight: 1,
+  priority: 0,
+  available: 2,
+  total: 3,
+  window: "24h",
+  offer: "OpenAI Direct",
+  position: 1,
+  subject: "Example item",
 };
 
 function objectAtPath(messages: Messages, path: string) {

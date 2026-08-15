@@ -375,6 +375,7 @@ describe("model marketplace detail access and query boundary", () => {
     expect(within(skeleton).getAllByTestId("detail-skeleton-status")).toHaveLength(1);
     expect(within(skeleton).getAllByTestId("detail-skeleton-chart")).toHaveLength(1);
     expect(within(skeleton).queryByTestId("legacy-model-summary-card")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   });
 
   it.each([
@@ -391,7 +392,8 @@ describe("model marketplace detail access and query boundary", () => {
     expect(state.capabilityHook).toHaveBeenCalled();
     expect(state.userDetail).not.toHaveBeenCalled();
     expect(state.adminDetail).not.toHaveBeenCalled();
-    if (!loading) expect(state.notFound).toHaveBeenCalled();
+    if (loading) expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    else expect(state.notFound).toHaveBeenCalled();
   });
 
   it("loads the ordinary detail with model, Token, window, and optional offer identity", () => {
