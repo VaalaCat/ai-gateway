@@ -25,7 +25,7 @@ func (b *UsageBuilder) Build(execution APIExecution) protocol.APIUsageEntry {
 		ProviderDispatchKnown: execution.Result.ProviderDispatchKnown,
 		ProviderDispatched:    execution.Result.ProviderDispatched,
 		QuotaGateDecision:     execution.QuotaGateDecision,
-		ErrorStage:            execution.Result.ErrorStage, ErrorCode: execution.Result.ErrorCode,
+		ErrorStage:            execution.Result.ErrorStage, ErrorCode: execution.Result.ErrorCode, ErrorMessage: execution.Result.ErrorMessage,
 		RateLimitDecision:      execution.Result.RateLimitDecision,
 		RateLimitWaitMs:        execution.Result.RateLimitWaitMs,
 		RateLimitReason:        execution.Result.RateLimitReason,

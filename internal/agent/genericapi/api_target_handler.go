@@ -11,6 +11,7 @@ import (
 
 	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	wire "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/gin-gonic/gin"
 )
@@ -75,6 +76,9 @@ func (h *APITargetHandler) serveStream(ctx context.Context, stream apiTargetStre
 		}
 		if result.ErrorCode == "" {
 			result.ErrorCode = ErrorCode(err)
+		}
+		if result.ErrorMessage == "" {
+			result.ErrorMessage = safeAPIErrorMessage(err, protocol.APIUpstreamCredential{})
 		}
 	}
 	if finishErr := response.finish(err); finishErr != nil {

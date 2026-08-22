@@ -1,16 +1,12 @@
 package transform
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
-	"net/http/httptest"
+	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // runClaudeToOpenAIChat decodes a Claude inbound request, applies IR transformers,
@@ -18,31 +14,34 @@ import (
 // JSON object.
 func runClaudeToOpenAIChat(t *testing.T, claudeReqBody string, sendBackThinking bool) map[string]any {
 	t.Helper()
-	httpReq := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader([]byte(claudeReqBody)))
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	cdec := &claude.ClaudeCodec{}
-	irReq, err := cdec.DecodeRequest(httpReq)
+	codec := llmkit.NewCodec()
+	decoded, err := codec.DecodeRequest(llmkit.DecodeRequestInput{
+		Method: http.MethodPost, Path: "/v1/messages",
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
+		Body:    []byte(claudeReqBody),
+	})
 	if err != nil {
 		t.Fatalf("claude DecodeRequest: %v", err)
 	}
-
-	cfg := &codec.ChannelConfig{
-		BaseURL:          "https://x",
-		APIKey:           "k",
-		Model:            "deepseek-v4-test",
-		SendBackThinking: sendBackThinking,
+	request := decoded.Request
+	if sendBackThinking {
+		ApplyThinkingPassthrough(request.Messages)
+	} else {
+		ApplyThinkingStrip(request.Messages)
 	}
-	codec.ApplyIRTransformers(codec.ProtocolOpenAIChat, irReq, cfg)
-
-	enc := &openai.ChatCodec{}
-	upstreamReq, err := enc.EncodeRequest(irReq, cfg)
+	encoded, err := codec.EncodeRequest(llmkit.EncodeRequestInput{
+		Request: request,
+		Target: llmkit.Target{
+			Protocol: llmkit.ProtocolOpenAIChat, BaseURL: "https://x",
+			APIKey: "k", Model: "deepseek-v4-test",
+		},
+		Options: llmkit.ConversionOptions{RequestFields: llmkit.DefaultRequestFieldPermissions()},
+	})
 	if err != nil {
 		t.Fatalf("openai EncodeRequest: %v", err)
 	}
-	bodyBytes, _ := io.ReadAll(upstreamReq.Body)
 	var raw map[string]any
-	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+	if err := json.Unmarshal(encoded.Body, &raw); err != nil {
 		t.Fatalf("unmarshal upstream body: %v", err)
 	}
 	return raw
@@ -114,32 +113,31 @@ func TestRegression_AnthropicThinkingNotLeakedToOpenAI(t *testing.T) {
 // a different tool_use format) to verify the placeholder semantics for tool_call
 // assistant messages.
 func TestRegression_DeepSeekToolCallMultiTurn_HistoryHasReasoningContent_DirectIR(t *testing.T) {
-	irReq := &codec.Request{
+	irReq := &llmkit.Request{
 		Model: "deepseek-v4",
-		Messages: []codec.Message{
-			{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "use tool"}}},
+		Messages: []llmkit.Message{
+			{Role: llmkit.RoleUser, Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "use tool"}}},
 			{
-				Role:      codec.RoleAssistant,
-				Content:   []codec.ContentBlock{{Type: codec.ContentTypeText, Text: ""}},
-				ToolCalls: []codec.ToolCall{{ID: "c1", Name: "f", Arguments: "{}"}},
+				Role:      llmkit.RoleAssistant,
+				Content:   []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: ""}},
+				ToolCalls: []llmkit.ToolCall{{ID: "c1", Name: "f", Arguments: "{}"}},
 			},
-			{Role: codec.RoleTool, ToolCallID: "c1", Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "result"}}},
+			{Role: llmkit.RoleTool, ToolCallID: "c1", Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "result"}}},
 		},
 	}
-	cfg := &codec.ChannelConfig{
-		BaseURL: "https://x", APIKey: "k", Model: "deepseek-v4",
-		SendBackThinking: true,
-	}
-	codec.ApplyIRTransformers(codec.ProtocolOpenAIChat, irReq, cfg)
-
-	enc := &openai.ChatCodec{}
-	upstreamReq, err := enc.EncodeRequest(irReq, cfg)
+	ApplyThinkingPassthrough(irReq.Messages)
+	encoded, err := llmkit.NewCodec().EncodeRequest(llmkit.EncodeRequestInput{
+		Request: *irReq,
+		Target: llmkit.Target{
+			Protocol: llmkit.ProtocolOpenAIChat, BaseURL: "https://x", APIKey: "k", Model: "deepseek-v4",
+		},
+		Options: llmkit.ConversionOptions{RequestFields: llmkit.DefaultRequestFieldPermissions()},
+	})
 	if err != nil {
 		t.Fatalf("EncodeRequest: %v", err)
 	}
-	bodyBytes, _ := io.ReadAll(upstreamReq.Body)
 	var raw map[string]any
-	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+	if err := json.Unmarshal(encoded.Body, &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 

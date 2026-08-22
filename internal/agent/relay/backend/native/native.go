@@ -2,317 +2,321 @@ package native
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/dataflow"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
-// Backend 走 codec pipeline 的原生 relay 路径。
-// 只持有 app.AgentApplication 拿 logger / transport pool，不再依赖 *Handler。
-// 外部访问为 native.Backend；Agent 字段导出方便 backend.Dispatcher 装配。
 type Backend struct {
-	Agent app.AgentApplication
+	Agent  app.AgentApplication
+	Codec  llmkit.Codec
+	Client llmkit.Client
 }
 
-// Relay 处理单次上行 attempt。流程：协商 outbound 协议 → decode 入站 →
-// seed/freeze Pass → 通过 dataflow.BuildChannelDataFlow 构建步骤链并 flow.Run
-// （含 model mapping、transformer、script、encode 等各 Step）→ dispatch 上行 HTTP
-// → 监控 events → encode 回客户端。
-//
-// 任一阶段失败会通过 Recorder.WithFail 标记 + 返回 state.AttemptResult.Err。
-// 不做 token 调和（FinalizeTokenCounts 在 Dispatcher 层统一处理），不做 forwarding 决策
-// （Executor 在 attempt 入口处理）。
-func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.AttemptResult {
-	c := rctx.Context
-	ch := a.Channel
-	modelName := a.RealModel
-	isStream := rctx.Input.IsStream
-	inboundProto := rctx.Input.InboundProto
-	startTime := rctx.Input.StartTime
-	rec := rctx.State.Recorder
-
-	logger := b.logger()
-
-	// Bind upstream calls to the client request context so that client
-	// disconnection cancels the upstream HTTP call immediately.
-	// For non-stream requests, also apply a hard relay timeout when configured.
-	ctx := c.Request.Context()
-	var cancel context.CancelFunc
-	if !isStream && rctx.Agent != nil && rctx.Agent.RelayTimeout() > 0 {
-		ctx, cancel = context.WithTimeout(ctx, rctx.Agent.RelayTimeout())
-	} else {
-		ctx, cancel = context.WithCancel(ctx)
-	}
+// Relay 处理单次 native attempt。产品级 request flow 在公共 Client 编码前运行；
+// header/override/script/transport 由该 attempt 的 HTTPDoer 处理。
+func (backend *Backend) Relay(relay *state.RelayContext, attempt state.Attempt) state.AttemptResult {
+	ctx, cancel := backend.attemptContext(relay)
 	defer cancel()
 
-	outboundProto, inboundCodec, outboundCodec, err := resolveNativeCodecs(ch, inboundProto, modelName)
+	decoded, err := backend.decodeInboundRequest(relay)
 	if err != nil {
 		return state.AttemptResult{Err: err}
 	}
-
-	// decode 留在链外:它的产出正是种入 Pass 的初值。
-	irReq, err := inboundCodec.DecodeRequest(c.Request)
+	target, config, err := buildTarget(attempt.Channel, decoded.Protocol, attempt.RealModel)
 	if err != nil {
-		return state.AttemptResult{Err: fmt.Errorf("decode inbound request: %w", err)}
+		return state.AttemptResult{Err: err}
 	}
-	// 进入本 channel 处理的模型名是 planner 解析出的 RealModel(对齐旧
-	// cfg.InboundModel 与 ApplyModelMapping 入参);body 里的 model 在此被丢弃。
-	// 先 seed 再冻结 Original,保证 Original.Model == RealModel。
-	irReq.Model = modelName
+	request, aborted, err := backend.runChannelRequestFlow(ctx, relay, attempt, decoded.Request, target.Protocol)
+	if err != nil {
+		return state.AttemptResult{Err: err}
+	}
+	if aborted != nil {
+		return *aborted
+	}
+	target.Model = request.Model
 
-	pass := &dataflow.Pass{
-		Original: dataflow.CloneRequest(irReq),
-		Working:  irReq,
-		Rec:      rec,
+	events, callErr := backend.callTarget(ctx, relay, attempt, request, target, config)
+	if callErr != nil {
+		return projectAttemptResult(relay.State.Recorder, target.Model, callErr)
 	}
-	flow := dataflow.BuildChannelDataFlow(ch, outboundProto, outboundCodec, dataflow.StepDeps{
-		Agent:   b.Agent,
-		GinCtx:  c,
-		RCtx:    rctx,
-		Attempt: a,
-		Logger:  logger,
+	return backend.writeClientResponse(ctx, cancel, relay, events, decoded.Protocol, target.Model)
+}
+
+func (backend *Backend) decodeInboundRequest(relay *state.RelayContext) (llmkit.DecodedRequest, error) {
+	request := relay.Context.Request
+	decoded, err := backend.codec().DecodeRequest(llmkit.DecodeRequestInput{
+		Method: request.Method, Path: request.URL.Path,
+		Headers: request.Header.Clone(), Body: relay.Input.Body,
+	})
+	if err != nil {
+		wrapped := fmt.Errorf("decode inbound request: %w", err)
+		relay.State.Recorder.WithFail(trace.StageInboundDecode, wrapped)
+		return llmkit.DecodedRequest{}, wrapped
+	}
+	return decoded, nil
+}
+
+func buildTarget(channel *models.Channel, inbound llmkit.Protocol, model string) (llmkit.Target, *upstream.ChannelConfig, error) {
+	if channel == nil {
+		return llmkit.Target{}, nil, fmt.Errorf("native relay requires a channel")
+	}
+	rules := upstream.ChannelOverrideRulesFor(channel)
+	override := upstream.ResolveOverride(rules, model)
+	outbound := protocolconfig.NegotiateOutboundProtocol(
+		inbound, channel.Type, channel.SupportedAPITypes, channel.Endpoints, override,
+	)
+	if !protocolconfig.IsSupportedProtocol(outbound) {
+		return llmkit.Target{}, nil, fmt.Errorf("unsupported outbound protocol %s", outbound)
+	}
+	config := upstream.BuildChannelConfig(channel, model, outbound)
+	headers := make(map[string][]string)
+	if config.Organization != "" {
+		headers[consts.HeaderOpenAIOrg] = []string{config.Organization}
+	}
+	endpointPath := config.EndpointPath
+	if config.ClaudeBetaQuery && outbound == llmkit.ProtocolClaudeMessages {
+		endpointPath = withBetaQuery(endpointPath)
+	}
+	return llmkit.Target{
+		Protocol: outbound, BaseURL: config.BaseURL, EndpointPath: endpointPath,
+		APIKey: config.APIKey, Model: model, Headers: headers,
+	}, config, nil
+}
+
+func (backend *Backend) runChannelRequestFlow(
+	ctx context.Context,
+	relay *state.RelayContext,
+	attempt state.Attempt,
+	request llmkit.Request,
+	protocol llmkit.Protocol,
+) (llmkit.Request, *state.AttemptResult, error) {
+	request.Model = attempt.RealModel
+	pass := &dataflow.Pass{
+		Original: dataflow.CloneRequest(&request),
+		Working:  &request,
+		Rec:      relay.State.Recorder,
+	}
+	flow := dataflow.BuildChannelRequestFlow(attempt.Channel, protocol, dataflow.StepDeps{
+		Agent: backend.Agent, GinCtx: relay.Context, RCtx: relay,
+		Attempt: attempt, Logger: backend.logger(),
 	})
 	if err := flow.Run(ctx, pass); err != nil {
-		return state.AttemptResult{Err: err}
+		return llmkit.Request{}, nil, err
 	}
 	if pass.Aborted {
-		return pass.AbortResult
+		return llmkit.Request{}, &pass.AbortResult, nil
 	}
-
-	upstreamReq := pass.HTTPReq
-	outboundBody := pass.Body
-	upstreamModel := pass.Working.Model
-
-	rec.WithOutbound(upstreamReq, outboundBody, ch)
-	rec.WithStage(trace.StageUpstreamDispatch)
-
-	resp, err := b.dispatchUpstream(ctx, upstreamReq, ch, rec)
-	if err != nil {
-		return state.AttemptResult{Err: err}
-	}
-	// Guarantee resp.Body is closed on every return path. Decoder goroutines
-	// also defer Close inside their own goroutine, but if EncodeResponse 半途
-	// 异常返回，decoder goroutine 可能因为 channel 背压卡住而一直拿着 body，
-	// 导致连接池泄漏。这里在 Relay 函数级别兜底，确保 transport pool 能复用连接。
-	// io.ReadCloser.Close 多次调用是安全的（net/http 自身允许）。
-	defer resp.Body.Close()
-
-	// Record time-to-first-byte from upstream (used as TTFR for non-stream)
-	httpResponseMs := int(time.Since(startTime).Milliseconds())
-
-	rec.WithUpstreamStatus(resp)
-
-	if result, handled := handleNativeErrorStatus(rec, resp, c.Writer, inboundCodec, upstreamModel); handled {
-		return result
-	}
-
-	return streamNativeResponse(
-		ctx,
-		c,
-		rec,
-		resp,
-		inboundCodec,
-		outboundCodec,
-		codec.FunctionFallbackTools(pass.Working),
-		isStream,
-		startTime,
-		httpResponseMs,
-		upstreamModel,
-		logger,
-	)
+	return *pass.Working, nil, nil
 }
 
-// streamNativeResponse 把 2xx 上行响应通过 outboundCodec.DecodeResponse →
-// monitorEvents → inboundCodec.EncodeResponse 推回客户端，
-// 同时通过 Recorder.WrapUpstreamBody / WrapClientWriter 捕获 body 给 trace / usage 抽取。
-//
-// 返回 state.AttemptResult：包含 token usage / TTFR / responseText / 可能的 encode error。
-// httpResponseMs 用于 non-stream 时作为 TTFR fallback（事件级别 timing 无意义）。
-//
-// 副作用：
-//   - 修改 resp.Body（wrap 成 TeeReader）。
-//   - 修改 c.Writer（wrap 成 Recorder-tracked writer）。
-//   - 切换 Recorder stage（StageUpstreamDecode → StageClientEncode → StageNone）。
-func streamNativeResponse(
+func (backend *Backend) buildCallOptions(
+	relay *state.RelayContext,
+	attempt state.Attempt,
+	inbound, outbound llmkit.Protocol,
+	config *upstream.ChannelConfig,
+) llmkit.CallOptions {
+	policy := llmkit.NormalizeBuiltinToolFallback(config.BuiltinToolFallback)
+	return llmkit.CallOptions{
+		HTTPClient: &attemptHTTPDoer{
+			agent: backend.Agent, gin: relay.Context, relay: relay,
+			attempt: attempt, protocol: outbound, recorder: relay.State.Recorder,
+		},
+		Conversion: llmkit.ConversionOptions{
+			BuiltinToolFallback: policy,
+			RequestFields:       config.RequestFieldPermissions,
+			OnDroppedTools: func(dropped []llmkit.DroppedTool) {
+				upstream.EmitDroppedTools(
+					backend.logger(), dropped, attempt.Channel.ID,
+					inbound, outbound, string(policy),
+				)
+			},
+		},
+	}
+}
+
+func (backend *Backend) callTarget(
 	ctx context.Context,
-	c *gin.Context,
-	rec *trace.Recorder,
-	resp *http.Response,
-	inboundCodec codec.InboundCodec,
-	outboundCodec codec.OutboundCodec,
-	functionFallbackTools map[string]codec.FunctionFallbackTool,
-	isStream bool,
-	startTime time.Time,
-	httpResponseMs int,
+	relay *state.RelayContext,
+	attempt state.Attempt,
+	request llmkit.Request,
+	target llmkit.Target,
+	config *upstream.ChannelConfig,
+) (<-chan llmkit.Event, error) {
+	relay.State.Recorder.WithStage(trace.StageOutboundEncode)
+	client := backend.Client
+	if client == nil {
+		client = llmkit.NewClient(llmkit.ClientOptions{Codec: backend.codec()})
+	}
+	return client.Call(ctx, request, target, backend.buildCallOptions(
+		relay, attempt, request.InboundProtocol, target.Protocol, config,
+	))
+}
+
+func (backend *Backend) writeClientResponse(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	relay *state.RelayContext,
+	events <-chan llmkit.Event,
+	inbound llmkit.Protocol,
 	upstreamModel string,
-	logger *zap.Logger,
 ) state.AttemptResult {
-	// Wrap resp.Body with Recorder TeeReader so upstream body is captured
-	// as it is consumed by the decoder (works for both stream and non-stream).
-	resp.Body = rec.WrapUpstreamBody(resp)
+	relay.State.Recorder.WithStage(trace.StageUpstreamDecode)
+	monitored, monitor := upstream.MonitorEvents(ctx, events, relay.Input.StartTime)
+	if !relay.Input.IsStream {
+		monitor.SetFirstResponseMs(int(time.Since(relay.Input.StartTime).Milliseconds()))
+	}
 
-	rec.WithStage(trace.StageUpstreamDecode)
-
-	// Decode the upstream response into an IR event stream
-	events, err := outboundCodec.DecodeResponse(resp, isStream)
+	relay.State.Recorder.WithStage(trace.StageClientEncode)
+	relay.Context.Writer = relay.State.Recorder.WrapClientWriter(relay.Context.Writer)
+	chunks, err := backend.codec().EncodeResponse(ctx, llmkit.EncodeResponseInput{
+		Protocol: inbound, Events: monitored, Stream: relay.Input.IsStream,
+	})
+	if err == nil {
+		err = writeEncodedChunks(relay.Context, chunks, monitor, relay.Input.IsStream)
+	}
+	if err == nil {
+		err = monitor.FinalSnapshot().EventErr
+	}
 	if err != nil {
-		resp.Body.Close()
-		rec.WithFail(trace.StageUpstreamDecode, err)
-		return state.AttemptResult{Err: fmt.Errorf("decode upstream response: %w", err)}
-	}
-	events = codec.AdaptFunctionFallbackEvents(ctx, events, functionFallbackTools)
-
-	// Monitor events: collect usage and first-response timing.
-	// For non-stream requests, use the HTTP response time as TTFR since the
-	// entire response arrives at once and event-level timing is meaningless.
-	monitoredEvents, monitor := upstream.MonitorEvents(events, startTime)
-	if !isStream {
-		monitor.SetFirstResponseMs(httpResponseMs)
-	}
-
-	rec.WithStage(trace.StageClientEncode)
-
-	// Wrap c.Writer so client response bytes are captured by Recorder.
-	c.Writer = rec.WrapClientWriter(c.Writer)
-
-	// Encode the response back to the client via the inbound codec
-	if err := inboundCodec.EncodeResponse(monitoredEvents, c.Writer, isStream); err != nil {
-		if logger != nil {
-			logger.Warn("failed to encode response to client", zap.Error(err))
+		cancel()
+		snapshot := monitor.FinalSnapshot()
+		wrapped := fmt.Errorf("encode response: %w", err)
+		relay.State.Recorder.WithFail(trace.StageClientEncode, wrapped)
+		if backend.logger() != nil {
+			backend.logger().Warn("failed to encode response to client", zap.Error(err))
 		}
-		rec.WithFail(trace.StageClientEncode, err)
-		usage := upstream.NormalizeUsage(monitor.Usage)
-		return state.AttemptResult{
-			Written:          true,
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			CacheReadTokens:  usage.CacheReadTokens,
-			CacheWriteTokens: usage.CacheWriteTokens,
-			FirstResponseMs:  monitor.FirstResponseMs(),
-			UpstreamModel:    upstreamModel,
-			Err:              fmt.Errorf("encode response: %w", err),
-			ResponseText:     monitor.ResponseText.String(),
-		}
+		return buildAttemptResult(snapshot, upstreamModel, relay.Context.Writer.Written(), wrapped)
 	}
 
-	rec.WithStage(trace.StageNone)
+	relay.State.Recorder.WithStage(trace.StageNone)
+	return buildAttemptResult(monitor.FinalSnapshot(), upstreamModel, relay.Context.Writer.Written(), nil)
+}
 
-	usage := upstream.NormalizeUsage(monitor.Usage)
+func writeEncodedChunks(context *gin.Context, chunks <-chan llmkit.EncodedChunk, monitor *upstream.EventMonitor, stream bool) error {
+	if stream {
+		context.Header(consts.HeaderContentType, consts.ContentTypeSSE)
+		context.Header(consts.HeaderCacheControl, consts.CacheControlNoCache)
+		context.Header(consts.HeaderConnection, consts.ConnectionKeepAlive)
+	} else {
+		context.Header(consts.HeaderContentType, consts.ContentTypeJSON)
+	}
+	for chunk := range chunks {
+		if chunk.Err != nil {
+			return chunk.Err
+		}
+		if eventErr := monitor.EventError(); eventErr != nil && !context.Writer.Written() {
+			return eventErr
+		}
+		if len(chunk.Data) == 0 {
+			continue
+		}
+		// gin's normal Write path commits headers before delegating to the
+		// underlying writer. Do this explicitly because tests and middleware may
+		// wrap Write while still delegating WriteHeaderNow.
+		context.Writer.WriteHeaderNow()
+		if _, err := context.Writer.Write(chunk.Data); err != nil {
+			return err
+		}
+		if stream {
+			context.Writer.Flush()
+		}
+	}
+	return nil
+}
+
+func buildAttemptResult(snapshot upstream.EventSnapshot, upstreamModel string, written bool, err error) state.AttemptResult {
+	usage := upstream.NormalizeUsage(snapshot.Usage)
 	return state.AttemptResult{
-		PromptTokens:     usage.PromptTokens,
-		CompletionTokens: usage.CompletionTokens,
-		CacheReadTokens:  usage.CacheReadTokens,
-		CacheWriteTokens: usage.CacheWriteTokens,
-		FirstResponseMs:  monitor.FirstResponseMs(),
-		UpstreamModel:    upstreamModel,
-		Written:          true,
-		ResponseText:     monitor.ResponseText.String(),
+		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens,
+		FirstResponseMs: snapshot.FirstResponseMs, UpstreamModel: upstreamModel,
+		Written: written, Err: err, ResponseText: snapshot.ResponseText,
 	}
 }
 
-// handleNativeErrorStatus 处理非 2xx/3xx 上行响应。
-//
-// 本函数职责仅:读 body / 记 trace / 包装成 *common.UpstreamError 返回。
-// 是否重试 / fallback / 立即返回的决策由 Executor 统一负责(参见
-// pipeline/exec/exec.go Run() 主循环)。
-//
-// 注意:本函数不再调用 inboundCodec.EncodeError,因为是否写回客户端取决于
-// Executor 走例外路径(plan 全部 attempt 耗尽 + 最后一次失败时才写),
-// 由 Executor 在终止 attempt 链时统一处理。
-//
-// 过渡期说明(T5 尚未落地):4xx 错误当前不写回客户端,会经历全部 attempt
-// 后由 Executor 统一终止。T5 落地后 Executor 将对 invalid_request_error 做
-// 立即短路返回。
-func handleNativeErrorStatus(rec *trace.Recorder, resp *http.Response, _w gin.ResponseWriter, _inboundCodec codec.InboundCodec, upstreamModel string) (state.AttemptResult, bool) {
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		return state.AttemptResult{}, false
+func projectAttemptResult(recorder *trace.Recorder, upstreamModel string, callErr error) state.AttemptResult {
+	var rejected *scriptRejectedError
+	if errors.As(callErr, &rejected) {
+		return rejected.result
 	}
-	capture, readErr := common.ReadBoundedErrorBody(upstreamResponseContext(resp), resp.Body, common.DefaultErrorBodyLimits())
-	rec.SetUpstreamBodyCapture(capture.Tail, capture.TotalSeen, capture.Truncated)
-	if readErr != nil {
-		wrapped := fmt.Errorf("read upstream error response: %w", readErr)
-		rec.WithFail(trace.StageUpstreamStatus, wrapped)
-		return state.AttemptResult{UpstreamModel: upstreamModel, Err: wrapped}, true
+	stage := trace.StageUpstreamDispatch
+	var kitErr *llmkit.Error
+	if errors.As(callErr, &kitErr) {
+		stage = traceStage(kitErr.Stage)
 	}
-	body := capture.BoundedHead()
-	upErr := &common.UpstreamError{
-		Status:            resp.StatusCode,
-		Body:              body,
-		ProviderErrorType: common.ParseProviderErrorType(capture.Head),
-		Header:            resp.Header.Clone(),
+	recorder.WithFail(stage, callErr)
+	var providerErr *common.UpstreamError
+	if errors.As(callErr, &providerErr) {
+		return state.AttemptResult{UpstreamModel: upstreamModel, Err: providerErr}
 	}
-	rec.WithFail(trace.StageUpstreamStatus, upErr)
-	return state.AttemptResult{
-		UpstreamModel: upstreamModel,
-		Err:           upErr,
-		// Written 留默认 false;客户端写回由 Executor 在 plan 结束时统一处理。
-	}, true
+	return state.AttemptResult{UpstreamModel: upstreamModel, Err: callErr}
 }
 
-func upstreamResponseContext(resp *http.Response) context.Context {
-	if resp != nil && resp.Request != nil {
-		return resp.Request.Context()
+func traceStage(stage llmkit.ErrorStage) trace.Stage {
+	switch stage {
+	case llmkit.ErrorStageEncode:
+		return trace.StageOutboundEncode
+	case llmkit.ErrorStageUpstream:
+		return trace.StageUpstreamStatus
+	case llmkit.ErrorStageDecode, llmkit.ErrorStageStream:
+		return trace.StageUpstreamDecode
+	default:
+		return trace.StageUpstreamDispatch
+	}
+}
+
+func (backend *Backend) attemptContext(relay *state.RelayContext) (context.Context, context.CancelFunc) {
+	ctx := relay.Context.Request.Context()
+	if !relay.Input.IsStream && relay.Agent != nil && relay.Agent.RelayTimeout() > 0 {
+		return context.WithTimeout(ctx, relay.Agent.RelayTimeout())
+	}
+	return context.WithCancel(ctx)
+}
+
+func (backend *Backend) codec() llmkit.Codec {
+	if backend.Codec != nil {
+		return backend.Codec
+	}
+	return llmkit.NewCodec()
+}
+
+func (backend *Backend) logger() *zap.Logger {
+	if backend.Agent == nil {
+		return nil
+	}
+	return backend.Agent.GetLogger()
+}
+
+func withBetaQuery(path string) string {
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return path
+	}
+	query := parsed.Query()
+	query.Set("beta", "true")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func upstreamResponseContext(response *http.Response) context.Context {
+	if response != nil && response.Request != nil {
+		return response.Request.Context()
 	}
 	return context.Background()
-}
-
-// dispatchUpstream 跑 HTTP 请求；失败时通过 Recorder.WithFail 打 trace + 返回 wrapped error。
-// ctx 绑定到请求，使客户端取消或超时能即时传播到上游连接。
-// 与原 inline 写法一致，error 文案保留 "upstream request failed"。
-func (b *Backend) dispatchUpstream(ctx context.Context, req *http.Request, ch *models.Channel, rec *trace.Recorder) (*http.Response, error) {
-	client := upstream.BuildHTTPClient(b.transportPool(), ch)
-	resp, err := client.Do(req.WithContext(ctx))
-	if err != nil {
-		rec.WithFail(trace.StageUpstreamDispatch, err)
-		return nil, fmt.Errorf("upstream request failed: %w", err)
-	}
-	return resp, nil
-}
-
-// resolveNativeCodecs 根据 channel + inbound 协议 + model 解析出最终的 outbound 协议
-// 以及对应的 inbound / outbound codec 实例。任一 codec 未注册都返回 error，由调用方
-// 包成 state.AttemptResult{Err: ...}。
-func resolveNativeCodecs(ch *models.Channel, inboundProto codec.Protocol, modelName string) (codec.Protocol, codec.InboundCodec, codec.OutboundCodec, error) {
-	rules := upstream.ChannelOverrideRulesFor(ch)
-	override := upstream.ResolveOverride(rules, modelName)
-	outboundProto := codec.NegotiateOutboundProtocol(inboundProto, ch.Type, ch.SupportedAPITypes, ch.Endpoints, override)
-
-	inboundCodec := codec.GetInbound(inboundProto)
-	if inboundCodec == nil {
-		return outboundProto, nil, nil, fmt.Errorf("no inbound codec for protocol %s", inboundProto)
-	}
-	outboundCodec := codec.GetOutbound(outboundProto)
-	if outboundCodec == nil {
-		return outboundProto, inboundCodec, nil, fmt.Errorf("no outbound codec for protocol %s", outboundProto)
-	}
-	return outboundProto, inboundCodec, outboundCodec, nil
-}
-
-// logger 是 b.Agent.GetLogger() 的 nil-guarded 包装。
-// agent 为 nil 时返回 nil，调用方需要做 nil 检查。
-func (b *Backend) logger() *zap.Logger {
-	if b.Agent == nil {
-		return nil
-	}
-	return b.Agent.GetLogger()
-}
-
-// transportPool 是 b.Agent.GetTransportPool() 的 nil-guarded 包装。
-// agent 为 nil 时返回 nil，buildHTTPClient 自带 nil pool fallback。
-func (b *Backend) transportPool() app.TransportPool {
-	if b.Agent == nil {
-		return nil
-	}
-	return b.Agent.GetTransportPool()
 }

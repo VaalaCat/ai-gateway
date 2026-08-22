@@ -58,6 +58,7 @@ export interface CatalogToolbarProps {
   routesLoading: boolean;
   routesError?: unknown;
   routesHaveMore: boolean;
+  showRoutePicker?: boolean;
   onServiceChange: (serviceID: number) => void;
   onRouteChange: (routeID: number) => void;
   onServiceSearch: (search: string) => void;
@@ -83,6 +84,7 @@ export function CatalogToolbar({
   routesLoading,
   routesError,
   routesHaveMore,
+  showRoutePicker = true,
   onServiceChange,
   onRouteChange,
   onServiceSearch,
@@ -122,7 +124,7 @@ export function CatalogToolbar({
           </div>
         ) : null}
       </Field>
-      <Field>
+      {showRoutePicker ? <Field>
         <FieldLabel>{t("mobileRoutePicker")}</FieldLabel>
         <SearchableSelect
           value={routeID ? String(routeID) : ""}
@@ -144,7 +146,7 @@ export function CatalogToolbar({
             </Button>
           </div>
         ) : null}
-      </Field>
+      </Field> : null}
     </FieldGroup>
   );
 }

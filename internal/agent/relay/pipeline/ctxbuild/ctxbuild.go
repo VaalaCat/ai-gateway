@@ -21,7 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -56,7 +56,7 @@ func Build(rctx *state.RelayContext) error {
 			rctx.Input.UserInfo = ui
 		}
 	}
-	rctx.Input.InboundProto = codec.PathToProtocol(rctx.Context.Request.URL.Path)
+	rctx.Input.InboundProto = protocolconfig.PathToProtocol(rctx.Context.Request.URL.Path)
 	if rctx.Context.Request.Method == http.MethodGet {
 		return nil
 	}
@@ -134,6 +134,12 @@ func Build(rctx *state.RelayContext) error {
 			return state.ErrInvalidForcedChannelID
 		}
 		rctx.Input.ForcedChannelID = uint(id)
+	}
+	if identity, ok := findAffinityIdentity(affinityIdentityInput{
+		Header: rctx.Context.Request.Header,
+		Body:   rctx.Input.Body,
+	}); ok {
+		rctx.Input.AffinityIdentity = identity
 	}
 	return nil
 }

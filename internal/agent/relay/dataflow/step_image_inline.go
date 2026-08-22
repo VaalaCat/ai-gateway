@@ -7,9 +7,9 @@ import (
 	"github.com/sourcegraph/conc/pool"
 	"go.uber.org/zap"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // imageFetchFn = upstream.FetchInlineImage 的签名(测试可注入 fake)。
@@ -26,11 +26,11 @@ type StepInlineImages struct {
 func (s *StepInlineImages) Key() string { return "inline_image" }
 
 func (s *StepInlineImages) Apply(ctx context.Context, p *Pass) error {
-	var targets []*codec.ContentBlock
+	var targets []*llmkit.ContentBlock
 	for m := range p.Working.Messages {
 		msg := &p.Working.Messages[m]
 		for i := range msg.Content {
-			if cb := &msg.Content[i]; cb.Type == codec.ContentTypeImage && cb.MediaURL != "" && cb.MediaB64 == "" {
+			if cb := &msg.Content[i]; cb.Type == llmkit.ContentTypeImage && cb.MediaURL != "" && cb.MediaB64 == "" {
 				targets = append(targets, cb)
 			}
 		}

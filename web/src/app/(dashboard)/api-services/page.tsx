@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Plus } from "lucide-react";
+import { FileUp, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import { BackgroundRefreshStatus } from "@/components/business/background-refresh-status";
@@ -117,7 +117,7 @@ export default function APIServicesPage() {
                 onChange={setFilters}
                 secondaryContent={<BackgroundRefreshStatus refreshing={query.isFetching && !query.isLoading} label={t("refreshingServices")} />}
                 primaryAction={canCreateAPIService(capability.data) ? (
-                  <Button asChild size="sm"><Link href="/api-services/new"><Plus data-icon="inline-start" />{t("createService")}</Link></Button>
+                  <div className="flex flex-wrap gap-2"><Button asChild size="sm"><Link href="/api-services/import"><FileUp data-icon="inline-start" />{t("importOpenAPI")}</Link></Button><Button asChild size="sm" variant="outline"><Link href="/api-services/new"><Plus data-icon="inline-start" />{t("createService")}</Link></Button></div>
                 ) : undefined}
               />
             }

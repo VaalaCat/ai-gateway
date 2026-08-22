@@ -69,7 +69,16 @@ func (h *WebSocketTargetHandler) serveStream(ctx context.Context, stream webSock
 		settingsFinder = h.settings
 	}
 	result := &apiattempt.APIExecutionResult{ProviderDispatchKnown: true}
+	credential := protocol.APIUpstreamCredential{}
+	var executionErr error
 	defer func() {
+		terminalErr := executionErr
+		if terminalErr == nil {
+			terminalErr = returnErr
+		}
+		if terminalErr != nil && result.ErrorMessage == "" {
+			result.ErrorMessage = safeAPIErrorMessage(terminalErr, credential)
+		}
 		resultCtx, cancel := webSocketControlContext(ctx, settingsFinder)
 		defer cancel()
 		if err := stream.SendResult(resultCtx, *result); returnErr == nil && err != nil {
@@ -95,7 +104,7 @@ func (h *WebSocketTargetHandler) serveStream(ctx context.Context, stream webSock
 		return err
 	}
 	result.APIUpstreamID, result.APIUpstreamName = lease.Upstream.ID, lease.Upstream.Name
-	var executionErr error
+	credential = lease.Upstream.Credential
 	defer func() { lease.Finish(APIBreakerCompletion{Result: result, Err: executionErr}) }()
 
 	permit, err := h.acquireLimiter(ctx, open, route, lease.Upstream.ID)

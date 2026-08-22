@@ -17,6 +17,29 @@ func validRateLimitHit(id uint) models.RateLimitHit {
 	}
 }
 
+// Production break caught: an execution result must reject unbounded or
+// transport-unsafe error text before it crosses the Agent wire boundary.
+func TestAPIExecutionResultErrorMessageValidation(t *testing.T) {
+	valid := APIExecutionResult{
+		ProviderDispatchKnown: true, ErrorStage: "transport", ErrorCode: "api_unavailable",
+		ErrorMessage: "dial tcp: connection refused",
+	}
+	require.NoError(t, valid.Validate())
+
+	t.Run("empty remains backward compatible", func(t *testing.T) {
+		require.NoError(t, (APIExecutionResult{ProviderDispatchKnown: true}).Validate())
+	})
+	t.Run("rejects oversized invalid utf8 and controls", func(t *testing.T) {
+		for _, message := range []string{
+			strings.Repeat("a", MaxAPIErrorMessageBytes+1), string([]byte{0xff}), "line\nbreak",
+		} {
+			result := valid
+			result.ErrorMessage = message
+			require.ErrorIs(t, result.Validate(), ErrInvalidExecutionResult)
+		}
+	})
+}
+
 func TestAPIExecutionResultRateLimitHitBoundsAndCodecNormalization(t *testing.T) {
 	hits := make([]models.RateLimitHit, 64)
 	for index := range hits {

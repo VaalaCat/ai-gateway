@@ -66,10 +66,11 @@ func NormalizeAPIRequestExample(example APIRequestExample, allowedMethods dataty
 		return APIRequestExample{}, invalidAPIRequestExample("invalid_example_encoding")
 	}
 
-	example.Method = strings.ToUpper(example.Method)
-	if _, ok := apiStandardMethods[example.Method]; !ok || !exampleMethodAllowed(example.Method, allowedMethods) {
+	method, ok := NormalizeStandardHTTPMethod(example.Method)
+	if !ok || !exampleMethodAllowed(method, allowedMethods) {
 		return APIRequestExample{}, invalidAPIRequestExample("invalid_example_method")
 	}
+	example.Method = method
 	if !safeExampleSubpath(example.Subpath) || !safeExampleQuery(example.Query) {
 		return APIRequestExample{}, invalidAPIRequestExample("invalid_example_subpath")
 	}

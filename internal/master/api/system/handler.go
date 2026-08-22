@@ -14,6 +14,7 @@ import (
 	masterhistorybackfill "github.com/VaalaCat/ai-gateway/internal/master/historybackfill"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/version"
 	"gorm.io/gorm"
 )
 
@@ -128,7 +129,7 @@ func (h *Handler) Stats(c *app.Context, _ StatsRequest) (StatsResponse, error) {
 	}
 
 	info := SystemInfo{
-		Version:      "dev",
+		Version:      version.Version,
 		GoVersion:    runtime.Version(),
 		StartTime:    startTime.Unix(),
 		UptimeSec:    int64(time.Since(startTime).Seconds()),

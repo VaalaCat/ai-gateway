@@ -3,7 +3,7 @@ package transform
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func TestParseRoleMapping(t *testing.T) {
@@ -70,8 +70,8 @@ func TestParseRoleMapping_Content(t *testing.T) {
 	if len(cfg.Default) != 1 {
 		t.Errorf("expected 1 default mapping, got %d", len(cfg.Default))
 	}
-	if cfg.Default[codec.RoleSystem] != codec.RoleUser {
-		t.Errorf("expected default system->user, got %v", cfg.Default[codec.RoleSystem])
+	if cfg.Default[llmkit.RoleSystem] != llmkit.RoleUser {
+		t.Errorf("expected default system->user, got %v", cfg.Default[llmkit.RoleSystem])
 	}
 
 	if len(cfg.Models) != 1 {
@@ -81,49 +81,49 @@ func TestParseRoleMapping_Content(t *testing.T) {
 
 func TestResolveRoleMapping(t *testing.T) {
 	cfg := &RoleMappingConfig{
-		Default: map[codec.Role]codec.Role{
-			codec.RoleSystem: codec.RoleUser,
+		Default: map[llmkit.Role]llmkit.Role{
+			llmkit.RoleSystem: llmkit.RoleUser,
 		},
-		Models: map[string]map[codec.Role]codec.Role{
-			"claude-3-opus": {codec.RoleUser: codec.RoleAssistant},
-			"claude-*":      {codec.RoleUser: codec.RoleDeveloper},
-			"gpt-*":         {codec.RoleSystem: codec.RoleDeveloper},
+		Models: map[string]map[llmkit.Role]llmkit.Role{
+			"claude-3-opus": {llmkit.RoleUser: llmkit.RoleAssistant},
+			"claude-*":      {llmkit.RoleUser: llmkit.RoleDeveloper},
+			"gpt-*":         {llmkit.RoleSystem: llmkit.RoleDeveloper},
 		},
 	}
 
 	tests := []struct {
 		name      string
 		modelName string
-		wantKey   codec.Role
-		wantVal   codec.Role
+		wantKey   llmkit.Role
+		wantVal   llmkit.Role
 		wantNil   bool
 	}{
 		{
 			name:      "exact match",
 			modelName: "claude-3-opus",
-			wantKey:   codec.RoleUser,
-			wantVal:   codec.RoleAssistant,
+			wantKey:   llmkit.RoleUser,
+			wantVal:   llmkit.RoleAssistant,
 			wantNil:   false,
 		},
 		{
 			name:      "wildcard match claude",
 			modelName: "claude-3-sonnet",
-			wantKey:   codec.RoleUser,
-			wantVal:   codec.RoleDeveloper,
+			wantKey:   llmkit.RoleUser,
+			wantVal:   llmkit.RoleDeveloper,
 			wantNil:   false,
 		},
 		{
 			name:      "wildcard match gpt",
 			modelName: "gpt-4-turbo",
-			wantKey:   codec.RoleSystem,
-			wantVal:   codec.RoleDeveloper,
+			wantKey:   llmkit.RoleSystem,
+			wantVal:   llmkit.RoleDeveloper,
 			wantNil:   false,
 		},
 		{
 			name:      "fallback to default",
 			modelName: "unknown-model",
-			wantKey:   codec.RoleSystem,
-			wantVal:   codec.RoleUser,
+			wantKey:   llmkit.RoleSystem,
+			wantVal:   llmkit.RoleUser,
 			wantNil:   false,
 		},
 	}
@@ -149,21 +149,21 @@ func TestResolveRoleMapping(t *testing.T) {
 
 func TestResolveRoleMapping_LongestWildcardWins(t *testing.T) {
 	cfg := &RoleMappingConfig{
-		Models: map[string]map[codec.Role]codec.Role{
-			"claude-*":      {codec.RoleUser: codec.RoleDeveloper},
-			"claude-3-*":    {codec.RoleUser: codec.RoleAssistant},
-			"claude-3-opus": {codec.RoleUser: codec.RoleSystem},
+		Models: map[string]map[llmkit.Role]llmkit.Role{
+			"claude-*":      {llmkit.RoleUser: llmkit.RoleDeveloper},
+			"claude-3-*":    {llmkit.RoleUser: llmkit.RoleAssistant},
+			"claude-3-opus": {llmkit.RoleUser: llmkit.RoleSystem},
 		},
 	}
 
 	tests := []struct {
 		name      string
 		modelName string
-		wantVal   codec.Role
+		wantVal   llmkit.Role
 	}{
-		{"exact match", "claude-3-opus", codec.RoleSystem},
-		{"longer wildcard", "claude-3-sonnet", codec.RoleAssistant},
-		{"shorter wildcard", "claude-2-haiku", codec.RoleDeveloper},
+		{"exact match", "claude-3-opus", llmkit.RoleSystem},
+		{"longer wildcard", "claude-3-sonnet", llmkit.RoleAssistant},
+		{"shorter wildcard", "claude-2-haiku", llmkit.RoleDeveloper},
 	}
 
 	for _, tt := range tests {
@@ -172,8 +172,8 @@ func TestResolveRoleMapping_LongestWildcardWins(t *testing.T) {
 			if got == nil {
 				t.Fatalf("ResolveRoleMapping(%q) = nil", tt.modelName)
 			}
-			if got[codec.RoleUser] != tt.wantVal {
-				t.Errorf("ResolveRoleMapping(%q)[user] = %v, want %v", tt.modelName, got[codec.RoleUser], tt.wantVal)
+			if got[llmkit.RoleUser] != tt.wantVal {
+				t.Errorf("ResolveRoleMapping(%q)[user] = %v, want %v", tt.modelName, got[llmkit.RoleUser], tt.wantVal)
 			}
 		})
 	}
@@ -181,8 +181,8 @@ func TestResolveRoleMapping_LongestWildcardWins(t *testing.T) {
 
 func TestResolveRoleMapping_NoMatch(t *testing.T) {
 	cfg := &RoleMappingConfig{
-		Models: map[string]map[codec.Role]codec.Role{
-			"claude-*": {codec.RoleUser: codec.RoleAssistant},
+		Models: map[string]map[llmkit.Role]llmkit.Role{
+			"claude-*": {llmkit.RoleUser: llmkit.RoleAssistant},
 		},
 	}
 
@@ -195,27 +195,27 @@ func TestResolveRoleMapping_NoMatch(t *testing.T) {
 func TestApplyRoleMapping(t *testing.T) {
 	tests := []struct {
 		name     string
-		messages []codec.Message
-		mapping  map[codec.Role]codec.Role
-		wantRole codec.Role
+		messages []llmkit.Message
+		mapping  map[llmkit.Role]llmkit.Role
+		wantRole llmkit.Role
 	}{
 		{
 			name:     "nil mapping",
-			messages: []codec.Message{{Role: codec.RoleSystem}},
+			messages: []llmkit.Message{{Role: llmkit.RoleSystem}},
 			mapping:  nil,
-			wantRole: codec.RoleSystem,
+			wantRole: llmkit.RoleSystem,
 		},
 		{
 			name:     "valid mapping",
-			messages: []codec.Message{{Role: codec.RoleSystem}},
-			mapping:  map[codec.Role]codec.Role{codec.RoleSystem: codec.RoleUser},
-			wantRole: codec.RoleUser,
+			messages: []llmkit.Message{{Role: llmkit.RoleSystem}},
+			mapping:  map[llmkit.Role]llmkit.Role{llmkit.RoleSystem: llmkit.RoleUser},
+			wantRole: llmkit.RoleUser,
 		},
 		{
 			name:     "unknown role preserved",
-			messages: []codec.Message{{Role: codec.RoleTool}},
-			mapping:  map[codec.Role]codec.Role{codec.RoleSystem: codec.RoleUser},
-			wantRole: codec.RoleTool,
+			messages: []llmkit.Message{{Role: llmkit.RoleTool}},
+			mapping:  map[llmkit.Role]llmkit.Role{llmkit.RoleSystem: llmkit.RoleUser},
+			wantRole: llmkit.RoleTool,
 		},
 	}
 
@@ -230,81 +230,23 @@ func TestApplyRoleMapping(t *testing.T) {
 }
 
 func TestApplyRoleMapping_MultipleMessages(t *testing.T) {
-	messages := []codec.Message{
-		{Role: codec.RoleSystem},
-		{Role: codec.RoleUser},
-		{Role: codec.RoleAssistant},
-		{Role: codec.RoleTool},
+	messages := []llmkit.Message{
+		{Role: llmkit.RoleSystem},
+		{Role: llmkit.RoleUser},
+		{Role: llmkit.RoleAssistant},
+		{Role: llmkit.RoleTool},
 	}
-	mapping := map[codec.Role]codec.Role{
-		codec.RoleSystem:    codec.RoleUser,
-		codec.RoleAssistant: codec.RoleDeveloper,
+	mapping := map[llmkit.Role]llmkit.Role{
+		llmkit.RoleSystem:    llmkit.RoleUser,
+		llmkit.RoleAssistant: llmkit.RoleDeveloper,
 	}
 
 	ApplyRoleMapping(messages, mapping)
 
-	expected := []codec.Role{codec.RoleUser, codec.RoleUser, codec.RoleDeveloper, codec.RoleTool}
+	expected := []llmkit.Role{llmkit.RoleUser, llmkit.RoleUser, llmkit.RoleDeveloper, llmkit.RoleTool}
 	for i, msg := range messages {
 		if msg.Role != expected[i] {
 			t.Errorf("messages[%d].Role = %v, want %v", i, msg.Role, expected[i])
-		}
-	}
-}
-
-func TestRoleMappingTransformer_NoopWhenEmpty(t *testing.T) {
-	tr := RoleMappingTransformer{}
-	req := &codec.Request{Messages: []codec.Message{
-		{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "hi"}}},
-	}}
-	cfg := &codec.ChannelConfig{RoleMapping: "", InboundModel: "m"}
-
-	tr.Transform(req, cfg)
-
-	if req.Messages[0].Role != codec.RoleUser {
-		t.Fatalf("role changed unexpectedly: %q", req.Messages[0].Role)
-	}
-}
-
-func TestRoleMappingTransformer_AppliesDefault(t *testing.T) {
-	// 用 default mapping 验证 wiring：把 user → system。
-	tr := RoleMappingTransformer{}
-	mapping := `{"default": {"user": "system"}}`
-	req := &codec.Request{Messages: []codec.Message{
-		{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "hi"}}},
-	}}
-	cfg := &codec.ChannelConfig{RoleMapping: mapping, InboundModel: "any-model"}
-
-	tr.Transform(req, cfg)
-
-	if req.Messages[0].Role != codec.RoleSystem {
-		t.Fatalf("role = %q, want %q", req.Messages[0].Role, codec.RoleSystem)
-	}
-}
-
-func TestRoleMappingTransformer_PerModelOverridesDefault(t *testing.T) {
-	// per-model 优先于 default：在 deepseek-chat 上把 user → assistant。
-	tr := RoleMappingTransformer{}
-	mapping := `{
-		"default": {"user": "system"},
-		"models": {"deepseek-chat": {"user": "assistant"}}
-	}`
-	req := &codec.Request{Messages: []codec.Message{
-		{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "hi"}}},
-	}}
-	cfg := &codec.ChannelConfig{RoleMapping: mapping, InboundModel: "deepseek-chat"}
-
-	tr.Transform(req, cfg)
-
-	if req.Messages[0].Role != codec.RoleAssistant {
-		t.Fatalf("role = %q, want %q (per-model override)", req.Messages[0].Role, codec.RoleAssistant)
-	}
-}
-
-func TestRoleMappingTransformer_AppliesToAllProtocols(t *testing.T) {
-	tr := RoleMappingTransformer{}
-	for _, p := range []codec.Protocol{codec.ProtocolOpenAIChat, codec.ProtocolOpenAIResponses, codec.ProtocolClaude} {
-		if !tr.AppliesTo(p) {
-			t.Fatalf("AppliesTo(%q) = false, want true", p)
 		}
 	}
 }

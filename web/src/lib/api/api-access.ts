@@ -26,6 +26,7 @@ export interface APIAccessGrantListParams { page?: number; page_size?: number; p
 export interface APICatalogService { id: number; slug: string; name: string; description: string }
 export interface APICatalogRoute { id: number; api_service_id: number; slug: string; protocols: Array<"http" | "websocket">; allowed_methods: string[]; websocket_subprotocols: string[]; example_request: APIRequestExample }
 export interface APICatalogParams { page?: number; page_size?: number; search?: string }
+export interface APICatalogOpenAPI { document: Record<string, unknown> }
 
 export interface APIRoleListParams {
   page?: number;
@@ -43,7 +44,7 @@ export interface APIRoleBindingListParams {
   role_id?: number;
 }
 
-type QueryOptions = { enabled?: boolean };
+type QueryOptions = { enabled?: boolean; queryIdentity?: string };
 
 function catalogQueryParams(scope: CatalogAccessScope, params: object) {
   const tokenID = catalogTokenID(scope);
@@ -91,6 +92,15 @@ export function useAPICatalogEffective(viewerUserID: number, scope: CatalogAcces
     queryFn: () => api.get<{ scope: APIAccessScope; route_ids: number[] }>(`/api-catalog/effective${buildQuery(catalogQueryParams(scope, { service_id: serviceID }))}`),
     enabled: catalogQueryEnabled(scope, options, serviceID),
     // behavior change: scope changes must not render the previous catalog result.
+    placeholderData: undefined,
+  });
+}
+export function useAPICatalogOpenAPI(viewerUserID: number, scope: CatalogAccessScope, serviceID: number, options: QueryOptions = {}) {
+  return useQuery({
+    queryKey: ["api-catalog", "openapi", viewerUserID, catalogScopeKey(scope), serviceID, options.queryIdentity],
+    queryFn: () => api.get<APICatalogOpenAPI>(`/api-catalog/openapi${buildQuery(catalogQueryParams(scope, { service_id: serviceID }))}`),
+    enabled: catalogQueryEnabled(scope, options, serviceID),
+    // behavior change: scope changes must not render the previous catalog document.
     placeholderData: undefined,
   });
 }

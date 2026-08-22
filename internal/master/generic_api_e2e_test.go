@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	agentcache "github.com/VaalaCat/ai-gateway/internal/agent/cache"
 	"github.com/VaalaCat/ai-gateway/internal/agent/genericapi"
 	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -115,6 +116,41 @@ func TestGenericAPIE2ERBACQuotaLimiterAndSettlement(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenericAPIRootRouteE2EForwardsDynamicFirstSegment(t *testing.T) {
+	providerPath := make(chan string, 1)
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		providerPath <- request.URL.RequestURI()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(provider.Close)
+
+	fixture := genericAPIE2ERoute(provider.URL)
+	fixture.route.Slug = ""
+	fixture.route.ForwardSubpath = true
+	index := agentcache.NewAPIIndex()
+	require.NoError(t, index.ReplaceServices([]protocol.SyncedAPIService{fixture.service}))
+	require.NoError(t, index.ReplaceRoutes([]protocol.SyncedAPIRoute{fixture.route}))
+	require.NoError(t, index.ReplaceUpstreams([]protocol.SyncedAPIUpstream{fixture.upstream}))
+	require.NoError(t, index.ReplaceRoles(nil))
+	require.NoError(t, index.ReplaceUserGroupRoleSets(nil))
+
+	upstreams := genericapi.NewAPIUpstreamPicker(index, genericAPIE2EBreakerFinder{})
+	handler := genericapi.NewHandler(genericapi.HandlerOptions{
+		Finder:     genericapi.NewServiceFinder(index),
+		Permission: genericAPIE2EPermissionGate{}, Quota: genericAPIE2EQuotaGate{},
+		Handlers: map[string]genericapi.ProtocolHandler{
+			genericapi.ProtocolHTTP: genericapi.NewHTTPHandler(upstreams, genericapi.NewHTTPTransport("")),
+		},
+	})
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/api/weather/acme/users?active=true", nil)
+
+	genericAPIE2ERouter(handler).ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusNoContent, response.Code)
+	require.Equal(t, "/provider/acme/users?active=true", <-providerPath)
 }
 
 func (h *genericAPIE2EHarness) assertLocalDirectRelayMatrix(t *testing.T) {
@@ -394,11 +430,11 @@ func genericAPIE2ERoute(providerURL string) genericAPIE2ERouteFixture {
 
 type genericAPIE2ERouteFinder struct{ route genericAPIE2ERouteFixture }
 
-func (f genericAPIE2ERouteFinder) Find(service, route, method, requestedProtocol string) (genericapi.ServiceRoute, error) {
-	if service != f.route.service.Slug || route != f.route.route.Slug || method != http.MethodPost || requestedProtocol != genericapi.ProtocolHTTP {
-		return genericapi.ServiceRoute{}, genericapi.ErrExecutionUnavailable
+func (f genericAPIE2ERouteFinder) Find(service, requestPath, method, requestedProtocol string) (genericapi.ServiceRoute, string, error) {
+	if service != f.route.service.Slug || requestPath != "/"+f.route.route.Slug || method != http.MethodPost || requestedProtocol != genericapi.ProtocolHTTP {
+		return genericapi.ServiceRoute{}, "", genericapi.ErrExecutionUnavailable
 	}
-	return genericapi.ServiceRoute{Service: f.route.service, Route: f.route.route, Protocol: requestedProtocol}, nil
+	return genericapi.ServiceRoute{Service: f.route.service, Route: f.route.route, Protocol: requestedProtocol}, "", nil
 }
 
 func (f genericAPIE2ERouteFinder) FindServiceRouteByID(serviceID, routeID uint) (genericapi.ServiceRoute, error) {

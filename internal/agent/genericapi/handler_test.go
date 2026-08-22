@@ -20,6 +20,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type allowPermissionGate struct{}
@@ -52,6 +55,23 @@ func (h *countingProviderProtocolHandler) Serve(_ context.Context, c *RequestCon
 	c.Execution.ProviderDispatched = true
 	c.Context.Status(http.StatusNoContent)
 	return nil
+}
+
+type capturingProtocolHandler struct {
+	calls   int
+	routeID uint
+	subpath string
+	err     error
+}
+
+func (h *capturingProtocolHandler) Serve(_ context.Context, c *RequestContext) error {
+	h.calls++
+	h.routeID = c.Route.ID
+	h.subpath = c.Subpath
+	if h.err == nil {
+		c.Context.Status(http.StatusNoContent)
+	}
+	return h.err
 }
 
 func TestGenericAPIIgnoresClientRequestIDForSettlementIdentity(t *testing.T) {
@@ -87,6 +107,25 @@ func TestGenericAPIIgnoresClientRequestIDForSettlementIdentity(t *testing.T) {
 	require.Equal(t, []string{reporter.entries[0].RequestID, reporter.entries[1].RequestID}, responseRequestIDs)
 }
 
+func TestHandlerForwardsStructuredFailureLogger(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	service := protocol.SyncedAPIService{ID: 7, Slug: "weather", Status: 1}
+	route := protocol.SyncedAPIRoute{ID: 9, ServiceID: 7, Slug: "current", Status: 1, Protocols: []string{ProtocolHTTP}}
+	handler := NewHandler(HandlerOptions{
+		Finder: orderedServiceRouteFinder{
+			order: &[]string{}, route: ServiceRoute{Service: service, Route: route, Protocol: ProtocolHTTP},
+		},
+		Permission: &recordingPermissionGate{err: ErrAPIForbidden}, Quota: allowQuotaGate{},
+		Usage: NewUsageBuilder(nil), Reporter: &recordingAPIUsageReporter{}, Logger: zap.New(core),
+	})
+
+	response := httptest.NewRecorder()
+	genericAPIRouter(handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/api/weather/current", nil))
+
+	require.Equal(t, http.StatusForbidden, response.Code)
+	require.Len(t, logs.FilterMessage("generic api request failed").All(), 1)
+}
+
 type committedErrorProtocolHandler struct{ err error }
 
 func (h committedErrorProtocolHandler) Serve(_ context.Context, c *RequestContext) error {
@@ -115,9 +154,11 @@ type recordingPermissionGate struct {
 	tokenID, userID, serviceID, routeID uint
 	order                               *[]string
 	err                                 error
+	calls                               int
 }
 
 func (g *recordingPermissionGate) AllowInvoke(_ context.Context, tokenID, userID, serviceID, routeID uint) error {
+	g.calls++
 	g.tokenID, g.userID, g.serviceID, g.routeID = tokenID, userID, serviceID, routeID
 	if g.order != nil {
 		*g.order = append(*g.order, "permission")
@@ -136,9 +177,19 @@ type orderedServiceRouteFinder struct {
 	route ServiceRoute
 }
 
-func (f orderedServiceRouteFinder) Find(_, _, _, _ string) (ServiceRoute, error) {
+func (f orderedServiceRouteFinder) Find(_, _, _, _ string) (ServiceRoute, string, error) {
 	*f.order = append(*f.order, "finder")
-	return f.route, nil
+	return f.route, "", nil
+}
+
+type countingServiceRouteFinder struct {
+	inner ServiceRouteFinder
+	calls int
+}
+
+func (f *countingServiceRouteFinder) Find(serviceSlug, requestPath, method, requestedProtocol string) (ServiceRoute, string, error) {
+	f.calls++
+	return f.inner.Find(serviceSlug, requestPath, method, requestedProtocol)
 }
 
 type orderedSourceLimiter struct{ order *[]string }
@@ -188,6 +239,18 @@ type blockedStageLimiter struct{ calls int }
 func (g *blockedStageLimiter) Acquire(context.Context, APIRequestFacts) (APIPermit, error) {
 	g.calls++
 	return nil, nil
+}
+
+type recordingStageLimiter struct {
+	calls   int
+	routeID uint
+	err     error
+}
+
+func (g *recordingStageLimiter) Acquire(_ context.Context, facts APIRequestFacts) (APIPermit, error) {
+	g.calls++
+	g.routeID = facts.APIRouteID
+	return nil, g.err
 }
 
 type blockedStageAgentPicker struct{ calls int }
@@ -416,26 +479,122 @@ func (g *recordingQuotaGate) Allow(_ context.Context, _ uint, _ protocol.SyncedA
 	return g.err
 }
 
-func TestGenericAPIRegistersRootAndSubpathRoutes(t *testing.T) {
+func TestGenericAPIRootRouteAndExplicitRouteShareServiceCatchAll(t *testing.T) {
 	service := protocol.SyncedAPIService{ID: 7, Slug: "weather", Status: 1}
-	index := serviceFinderIndex(t, service, protocol.SyncedAPIRoute{ID: 9, ServiceID: 7, Slug: "current", Status: 1, Protocols: []string{ProtocolHTTP}})
-	require.NoError(t, index.ReplaceRoutes([]protocol.SyncedAPIRoute{
-		{ID: 9, ServiceID: 7, Slug: "current", Status: 1, Protocols: []string{ProtocolHTTP}},
-		{ID: 10, ServiceID: 7, Slug: "files", Status: 1, Protocols: []string{ProtocolHTTP}, ForwardSubpath: true},
-	}))
-	handler := NewHandler(HandlerOptions{
-		Finder:     NewServiceFinder(index),
-		Permission: allowPermissionGate{},
-		Quota:      allowQuotaGate{},
-		Handlers:   map[string]ProtocolHandler{ProtocolHTTP: statusProtocolHandler{status: http.StatusNoContent}},
-	})
-	router := genericAPIRouter(handler)
+	index := serviceFinderIndex(t, service,
+		protocol.SyncedAPIRoute{ID: 8, ServiceID: 7, Slug: "", Status: 1, Protocols: []string{ProtocolHTTP}, ForwardSubpath: true},
+		protocol.SyncedAPIRoute{ID: 9, ServiceID: 7, Slug: "current", Status: 1, Protocols: []string{ProtocolHTTP}},
+		protocol.SyncedAPIRoute{ID: 10, ServiceID: 7, Slug: "files", Status: 1, Protocols: []string{ProtocolHTTP}, ForwardSubpath: true},
+	)
 
-	for _, path := range []string{"/v1/api/weather/current", "/v1/api/weather/files/a/b"} {
-		request := httptest.NewRequest(http.MethodPost, path, nil)
-		response := httptest.NewRecorder()
-		router.ServeHTTP(response, request)
-		require.Equalf(t, http.StatusNoContent, response.Code, "path %s", path)
+	for _, test := range []struct {
+		name        string
+		path        string
+		wantRouteID uint
+		wantSubpath string
+	}{
+		{name: "service root", path: "/v1/api/weather", wantRouteID: 8},
+		{name: "service root trailing slash", path: "/v1/api/weather/", wantRouteID: 8, wantSubpath: "/"},
+		{name: "dynamic first segment uses root route", path: "/v1/api/weather/acme/users", wantRouteID: 8, wantSubpath: "/acme/users"},
+		{name: "explicit route remains unchanged", path: "/v1/api/weather/current", wantRouteID: 9},
+		{name: "explicit route receives only remaining subpath", path: "/v1/api/weather/files/a/b", wantRouteID: 10, wantSubpath: "/a/b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capture := &capturingProtocolHandler{}
+			handler := NewHandler(HandlerOptions{
+				Finder: NewServiceFinder(index), Permission: allowPermissionGate{}, Quota: allowQuotaGate{},
+				Handlers: map[string]ProtocolHandler{ProtocolHTTP: capture},
+			})
+			response := httptest.NewRecorder()
+			genericAPIRouter(handler).ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, nil))
+
+			require.Equal(t, http.StatusNoContent, response.Code)
+			require.Equal(t, test.wantRouteID, capture.routeID)
+			require.Equal(t, test.wantSubpath, capture.subpath)
+		})
+	}
+}
+
+// Break caught: decoded or literal extra leading slashes must be rejected
+// before the root route can become the request's authorization identity.
+func TestGenericAPIRejectsExtraLeadingSlashBeforeRootRouteGates(t *testing.T) {
+	service := protocol.SyncedAPIService{ID: 7, Slug: "users", Status: consts.StatusEnabled}
+	root := protocol.SyncedAPIRoute{
+		ID: 8, ServiceID: service.ID, Slug: "", Status: consts.StatusEnabled,
+		Protocols: []string{ProtocolHTTP}, ForwardSubpath: true,
+	}
+
+	for _, path := range []string{
+		"/v1/api/users//accounts",
+		"/v1/api/users/%2Faccounts",
+		"/v1/api/users/%252Faccounts",
+	} {
+		t.Run(path, func(t *testing.T) {
+			permission := &recordingPermissionGate{}
+			provider := &countingProviderProtocolHandler{}
+			handler := NewHandler(HandlerOptions{
+				Finder: NewServiceFinder(serviceFinderIndex(t, service, root)), Permission: permission, Quota: allowQuotaGate{},
+				Handlers: map[string]ProtocolHandler{ProtocolHTTP: provider},
+			})
+			response := httptest.NewRecorder()
+			genericAPIRouter(handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+
+			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+			require.Equal(t, CodeInvalidRequest, responseBodyCode(t, response))
+			require.Zero(t, permission.calls)
+			require.Zero(t, provider.calls)
+		})
+	}
+}
+
+func TestGenericAPIExplicitRouteFailuresAfterFindNeverFallBackToRootRoute(t *testing.T) {
+	service := protocol.SyncedAPIService{ID: 7, Slug: "users", Status: consts.StatusEnabled}
+	root := protocol.SyncedAPIRoute{ID: 8, ServiceID: 7, Slug: "", Status: consts.StatusEnabled, Protocols: []string{ProtocolHTTP}}
+	explicit := protocol.SyncedAPIRoute{ID: 9, ServiceID: 7, Slug: "accounts", Status: consts.StatusEnabled, Protocols: []string{ProtocolHTTP}}
+
+	for _, test := range []struct {
+		name           string
+		permissionErr  error
+		quotaErr       error
+		limiterErr     error
+		dispatchErr    error
+		wantStatus     int
+		wantQuotaCalls int
+		wantLimitCalls int
+		wantDispatch   int
+	}{
+		{name: "permission", permissionErr: ErrAPIForbidden, wantStatus: http.StatusForbidden},
+		{name: "quota", quotaErr: ErrInsufficientQuota, wantStatus: http.StatusPaymentRequired, wantQuotaCalls: 1},
+		{name: "limiter", limiterErr: ErrAPIRateLimited, wantStatus: http.StatusTooManyRequests, wantQuotaCalls: 1, wantLimitCalls: 1},
+		{name: "dispatch", dispatchErr: ErrExecutionUnavailable, wantStatus: http.StatusServiceUnavailable, wantQuotaCalls: 1, wantLimitCalls: 1, wantDispatch: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			finder := &countingServiceRouteFinder{inner: NewServiceFinder(serviceFinderIndex(t, service, root, explicit))}
+			permission := &recordingPermissionGate{err: test.permissionErr}
+			quota := &recordingQuotaGate{err: test.quotaErr}
+			limiter := &recordingStageLimiter{err: test.limiterErr}
+			dispatch := &capturingProtocolHandler{err: test.dispatchErr}
+			handler := NewHandler(HandlerOptions{
+				Finder: finder, Permission: permission, Quota: quota, Limiter: limiter,
+				Handlers: map[string]ProtocolHandler{ProtocolHTTP: dispatch},
+			})
+			response := httptest.NewRecorder()
+			genericAPIRouter(handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/api/users/accounts", nil))
+
+			require.Equal(t, test.wantStatus, response.Code)
+			require.Equal(t, 1, finder.calls, "handler must select the route only once")
+			require.Equal(t, 1, permission.calls)
+			require.Equal(t, explicit.ID, permission.routeID)
+			require.Equal(t, test.wantQuotaCalls, quota.calls)
+			require.Equal(t, test.wantLimitCalls, limiter.calls)
+			if limiter.calls > 0 {
+				require.Equal(t, explicit.ID, limiter.routeID)
+			}
+			require.Equal(t, test.wantDispatch, dispatch.calls)
+			if dispatch.calls > 0 {
+				require.Equal(t, explicit.ID, dispatch.routeID)
+			}
+		})
 	}
 }
 
@@ -473,14 +632,56 @@ func TestGenericAPIRejectsNonWebSocketHTTPUpgrade(t *testing.T) {
 	require.NotEqual(t, "bad-upgrade", response.Header().Get(consts.HeaderXRequestID))
 }
 
+func TestGenericAPIAcceptsBrowserKeepAliveAsHTTP(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/v1/api/weather/current", nil)
+	request.Header.Set(consts.HeaderConnection, "keep-alive")
+	response := httptest.NewRecorder()
+
+	genericAPIRouter(newHandlerForTest(t)).ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusNoContent, response.Code)
+}
+
+func TestGenericAPIPreContractUpgradeRejectionsPublishNoUsage(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		upgrade string
+	}{
+		{name: "missing Upgrade header"},
+		{name: "h2c", upgrade: "h2c"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reporter := &recordingAPIUsageReporter{}
+			handler := NewHandler(HandlerOptions{
+				Usage: NewUsageBuilder(nil), Reporter: reporter,
+			})
+			request := httptest.NewRequest(http.MethodGet, "/v1/api/weather/current", nil)
+			request.Header.Set(consts.HeaderConnection, "Upgrade")
+			if test.upgrade != "" {
+				request.Header.Set("Upgrade", test.upgrade)
+			}
+			response := httptest.NewRecorder()
+
+			genericAPIRouter(handler).ServeHTTP(response, request)
+
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.NotEmpty(t, response.Header().Get(consts.HeaderXRequestID))
+			require.Contains(t, response.Body.String(), `"code":"invalid_upgrade"`)
+			require.Empty(t, reporter.entries, "pre-contract rejection must not create an identity-less usage entry")
+		})
+	}
+}
+
 func TestGenericAPIRejectsSubpathWhenRouteDoesNotForwardIt(t *testing.T) {
 	service := protocol.SyncedAPIService{ID: 7, Slug: "weather", Status: 1}
 	route := protocol.SyncedAPIRoute{ID: 9, ServiceID: 7, Slug: "current", Status: 1, Protocols: []string{ProtocolHTTP}}
+	root := protocol.SyncedAPIRoute{ID: 8, ServiceID: 7, Slug: "", Status: 1, Protocols: []string{ProtocolHTTP}, ForwardSubpath: true}
+	provider := &countingProviderProtocolHandler{}
 	handler := NewHandler(HandlerOptions{
-		Finder:     NewServiceFinder(serviceFinderIndex(t, service, route)),
+		Finder:     NewServiceFinder(serviceFinderIndex(t, service, root, route)),
 		Permission: allowPermissionGate{},
 		Quota:      allowQuotaGate{},
-		Handlers:   map[string]ProtocolHandler{ProtocolHTTP: statusProtocolHandler{status: http.StatusNoContent}},
+		Handlers:   map[string]ProtocolHandler{ProtocolHTTP: provider},
 	})
 	router := genericAPIRouter(handler)
 	response := httptest.NewRecorder()
@@ -488,6 +689,7 @@ func TestGenericAPIRejectsSubpathWhenRouteDoesNotForwardIt(t *testing.T) {
 
 	require.Equal(t, http.StatusNotFound, response.Code)
 	require.Equal(t, CodeAPINotFound, responseBodyCode(t, response))
+	require.Zero(t, provider.calls, "the root route must not bypass an explicit route's ForwardSubpath policy")
 }
 
 func TestGenericAPIWebSocketUpgradeAcceptsHeaderListsAndRepeatedFields(t *testing.T) {
@@ -710,7 +912,7 @@ func TestNewRequestContextProjectsTokenNameFromAuthenticatedIdentity(t *testing.
 				c.Set(consts.CtxKeyUserInfo, test.identity)
 			}
 
-			rc := newRequestContext(c, ServiceRoute{}, "request", apiattempt.APITracePolicy{})
+			rc := newRequestContext(c, ServiceRoute{}, "", "request", apiattempt.APITracePolicy{})
 
 			require.Equal(t, test.want, rc.TokenName)
 		})

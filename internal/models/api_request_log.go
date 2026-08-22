@@ -41,6 +41,7 @@ type APIRequestLog struct {
 	QuotaGateDecision          string                            `gorm:"size:16;index" json:"quota_gate_decision"`
 	ErrorStage                 string                            `gorm:"size:32;index" json:"error_stage"`
 	ErrorCode                  string                            `gorm:"size:64;index" json:"error_code"`
+	ErrorMessage               string                            `gorm:"type:text" json:"error_message"`
 	ServiceMissingAtSettlement bool                              `gorm:"index" json:"service_missing_at_settlement"`
 	RateLimitDecision          string                            `gorm:"size:16;index" json:"rate_limit_decision"`
 	RateLimitWaitMs            int                               `json:"rate_limit_wait_ms"`

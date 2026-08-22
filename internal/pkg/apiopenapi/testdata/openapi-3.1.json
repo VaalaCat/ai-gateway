@@ -1,0 +1,76 @@
+{
+  "openapi": "3.1.1",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Order API",
+    "summary": "Order operations",
+    "description": "Manage orders",
+    "version": "2.0.0"
+  },
+  "servers": [
+    {"url": "https://orders.example.test"},
+    {"url": "https://orders-backup.example.test"}
+  ],
+  "paths": {
+    "/orders": {
+      "post": {
+        "operationId": "createOrder",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {"$ref": "#/components/schemas/OrderInput"}
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "headers": {
+              "X-Order-Mode": {
+                "description": "Order mode",
+                "allowEmptyValue": true,
+                "allowReserved": true,
+                "schema": {"type": "string"}
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Order"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "OrderInput": {
+        "type": "object",
+        "properties": {
+          "note": {"type": ["string", "null"]},
+          "kind": {"const": "standard"}
+        },
+        "unevaluatedProperties": false
+      },
+      "Order": {
+        "allOf": [
+          {"$ref": "#/components/schemas/OrderInput"},
+          {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"]
+          }
+        ]
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "x-document-generation": 2
+}

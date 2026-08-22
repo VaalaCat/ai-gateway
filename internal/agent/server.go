@@ -590,6 +590,7 @@ func (s *Server) registerGenericAPIRoutes(router *gin.Engine) {
 		SourceAgentID:         s.Creds.AgentID,
 		TraceSettings:         s.Store,
 		Metrics:               s.GenericAPIMetrics,
+		Logger:                s.Logger,
 		Executor: genericapi.NewExecutor(map[string]genericapi.ProtocolHandler{
 			genericapi.ProtocolHTTP:      s.newGenericAPIProtocolHandler(),
 			genericapi.ProtocolWebSocket: s.newGenericAPIWebSocketProtocolHandler(),

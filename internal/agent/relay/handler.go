@@ -23,10 +23,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
-
-	// Register codec implementations via their init() functions.
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"
 )
 
 var _ app.RelayHandler = (*Handler)(nil)

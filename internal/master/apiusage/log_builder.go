@@ -25,7 +25,7 @@ func BuildLogBatch(entry protocol.APIUsageEntry, settlement APISettlement, servi
 		SourceAgentID: settlement.SourceAgentID, ExecutionAgentID: entry.ExecutionAgentID, AgentRouteID: entry.AgentRouteID, AgentRoutePath: entry.AgentRoutePath,
 		StatusCode: entry.StatusCode, DurationMs: entry.DurationMs, FirstByteMs: entry.FirstByteMs, RequestBytes: entry.RequestBytes, ResponseBytes: entry.ResponseBytes,
 		ProviderDispatchKnown: entry.ProviderDispatchKnown, ProviderDispatched: entry.ProviderDispatched, QuotaGateDecision: entry.QuotaGateDecision,
-		ErrorStage: entry.ErrorStage, ErrorCode: entry.ErrorCode, RateLimitDecision: entry.RateLimitDecision, RateLimitWaitMs: entry.RateLimitWaitMs,
+		ErrorStage: entry.ErrorStage, ErrorCode: entry.ErrorCode, ErrorMessage: entry.ErrorMessage, RateLimitDecision: entry.RateLimitDecision, RateLimitWaitMs: entry.RateLimitWaitMs,
 		RateLimitReason: entry.RateLimitReason, RateLimitHits: datatypes.NewJSONSlice(entry.RateLimitHits), UnitPrice: settlement.Quota, TotalCost: settlement.Quota, CreatedAt: entry.Timestamp,
 	}
 	if entry.WebSocketCloseCode != 0 {

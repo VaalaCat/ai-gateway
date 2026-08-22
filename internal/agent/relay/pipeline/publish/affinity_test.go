@@ -96,6 +96,53 @@ func TestFillExecution_AffinityRecordIsolatedByTokenID(t *testing.T) {
 	}
 }
 
+func TestFillExecution_SessionIdentityRecordsFirstSuccessfulRequest(t *testing.T) {
+	eng := affinity.New(affStubCfg{on: 1})
+	p := NewPublisher(nil, nil, eng)
+	used := state.Attempt{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5}
+	rctx := affRctx(used, state.AttemptResult{}, false)
+	rctx.Input.UserInfo.TokenID = 11
+	rctx.Input.AffinityIdentity = state.AffinityIdentity{
+		Key:       "session-a",
+		Partition: state.AffinityPartition{ByUser: true, ByToken: true, ByModel: true},
+	}
+	var entry protocol.UsageLogEntry
+	projectExecution(&entry, rctx)
+	p.recordAffinity(rctx, &entry)
+
+	if !entry.AffinityRecorded {
+		t.Fatal("successful request with a session identity should record affinity without cache token usage")
+	}
+	key := affinity.BuildKey(rctx.Input.AffinityIdentity, 1, 11, "m")
+	got, ok := eng.Lookup(key)
+	if !ok || got.SourceID != 5 {
+		t.Fatalf("session affinity lookup = (%+v, %v), want source 5", got, ok)
+	}
+}
+
+func TestFillExecution_SessionIdentityDoesNotRecordFailedRequest(t *testing.T) {
+	eng := affinity.New(affStubCfg{on: 1})
+	p := NewPublisher(nil, nil, eng)
+	used := state.Attempt{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5}
+	rctx := affRctx(used, state.AttemptResult{}, false)
+	rctx.Input.AffinityIdentity = state.AffinityIdentity{
+		Key:       "session-a",
+		Partition: state.AffinityPartition{ByUser: true, ByToken: true, ByModel: true},
+	}
+	rctx.State.Execution.Err = errors.New("upstream failed")
+	var entry protocol.UsageLogEntry
+	projectExecution(&entry, rctx)
+	p.recordAffinity(rctx, &entry)
+
+	if entry.AffinityRecorded {
+		t.Fatal("failed request must not record session affinity")
+	}
+	key := affinity.BuildKey(rctx.Input.AffinityIdentity, 1, 0, "m")
+	if _, ok := eng.Lookup(key); ok {
+		t.Fatal("failed request unexpectedly stored session affinity")
+	}
+}
+
 func TestFillExecution_AffinityDisabledEmpty(t *testing.T) {
 	eng := affinity.New(affStubCfg{on: 0})
 	p := NewPublisher(nil, nil, eng)

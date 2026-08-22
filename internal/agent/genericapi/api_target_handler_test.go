@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -124,6 +125,60 @@ func TestAPITargetHandlerBoundsExcessLimiterHitsBeforeResult(t *testing.T) {
 	require.Equal(t, uint(1), result.RateLimitHits[0].LimiterID)
 	require.Equal(t, uint(64), result.RateLimitHits[63].LimiterID)
 	require.NoError(t, result.Validate())
+}
+
+func TestAPITargetHandlerSendsPrepareErrorMessageWithoutCredential(t *testing.T) {
+	finder := &frozenServiceRouteFinder{}
+	handler := NewAPITargetHandler(finder, excessRateHitProtocolHandler{})
+	stream := newTargetHTTPStream("")
+	stream.open.BodyLength = 0
+	stream.requests = []agenttunnel.APIRequestEvent{{Kind: agenttunnel.APIRequestEnd}}
+
+	require.NoError(t, handler.serveStream(t.Context(), stream))
+	require.Len(t, stream.results, 1)
+	require.Equal(t, "execution", stream.results[0].ErrorStage)
+	require.NotEmpty(t, stream.results[0].ErrorMessage)
+}
+
+type fixedExecutionResultHandler struct{ result apiattempt.APIExecutionResult }
+
+func (h fixedExecutionResultHandler) Serve(_ context.Context, rc *RequestContext) error {
+	rc.Execution = h.result
+	return nil
+}
+
+func TestAPITargetHandlerPreservesLocalExecutionErrorMessage(t *testing.T) {
+	finder := &frozenServiceRouteFinder{value: ServiceRoute{
+		Service: protocol.SyncedAPIService{ID: 7}, Route: protocol.SyncedAPIRoute{ID: 9, ServiceID: 7},
+	}}
+	handler := NewAPITargetHandler(finder, fixedExecutionResultHandler{result: apiattempt.APIExecutionResult{
+		ProviderDispatchKnown: true, ErrorStage: "transport", ErrorCode: CodeUnavailable,
+		ErrorMessage: "dial tcp: connection refused",
+	}})
+	stream := newTargetHTTPStream("")
+	stream.open.BodyLength = 0
+	stream.requests = []agenttunnel.APIRequestEvent{{Kind: agenttunnel.APIRequestEnd}}
+
+	require.NoError(t, handler.serveStream(t.Context(), stream))
+	require.Len(t, stream.results, 1)
+	require.Equal(t, "dial tcp: connection refused", stream.results[0].ErrorMessage)
+}
+
+func TestAPITargetHandlerRejectsInvalidErrorMessageResult(t *testing.T) {
+	finder := &frozenServiceRouteFinder{value: ServiceRoute{
+		Service: protocol.SyncedAPIService{ID: 7}, Route: protocol.SyncedAPIRoute{ID: 9, ServiceID: 7},
+	}}
+	for _, message := range []string{strings.Repeat("x", apiattempt.MaxAPIErrorMessageBytes+1), "line\nbreak"} {
+		stream := newTargetHTTPStream("")
+		stream.open.BodyLength = 0
+		stream.requests = []agenttunnel.APIRequestEvent{{Kind: agenttunnel.APIRequestEnd}}
+		handler := NewAPITargetHandler(finder, fixedExecutionResultHandler{result: apiattempt.APIExecutionResult{
+			ProviderDispatchKnown: true, ErrorMessage: message,
+		}})
+
+		require.ErrorIs(t, handler.serveStream(t.Context(), stream), apiattempt.ErrInvalidExecutionResult)
+		require.Empty(t, stream.results)
+	}
 }
 
 func TestAPITargetHandlerPicksOneUpstreamGatesThenDispatchesOnce(t *testing.T) {

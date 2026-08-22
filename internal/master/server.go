@@ -33,6 +33,7 @@ import (
 	apiaccessgrant "github.com/VaalaCat/ai-gateway/internal/master/api/api_access_grant"
 	apibackend "github.com/VaalaCat/ai-gateway/internal/master/api/api_backend"
 	apiCatalog "github.com/VaalaCat/ai-gateway/internal/master/api/api_catalog"
+	apiopenapi "github.com/VaalaCat/ai-gateway/internal/master/api/api_openapi"
 	apirequestlog "github.com/VaalaCat/ai-gateway/internal/master/api/api_request_log"
 	apirole "github.com/VaalaCat/ai-gateway/internal/master/api/api_role"
 	apiroute "github.com/VaalaCat/ai-gateway/internal/master/api/api_route"
@@ -765,6 +766,13 @@ func (s *Server) setupRoutes() {
 	apiServiceH := &apiservice.Handler{App: s.App, Publisher: apiActions}
 	apiUpstreamCreator := apiupstream.Creator{Cipher: s.BYOKProvider.GetCipher()}
 	apiRouteH := &apiroute.Handler{App: s.App, Publisher: apiActions, UpstreamCreator: apiUpstreamCreator}
+	apiOpenAPIH := &apiopenapi.Handler{
+		App: s.App,
+		Importer: apiopenapi.Importer{
+			UpstreamCreator: apiUpstreamCreator,
+			Publisher:       apiActions,
+		},
+	}
 	apiBackendH := &apibackend.Handler{App: s.App, Publisher: apiActions}
 	apiUpstreamH := &apiupstream.Handler{App: s.App, Publisher: apiActions, Creator: apiUpstreamCreator}
 	apiRoleH := &apirole.Handler{App: s.App, Publisher: apiActions}
@@ -785,6 +793,7 @@ func (s *Server) setupRoutes() {
 	userAuth.GET("/api-catalog/services/detail", api.Adapt(adapter, api.BindQuery, apiCatalogH.ServiceDetail))
 	userAuth.GET("/api-catalog/routes", api.Adapt(adapter, api.BindQuery, apiCatalogH.ListRoutes))
 	userAuth.GET("/api-catalog/effective", api.Adapt(adapter, api.BindQuery, apiCatalogH.Effective))
+	userAuth.GET("/api-catalog/openapi", api.Adapt(adapter, api.BindQuery, apiCatalogH.OpenAPI))
 	userAuth.GET("/api-request-logs", api.Adapt(adapter, api.BindQuery, apiRequestLogH.PortalList))
 	userAuth.GET("/api-request-traces", api.Adapt(adapter, api.BindQuery, apiRequestLogH.PortalGetTrace))
 	userAuth.GET("/api-request-logs/:request_id", api.Adapt(adapter, api.BindURI, apiRequestLogH.PortalGet))
@@ -859,6 +868,10 @@ func (s *Server) setupRoutes() {
 	auth.DELETE("/api-access-grants/:principal_type/:principal_id/services/:service_id", api.Adapt(adapter, api.BindURI, apiAccessGrantH.Delete))
 	auth.GET("/api-services", api.Adapt(adapter, api.BindQuery, apiServiceH.List))
 	auth.POST("/api-services", api.Adapt(adapter, api.BindJSON, apiServiceH.Create))
+	auth.POST("/api-services/openapi/preview", apiopenapi.LimitRequestBody(api.Adapt(adapter, api.BindStrictJSONText, apiOpenAPIH.Preview)))
+	auth.POST("/api-services/openapi/import", apiopenapi.LimitRequestBody(api.Adapt(adapter, api.BindStrictJSONText, apiOpenAPIH.Import)))
+	auth.GET("/api-services/:id/openapi", api.Adapt(adapter, api.BindURI, apiOpenAPIH.Get))
+	auth.PUT("/api-services/:id/openapi", apiopenapi.LimitRequestBody(api.Adapt(adapter, api.BindURIAndStrictJSONText, apiOpenAPIH.Update)))
 	auth.GET("/api-services/:id", api.Adapt(adapter, api.BindURI, apiServiceH.Get))
 	auth.PUT("/api-services/:id", api.Adapt(adapter, api.BindURIAndBodyMap, apiServiceH.Update))
 	auth.DELETE("/api-services/:id", api.Adapt(adapter, api.BindURI, apiServiceH.Delete))

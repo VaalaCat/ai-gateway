@@ -11,6 +11,14 @@ interface InvocationInput {
   token: string | typeof API_TOKEN_TEMPLATE;
 }
 
+export interface CanonicalCurlInvocationInput {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+  token: string | typeof API_TOKEN_TEMPLATE;
+}
+
 export interface InvocationResult {
   kind: "curl" | "websocat";
   command: string;
@@ -33,7 +41,7 @@ function normalizedOrigin(raw: string) {
   return parsed.origin;
 }
 
-function encodePathSegment(raw: string) {
+export function encodeInvocationPathSegment(raw: string) {
   let decoded = raw;
   try {
     decoded = decodeURIComponent(raw);
@@ -57,9 +65,9 @@ function publicURL(input: InvocationInput, websocket: boolean) {
   const path = [
     "v1",
     "api",
-    encodePathSegment(input.serviceSlug),
-    encodePathSegment(input.routeSlug),
-    ...(subpath ? subpath.split("/").map(encodePathSegment) : []),
+    encodeInvocationPathSegment(input.serviceSlug),
+    encodeInvocationPathSegment(input.routeSlug),
+    ...(subpath ? subpath.split("/").map(encodeInvocationPathSegment) : []),
   ].join("/");
   return `${base}/${path}${input.example.query ? `?${input.example.query}` : ""}`;
 }
@@ -72,20 +80,30 @@ function authorizationArgument(token: InvocationInput["token"]) {
 }
 
 function curlCommand(input: InvocationInput, url: string) {
+  return buildCanonicalCurlInvocationCommand({
+    url,
+    method: input.example.method,
+    headers: input.example.headers,
+    body: input.example.body,
+    token: input.token,
+  });
+}
+
+export function buildCanonicalCurlInvocationCommand(input: CanonicalCurlInvocationInput) {
   const parts = [
     "curl",
     "--request",
-    quotePOSIXShell(input.example.method || "GET"),
+    quotePOSIXShell(input.method || "GET"),
     "--url",
-    quotePOSIXShell(url),
+    quotePOSIXShell(input.url),
     "--header",
     authorizationArgument(input.token),
   ];
-  for (const [name, value] of Object.entries(input.example.headers)) {
+  for (const [name, value] of Object.entries(input.headers)) {
     if (isGatewayAuthorizationHeader(name)) continue;
     parts.push("--header", quotePOSIXShell(`${name}: ${value}`));
   }
-  if (input.example.body) parts.push("--data-raw", quotePOSIXShell(input.example.body));
+  if (input.body) parts.push("--data-raw", quotePOSIXShell(input.body));
   return parts.join(" ");
 }
 

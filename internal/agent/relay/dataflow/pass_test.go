@@ -3,14 +3,14 @@ package dataflow
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func TestCloneRequest_Independent(t *testing.T) {
-	orig := &codec.Request{
+	orig := &llmkit.Request{
 		Model: "m1",
-		Messages: []codec.Message{
-			{Role: codec.RoleUser, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "hi"}}},
+		Messages: []llmkit.Message{
+			{Role: llmkit.RoleUser, Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "hi"}}},
 		},
 	}
 	clone := CloneRequest(orig)
@@ -21,8 +21,8 @@ func TestCloneRequest_Independent(t *testing.T) {
 		t.Fatalf("orig.Model mutated to %q", orig.Model)
 	}
 	// 改 clone 的消息 role 不影响 orig(深拷贝)
-	clone.Messages[0].Role = codec.RoleAssistant
-	if orig.Messages[0].Role != codec.RoleUser {
+	clone.Messages[0].Role = llmkit.RoleAssistant
+	if orig.Messages[0].Role != llmkit.RoleUser {
 		t.Fatalf("orig message role mutated to %q", orig.Messages[0].Role)
 	}
 }

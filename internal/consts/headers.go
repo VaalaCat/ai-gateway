@@ -6,6 +6,7 @@ const (
 	HeaderContentType      = "Content-Type"
 	HeaderConnection       = "Connection"
 	HeaderCacheControl     = "Cache-Control"
+	HeaderSessionID        = "Session-Id"
 	HeaderHost             = "Host"
 	HeaderOpenAIOrg        = "OpenAI-Organization"
 	HeaderXAPIKey          = "x-api-key"

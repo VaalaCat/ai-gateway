@@ -1,28 +1,32 @@
 package upstream
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
-// EventMonitor collects usage and timing information from an IR event stream.
-//
-// firstResponseMs 在两处被写：
-//   - MonitorEvents 启动的 goroutine（流到第一个 content event 时）
-//   - 主调用方在 non-stream 路径（用 HTTP 响应时间覆盖）
-//
-// 这两处天然在两个 goroutine 上下文中触发，所以加 mu 保护 firstResponseMs 写入；
-// firstResponseMs 的读取（构造 AttemptResult 时）发生在 monitoredEvents 已被完全 drain
-// 之后，按文档契约属于安全顺序，但读侧也用 Lock/Unlock 走最小成本兜底。
+type EventSnapshot struct {
+	Usage           llmkit.Usage
+	FirstResponseMs int
+	FinishReason    string
+	ResponseText    string
+	EventErr        error
+}
+
+// EventMonitor collects one synchronized snapshot from an IR event stream.
 type EventMonitor struct {
 	mu              sync.Mutex
-	Usage           codec.Usage
+	usage           llmkit.Usage
 	firstResponseMs int
-	FinishReason    string
-	ResponseText    strings.Builder
+	finishReason    string
+	responseText    strings.Builder
+	eventErr        error
+	done            chan struct{}
 }
 
 // SetFirstResponseMs 是 firstResponseMs 的唯一写入入口；外部主线程和
@@ -42,45 +46,90 @@ func (m *EventMonitor) FirstResponseMs() int {
 	return m.firstResponseMs
 }
 
+func (m *EventMonitor) EventError() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.eventErr
+}
+
+func (m *EventMonitor) Done() <-chan struct{} {
+	return m.done
+}
+
+func (m *EventMonitor) Snapshot() EventSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return EventSnapshot{
+		Usage:           m.usage,
+		FirstResponseMs: m.firstResponseMs,
+		FinishReason:    m.finishReason,
+		ResponseText:    m.responseText.String(),
+		EventErr:        m.eventErr,
+	}
+}
+
+func (m *EventMonitor) FinalSnapshot() EventSnapshot {
+	<-m.done
+	return m.Snapshot()
+}
+
 // MonitorEvents wraps an event channel, intercepting events to collect usage
 // data and measure time-to-first-response. It returns a new channel that
 // passes all events through and an EventMonitor that is populated as events
-// flow through. The monitor values are only guaranteed to be final after the
-// returned channel is fully drained (closed).
+// flow through. FinalSnapshot waits until monitoring has stopped naturally or
+// because the attempt context was canceled.
 //
 // 包级纯函数：不依赖 Handler 状态，方便 nativeBackend 不持有 *Handler 也能调用。
-func MonitorEvents(events <-chan codec.Event, startTime time.Time) (<-chan codec.Event, *EventMonitor) {
-	mon := &EventMonitor{}
-	out := make(chan codec.Event, 64)
+func MonitorEvents(ctx context.Context, events <-chan llmkit.Event, startTime time.Time) (<-chan llmkit.Event, *EventMonitor) {
+	mon := &EventMonitor{done: make(chan struct{})}
+	out := make(chan llmkit.Event, 64)
 
 	go func() {
 		defer close(out)
+		defer close(mon.done)
 		firstContent := true
-		for ev := range events {
-			// Track first content-bearing event for time-to-first-response.
-			// We match any event that carries actual content, not just control
-			// signals (StreamStart, Usage, Done, Error).
+		for {
+			var ev llmkit.Event
+			var ok bool
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok = <-events:
+				if !ok {
+					return
+				}
+			}
+
+			mon.mu.Lock()
+			if ev.Type == llmkit.EventError {
+				message := "upstream response stream failed"
+				if ev.Error != nil && ev.Error.Message != "" {
+					message = ev.Error.Message
+				}
+				if mon.eventErr == nil {
+					mon.eventErr = errors.New(message)
+				}
+			}
 			if firstContent && isContentEvent(ev.Type) {
-				mon.SetFirstResponseMs(int(time.Since(startTime).Milliseconds()))
+				mon.firstResponseMs = int(time.Since(startTime).Milliseconds())
 				firstContent = false
 			}
-
-			// Collect usage
-			if ev.Type == codec.EventUsage && ev.Usage != nil {
-				mon.Usage = *ev.Usage
+			if ev.Type == llmkit.EventUsage && ev.Usage != nil {
+				mon.usage = *ev.Usage
 			}
-
-			// Collect finish reason
 			if ev.FinishReason != "" {
-				mon.FinishReason = ev.FinishReason
+				mon.finishReason = ev.FinishReason
 			}
-
-			// Accumulate response text for token estimation
-			if ev.Type == codec.EventContentDelta && ev.Delta != nil && ev.Delta.Text != "" {
-				mon.ResponseText.WriteString(ev.Delta.Text)
+			if ev.Type == llmkit.EventContentDelta && ev.Delta != nil && ev.Delta.Text != "" {
+				mon.responseText.WriteString(ev.Delta.Text)
 			}
+			mon.mu.Unlock()
 
-			out <- ev
+			select {
+			case out <- ev:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 

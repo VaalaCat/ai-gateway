@@ -43,6 +43,32 @@ func TestAPIIndexFindServiceRouteFailsClosedAfterServiceDelete(t *testing.T) {
 	require.ErrorIs(t, err, ErrAPIServiceNotFound)
 }
 
+func TestAPIIndexFindsEmptySlugRootRouteAndRejectsDuplicate(t *testing.T) {
+	services := []protocol.SyncedAPIService{
+		{ID: 1, Slug: "users", Status: 1},
+		{ID: 2, Slug: "orders", Status: 1},
+	}
+	rootRoutes := []protocol.SyncedAPIRoute{
+		{ID: 10, ServiceID: 1, BackendID: 11, Slug: "", Status: 1},
+		{ID: 20, ServiceID: 2, BackendID: 21, Slug: "", Status: 1},
+	}
+	index := readyAPIIndex(t, services, rootRoutes, nil, nil, nil)
+
+	got, err := index.FindServiceRoute("users", "")
+	require.NoError(t, err)
+	require.Equal(t, uint(10), got.Route.ID)
+	require.Empty(t, got.Route.Slug)
+
+	err = index.ReplaceRoutes([]protocol.SyncedAPIRoute{
+		rootRoutes[0],
+		{ID: 11, ServiceID: 1, BackendID: 12, Slug: "", Status: 1},
+	})
+	require.Error(t, err)
+	got, findErr := index.FindServiceRoute("users", "")
+	require.NoError(t, findErr)
+	require.Equal(t, uint(10), got.Route.ID, "a rejected snapshot must not replace the prior root route")
+}
+
 func TestAPIIndexFindServiceRouteByIDReturnsOnlyMatchingFrozenProjection(t *testing.T) {
 	index := readyAPIIndex(t,
 		[]protocol.SyncedAPIService{{ID: 1, Slug: "weather", Status: 1}, {ID: 4, Slug: "maps", Status: 1}},

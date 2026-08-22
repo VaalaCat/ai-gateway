@@ -3,14 +3,34 @@ package upstream
 import (
 	"encoding/json"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
-// BuildChannelConfig creates a codec.ChannelConfig from a Channel model and
-// resolved upstream model name.
-func BuildChannelConfig(ch *models.Channel, model string, outboundProto codec.Protocol) *codec.ChannelConfig {
-	cfg := &codec.ChannelConfig{
+// ChannelConfig 是 ai-gateway 的产品级 channel 设置，不属于公共 llmkit 协议层。
+type ChannelConfig struct {
+	BaseURL                 string
+	APIKey                  string
+	Model                   string
+	Organization            string
+	APIVersion              string
+	ParamOverride           map[string]any
+	HeaderOverride          map[string]any
+	SystemPrompt            string
+	EndpointPath            string
+	RoleMapping             string
+	SystemPromptInInput     bool
+	BuiltinToolFallback     string
+	SendBackThinking        bool
+	InlineImageURL          bool
+	RequestFieldPermissions llmkit.RequestFieldPermissions
+	ClaudeBetaQuery         bool
+}
+
+// BuildChannelConfig creates product-level request settings from a Channel.
+func BuildChannelConfig(ch *models.Channel, model string, outboundProto llmkit.Protocol) *ChannelConfig {
+	cfg := &ChannelConfig{
 		BaseURL:                 ch.GetBaseURL(),
 		APIKey:                  ch.Key,
 		Model:                   model,
@@ -18,10 +38,10 @@ func BuildChannelConfig(ch *models.Channel, model string, outboundProto codec.Pr
 		APIVersion:              ch.ApiVersion,
 		SystemPrompt:            ch.SystemPrompt,
 		RoleMapping:             ch.RoleMapping,
-		RequestFieldPermissions: codec.DefaultRequestFieldPermissions(),
+		RequestFieldPermissions: llmkit.DefaultRequestFieldPermissions(),
 	}
 
-	cfg.EndpointPath = codec.ResolveEndpointPath(ch.Endpoints, outboundProto)
+	cfg.EndpointPath = protocolconfig.ResolveEndpointPath(ch.Endpoints, outboundProto)
 	cfg.SystemPromptInInput = ch.SystemPromptInInput
 
 	// Parse param override

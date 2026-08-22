@@ -18,6 +18,53 @@ func TestKeyIncludesTokenID(t *testing.T) {
 	}
 }
 
+func TestBuildKeyAppliesIdentityPartition(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity state.AffinityIdentity
+		want     Key
+	}{
+		{
+			name: "session isolated by user token and model",
+			identity: state.AffinityIdentity{
+				Key:       "session-a",
+				Partition: state.AffinityPartition{ByUser: true, ByToken: true, ByModel: true},
+			},
+			want: Key{UserID: 7, TokenID: 11, RealModel: "model-a", CacheKey: "session-a"},
+		},
+		{
+			name: "cross model",
+			identity: state.AffinityIdentity{
+				Key:       "conversation-a",
+				Partition: state.AffinityPartition{ByUser: true, ByToken: true},
+			},
+			want: Key{UserID: 7, TokenID: 11, CacheKey: "conversation-a"},
+		},
+		{
+			name: "cross user",
+			identity: state.AffinityIdentity{
+				Key:       "shared-a",
+				Partition: state.AffinityPartition{ByModel: true},
+			},
+			want: Key{RealModel: "model-a", CacheKey: "shared-a"},
+		},
+		{
+			name:     "legacy request without identity",
+			identity: state.AffinityIdentity{},
+			want:     Key{UserID: 7, TokenID: 11, RealModel: "model-a"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildKey(tt.identity, 7, 11, "model-a")
+			if got != tt.want {
+				t.Fatalf("BuildKey() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTTLStore_RememberLookup(t *testing.T) {
 	s := newTTLStore()
 	k := Key{UserID: 1, RealModel: "claude-3-5-sonnet"}

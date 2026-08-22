@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"gorm.io/datatypes"
 )
 
@@ -110,7 +110,7 @@ func TestRunUpstreamScriptsReject(t *testing.T) {
 	body := []byte(`{"model":"gpt"}`)
 	upstreamReq := newUpstreamReq(t, body)
 
-	newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, state.Attempt{Channel: ch, RealModel: "gpt"}, codec.Protocol("openai"), upstreamReq, body)
+	newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, state.Attempt{Channel: ch, RealModel: "gpt"}, llmkit.Protocol("openai"), upstreamReq, body)
 
 	assert.True(t, rejected)
 	assert.True(t, res.Written)
@@ -128,7 +128,7 @@ func TestRunUpstreamScriptsChanged(t *testing.T) {
 	body := []byte(`{"model":"gpt"}`)
 	upstreamReq := newUpstreamReq(t, body)
 
-	newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, state.Attempt{Channel: ch, RealModel: "gpt"}, codec.Protocol("openai"), upstreamReq, body)
+	newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, state.Attempt{Channel: ch, RealModel: "gpt"}, llmkit.Protocol("openai"), upstreamReq, body)
 
 	assert.False(t, rejected)
 	assert.NoError(t, res.Err)
@@ -157,13 +157,34 @@ func TestRunUpstreamScriptsHeaderOps(t *testing.T) {
 	upstreamReq := newUpstreamReq(t, body)
 	upstreamReq.Header.Set("X-Bar", "remove-me")
 
-	newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, state.Attempt{Channel: ch, RealModel: "gpt"}, codec.Protocol("openai"), upstreamReq, body)
+	newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, state.Attempt{Channel: ch, RealModel: "gpt"}, llmkit.Protocol("openai"), upstreamReq, body)
 
 	assert.False(t, rejected)
 	assert.NoError(t, res.Err)
 	assert.Equal(t, "bar", upstreamReq.Header.Get("X-Foo"))
 	assert.Empty(t, upstreamReq.Header.Get("X-Bar"))
 	assert.Equal(t, body, newBody)
+}
+
+func TestRunUpstreamScriptsKeepsInboundHeaderSnapshot(t *testing.T) {
+	eng := engineWithCode(t, `function onUpstreamRequest(ctx){ ctx.body.seen = ctx.headers["X-Source"] }`)
+	agent := stubAgent{cache: stubCache{eng: eng}}
+	c, _ := ginCtxWithRecorder(t)
+	c.Request.Header.Set("X-Source", "inbound")
+	rctx := &state.RelayContext{Context: c}
+	ch := &models.Channel{}
+	body := []byte(`{"model":"gpt"}`)
+	upstreamReq := newUpstreamReq(t, body)
+	upstreamReq.Header.Set("X-Source", "upstream")
+
+	newBody, rejected, res := RunUpstreamScripts(
+		agent, c, rctx, state.Attempt{Channel: ch, RealModel: "gpt"},
+		llmkit.ProtocolOpenAIChat, upstreamReq, body,
+	)
+
+	assert.False(t, rejected)
+	assert.NoError(t, res.Err)
+	assert.JSONEq(t, `{"model":"gpt","seen":"inbound"}`, string(newBody))
 }
 
 func TestRunUpstreamScriptsMatchesChannelSourceScopes(t *testing.T) {
@@ -217,7 +238,7 @@ func TestRunUpstreamScriptsMatchesChannelSourceScopes(t *testing.T) {
 			body := []byte(`{"model":"client-model"}`)
 			upstreamReq := newUpstreamReq(t, body)
 
-			newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, tt.attempt, codec.ProtocolOpenAIChat, upstreamReq, body)
+			newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, tt.attempt, llmkit.ProtocolOpenAIChat, upstreamReq, body)
 
 			require.False(t, rejected)
 			require.NoError(t, res.Err)
@@ -240,7 +261,7 @@ func TestRunUpstreamScriptsMatchesUserScopeForBothSources(t *testing.T) {
 			body := []byte(`{"model":"client-model"}`)
 			upstreamReq := newUpstreamReq(t, body)
 
-			newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, attempt, codec.ProtocolOpenAIChat, upstreamReq, body)
+			newBody, rejected, res := RunUpstreamScripts(agent, c, rctx, attempt, llmkit.ProtocolOpenAIChat, upstreamReq, body)
 
 			require.False(t, rejected)
 			require.NoError(t, res.Err)
@@ -255,7 +276,7 @@ func TestRunUpstreamScriptsNilChannelIsNoop(t *testing.T) {
 	body := []byte(`{"model":"client-model"}`)
 	upstreamReq := newUpstreamReq(t, body)
 
-	newBody, rejected, res := RunUpstreamScripts(agent, c, &state.RelayContext{Context: c}, state.Attempt{RealModel: "provider-model"}, codec.ProtocolOpenAIChat, upstreamReq, body)
+	newBody, rejected, res := RunUpstreamScripts(agent, c, &state.RelayContext{Context: c}, state.Attempt{RealModel: "provider-model"}, llmkit.ProtocolOpenAIChat, upstreamReq, body)
 
 	assert.False(t, rejected)
 	assert.False(t, res.Written)

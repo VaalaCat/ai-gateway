@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -198,7 +198,7 @@ func projectExecution(e *protocol.UsageLogEntry, rctx *state.RelayContext) {
 	}
 	e.UseLegacy = u.Mode == state.ModeLegacy
 	e.Other = buildOtherJSON(u.Channel, u.Mode, rctx.State.Plan.Trace)
-	e.OutboundProtocol = string(codec.NegotiateOutboundProtocol(
+	e.OutboundProtocol = string(protocolconfig.NegotiateOutboundProtocol(
 		rctx.Input.InboundProto,
 		u.Channel.Type,
 		u.Channel.SupportedAPITypes,

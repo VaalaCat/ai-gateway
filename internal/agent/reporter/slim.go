@@ -148,7 +148,7 @@ func apiUsageResult(entry protocol.APIUsageEntry) apiattempt.APIExecutionResult 
 		ProviderDispatched: entry.ProviderDispatched, RequestBytes: entry.RequestBytes,
 		ResponseBytes: entry.ResponseBytes, FirstByteMs: entry.FirstByteMs,
 		WebSocketCloseCode: entry.WebSocketCloseCode, ErrorStage: entry.ErrorStage,
-		ErrorCode: entry.ErrorCode, RateLimitDecision: entry.RateLimitDecision,
+		ErrorCode: entry.ErrorCode, ErrorMessage: entry.ErrorMessage, RateLimitDecision: entry.RateLimitDecision,
 		RateLimitWaitMs: entry.RateLimitWaitMs, RateLimitReason: entry.RateLimitReason,
 		RateLimitHits: entry.RateLimitHits, RateLimitHitTotal: entry.RateLimitHitTotal,
 		RateLimitHitsTruncated: entry.RateLimitHitsTruncated, Trace: entry.Trace,
@@ -167,6 +167,7 @@ func applyAPIUsageResult(entry *protocol.APIUsageEntry, result apiattempt.APIExe
 	entry.WebSocketCloseCode = result.WebSocketCloseCode
 	entry.ErrorStage = result.ErrorStage
 	entry.ErrorCode = result.ErrorCode
+	entry.ErrorMessage = result.ErrorMessage
 	entry.RateLimitDecision = result.RateLimitDecision
 	entry.RateLimitWaitMs = result.RateLimitWaitMs
 	entry.RateLimitReason = result.RateLimitReason

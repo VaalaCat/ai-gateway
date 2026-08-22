@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -24,6 +23,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/eventbus"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/stretchr/testify/require"
 )
 
@@ -186,7 +186,7 @@ func newPublishTestRctx() *state.RelayContext {
 			Model:        "gpt-4",
 			IsStream:     false,
 			StartTime:    time.Now(),
-			InboundProto: codec.ProtocolOpenAIChat,
+			InboundProto: llmkit.ProtocolOpenAIChat,
 			UserInfo:     &app.UserInfo{UserID: 1, TokenID: 2, TokenName: "test"},
 		},
 		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},

@@ -144,6 +144,24 @@ Daily rollups by token and by channel — total cost, request count, success rat
 
 ## Tools
 
+### API Services and OpenAPI Import
+
+Administrators open `/api-services`, choose **Import OpenAPI**, review the
+three-step file/server/Route preview, and create the Service. The Service detail
+page provides platform-document editing and sanitized export; imported files
+are not the source of truth after creation.
+
+### API Catalog
+
+Users open `/api-catalog` and select a Token before browsing. Service and Route
+navigation, path/method selection, parameter replacement, the final public URL,
+and online invocation stay in the normal page flow. The catalog omits paths and
+operations outside the selected Token's Route scope.
+
+An empty-slug root Route uses `/v1/api/{service_slug}` (plus any dynamic
+subpath). Route access covers the Route prefix and its runtime method/subpath
+policy; it is not a separate allow-list for each OpenAPI operation.
+
 ### Playground
 
 In-browser chat tester for any configured model. Supports Chat / JSON / SSE views and arbitrary system prompts.

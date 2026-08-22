@@ -71,9 +71,18 @@ describe("Route page placeholder transition", () => {
 
   it("keeps previous rows but unmounts their workspace until the requested page resolves", async () => {
     const secondPage = deferred<{ data: APIRoute[]; total: number; page: number; page_size: number }>();
-    apiGet
-      .mockResolvedValueOnce({ data: [route("page-one")], total: 2, page: 1, page_size: 10 })
-      .mockReturnValueOnce(secondPage.promise);
+    apiGet.mockImplementation((path: string) => {
+      if (path === "/admin/api-services/7/openapi") {
+        return Promise.resolve({ service: { document: { openapi: "3.1.0" } } });
+      }
+      if (path === "/admin/api-routes?api_service_id=7&page=1&page_size=10") {
+        return Promise.resolve({ data: [route("page-one")], total: 2, page: 1, page_size: 10 });
+      }
+      if (path === "/admin/api-routes?api_service_id=7&page=2&page_size=10") {
+        return secondPage.promise;
+      }
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
     render(
       <QueryClientProvider client={createTestQueryClient()}>
         <APIServiceWorkspace service={service} canManage origin="https://gateway.test" />

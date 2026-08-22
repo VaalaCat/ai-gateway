@@ -1,6 +1,7 @@
 package genericapi
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -31,45 +32,90 @@ type ServiceRoute struct {
 	Protocol string
 }
 
-// ServiceFinder validates the public route shape against the current API index.
-type ServiceFinder struct{ index *cache.APIIndex }
-
-func NewServiceFinder(index *cache.APIIndex) *ServiceFinder { return &ServiceFinder{index: index} }
-
-func (f *ServiceFinder) Find(serviceSlug, routeSlug, method, requestedProtocol string) (ServiceRoute, error) {
-	if err := validRouteRequest(serviceSlug, routeSlug, requestedProtocol); err != nil {
-		return ServiceRoute{}, err
-	}
-	if f == nil || f.index == nil {
-		return ServiceRoute{}, gatewayError(CodeCacheNotReady, http.StatusServiceUnavailable, "", ErrAPICacheNotReady)
-	}
-	if err := f.index.RequireReady(); err != nil {
-		return ServiceRoute{}, gatewayError(CodeCacheNotReady, http.StatusServiceUnavailable, "", err)
-	}
-	found, err := f.index.FindServiceRoute(serviceSlug, routeSlug)
-	if err != nil {
-		return ServiceRoute{}, gatewayError(CodeAPINotFound, http.StatusNotFound, "", err)
-	}
-	if found.Service.Status != consts.StatusEnabled || found.Route.Status != consts.StatusEnabled {
-		return ServiceRoute{}, gatewayError(CodeAPINotFound, http.StatusNotFound, "", nil)
-	}
-	if !routeSupportsProtocol(found.Route.Protocols, requestedProtocol) {
-		return ServiceRoute{}, gatewayError(CodeAPINotFound, http.StatusNotFound, "", nil)
-	}
-	if err := validateMethod(found.Route.AllowedMethods, method, requestedProtocol); err != nil {
-		return ServiceRoute{}, err
-	}
-	return ServiceRoute{Service: found.Service, Route: found.Route, Protocol: requestedProtocol}, nil
+type serviceRouteFinder interface {
+	FindServiceRoute(serviceSlug, routeSlug string) (cache.ServiceRoute, error)
 }
 
-func validRouteRequest(serviceSlug, routeSlug, requestedProtocol string) error {
-	if !apiSlugPattern.MatchString(serviceSlug) || !apiSlugPattern.MatchString(routeSlug) {
+// ServiceFinder selects an explicit first-segment route or falls back to the
+// service's empty-slug root route when that explicit route does not exist.
+type ServiceFinder struct{ routeFinder serviceRouteFinder }
+
+func NewServiceFinder(index *cache.APIIndex) *ServiceFinder {
+	if index == nil {
+		return &ServiceFinder{}
+	}
+	return &ServiceFinder{routeFinder: index}
+}
+
+func (f *ServiceFinder) Find(serviceSlug, requestPath, method, requestedProtocol string) (ServiceRoute, string, error) {
+	if err := validRouteRequest(serviceSlug, requestedProtocol); err != nil {
+		return ServiceRoute{}, "", err
+	}
+	if hasExtraLeadingSlash(requestPath) {
+		return ServiceRoute{}, "", gatewayError(CodeInvalidRequest, http.StatusBadRequest, "", nil)
+	}
+	if f == nil || f.routeFinder == nil {
+		return ServiceRoute{}, "", gatewayError(CodeCacheNotReady, http.StatusServiceUnavailable, "", ErrAPICacheNotReady)
+	}
+	routeSlug, subpath := splitAPIRequestPath(requestPath)
+	found, err := f.routeFinder.FindServiceRoute(serviceSlug, routeSlug)
+	if routeSlug != "" && errors.Is(err, cache.ErrAPIRouteNotFound) {
+		found, err = f.routeFinder.FindServiceRoute(serviceSlug, "")
+		subpath = requestPath
+	}
+	if err != nil {
+		return ServiceRoute{}, "", serviceRouteFindError(err)
+	}
+	if found.Service.Status != consts.StatusEnabled || found.Route.Status != consts.StatusEnabled {
+		return ServiceRoute{}, "", gatewayError(CodeAPINotFound, http.StatusNotFound, "", nil)
+	}
+	if !routeSupportsProtocol(found.Route.Protocols, requestedProtocol) {
+		return ServiceRoute{}, "", gatewayError(CodeAPINotFound, http.StatusNotFound, "", nil)
+	}
+	if err := validateMethod(found.Route.AllowedMethods, method, requestedProtocol); err != nil {
+		return ServiceRoute{}, "", err
+	}
+	return ServiceRoute{Service: found.Service, Route: found.Route, Protocol: requestedProtocol}, subpath, nil
+}
+
+func serviceRouteFindError(err error) error {
+	switch {
+	case errors.Is(err, cache.ErrAPICacheNotReady):
+		return gatewayError(CodeCacheNotReady, http.StatusServiceUnavailable, "", err)
+	case errors.Is(err, cache.ErrAPIServiceNotFound), errors.Is(err, cache.ErrAPIRouteNotFound):
+		return gatewayError(CodeAPINotFound, http.StatusNotFound, "", err)
+	default:
+		return gatewayError(CodeUnavailable, http.StatusServiceUnavailable, "", err)
+	}
+}
+
+func hasExtraLeadingSlash(requestPath string) bool {
+	if strings.HasPrefix(requestPath, "//") {
+		return true
+	}
+	return len(requestPath) >= 4 && requestPath[0] == '/' && strings.EqualFold(requestPath[1:4], "%2f")
+}
+
+func validRouteRequest(serviceSlug, requestedProtocol string) error {
+	if !apiSlugPattern.MatchString(serviceSlug) {
 		return gatewayError(CodeInvalidRequest, http.StatusBadRequest, "", nil)
 	}
 	if requestedProtocol != ProtocolHTTP && requestedProtocol != ProtocolWebSocket {
 		return gatewayError(CodeInvalidRequest, http.StatusBadRequest, "", nil)
 	}
 	return nil
+}
+
+func splitAPIRequestPath(requestPath string) (routeSlug, subpath string) {
+	withoutLeadingSlash := strings.TrimPrefix(requestPath, "/")
+	if withoutLeadingSlash == "" {
+		return "", requestPath
+	}
+	separator := strings.IndexByte(withoutLeadingSlash, '/')
+	if separator < 0 {
+		return withoutLeadingSlash, ""
+	}
+	return withoutLeadingSlash[:separator], withoutLeadingSlash[separator:]
 }
 
 func routeSupportsProtocol(protocols []string, requested string) bool {

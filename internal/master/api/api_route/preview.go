@@ -17,7 +17,7 @@ import (
 
 type PreviewRequest struct {
 	APIServiceID   uint                     `json:"api_service_id" binding:"required"`
-	Slug           string                   `json:"slug" binding:"required"`
+	Slug           string                   `json:"slug" binding:"max=64"`
 	UpstreamPath   string                   `json:"upstream_path"`
 	ForwardSubpath bool                     `json:"forward_subpath"`
 	Sample         models.APIRequestExample `json:"sample"`

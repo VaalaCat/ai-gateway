@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,6 +26,7 @@ const (
 	BindURIAndBodyMap
 	BindStrictJSONText
 	BindURIAndStrictJSONBodyMap
+	BindURIAndStrictJSONText
 )
 
 var errInvalidJSONTextEncoding = errors.New("JSON body must use valid UTF-8 and Unicode surrogate pairs")
@@ -106,9 +108,40 @@ func (DefaultRequestBinder) Bind(c *gin.Context, mode BindMode, req any) error {
 		}
 		setter.SetBodyMap(body)
 		return nil
+	case BindURIAndStrictJSONText:
+		if err := decodeStrictJSONText(c, req); err != nil {
+			return err
+		}
+		return c.ShouldBindUri(req)
 	default:
 		return errors.New("unknown bind mode")
 	}
+}
+
+func decodeStrictJSONText(c *gin.Context, req any) error {
+	if c.Request == nil || c.Request.Body == nil {
+		return io.EOF
+	}
+	payload, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return err
+	}
+	if !jsontext.ValidEncoding(payload) {
+		return errInvalidJSONTextEncoding
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(req); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("JSON body must contain exactly one value")
+		}
+		return err
+	}
+	return nil
 }
 
 func bindStrictJSONText(c *gin.Context, req any) error {

@@ -14,7 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
@@ -66,7 +66,7 @@ func TestContextBuilderRestoresProviderPathBeforeSharedBuild(t *testing.T) {
 			require.Equal(t, tt.path, c.Request.URL.Path)
 			require.Equal(t, tt.path, c.Request.URL.RawPath)
 			require.Equal(t, tt.path, rctx.Request.URL.Path)
-			require.Equal(t, codec.PathToProtocol(tt.path), rctx.Input.InboundProto)
+			require.Equal(t, protocolconfig.PathToProtocol(tt.path), rctx.Input.InboundProto)
 			require.Same(t, user, rctx.Input.UserInfo)
 			require.Equal(t, "provider-real-model", rctx.Input.Model)
 			require.NotNil(t, rctx.State.Recorder)

@@ -165,13 +165,23 @@ export function APIRequestDetails({
         </span>
       </div>
 
-      {request.error_stage || request.error_code || request.service_missing_at_settlement ? (
+      {request.error_stage || request.error_code || request.error_message || request.service_missing_at_settlement ? (
         <Alert variant="destructive">
           <AlertTitle>{t("failureDetails")}</AlertTitle>
-          <AlertDescription className="flex flex-wrap gap-x-6 gap-y-1">
-            <span>{t("errorStage")}: {valueOrDash(request.error_stage)}</span>
-            <span>{t("errorCode")}: {valueOrDash(request.error_code)}</span>
-            {request.service_missing_at_settlement ? <span>{t("serviceMissingAtSettlement")}</span> : null}
+          <AlertDescription className="min-w-0">
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <span>{t("errorStage")}: {valueOrDash(request.error_stage)}</span>
+              <span>{t("errorCode")}: {valueOrDash(request.error_code)}</span>
+              {request.service_missing_at_settlement ? <span>{t("serviceMissingAtSettlement")}</span> : null}
+            </div>
+            {showInternal && request.error_message ? (
+              <div className="mt-2 min-w-0">
+                <div className="text-xs font-medium">{t("errorMessage")}</div>
+                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/50 p-2 font-mono text-xs">
+                  {request.error_message}
+                </pre>
+              </div>
+            ) : null}
           </AlertDescription>
         </Alert>
       ) : null}

@@ -122,6 +122,9 @@ class CatalogTransport {
     if (url.pathname === "/api/api-catalog/effective") {
       return Promise.resolve(json({ scope: "routes", route_ids: [] }));
     }
+    if (url.pathname === "/api/api-catalog/openapi") {
+      return Promise.resolve(json({ document: { paths: {} } }));
+    }
     return Promise.reject(new Error(`Unexpected request: ${key}`));
   });
 
@@ -147,6 +150,7 @@ const tokenServicePath = (tokenID: number, current = 1) => `/api/api-catalog/ser
 const tokenRoutePath = (tokenID: number, serviceID: number, current = 1) => `/api/api-catalog/routes?service_id=${serviceID}&page=${current}&page_size=50&token_id=${tokenID}`;
 const serviceSearchPath = (search: string, current = 1) => `/api/api-catalog/services?page=${current}&page_size=50&search=${encodeURIComponent(search)}`;
 const routeSearchPath = (serviceID: number, search: string, current = 1) => `/api/api-catalog/routes?service_id=${serviceID}&page=${current}&page_size=50&search=${encodeURIComponent(search)}`;
+const openAPIPath = (serviceID: number, tokenID?: number) => `/api/api-catalog/openapi?service_id=${serviceID}${tokenID === undefined ? "" : `&token_id=${tokenID}`}`;
 const ownerValidationPath = (routeID = 9, tokenID = 5) => `/api/tokens?usable_only=true&user_id=1&api_service_id=7&api_route_id=${routeID}&token_id=${tokenID}&page=1&page_size=1`;
 const globalValidationPath = (routeID = 9, tokenID = 5) => `/api/tokens?usable_only=true&api_service_id=7&api_route_id=${routeID}&token_id=${tokenID}&page=1&page_size=1`;
 
@@ -687,6 +691,176 @@ describe("APICatalogPage", () => {
     expect(within(mobile).queryByRole("combobox", { name: "mobileTokenPicker" })).not.toBeInTheDocument();
     expect(screen.getByTestId("catalog-desktop-service-navigation")).toHaveClass("hidden", "lg:block");
     expect(screen.getByTestId("catalog-main")).toHaveClass("min-w-0");
+  });
+
+  it("renders Service, operation navigation, document, and invocation in the normal desktop and mobile page flow", async () => {
+    seedSingleService();
+    transport.respond(openAPIPath(7), {
+      document: {
+        paths: {
+          "/forecast/{city}": {
+            "x-ai-gateway-route-slug": "forecast",
+            get: { summary: "City forecast", parameters: [{ name: "city", in: "path", required: true, example: "Paris" }], responses: { "200": { description: "Forecast" } } },
+          },
+        },
+      },
+    });
+
+    renderPage("service_id=7&route_id=9&path=%2Fforecast%2F%7Bcity%7D&method=get");
+
+    expect(await screen.findByTestId("catalog-openapi-workbench")).toBeInTheDocument();
+    expect(screen.getByTestId("catalog-desktop-service-navigation")).toContainElement(currentButton("Weather")!);
+    expect(screen.getByTestId("catalog-desktop-operation-navigation")).toHaveClass("hidden", "lg:block");
+    expect(screen.getAllByRole("button", { name: "GET /forecast/{city}" })).toHaveLength(2);
+    expect(screen.getByTestId("openapi-operation-document")).toHaveTextContent("City forecast");
+    expect(screen.getByTestId("openapi-invocation-workbench")).toBeInTheDocument();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it.each([
+    ["loading", 0, "openAPILoading"],
+    ["500 error", 500, "openAPILoadFailed"],
+    ["503 error", 503, "openAPILoadFailed"],
+    ["empty", 200, "openAPIEmpty"],
+  ])("keeps legacy Route navigation and invocation reachable for OpenAPI %s", async (state, status, message) => {
+    seedSingleService();
+    if (state === "loading") {
+      transport.sequence(openAPIPath(7), () => new Promise<Response>(() => {}));
+    } else if (status === 200) {
+      transport.respond(openAPIPath(7), { document: { paths: {} } });
+    } else {
+      transport.respond(openAPIPath(7), { code: "catalog_access_unavailable", error: "OpenAPI unavailable" }, status);
+    }
+
+    renderPage("service_id=7&route_id=9&protocol=http");
+
+    expect(await screen.findByTestId("invocation-workbench")).toBeInTheDocument();
+    expect(screen.getByTestId("catalog-mobile-toolbar")).toBeInTheDocument();
+    expect(within(screen.getByTestId("catalog-main")).getByRole("button", { name: "forecast" })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByText(message)).toBeInTheDocument();
+    if (state.endsWith("error")) expect(screen.getByRole("button", { name: "retry" })).toBeInTheDocument();
+  });
+
+  it("automatically loads the 51st Route identity before preserving an OpenAPI deep link", async () => {
+    const firstFifty = Array.from({ length: 50 }, (_, index): APICatalogRoute => ({
+      ...forecast,
+      id: index + 1,
+      slug: `route-${index + 1}`,
+    }));
+    const route51: APICatalogRoute = { ...forecast, id: 51, slug: "route-51" };
+    transport.respond(servicePath(), page([weather], 1, 1));
+    transport.respond(routePath(7), page(firstFifty, 1, 51));
+    transport.respond(routePath(7, 2), page([route51], 2, 51));
+    transport.respond(openAPIPath(7), {
+      document: {
+        paths: {
+          "/route-51/items": {
+            "x-ai-gateway-route-slug": "route-51",
+            get: { summary: "Operation 51", responses: { "200": { description: "ok" } } },
+          },
+        },
+      },
+    });
+
+    renderPage("service_id=7&route_id=51&path=%2Froute-51%2Fitems&method=get");
+
+    await waitFor(() => expect(transport.calls(routePath(7, 2))).toBe(1));
+    expect(await screen.findByTestId("catalog-openapi-workbench")).toHaveTextContent("Operation 51");
+    expect(screen.getAllByRole("button", { name: "GET /route-51/items" })[0]).toHaveAttribute("aria-current", "true");
+    await expectQuery("service_id=7&route_id=51&path=%2Froute-51%2Fitems&method=get");
+  });
+
+  it("keeps legacy invocation visible and reports documented Route identities still missing after pagination is exhausted", async () => {
+    seedSingleService();
+    transport.respond(openAPIPath(7), {
+      document: {
+        paths: {
+          "/missing/items": {
+            "x-ai-gateway-route-slug": "missing",
+            get: { responses: { "200": { description: "ok" } } },
+          },
+        },
+      },
+    });
+
+    renderPage("service_id=7&route_id=9&protocol=http");
+
+    expect(await screen.findByText("openAPIRoutesUnresolved")).toBeInTheDocument();
+    expect(screen.getByTestId("invocation-workbench")).toBeInTheDocument();
+    expect(within(screen.getByTestId("catalog-main")).getByRole("button", { name: "forecast" })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("stops OpenAPI Route identity pagination when a non-empty stale page adds no Route ID", async () => {
+    transport.respond(servicePath(), page([weather], 1, 1));
+    transport.respond(routePath(7), page([forecast], 1, 100));
+    transport.respond(routePath(7, 2), page([forecast], 2, 100));
+    transport.respond(openAPIPath(7), {
+      document: { paths: { "/missing": { "x-ai-gateway-route-slug": "missing", get: { responses: {} } } } },
+    });
+
+    renderPage("service_id=7&route_id=9&protocol=http");
+
+    expect(await screen.findByText("openAPIRoutesUnresolved")).toBeInTheDocument();
+    expect(transport.calls(routePath(7, 2))).toBe(1);
+    expect(transport.calls(routePath(7, 3))).toBe(0);
+    expect(screen.getByTestId("invocation-workbench")).toBeInTheDocument();
+  });
+
+  it("returns to legacy Route invocation when a warm OpenAPI refresh fails", async () => {
+    seedSingleService();
+    transport.sequence(
+      openAPIPath(7),
+      () => Promise.resolve(json({ document: { paths: { "/forecast": { "x-ai-gateway-route-slug": "forecast", get: { responses: {} } } } } })),
+      () => Promise.resolve(json({ code: "catalog_access_unavailable", error: "OpenAPI unavailable" }, 503)),
+    );
+    const view = renderPage("service_id=7&route_id=9&path=%2Fforecast&method=get");
+    expect(await screen.findByTestId("catalog-openapi-workbench")).toBeInTheDocument();
+
+    await view.queryClient.invalidateQueries({ queryKey: ["api-catalog", "openapi"] });
+
+    expect(await screen.findByText("openAPILoadFailed")).toBeInTheDocument();
+    expect(screen.getByTestId("invocation-workbench")).toBeInTheDocument();
+    expect(screen.queryByTestId("catalog-openapi-workbench")).toBeNull();
+  });
+
+  it("forgets a remembered Token when only OpenAPI reports token_not_available", async () => {
+    const usableToken = {
+      id: 5, user_id: 1, key: "sk-production-secret", name: "Production Token", status: 1,
+      expired_at: 0, models: "", trace_enabled: false, trace_mode: "full", api_role_mode: "explicit",
+      created_at: 1, updated_at: 1,
+    };
+    window.localStorage.setItem("token", jwt(1));
+    window.localStorage.setItem("aigw:api-catalog-token-id:1", "5");
+    window.dispatchEvent(new StorageEvent("storage", { key: "token" }));
+    seedSingleService();
+    transport.respond(globalValidationPath(), page([usableToken], 1, 1));
+    transport.respond(openAPIPath(7, 5), { code: "token_not_available", error: "Token unavailable" }, 404);
+
+    renderPage("service_id=7&route_id=9&protocol=http");
+
+    await waitFor(() => expect(window.localStorage.getItem("aigw:api-catalog-token-id:1")).toBeNull());
+    expect(await screen.findByTestId("catalog-token-scope")).toHaveTextContent("selectTokenForCatalog");
+    expect(screen.queryByTestId("invocation-workbench")).not.toBeInTheDocument();
+  });
+
+  it("keeps a remembered Token and legacy invocation when only OpenAPI returns 503", async () => {
+    const usableToken = {
+      id: 5, user_id: 1, key: "sk-production-secret", name: "Production Token", status: 1,
+      expired_at: 0, models: "", trace_enabled: false, trace_mode: "full", api_role_mode: "explicit",
+      created_at: 1, updated_at: 1,
+    };
+    window.localStorage.setItem("token", jwt(1));
+    window.localStorage.setItem("aigw:api-catalog-token-id:1", "5");
+    window.dispatchEvent(new StorageEvent("storage", { key: "token" }));
+    seedSingleService();
+    transport.respond(globalValidationPath(), page([usableToken], 1, 1));
+    transport.respond(openAPIPath(7, 5), { code: "catalog_access_unavailable", error: "OpenAPI unavailable" }, 503);
+
+    renderPage("service_id=7&route_id=9&protocol=http");
+
+    expect(await screen.findByText("openAPILoadFailed")).toBeInTheDocument();
+    expect(screen.getByTestId("invocation-workbench")).toBeInTheDocument();
+    expect(window.localStorage.getItem("aigw:api-catalog-token-id:1")).toBe("5");
   });
 
   it("searches unloaded Services on the server without letting candidates rewrite the deep link", async () => {

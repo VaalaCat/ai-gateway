@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -33,7 +34,7 @@ type ListRequest struct {
 }
 type CreateRequest struct {
 	APIServiceID          uint                     `json:"api_service_id" binding:"required"`
-	Slug                  string                   `json:"slug" binding:"required,max=64"`
+	Slug                  string                   `json:"slug" binding:"max=64"`
 	Protocols             []models.APIProtocol     `json:"protocols"`
 	AllowedMethods        []string                 `json:"allowed_methods"`
 	WebSocketSubprotocols []string                 `json:"websocket_subprotocols"`
@@ -108,6 +109,14 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 	return api.Created[models.APIRoute]{Value: row}, nil
 }
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (api.StatusResponse, error) {
+	if _, ok := req.Fields["openapi_paths"]; ok {
+		return api.StatusResponse{}, api.ErrorWithCode(
+			http.StatusBadRequest,
+			"openapi_document_requires_dedicated_endpoint",
+			"OpenAPI document must be updated through the dedicated endpoint",
+			nil,
+		)
+	}
 	row, err := h.route(c, req.ID)
 	if err != nil {
 		return api.StatusResponse{}, err

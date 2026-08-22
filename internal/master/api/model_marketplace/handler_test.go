@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	relayplan "github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/config"
@@ -23,6 +22,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
@@ -1936,9 +1936,9 @@ func offerPlanCandidate(
 
 func handlerOfferPlanModes() []relayplan.ModelOfferCandidateMode {
 	return []relayplan.ModelOfferCandidateMode{
-		{Protocol: codec.ProtocolOpenAIChat, Mode: state.ModeNative},
-		{Protocol: codec.ProtocolOpenAIResponses, Mode: state.ModeNative},
-		{Protocol: codec.ProtocolClaude, Mode: state.ModeNative},
+		{Protocol: llmkit.ProtocolOpenAIChat, Mode: state.ModeNative},
+		{Protocol: llmkit.ProtocolOpenAIResponses, Mode: state.ModeNative},
+		{Protocol: llmkit.ProtocolClaude, Mode: state.ModeNative},
 	}
 }
 

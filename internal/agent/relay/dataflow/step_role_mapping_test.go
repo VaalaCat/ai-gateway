@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/transform"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func TestStepRoleMapping_KeysOnOriginalModel(t *testing.T) {
@@ -16,15 +16,15 @@ func TestStepRoleMapping_KeysOnOriginalModel(t *testing.T) {
 	}
 	s := &StepRoleMapping{rules: rules}
 	p := &Pass{
-		Original: &codec.Request{Model: "real"},
-		Working: &codec.Request{Model: "upstream", Messages: []codec.Message{
-			{Role: codec.RoleSystem, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "s"}}},
+		Original: &llmkit.Request{Model: "real"},
+		Working: &llmkit.Request{Model: "upstream", Messages: []llmkit.Message{
+			{Role: llmkit.RoleSystem, Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "s"}}},
 		}},
 	}
 	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
-	if p.Working.Messages[0].Role != codec.RoleUser {
+	if p.Working.Messages[0].Role != llmkit.RoleUser {
 		t.Fatalf("role = %q, want user (rule matched on Original.Model=real)", p.Working.Messages[0].Role)
 	}
 }
@@ -32,15 +32,15 @@ func TestStepRoleMapping_KeysOnOriginalModel(t *testing.T) {
 func TestStepRoleMapping_NilRulesNoop(t *testing.T) {
 	s := &StepRoleMapping{rules: nil}
 	p := &Pass{
-		Original: &codec.Request{Model: "real"},
-		Working: &codec.Request{Model: "real", Messages: []codec.Message{
-			{Role: codec.RoleSystem, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "s"}}},
+		Original: &llmkit.Request{Model: "real"},
+		Working: &llmkit.Request{Model: "real", Messages: []llmkit.Message{
+			{Role: llmkit.RoleSystem, Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "s"}}},
 		}},
 	}
 	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
-	if p.Working.Messages[0].Role != codec.RoleSystem {
+	if p.Working.Messages[0].Role != llmkit.RoleSystem {
 		t.Fatalf("role mutated with nil rules: %q", p.Working.Messages[0].Role)
 	}
 }
@@ -49,13 +49,13 @@ func TestStepRoleMapping_NoMatchKeepsRoles(t *testing.T) {
 	rules := transform.ParseRoleMapping(`{"models":{"other":{"system":"user"}}}`)
 	s := &StepRoleMapping{rules: rules}
 	p := &Pass{
-		Original: &codec.Request{Model: "real"},
-		Working: &codec.Request{Model: "real", Messages: []codec.Message{
-			{Role: codec.RoleSystem, Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "s"}}},
+		Original: &llmkit.Request{Model: "real"},
+		Working: &llmkit.Request{Model: "real", Messages: []llmkit.Message{
+			{Role: llmkit.RoleSystem, Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "s"}}},
 		}},
 	}
 	_ = s.Apply(context.Background(), p)
-	if p.Working.Messages[0].Role != codec.RoleSystem {
+	if p.Working.Messages[0].Role != llmkit.RoleSystem {
 		t.Fatalf("role = %q, want system (no rule match)", p.Working.Messages[0].Role)
 	}
 }

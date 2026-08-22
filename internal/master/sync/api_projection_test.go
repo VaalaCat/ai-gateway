@@ -72,6 +72,18 @@ func TestAPIProjectionCopiesRouteSlicesAndUpstreamMap(t *testing.T) {
 	require.NotContains(t, string(upstreamBody), "service_id")
 }
 
+func TestAPIProjectionPreservesEmptySlugRootRoute(t *testing.T) {
+	got := NewAPIProjector(nil).ProjectRoute(models.APIRoute{
+		ID: 2, APIServiceID: 1, BackendID: 9, Slug: "",
+		Protocols:      datatypes.JSONSlice[models.APIProtocol]{models.APIProtocolHTTP},
+		ForwardSubpath: true, Status: 1,
+	})
+
+	require.Empty(t, got.Slug)
+	require.Equal(t, uint(1), got.ServiceID)
+	require.True(t, got.ForwardSubpath)
+}
+
 func TestAPIProjectionDecryptsExecutionSecretsAndFailsClosed(t *testing.T) {
 	cipher, err := byokcrypto.NewFromConfig("", "api-projection-test-secret")
 	require.NoError(t, err)

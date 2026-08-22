@@ -5,15 +5,15 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func TestParseProtocolOverride(t *testing.T) {
 	tests := []struct {
 		name string
 		in   map[string]any
-		want map[codec.Protocol]codec.Protocol
+		want map[llmkit.Protocol]llmkit.Protocol
 	}{
 		{
 			name: "valid mapping",
@@ -21,9 +21,9 @@ func TestParseProtocolOverride(t *testing.T) {
 				"openai_chat":      "claude",
 				"openai_responses": "openai_chat",
 			},
-			want: map[codec.Protocol]codec.Protocol{
-				codec.ProtocolOpenAIChat:      codec.ProtocolClaude,
-				codec.ProtocolOpenAIResponses: codec.ProtocolOpenAIChat,
+			want: map[llmkit.Protocol]llmkit.Protocol{
+				llmkit.ProtocolOpenAIChat:      llmkit.ProtocolClaude,
+				llmkit.ProtocolOpenAIResponses: llmkit.ProtocolOpenAIChat,
 			},
 		},
 		{
@@ -33,8 +33,8 @@ func TestParseProtocolOverride(t *testing.T) {
 				"openai_responses": "",
 				"claude":           "openai_chat",
 			},
-			want: map[codec.Protocol]codec.Protocol{
-				codec.ProtocolClaude: codec.ProtocolOpenAIChat,
+			want: map[llmkit.Protocol]llmkit.Protocol{
+				llmkit.ProtocolClaude: llmkit.ProtocolOpenAIChat,
 			},
 		},
 		{
@@ -45,8 +45,8 @@ func TestParseProtocolOverride(t *testing.T) {
 				"unknown":     "openai_chat",
 				"claude":      "openai_chat",
 			},
-			want: map[codec.Protocol]codec.Protocol{
-				codec.ProtocolClaude: codec.ProtocolOpenAIChat,
+			want: map[llmkit.Protocol]llmkit.Protocol{
+				llmkit.ProtocolClaude: llmkit.ProtocolOpenAIChat,
 			},
 		},
 		{
@@ -55,8 +55,8 @@ func TestParseProtocolOverride(t *testing.T) {
 				"openai_chat": 123,
 				"claude":      "openai_chat",
 			},
-			want: map[codec.Protocol]codec.Protocol{
-				codec.ProtocolClaude: codec.ProtocolOpenAIChat,
+			want: map[llmkit.Protocol]llmkit.Protocol{
+				llmkit.ProtocolClaude: llmkit.ProtocolOpenAIChat,
 			},
 		},
 		{
@@ -86,7 +86,7 @@ func TestChannelProtocolOverride(t *testing.T) {
 	tests := []struct {
 		name          string
 		otherSettings string
-		want          map[codec.Protocol]codec.Protocol
+		want          map[llmkit.Protocol]llmkit.Protocol
 	}{
 		{
 			name:          "empty other_settings",
@@ -101,7 +101,7 @@ func TestChannelProtocolOverride(t *testing.T) {
 		{
 			name:          "valid mapping",
 			otherSettings: `{"protocol_override":{"openai_chat":"claude"}}`,
-			want:          map[codec.Protocol]codec.Protocol{codec.ProtocolOpenAIChat: codec.ProtocolClaude},
+			want:          map[llmkit.Protocol]llmkit.Protocol{llmkit.ProtocolOpenAIChat: llmkit.ProtocolClaude},
 		},
 		{
 			name:          "invalid json",
@@ -118,7 +118,7 @@ func TestChannelProtocolOverride(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ch := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: tc.otherSettings}}
 			rules := ChannelOverrideRulesFor(ch)
-			var got map[codec.Protocol]codec.Protocol
+			var got map[llmkit.Protocol]llmkit.Protocol
 			if rules != nil {
 				got = rules.ChannelLevel
 			}
@@ -269,15 +269,15 @@ func TestChannelOverrideRulesFor_OnlyModelLevel(t *testing.T) {
 
 func newRule(pattern string, isExact bool, ov map[string]string) modelOverrideRule {
 	re := regexp.MustCompile("^" + pattern + "$")
-	out := make(map[codec.Protocol]codec.Protocol, len(ov))
+	out := make(map[llmkit.Protocol]llmkit.Protocol, len(ov))
 	for k, v := range ov {
-		var key codec.Protocol
+		var key llmkit.Protocol
 		if k == "*" {
 			key = ProtocolWildcard
 		} else {
-			key = codec.Protocol(k)
+			key = llmkit.Protocol(k)
 		}
-		out[key] = codec.Protocol(v)
+		out[key] = llmkit.Protocol(v)
 	}
 	return modelOverrideRule{Pattern: re, PatternRaw: pattern, IsExact: isExact, Overrides: out}
 }
@@ -290,10 +290,10 @@ func TestResolveOverride_NilRules(t *testing.T) {
 
 func TestResolveOverride_FallbackToChannelLevel(t *testing.T) {
 	rules := &ChannelOverrideRules{
-		ChannelLevel: map[codec.Protocol]codec.Protocol{"openai_chat": "claude"},
+		ChannelLevel: map[llmkit.Protocol]llmkit.Protocol{"openai_chat": "claude"},
 	}
 	got := ResolveOverride(rules, "gpt-4o")
-	want := map[codec.Protocol]codec.Protocol{"openai_chat": "claude"}
+	want := map[llmkit.Protocol]llmkit.Protocol{"openai_chat": "claude"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v want %v", got, want)
 	}
@@ -355,13 +355,13 @@ func TestResolveOverride_RegexConfigOrderTieBreak(t *testing.T) {
 
 func TestResolveOverride_NoModelMatchUsesChannelLevel(t *testing.T) {
 	rules := &ChannelOverrideRules{
-		ChannelLevel: map[codec.Protocol]codec.Protocol{"openai_chat": "claude"},
+		ChannelLevel: map[llmkit.Protocol]llmkit.Protocol{"openai_chat": "claude"},
 		ModelLevel: []modelOverrideRule{
 			newRule("nomatch-.*", false, map[string]string{"openai_chat": "openai_responses"}),
 		},
 	}
 	got := ResolveOverride(rules, "gpt-4o")
-	want := map[codec.Protocol]codec.Protocol{"openai_chat": "claude"}
+	want := map[llmkit.Protocol]llmkit.Protocol{"openai_chat": "claude"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("no model match → channel level; got %v want %v", got, want)
 	}
@@ -373,7 +373,7 @@ func TestResolveOverride_NoModelMatchUsesChannelLevel(t *testing.T) {
 // fixed set of valid inbound protocols. Inbound protocol is determined
 // by the client request URL, not by the channel's upstream endpoints, so
 // the wildcard MUST cover all 3 valid inbounds regardless of channel
-// configuration. Reachability is enforced later by codec.NegotiateOutboundProtocol.
+// configuration. Reachability is enforced later by llmkit.NegotiateOutboundProtocol.
 func TestResolveOverride_WildcardExpandsToAllInbounds_NotEndpoints(t *testing.T) {
 	// Reproduces user-reported bug: model "kimi.*" with overrides {"*":"claude"}.
 	// Before fix: inbound openai_chat → wildcard not expanded → empty map.
@@ -384,13 +384,13 @@ func TestResolveOverride_WildcardExpandsToAllInbounds_NotEndpoints(t *testing.T)
 		},
 	}
 	got := ResolveOverride(rules, "kimi-for-coding")
-	if got[codec.ProtocolOpenAIChat] != codec.ProtocolClaude {
+	if got[llmkit.ProtocolOpenAIChat] != llmkit.ProtocolClaude {
 		t.Fatalf("openai_chat should map to claude via wildcard; got map=%v", got)
 	}
-	if got[codec.ProtocolOpenAIResponses] != codec.ProtocolClaude {
+	if got[llmkit.ProtocolOpenAIResponses] != llmkit.ProtocolClaude {
 		t.Fatalf("openai_responses should map to claude via wildcard; got map=%v", got)
 	}
-	if got[codec.ProtocolClaude] != codec.ProtocolClaude {
+	if got[llmkit.ProtocolClaude] != llmkit.ProtocolClaude {
 		t.Fatalf("claude should map to claude via wildcard (identity is fine); got map=%v", got)
 	}
 }

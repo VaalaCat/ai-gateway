@@ -3,7 +3,9 @@ package master
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,11 +28,39 @@ import (
 const genericAPIProductionTokenKey = "sk-generic-api-production-wiring"
 
 type genericAPIProductionCase struct {
-	grantInvoke  bool
-	userQuota    int64
-	initialPrice int64
-	currentPrice int64
-	limiter      bool
+	grantInvoke         bool
+	userQuota           int64
+	initialPrice        int64
+	currentPrice        int64
+	limiter             bool
+	providerUnavailable bool
+}
+
+// Production break caught: transport failures must keep the client envelope
+// opaque while persisting a useful, sanitized error for administrators.
+func TestGenericAPIProductionWiringPersistsSafeTransportError(t *testing.T) {
+	fixture := newGenericAPIProductionWiringFixture(t, genericAPIProductionCase{
+		grantInvoke: true, userQuota: 50_000, initialPrice: 100, providerUnavailable: true,
+	})
+	response := fixture.invokeRaw(t, "generic-api-production-connection-refused")
+	defer response.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+
+	requestID := internalRequestID(t, response, "generic-api-production-connection-refused")
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.JSONEq(t, fmt.Sprintf(`{"error":{"code":"api_unavailable","request_id":%q}}`, requestID), string(body))
+
+	var log models.APIRequestLog
+	require.Eventually(t, func() bool {
+		logDB := fixture.server.App.GetLogDB()
+		return logDB != nil && logDB.Where("request_id = ?", requestID).Take(&log).Error == nil
+	}, 8*time.Second, 20*time.Millisecond)
+	require.Equal(t, "transport", log.ErrorStage)
+	require.Equal(t, genericapi.CodeUnavailable, log.ErrorCode)
+	require.Contains(t, log.ErrorMessage, "connection refused")
+	require.NotContains(t, log.ErrorMessage, "fixture-secret")
+	require.NotContains(t, log.ErrorMessage, "api_key")
 }
 
 type genericAPIProductionWiringFixture struct {
@@ -168,6 +198,13 @@ func newGenericAPIProductionWiringFixture(t *testing.T, testCase genericAPIProdu
 		<-fixture.providerRelease
 		response.WriteHeader(http.StatusOK)
 	}))
+	providerURL := provider.URL
+	if testCase.providerUnavailable {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		providerURL = "http://" + listener.Addr().String() + "?api_key=fixture-secret"
+		require.NoError(t, listener.Close())
+	}
 
 	cfg := &config.MasterRuntimeConfig{
 		Master: config.MasterConfig{
@@ -230,7 +267,7 @@ func newGenericAPIProductionWiringFixture(t *testing.T, testCase genericAPIProdu
 	upstream := models.APIUpstream{
 		BackendID: backend.ID,
 		Name:      "primary",
-		BaseURL:   provider.URL,
+		BaseURL:   providerURL,
 		Weight:    1,
 		AuthType:  models.APIUpstreamAuthNone,
 		Status:    consts.StatusEnabled,
@@ -309,6 +346,17 @@ func (f *genericAPIProductionWiringFixture) invoke(t *testing.T, requestID strin
 	_, err = io.Copy(io.Discard, response.Body)
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
+	return response
+}
+
+func (f *genericAPIProductionWiringFixture) invokeRaw(t *testing.T, requestID string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, f.baseURL+"/v1/api/weather/current", bytes.NewBufferString("production-wiring-body"))
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "Bearer "+genericAPIProductionTokenKey)
+	request.Header.Set(consts.HeaderXRequestID, requestID)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
 	return response
 }
 

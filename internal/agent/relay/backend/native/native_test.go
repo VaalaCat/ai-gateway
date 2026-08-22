@@ -10,17 +10,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude" // register claude codec for tests
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai" // register openai codec for tests
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 )
 
@@ -32,7 +31,7 @@ import (
 
 // newNativeTestCtx 构造一个最小可用的 RelayContext + gin.Context，
 // c.Request 指向 baseURL+path，便于 backend.Relay 走完整 codec 链路。
-func newNativeTestCtx(t *testing.T, body []byte, inbound codec.Protocol, isStream bool) (*state.RelayContext, *httptest.ResponseRecorder) {
+func newNativeTestCtx(t *testing.T, body []byte, inbound llmkit.Protocol, isStream bool) (*state.RelayContext, *httptest.ResponseRecorder) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
@@ -40,8 +39,11 @@ func newNativeTestCtx(t *testing.T, body []byte, inbound codec.Protocol, isStrea
 
 	// inbound path 仅用作语义占位，DecodeRequest 直接读 Body。
 	path := "/v1/chat/completions"
-	if inbound == codec.ProtocolClaude {
+	switch inbound {
+	case llmkit.ProtocolClaude:
 		path = "/v1/messages"
+	case llmkit.ProtocolOpenAIResponses:
+		path = "/v1/responses"
 	}
 	c.Request, _ = http.NewRequest(http.MethodPost, "http://gateway"+path,
 		strings.NewReader(string(body)))
@@ -68,6 +70,491 @@ func makeNativeChannel(baseURL string) *models.Channel {
 }
 
 // ==================== Tests ====================
+
+type recordingLLMKitClient struct {
+	calls   int
+	request llmkit.Request
+	target  llmkit.Target
+	options llmkit.CallOptions
+	events  []llmkit.Event
+	err     error
+}
+
+func (client *recordingLLMKitClient) Call(
+	_ context.Context,
+	request llmkit.Request,
+	target llmkit.Target,
+	options llmkit.CallOptions,
+) (<-chan llmkit.Event, error) {
+	client.calls++
+	client.request = request
+	client.target = target
+	client.options = options
+	if client.err != nil {
+		return nil, client.err
+	}
+	events := make(chan llmkit.Event, len(client.events))
+	for _, event := range client.events {
+		events <- event
+	}
+	close(events)
+	return events, nil
+}
+
+type recordingLLMKitCodec struct {
+	decoded        llmkit.DecodedRequest
+	decodeIn       llmkit.DecodeRequestInput
+	encodeIn       llmkit.EncodeResponseInput
+	chunks         []llmkit.EncodedChunk
+	encodeResponse func(llmkit.EncodeResponseInput) <-chan llmkit.EncodedChunk
+}
+
+func (fake *recordingLLMKitCodec) DecodeRequest(input llmkit.DecodeRequestInput) (llmkit.DecodedRequest, error) {
+	fake.decodeIn = input
+	return fake.decoded, nil
+}
+
+func (*recordingLLMKitCodec) EncodeRequest(llmkit.EncodeRequestInput) (llmkit.EncodedRequest, error) {
+	panic("native must let llmkit.Client encode the upstream request")
+}
+
+func (*recordingLLMKitCodec) DecodeResponse(context.Context, llmkit.DecodeResponseInput) (<-chan llmkit.Event, error) {
+	panic("native must let llmkit.Client decode the upstream response")
+}
+
+func (fake *recordingLLMKitCodec) EncodeResponse(_ context.Context, input llmkit.EncodeResponseInput) (<-chan llmkit.EncodedChunk, error) {
+	fake.encodeIn = input
+	if fake.encodeResponse != nil {
+		return fake.encodeResponse(input), nil
+	}
+	chunks := make(chan llmkit.EncodedChunk, len(fake.chunks))
+	for _, chunk := range fake.chunks {
+		chunks <- chunk
+	}
+	close(chunks)
+	return chunks, nil
+}
+
+func encodeContentEvents(input llmkit.EncodeResponseInput) <-chan llmkit.EncodedChunk {
+	chunks := make(chan llmkit.EncodedChunk)
+	go func() {
+		defer close(chunks)
+		for event := range input.Events {
+			if event.Type == llmkit.EventContentDelta && event.Delta != nil {
+				chunks <- llmkit.EncodedChunk{Data: []byte(event.Delta.Text)}
+			}
+		}
+	}()
+	return chunks
+}
+
+type eventErrorAfterWriteClient struct {
+	written <-chan struct{}
+}
+
+func (client eventErrorAfterWriteClient) Call(
+	_ context.Context,
+	_ llmkit.Request,
+	_ llmkit.Target,
+	_ llmkit.CallOptions,
+) (<-chan llmkit.Event, error) {
+	events := make(chan llmkit.Event)
+	go func() {
+		defer close(events)
+		events <- llmkit.Event{Type: llmkit.EventStreamStart}
+		events <- llmkit.Event{
+			Type:  llmkit.EventContentDelta,
+			Delta: &llmkit.DeltaPayload{Text: "first"},
+		}
+		<-client.written
+		events <- llmkit.Event{
+			Type:  llmkit.EventError,
+			Error: &llmkit.ErrorPayload{Message: "stream failed after commit"},
+		}
+	}()
+	return events, nil
+}
+
+type writeSignalResponseWriter struct {
+	gin.ResponseWriter
+	written chan struct{}
+	once    sync.Once
+}
+
+func (writer *writeSignalResponseWriter) Write(data []byte) (int, error) {
+	n, err := writer.ResponseWriter.Write(data)
+	if n > 0 {
+		writer.once.Do(func() { close(writer.written) })
+	}
+	return n, err
+}
+
+type monitoringLifecycleCodec struct {
+	encodeErr  error
+	sourceDone chan struct{}
+}
+
+func (*monitoringLifecycleCodec) DecodeRequest(llmkit.DecodeRequestInput) (llmkit.DecodedRequest, error) {
+	return llmkit.DecodedRequest{
+		Protocol: llmkit.ProtocolOpenAIChat,
+		Request: llmkit.Request{
+			Model: "client-model", Stream: true,
+		},
+	}, nil
+}
+
+func (*monitoringLifecycleCodec) EncodeRequest(llmkit.EncodeRequestInput) (llmkit.EncodedRequest, error) {
+	return llmkit.EncodedRequest{
+		Method: http.MethodPost,
+		Path:   "/v1/chat/completions",
+		Body:   []byte(`{"model":"provider-model","stream":true}`),
+	}, nil
+}
+
+func (codec *monitoringLifecycleCodec) DecodeResponse(ctx context.Context, _ llmkit.DecodeResponseInput) (<-chan llmkit.Event, error) {
+	events := make(chan llmkit.Event)
+	go func() {
+		defer close(codec.sourceDone)
+		defer close(events)
+		prefix := []llmkit.Event{
+			{Type: llmkit.EventContentDelta, Delta: &llmkit.DeltaPayload{Text: "first"}},
+			{Type: llmkit.EventUsage, Usage: &llmkit.Usage{PromptTokens: 7, CompletionTokens: 11}},
+			{Type: llmkit.EventContentDelta, Delta: &llmkit.DeltaPayload{Text: "second"}},
+		}
+		for _, event := range prefix {
+			select {
+			case events <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+		for {
+			select {
+			case events <- llmkit.Event{Type: llmkit.EventContentDelta, Delta: &llmkit.DeltaPayload{}}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return events, nil
+}
+
+func (codec *monitoringLifecycleCodec) EncodeResponse(ctx context.Context, input llmkit.EncodeResponseInput) (<-chan llmkit.EncodedChunk, error) {
+	chunks := make(chan llmkit.EncodedChunk)
+	go func() {
+		defer close(chunks)
+		contentChunks := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-input.Events:
+				if !ok {
+					return
+				}
+				if event.Type != llmkit.EventContentDelta || event.Delta == nil || event.Delta.Text == "" {
+					continue
+				}
+				contentChunks++
+				chunk := llmkit.EncodedChunk{Data: []byte(event.Delta.Text)}
+				if codec.encodeErr != nil && contentChunks == 2 {
+					chunk = llmkit.EncodedChunk{Err: codec.encodeErr}
+				}
+				select {
+				case chunks <- chunk:
+				case <-ctx.Done():
+					return
+				}
+				if chunk.Err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return chunks, nil
+}
+
+type lifecycleTrackingBody struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (*lifecycleTrackingBody) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (body *lifecycleTrackingBody) Close() error {
+	body.once.Do(func() { close(body.closed) })
+	return nil
+}
+
+type failSecondWriteResponseWriter struct {
+	gin.ResponseWriter
+	err   error
+	calls int
+}
+
+func (writer *failSecondWriteResponseWriter) Write(data []byte) (int, error) {
+	writer.calls++
+	if writer.calls == 2 {
+		return 0, writer.err
+	}
+	return writer.ResponseWriter.Write(data)
+}
+
+func runMonitoringLifecycleFailure(
+	t *testing.T,
+	codec *monitoringLifecycleCodec,
+	configureWriter func(*state.RelayContext),
+) (state.AttemptResult, *httptest.ResponseRecorder, <-chan struct{}) {
+	t.Helper()
+	bodyClosed := make(chan struct{})
+	transport := httpDoerTestTransport("monitoring", func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       &lifecycleTrackingBody{closed: bodyClosed},
+			Request:    request,
+		}, nil
+	})
+	agent := httpDoerTestAgent{pool: &httpDoerTransportPool{transport: transport}}
+	rctx, recorder := newNativeTestCtx(
+		t,
+		[]byte(`{"model":"client-model","stream":true}`),
+		llmkit.ProtocolOpenAIChat,
+		true,
+	)
+	if configureWriter != nil {
+		configureWriter(rctx)
+	}
+	result := (&Backend{Agent: agent, Codec: codec}).Relay(rctx, state.Attempt{
+		Channel: makeNativeChannel("monitoring://provider"), RealModel: "provider-model",
+	})
+	return result, recorder, bodyClosed
+}
+
+func assertMonitoringLifecycleFinalized(
+	t *testing.T,
+	result state.AttemptResult,
+	wantErr error,
+	sourceDone, bodyClosed <-chan struct{},
+) {
+	t.Helper()
+	if !errors.Is(result.Err, wantErr) {
+		t.Fatalf("Relay() error = %v, want %v", result.Err, wantErr)
+	}
+	if !result.Written {
+		t.Fatalf("Relay() result = %+v, want committed response", result)
+	}
+	if result.PromptTokens != 7 || result.CompletionTokens != 11 {
+		t.Fatalf("final usage = (%d,%d), want (7,11)", result.PromptTokens, result.CompletionTokens)
+	}
+	if result.ResponseText != "firstsecond" {
+		t.Fatalf("final response text = %q, want firstsecond", result.ResponseText)
+	}
+	select {
+	case <-sourceDone:
+	case <-time.After(time.Second):
+		t.Fatal("source producer did not stop after client response failure")
+	}
+	select {
+	case <-bodyClosed:
+	case <-time.After(time.Second):
+		t.Fatal("upstream response body was not closed after client response failure")
+	}
+}
+
+func TestBackend_EncoderFailureFinalizesMonitoringLifecycle(t *testing.T) {
+	wantErr := errors.New("encode second chunk")
+	codec := &monitoringLifecycleCodec{encodeErr: wantErr, sourceDone: make(chan struct{})}
+
+	result, recorder, bodyClosed := runMonitoringLifecycleFailure(t, codec, nil)
+
+	if got := recorder.Body.String(); got != "first" {
+		t.Fatalf("client body = %q, want first committed chunk", got)
+	}
+	assertMonitoringLifecycleFinalized(t, result, wantErr, codec.sourceDone, bodyClosed)
+}
+
+func TestBackend_SecondWriterFailureFinalizesMonitoringLifecycle(t *testing.T) {
+	wantErr := errors.New("write second chunk")
+	codec := &monitoringLifecycleCodec{sourceDone: make(chan struct{})}
+
+	result, recorder, bodyClosed := runMonitoringLifecycleFailure(t, codec, func(rctx *state.RelayContext) {
+		rctx.Context.Writer = &failSecondWriteResponseWriter{
+			ResponseWriter: rctx.Context.Writer,
+			err:            wantErr,
+		}
+	})
+
+	if got := recorder.Body.String(); got != "first" {
+		t.Fatalf("client body = %q, want first committed chunk", got)
+	}
+	assertMonitoringLifecycleFinalized(t, result, wantErr, codec.sourceDone, bodyClosed)
+}
+
+func TestBackend_LLMKitCallsClientOnceWithChannelTarget(t *testing.T) {
+	request := llmkit.Request{Model: "client-model", Stream: false}
+	fakeCodec := &recordingLLMKitCodec{
+		decoded: llmkit.DecodedRequest{Protocol: llmkit.ProtocolOpenAIChat, Request: request},
+		chunks:  []llmkit.EncodedChunk{{Data: []byte(`{"ok":true}`)}},
+	}
+	client := &recordingLLMKitClient{events: []llmkit.Event{
+		{Type: llmkit.EventStreamStart},
+		{Type: llmkit.EventDone},
+	}}
+	channel := makeNativeChannel("https://provider.example/base")
+	channel.Endpoints = `{"chat_completions":"/custom/chat"}`
+	rctx, recorder := newNativeTestCtx(t,
+		[]byte(`{"model":"client-model","messages":[{"role":"user","content":"hi"}]}`),
+		llmkit.ProtocolOpenAIChat,
+		false,
+	)
+
+	result := (&Backend{Codec: fakeCodec, Client: client}).Relay(rctx, state.Attempt{
+		Channel: channel, RealModel: "provider-model",
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Relay() error = %v", result.Err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("Client.Call calls = %d, want 1", client.calls)
+	}
+	wantTarget := llmkit.Target{
+		Protocol: llmkit.ProtocolOpenAIChat, BaseURL: "https://provider.example/base",
+		EndpointPath: "/custom/chat", APIKey: "k", Model: "provider-model",
+	}
+	if client.target.Protocol != wantTarget.Protocol || client.target.BaseURL != wantTarget.BaseURL ||
+		client.target.EndpointPath != wantTarget.EndpointPath || client.target.APIKey != wantTarget.APIKey ||
+		client.target.Model != wantTarget.Model {
+		t.Fatalf("Client.Call target = %+v, want %+v", client.target, wantTarget)
+	}
+	if client.request.Model != "provider-model" {
+		t.Fatalf("Client.Call request model = %q, want provider-model", client.request.Model)
+	}
+	if client.options.HTTPClient == nil {
+		t.Fatal("Client.Call must receive the attempt HTTP doer")
+	}
+	if fakeCodec.decodeIn.Method != http.MethodPost || fakeCodec.decodeIn.Path != "/v1/chat/completions" {
+		t.Fatalf("DecodeRequest input = %s %s", fakeCodec.decodeIn.Method, fakeCodec.decodeIn.Path)
+	}
+	if got := recorder.Body.String(); got != `{"ok":true}` {
+		t.Fatalf("client body = %q, want encoded llmkit response", got)
+	}
+}
+
+func TestBackend_LLMKitClientErrorProjectsAttemptResult(t *testing.T) {
+	root := errors.New("dial provider")
+	fakeCodec := &recordingLLMKitCodec{decoded: llmkit.DecodedRequest{
+		Protocol: llmkit.ProtocolOpenAIChat,
+		Request:  llmkit.Request{Model: "client-model"},
+	}}
+	client := &recordingLLMKitClient{err: &llmkit.Error{Stage: llmkit.ErrorStageConnect, Cause: root}}
+	rctx, _ := newNativeTestCtx(t, []byte(`{"model":"client-model"}`), llmkit.ProtocolOpenAIChat, false)
+
+	result := (&Backend{Codec: fakeCodec, Client: client}).Relay(rctx, state.Attempt{
+		Channel: makeNativeChannel("https://provider.example"), RealModel: "provider-model",
+	})
+
+	if !errors.Is(result.Err, root) {
+		t.Fatalf("Relay() error = %v, want root client error", result.Err)
+	}
+	if result.Written {
+		t.Fatalf("client error before response must remain retryable: %+v", result)
+	}
+	if client.calls != 1 {
+		t.Fatalf("Client.Call calls = %d, want 1", client.calls)
+	}
+}
+
+func TestTraceStageMapsStreamToUpstreamDecode(t *testing.T) {
+	if got := traceStage(llmkit.ErrorStageStream); got != trace.StageUpstreamDecode {
+		t.Fatalf("traceStage(stream) = %q, want %q", got, trace.StageUpstreamDecode)
+	}
+}
+
+func TestBackend_LLMKitScriptRejectionRestoresAttemptResult(t *testing.T) {
+	rejection := state.AttemptResult{Written: true, Err: errors.New("script rejected")}
+	fakeCodec := &recordingLLMKitCodec{decoded: llmkit.DecodedRequest{
+		Protocol: llmkit.ProtocolOpenAIChat,
+		Request:  llmkit.Request{Model: "client-model"},
+	}}
+	client := &recordingLLMKitClient{err: &llmkit.Error{
+		Stage: llmkit.ErrorStageConnect,
+		Cause: &scriptRejectedError{result: rejection},
+	}}
+	rctx, _ := newNativeTestCtx(t, []byte(`{"model":"client-model"}`), llmkit.ProtocolOpenAIChat, false)
+
+	result := (&Backend{Codec: fakeCodec, Client: client}).Relay(rctx, state.Attempt{
+		Channel: makeNativeChannel("https://provider.example"), RealModel: "provider-model",
+	})
+
+	if !result.Written || !errors.Is(result.Err, rejection.Err) {
+		t.Fatalf("Relay() result = %+v, want original script rejection %+v", result, rejection)
+	}
+}
+
+func TestBackend_LLMKitEventErrorBeforeCommitRemainsRetryable(t *testing.T) {
+	fakeCodec := &recordingLLMKitCodec{
+		decoded: llmkit.DecodedRequest{
+			Protocol: llmkit.ProtocolOpenAIChat,
+			Request:  llmkit.Request{Model: "client-model", Stream: true},
+		},
+		encodeResponse: encodeContentEvents,
+	}
+	client := &recordingLLMKitClient{events: []llmkit.Event{
+		{Type: llmkit.EventStreamStart},
+		{Type: llmkit.EventError, Error: &llmkit.ErrorPayload{Message: "stream failed before commit"}},
+	}}
+	rctx, recorder := newNativeTestCtx(t, []byte(`{"model":"client-model","stream":true}`), llmkit.ProtocolOpenAIChat, true)
+
+	result := (&Backend{Codec: fakeCodec, Client: client}).Relay(rctx, state.Attempt{
+		Channel: makeNativeChannel("https://provider.example"), RealModel: "provider-model",
+	})
+
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "stream failed before commit") {
+		t.Fatalf("Relay() error = %v, want upstream stream error", result.Err)
+	}
+	if result.Written {
+		t.Fatalf("EventError before commit must remain retryable: %+v", result)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("client body = %q, want empty fallback response", recorder.Body.String())
+	}
+}
+
+func TestBackend_LLMKitEventErrorAfterCommitTerminatesWrittenResponse(t *testing.T) {
+	fakeCodec := &recordingLLMKitCodec{
+		decoded: llmkit.DecodedRequest{
+			Protocol: llmkit.ProtocolOpenAIChat,
+			Request:  llmkit.Request{Model: "client-model", Stream: true},
+		},
+		encodeResponse: encodeContentEvents,
+	}
+	rctx, recorder := newNativeTestCtx(t, []byte(`{"model":"client-model","stream":true}`), llmkit.ProtocolOpenAIChat, true)
+	written := make(chan struct{})
+	rctx.Context.Writer = &writeSignalResponseWriter{
+		ResponseWriter: rctx.Context.Writer,
+		written:        written,
+	}
+
+	result := (&Backend{Codec: fakeCodec, Client: eventErrorAfterWriteClient{written: written}}).Relay(
+		rctx,
+		state.Attempt{Channel: makeNativeChannel("https://provider.example"), RealModel: "provider-model"},
+	)
+
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "stream failed after commit") {
+		t.Fatalf("Relay() error = %v, want upstream stream error", result.Err)
+	}
+	if !result.Written {
+		t.Fatalf("EventError after commit must terminate a written response: %+v", result)
+	}
+	if got := recorder.Body.String(); got != "first" {
+		t.Fatalf("client body = %q, want first committed chunk", got)
+	}
+	if result.ResponseText != "first" {
+		t.Fatalf("response text = %q, want first", result.ResponseText)
+	}
+}
 
 // TestBackend_BodyClosedOnEncodeFailure 守护 a699e7c 的 `defer resp.Body.Close()`
 // 修复。注入一个 RoundTripper-wrapped client transport pool 来计数 Close 调用，
@@ -97,7 +584,7 @@ func TestBackend_BodyClosedOnEncodeFailure(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, baseRec := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	// 把 c.Writer 替换成 Write 必失败的 writer。
 	// rec.WrapClientWriter 仍会再包一层，但底层 Write 委派回我们这层，errors propagate。
 	rctx.Context.Writer = &failingResponseWriter{ResponseWriter: rctx.Context.Writer, baseRec: baseRec}
@@ -135,7 +622,7 @@ func TestBackend_NegotiatesOutboundProtocol(t *testing.T) {
 
 	// claude inbound body
 	body := []byte(`{"model":"gpt-4","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	rctx, _ := newNativeTestCtx(t, body, codec.ProtocolClaude, false)
+	rctx, _ := newNativeTestCtx(t, body, llmkit.ProtocolClaude, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -160,7 +647,7 @@ func TestBackend_Upstream5xx_PropagatesError(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, _ := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -191,7 +678,7 @@ func TestBackend_SuccessfulRelay_ReturnsZeroErr(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, w := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -237,7 +724,7 @@ func TestBackend_ApplyModelMappingBeforeEncode(t *testing.T) {
 
 	rctx, _ := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -277,7 +764,7 @@ func TestBackend_StreamResponsePropagatesUsageEvents(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, w := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, true)
+		llmkit.ProtocolOpenAIChat, true)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -304,7 +791,7 @@ func TestBackend_InvalidUpstreamURL_DispatchError(t *testing.T) {
 	ch := makeNativeChannel("http://127.0.0.1:1")
 	rctx, _ := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -333,7 +820,7 @@ func TestBackend_Upstream4xx_Returns4xxAsUpstreamError(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, w := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -376,7 +863,7 @@ func TestHandleNativeError_429_RateLimit_GoesFallback(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, w := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -415,7 +902,7 @@ func TestHandleNativeError_408_Timeout_GoesFallback(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, w := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -451,7 +938,7 @@ func TestHandleNativeError_400_InvalidRequest(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, _ := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -488,7 +975,7 @@ func TestHandleNativeError_400_NoProviderType(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, _ := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 	backend := &Backend{Agent: nil}
 
 	got := backend.Relay(rctx, state.Attempt{Channel: ch, RealModel: "gpt-4"})
@@ -513,14 +1000,17 @@ func TestHandleNativeError_400_NoProviderType(t *testing.T) {
 // TestNative_DispatchHonorsCanceledContext 验证已取消的 client context 必须让
 // 上游调用立刻失败，而非永久 hang。
 func TestNative_DispatchHonorsCanceledContext(t *testing.T) {
-	b := &Backend{Agent: nil} // nil agent → BuildHTTPClient 用零值 client，无 transport
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	req, _ := http.NewRequest(http.MethodGet, "http://10.255.255.1:9/hang", nil) // 不可路由
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://10.255.255.1:9/hang", nil)
 	rec := trace.NewRecorder(trace.CaptureOff, 0)
+	doer := &attemptHTTPDoer{
+		attempt:  state.Attempt{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}},
+		protocol: llmkit.ProtocolOpenAIChat, recorder: rec,
+	}
 
 	start := time.Now()
-	_, err := b.dispatchUpstream(ctx, req, &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, rec)
+	_, err := doer.Do(req)
 	if err == nil {
 		t.Fatal("expected error on canceled context")
 	}
@@ -537,7 +1027,7 @@ func TestNativeErrorBodyIsBoundedAndTraceKeepsTail(t *testing.T) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer upstream.Close()
-	rctx, _ := newNativeTestCtx(t, []byte(`{"model":"gpt-4","messages":[]}`), codec.ProtocolOpenAIChat, false)
+	rctx, _ := newNativeTestCtx(t, []byte(`{"model":"gpt-4","messages":[]}`), llmkit.ProtocolOpenAIChat, false)
 	rctx.State.Recorder = trace.NewRecorder(trace.CaptureFull, 64)
 	got := (&Backend{}).Relay(rctx, state.Attempt{Channel: makeNativeChannel(upstream.URL), RealModel: "gpt-4"})
 	var upErr *common.UpstreamError
@@ -558,22 +1048,41 @@ func TestNativeErrorBodyIsBoundedAndTraceKeepsTail(t *testing.T) {
 
 func TestNativeErrorBodyReadErrorPropagates(t *testing.T) {
 	wantErr := errors.New("native error body failed")
-	resp := &http.Response{StatusCode: http.StatusBadGateway, Body: &backendErrorReadCloser{err: wantErr}}
-	result, handled := handleNativeErrorStatus(trace.NewRecorder(trace.CaptureFull, 64), resp, nil, nil, "gpt-4")
-	if !handled || !errors.Is(result.Err, wantErr) {
-		t.Fatalf("handled=%v err=%v, want read error", handled, result.Err)
+	transport := httpDoerTestTransport("readerr", func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway, Header: make(http.Header),
+			Body: &backendErrorReadCloser{err: wantErr}, Request: request,
+		}, nil
+	})
+	doer := &attemptHTTPDoer{
+		agent:    httpDoerTestAgent{pool: &httpDoerTransportPool{transport: transport}},
+		attempt:  state.Attempt{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}},
+		protocol: llmkit.ProtocolOpenAIChat, recorder: trace.NewRecorder(trace.CaptureFull, 64),
+	}
+	_, err := doer.Do(httpDoerRequest(t, "readerr://provider/v1", `{}`))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err=%v, want read error", err)
 	}
 }
 
 func TestNativeErrorBodyCancellationUnblocksRead(t *testing.T) {
 	body := newBackendBlockingReadCloser()
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
-	resp := &http.Response{StatusCode: http.StatusBadGateway, Body: body, Request: req}
+	transport := httpDoerTestTransport("blockread", func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: body, Request: request,
+		}, nil
+	})
+	doer := &attemptHTTPDoer{
+		agent:    httpDoerTestAgent{pool: &httpDoerTransportPool{transport: transport}},
+		attempt:  state.Attempt{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}},
+		protocol: llmkit.ProtocolOpenAIChat, recorder: trace.NewRecorder(trace.CaptureFull, 64),
+	}
+	req := httpDoerRequest(t, "blockread://provider/v1", `{}`).WithContext(ctx)
 	done := make(chan error, 1)
 	go func() {
-		result, _ := handleNativeErrorStatus(trace.NewRecorder(trace.CaptureFull, 64), resp, nil, nil, "gpt-4")
-		done <- result.Err
+		_, err := doer.Do(req)
+		done <- err
 	}()
 	<-body.entered
 	cancel()

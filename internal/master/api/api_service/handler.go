@@ -2,6 +2,7 @@ package api_service
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -76,6 +77,14 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 	return api.Created[models.APIService]{Value: row}, nil
 }
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (api.StatusResponse, error) {
+	if _, ok := req.Fields["openapi_document"]; ok {
+		return api.StatusResponse{}, api.ErrorWithCode(
+			http.StatusBadRequest,
+			"openapi_document_requires_dedicated_endpoint",
+			"OpenAPI document must be updated through the dedicated endpoint",
+			nil,
+		)
+	}
 	id, err := parseID(req.ID)
 	if err != nil {
 		return api.StatusResponse{}, err

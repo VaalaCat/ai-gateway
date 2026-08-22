@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // capturedUpstream 记录上游 server 收到的请求,供断言。
@@ -25,7 +25,7 @@ type capturedUpstream struct {
 // runRelayCapture 跑一次 native.Relay,返回上游实际收到的请求。
 // 上游 server 固定回一个最小可解码的 openai chat 响应,保证 Relay 不在 decode 响应处早退;
 // 即便响应处理出错也无妨——我们只断言"上游收到的请求"(它在发送时即被记录)。
-func runRelayCapture(t *testing.T, ch *models.Channel, reqBody string, inbound codec.Protocol, realModel string) capturedUpstream {
+func runRelayCapture(t *testing.T, ch *models.Channel, reqBody string, inbound llmkit.Protocol, realModel string) capturedUpstream {
 	t.Helper()
 	var cap capturedUpstream
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +57,7 @@ func TestChar_ModelMapping_RemapsUpstreamModel(t *testing.T) {
 		Models:       "real-model",
 		ModelMapping: `{"real-model":"upstream-model"}`,
 	}
-	cap := runRelayCapture(t, ch, chatBody, codec.ProtocolOpenAIChat, "real-model")
+	cap := runRelayCapture(t, ch, chatBody, llmkit.ProtocolOpenAIChat, "real-model")
 	if cap.Body["model"] != "upstream-model" {
 		t.Fatalf("upstream model = %v, want upstream-model", cap.Body["model"])
 	}
@@ -69,7 +69,7 @@ func TestChar_ModelMapping_NoMappingKeepsRealModel(t *testing.T) {
 		Key:         "k",
 		Models:      "real-model",
 	}
-	cap := runRelayCapture(t, ch, chatBody, codec.ProtocolOpenAIChat, "real-model")
+	cap := runRelayCapture(t, ch, chatBody, llmkit.ProtocolOpenAIChat, "real-model")
 	if cap.Body["model"] != "real-model" {
 		t.Fatalf("upstream model = %v, want real-model (no mapping)", cap.Body["model"])
 	}
@@ -82,7 +82,7 @@ func TestChar_SystemPrompt_Injected(t *testing.T) {
 		Key:    "k",
 		Models: "real-model",
 	}
-	cap := runRelayCapture(t, ch, chatBody, codec.ProtocolOpenAIChat, "real-model")
+	cap := runRelayCapture(t, ch, chatBody, llmkit.ProtocolOpenAIChat, "real-model")
 	msgs, _ := cap.Body["messages"].([]any)
 	if len(msgs) == 0 {
 		t.Fatal("no messages in upstream body")
@@ -103,7 +103,7 @@ func TestChar_RoleMapping_DefaultRemap(t *testing.T) {
 		Models: "req-model",
 	}
 	body := `{"model":"req-model","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}`
-	cap := runRelayCapture(t, ch, body, codec.ProtocolOpenAIChat, "req-model")
+	cap := runRelayCapture(t, ch, body, llmkit.ProtocolOpenAIChat, "req-model")
 	msgs, _ := cap.Body["messages"].([]any)
 	if len(msgs) == 0 {
 		t.Fatal("no messages in upstream body")
@@ -133,7 +133,7 @@ func TestChar_RoleMapping_ByRequestedModel(t *testing.T) {
 		ModelMapping: `{"real-model":"upstream-model"}`,
 	}
 	body := `{"model":"real-model","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}`
-	cap := runRelayCapture(t, ch, body, codec.ProtocolOpenAIChat, "real-model")
+	cap := runRelayCapture(t, ch, body, llmkit.ProtocolOpenAIChat, "real-model")
 	msgs, _ := cap.Body["messages"].([]any)
 	if len(msgs) == 0 {
 		t.Fatal("no messages in upstream body")
@@ -172,7 +172,7 @@ func TestChar_Thinking_StripWhenOff(t *testing.T) {
 			]}
 		]
 	}`
-	cap := runRelayCapture(t, ch, claudeBody, codec.ProtocolClaude, "claude-3-7")
+	cap := runRelayCapture(t, ch, claudeBody, llmkit.ProtocolClaude, "claude-3-7")
 	msgs, _ := cap.Body["messages"].([]any)
 	for _, m := range msgs {
 		mm := m.(map[string]any)
@@ -197,7 +197,7 @@ func TestChar_ParamOverride_MergedIntoBody(t *testing.T) {
 		Key:    "k",
 		Models: "real-model",
 	}
-	cap := runRelayCapture(t, ch, chatBody, codec.ProtocolOpenAIChat, "real-model")
+	cap := runRelayCapture(t, ch, chatBody, llmkit.ProtocolOpenAIChat, "real-model")
 	temp, ok := cap.Body["temperature"].(float64)
 	if !ok {
 		t.Fatalf("temperature not found or wrong type in upstream body: %v", cap.Body["temperature"])
@@ -214,7 +214,7 @@ func TestChar_HeaderOverride_SetOnRequest(t *testing.T) {
 		Models:         "real-model",
 		HeaderOverride: `{"X-Test":"v"}`,
 	}
-	cap := runRelayCapture(t, ch, chatBody, codec.ProtocolOpenAIChat, "real-model")
+	cap := runRelayCapture(t, ch, chatBody, llmkit.ProtocolOpenAIChat, "real-model")
 	if cap.Header.Get("X-Test") != "v" {
 		t.Fatalf("X-Test header = %q, want v", cap.Header.Get("X-Test"))
 	}
@@ -224,8 +224,8 @@ func TestChar_HeaderOverride_SetOnRequest(t *testing.T) {
 // 出站协议协商:openai_chat 入站 → 强制 claude 出站。断言上游 PATH 为 claude 的
 // /v1/messages,证明协议协商 + 匹配的 outbound codec 仍把请求送过新 dataflow 路径。
 //
-// JSON 形状(见 upstream/overrides.go parseModelProtocolOverride / codec.go
-// NegotiateOutboundProtocol):overrides 的 key/value 是 codec.Protocol 字符串值
+// JSON 形状(见 upstream/overrides.go parseModelProtocolOverride / llmkit.go
+// NegotiateOutboundProtocol):overrides 的 key/value 是 llmkit.Protocol 字符串值
 // (openai_chat / openai_responses / claude),不是 endpoint key。
 // endpoints / supportedAPITypes 都不设 → isReachable 返回 true,override 生效。
 func TestChar_ProtocolOverride(t *testing.T) {
@@ -237,7 +237,7 @@ func TestChar_ProtocolOverride(t *testing.T) {
 		Key:    "k",
 		Models: "real-model",
 	}
-	cap := runRelayCapture(t, ch, chatBody, codec.ProtocolOpenAIChat, "real-model")
+	cap := runRelayCapture(t, ch, chatBody, llmkit.ProtocolOpenAIChat, "real-model")
 	if cap.Path != "/v1/messages" {
 		t.Fatalf("upstream path = %q, want /v1/messages (claude outbound forced by protocol override)", cap.Path)
 	}
@@ -295,7 +295,7 @@ func TestChar_ChatToResponsesPreservesImageContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := `{"model":"real-model","messages":[{"role":"user","content":` + tt.content + `}]}`
-			cap := runRelayCapture(t, ch, body, codec.ProtocolOpenAIChat, "real-model")
+			cap := runRelayCapture(t, ch, body, llmkit.ProtocolOpenAIChat, "real-model")
 			if cap.Path != "/v1/responses" {
 				t.Fatalf("upstream path = %q, want /v1/responses", cap.Path)
 			}
@@ -354,7 +354,7 @@ func TestChar_ResponsesFunctionToolFallback(t *testing.T) {
 		]
 	}`
 
-	cap := runRelayCapture(t, ch, body, codec.ProtocolOpenAIResponses, "glm-5.2")
+	cap := runRelayCapture(t, ch, body, llmkit.ProtocolOpenAIResponses, "glm-5.2")
 	if cap.Path != "/api/v1/responses" {
 		t.Fatalf("upstream path = %q, want /api/v1/responses", cap.Path)
 	}
@@ -437,7 +437,7 @@ func TestChar_ResponsesFunctionFallbackRestoresCustomToolCall(t *testing.T) {
 				Key: "k", Models: "glm-5.2",
 			}
 			body := []byte(`{"model":"gpt-5.5","stream":` + strconv.FormatBool(stream) + `,"input":"edit","tools":[{"type":"custom","name":"apply_patch","description":"Edit files","format":{"type":"grammar"}}]}`)
-			rctx, recorder := newNativeTestCtx(t, body, codec.ProtocolOpenAIResponses, stream)
+			rctx, recorder := newNativeTestCtx(t, body, llmkit.ProtocolOpenAIResponses, stream)
 
 			result := (&Backend{}).Relay(rctx, state.Attempt{Channel: ch, RealModel: "glm-5.2"})
 			if result.Err != nil {
@@ -471,7 +471,7 @@ func TestChar_ResponsesInbound(t *testing.T) {
 		Models:      "real-model",
 	}
 	respBody := `{"model":"req-model","input":[{"role":"user","content":"hi"}]}`
-	cap := runRelayCapture(t, ch, respBody, codec.ProtocolOpenAIResponses, "real-model")
+	cap := runRelayCapture(t, ch, respBody, llmkit.ProtocolOpenAIResponses, "real-model")
 	if cap.Body["model"] != "real-model" {
 		t.Fatalf("upstream model = %v, want real-model", cap.Body["model"])
 	}
@@ -503,7 +503,7 @@ func TestChar_ForwardClientHeaders_E2E(t *testing.T) {
 	ch := makeNativeChannel(upstream.URL)
 	rctx, _ := newNativeTestCtx(t,
 		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
-		codec.ProtocolOpenAIChat, false)
+		llmkit.ProtocolOpenAIChat, false)
 
 	// 注入入站头，模拟客户端请求携带自定义头、User-Agent 以及凭证。
 	rctx.Context.Request.Header.Set("X-Foo", "bar")

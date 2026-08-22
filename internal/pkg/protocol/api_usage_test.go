@@ -7,12 +7,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAPIUsageEntryJSONRoundTripPreservesIndependentAPIFacts(t *testing.T) {
+func TestAPIUsageEntryErrorMessageJSONRoundTripPreservesIndependentAPIFacts(t *testing.T) {
 	var want APIUsageEntry
 	require.NoError(t, json.Unmarshal([]byte(`{
 		"request_id":"request","api_service_id":7,"api_route_id":9,"api_upstream_id":11,
 		"source_agent_id":"source","execution_agent_id":"execution","provider_dispatch_known":true,
-		"rate_limit_hit_total":2,"rate_limit_hits_truncated":true,
+		"error_message":"connection refused","rate_limit_hit_total":2,"rate_limit_hits_truncated":true,
 		"rate_limit_hits":[{"limiter_id":1,"name":"one","dimension":"rate/shared","bucket":"global:0:shared","decision":"allow"}]
 	}`), &want))
 	encoded, err := json.Marshal(want)
@@ -21,6 +21,7 @@ func TestAPIUsageEntryJSONRoundTripPreservesIndependentAPIFacts(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &fields))
 	require.EqualValues(t, 2, fields["rate_limit_hit_total"])
 	require.Equal(t, true, fields["rate_limit_hits_truncated"])
+	require.Equal(t, "connection refused", fields["error_message"])
 	var got APIUsageEntry
 	require.NoError(t, json.Unmarshal(encoded, &got))
 	require.Equal(t, want, got)

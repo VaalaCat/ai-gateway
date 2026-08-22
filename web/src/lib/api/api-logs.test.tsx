@@ -69,6 +69,34 @@ describe("generic API log hooks", () => {
     expect(apiGet).toHaveBeenNthCalledWith(2, "/api-request-traces?request_id=mine");
   });
 
+  it("consumes an administrator error message from the log payload", async () => {
+    apiGet.mockResolvedValueOnce({
+      data: [{ request_id: "req-failed", error_message: "connection refused" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+
+    const { result } = renderHook(() => useAPIRequestLogs({}, "admin"), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.data[0]?.error_message).toBe("connection refused");
+  });
+
+  it("accepts a Portal log payload without an internal error message", async () => {
+    apiGet.mockResolvedValueOnce({
+      data: [{ request_id: "req-portal" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+
+    const { result } = renderHook(() => useAPIRequestLogs({}, "portal"), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.data[0]?.error_message).toBeUndefined();
+  });
+
   it("exposes a 503 log-store error instead of converting it to an empty result", async () => {
     apiGet.mockRejectedValueOnce(new ApiError(503, "log database is temporarily unavailable"));
     const { result } = renderHook(() => useAPIRequestLogs({}), { wrapper });

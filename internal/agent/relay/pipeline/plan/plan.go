@@ -193,7 +193,12 @@ func (s *defaultSolver) applyAffinity(rctx *state.RelayContext, realModel string
 	if uid == 0 {
 		return ordered
 	}
-	key := affinity.Key{UserID: uid, TokenID: rctx.Input.UserInfo.TokenID, RealModel: realModel}
+	key := affinity.BuildKey(
+		rctx.Input.AffinityIdentity,
+		uid,
+		rctx.Input.UserInfo.TokenID,
+		realModel,
+	)
 	entry, ok := s.Affinity.Lookup(key)
 	if !ok {
 		return ordered

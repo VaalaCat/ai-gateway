@@ -100,21 +100,36 @@ See [`config.example.yaml`](config.example.yaml) for a complete template.
 
 ### Generic API Gateway
 
-Administrators configure Generic API services, routes, upstreams, access roles,
-Agent routes, and rate limiters from the dashboard. Clients invoke an enabled
-route with a normal API token at:
+Administrators can import an OpenAPI 3.0 or 3.1 JSON document from **API
+Services → Import OpenAPI**. Review the detected server and Route groups before
+importing. After import, open the Service detail page to edit the platform copy
+of the document or export a sanitized OpenAPI document. The platform copy is
+the source of truth after import; upload the exported document to repeat the
+workflow in another Service.
+
+Users open **API Catalog**, select one of their Tokens, then browse only the
+Services, Routes, paths, and operations that Token can invoke. The operation
+view substitutes path parameters, builds the final public URL, and can send an
+online request. An explicit Route is invoked at:
 
 ```text
 /v1/api/{service_slug}/{route_slug}
 /v1/api/{service_slug}/{route_slug}/{subpath...}
 ```
 
-The route controls the allowed HTTP Method, whether trailing subpaths are
-forwarded, and whether the protocol is HTTP or WebSocket. A token or its owner
-must receive an `invoke` permission for the matching `api_service` or
-`api_route`; quota and bound rate limiters are then applied automatically.
-`price_per_call` is an integer quota amount where `100000` equals USD 1 and `0`
-means free.
+Documents whose routable paths begin at `/` or with a path parameter can create
+an empty-slug root Route. It keeps the Route segment out of the public URL:
+
+```text
+/v1/api/{service_slug}
+/v1/api/{service_slug}/{dynamic_path...}
+```
+
+Route authorization is a prefix boundary, not an OpenAPI operation allow-list.
+Once a Token can invoke a Route, runtime enforcement uses that Route's protocol,
+combined allowed HTTP methods, and subpath policy; it does not grant or deny
+individual OpenAPI operations independently. Split operations into separate
+Routes when they require different access grants.
 
 For rolling upgrades, upgrade the Master before enabling Generic API traffic,
 then upgrade every Agent that can be selected as an execution Agent. A remote

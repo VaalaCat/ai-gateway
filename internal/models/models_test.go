@@ -96,8 +96,10 @@ func TestAutoMigrateCoreAPIRoutingTargetModels(t *testing.T) {
 
 	require.NoError(t, MigrateCoreDB(db))
 	require.True(t, db.Migrator().HasTable(&APIBackend{}))
+	require.True(t, db.Migrator().HasColumn(&APIService{}, "openapi_document"))
 	require.True(t, db.Migrator().HasColumn(&APIRoute{}, "backend_id"))
 	require.True(t, db.Migrator().HasColumn(&APIRoute{}, "example_request"))
+	require.True(t, db.Migrator().HasColumn(&APIRoute{}, "openapi_paths"))
 	require.True(t, db.Migrator().HasColumn(&APIUpstream{}, "backend_id"))
 	require.False(t, db.Migrator().HasColumn(&APIUpstream{}, "api_service_id"))
 }

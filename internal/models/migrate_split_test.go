@@ -118,6 +118,21 @@ func TestAPICoreAndLogModelsMigrate(t *testing.T) {
 	require.False(t, logDB.Migrator().HasTable(&UsageLog{}), "legacy usage_logs must not return to the log DB")
 }
 
+// Production break caught: a log database migration must retain the safe error
+// text for administrators while old empty records remain readable.
+func TestAPIRequestLogErrorMessageRoundTripAfterMigration(t *testing.T) {
+	db := openSplitTestDB(t)
+	require.NoError(t, MigrateLogDB(db))
+	require.True(t, db.Migrator().HasColumn(&APIRequestLog{}, "error_message"))
+	require.NoError(t, db.Create(&APIRequestLog{RequestID: "error-message", ErrorMessage: "connection refused"}).Error)
+	require.NoError(t, db.Create(&APIRequestLog{RequestID: "legacy-empty"}).Error)
+	var rows []APIRequestLog
+	require.NoError(t, db.Order("request_id").Find(&rows).Error)
+	require.Len(t, rows, 2)
+	require.Equal(t, "connection refused", rows[0].ErrorMessage)
+	require.Empty(t, rows[1].ErrorMessage)
+}
+
 func TestMigrateLogDBCreatesDailyBillingBackfillSchema(t *testing.T) {
 	db := openSplitTestDB(t)
 	require.NoError(t, MigrateLogDB(db))

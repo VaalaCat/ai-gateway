@@ -7,18 +7,15 @@ import (
 
 	agentapp "github.com/VaalaCat/ai-gateway/internal/agent/app"
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"
 )
 
 func TestModelOfferPlanFinderSharesRelayCandidateRules(t *testing.T) {
@@ -108,7 +105,7 @@ func TestModelOfferPlanFinderSharesRelayCandidateRules(t *testing.T) {
 
 			got, err := finder.Find(t.Context(), ModelOfferPlanQuery{
 				Model: "model-a", UserInfo: ui, ForcedChannelID: test.forcedID,
-				InboundProtocols: []codec.Protocol{codec.ProtocolOpenAIChat},
+				InboundProtocols: []llmkit.Protocol{llmkit.ProtocolOpenAIChat},
 			})
 			require.NoError(t, err)
 			require.Equal(t, test.wantKeys, modelOfferCandidateKeys(got.Candidates))
@@ -118,7 +115,7 @@ func TestModelOfferPlanFinderSharesRelayCandidateRules(t *testing.T) {
 				require.Empty(t, got.Blocked)
 			}
 
-			relayContext := modelOfferRelayContext(store, "model-a", ui, test.forcedID, codec.ProtocolOpenAIChat)
+			relayContext := modelOfferRelayContext(store, "model-a", ui, test.forcedID, llmkit.ProtocolOpenAIChat)
 			relayErr := NewSolver(nil).Solve(relayContext)
 			if test.wantRelay != nil {
 				require.ErrorIs(t, relayErr, test.wantRelay)
@@ -170,7 +167,7 @@ func TestModelOfferPlanFinderUsesDeterministicExhaustiveRoutingAndModes(t *testi
 	finder := NewModelOfferPlanFinder(store)
 	query := ModelOfferPlanQuery{
 		Model: "route", UserInfo: ui,
-		InboundProtocols: []codec.Protocol{codec.ProtocolOpenAIChat, codec.ProtocolClaude},
+		InboundProtocols: []llmkit.Protocol{llmkit.ProtocolOpenAIChat, llmkit.ProtocolClaude},
 	}
 
 	var first ModelOfferPlan
@@ -188,18 +185,18 @@ func TestModelOfferPlanFinderUsesDeterministicExhaustiveRoutingAndModes(t *testi
 	require.Equal(t, []string{
 		"nested-real:admin:1", "nested-real:admin:2", "token-real:admin:3",
 	}, modelOfferCandidateKeys(first.Candidates))
-	require.Equal(t, state.ModePassthrough, modelOfferMode(first.Candidates[0], codec.ProtocolOpenAIChat))
-	require.Equal(t, state.ModeNative, modelOfferMode(first.Candidates[0], codec.ProtocolClaude))
-	require.Equal(t, state.ModeLegacy, modelOfferMode(first.Candidates[1], codec.ProtocolOpenAIChat))
+	require.Equal(t, state.ModePassthrough, modelOfferMode(first.Candidates[0], llmkit.ProtocolOpenAIChat))
+	require.Equal(t, state.ModeNative, modelOfferMode(first.Candidates[0], llmkit.ProtocolClaude))
+	require.Equal(t, state.ModeLegacy, modelOfferMode(first.Candidates[1], llmkit.ProtocolOpenAIChat))
 
 	// A high Relay budget exposes the same candidate identity/mode set. The
 	// finder remains exhaustive even though the persisted RetryMax is one.
 	loadPlanSettings(store, 100, 0)
-	relayContext := modelOfferRelayContext(store, "route", ui, 0, codec.ProtocolOpenAIChat)
+	relayContext := modelOfferRelayContext(store, "route", ui, 0, llmkit.ProtocolOpenAIChat)
 	require.NoError(t, NewSolver(nil).Solve(relayContext))
 	require.Equal(t, modelOfferCandidateKeys(first.Candidates), attemptCandidateKeys(relayContext.State.Plan.Attempts))
 	require.Equal(t,
-		modelOfferModesByKey(first.Candidates, codec.ProtocolOpenAIChat),
+		modelOfferModesByKey(first.Candidates, llmkit.ProtocolOpenAIChat),
 		attemptModesByKey(relayContext.State.Plan.Attempts),
 	)
 }
@@ -292,7 +289,7 @@ func modelOfferRelayContext(
 	model string,
 	ui *app.UserInfo,
 	forcedID uint,
-	protocol codec.Protocol,
+	protocol llmkit.Protocol,
 ) *state.RelayContext {
 	agentApplication := agentapp.NewDefaultAgentApplication(
 		store, nil, zap.NewNop(), &config.AgentRuntimeConfig{}, nil,
@@ -320,7 +317,7 @@ func attemptCandidateKeys(attempts []state.Attempt) []string {
 	return keys
 }
 
-func modelOfferMode(candidate ModelOfferCandidate, protocol codec.Protocol) state.RelayMode {
+func modelOfferMode(candidate ModelOfferCandidate, protocol llmkit.Protocol) state.RelayMode {
 	for _, mode := range candidate.Modes {
 		if mode.Protocol == protocol {
 			return mode.Mode
@@ -331,7 +328,7 @@ func modelOfferMode(candidate ModelOfferCandidate, protocol codec.Protocol) stat
 
 func modelOfferModesByKey(
 	candidates []ModelOfferCandidate,
-	protocol codec.Protocol,
+	protocol llmkit.Protocol,
 ) map[string]state.RelayMode {
 	modes := make(map[string]state.RelayMode, len(candidates))
 	for _, candidate := range candidates {

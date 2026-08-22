@@ -197,11 +197,11 @@ type genericAPIE2EWebSocketRouteFinder struct {
 	route genericAPIE2EWebSocketRouteFixture
 }
 
-func (f genericAPIE2EWebSocketRouteFinder) Find(service, route, method, requestedProtocol string) (genericapi.ServiceRoute, error) {
-	if service != f.route.service.Slug || route != f.route.route.Slug || method != http.MethodGet || requestedProtocol != genericapi.ProtocolWebSocket {
-		return genericapi.ServiceRoute{}, genericapi.ErrExecutionUnavailable
+func (f genericAPIE2EWebSocketRouteFinder) Find(service, requestPath, method, requestedProtocol string) (genericapi.ServiceRoute, string, error) {
+	if service != f.route.service.Slug || requestPath != "/"+f.route.route.Slug || method != http.MethodGet || requestedProtocol != genericapi.ProtocolWebSocket {
+		return genericapi.ServiceRoute{}, "", genericapi.ErrExecutionUnavailable
 	}
-	return genericapi.ServiceRoute{Service: f.route.service, Route: f.route.route, Protocol: requestedProtocol}, nil
+	return genericapi.ServiceRoute{Service: f.route.service, Route: f.route.route, Protocol: requestedProtocol}, "", nil
 }
 
 func (f genericAPIE2EWebSocketRouteFinder) FindServiceRouteByID(serviceID, routeID uint) (genericapi.ServiceRoute, error) {

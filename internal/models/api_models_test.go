@@ -10,6 +10,33 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestNormalizeStandardHTTPMethod(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{input: "GET", want: "GET", ok: true},
+		{input: "post", want: "POST", ok: true},
+		{input: "Trace", want: "TRACE", ok: true},
+		{input: "CONNECT", ok: false},
+		{input: "", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			method, ok := NormalizeStandardHTTPMethod(tt.input)
+			require.Equal(t, tt.ok, ok)
+			require.Equal(t, tt.want, method)
+		})
+	}
+}
+
+func TestAPIRouteNormalizeForWriteReportsOriginalInvalidMethod(t *testing.T) {
+	route := APIRoute{AllowedMethods: datatypes.JSONSlice[string]{"CONNECT"}}
+	err := route.NormalizeForWrite()
+	require.ErrorContains(t, err, `got "CONNECT"`)
+}
+
 func TestAPIRouteJSONAndUniqueConstraints(t *testing.T) {
 	// This catches route writes that either skip the service-scoped slug index or
 	// persist an empty protocol set instead of the contract default ["http"].
@@ -50,6 +77,43 @@ func TestAPIRouteJSONAndUniqueConstraints(t *testing.T) {
 	require.Equal(t, datatypes.JSONSlice[APIProtocol]{APIProtocolHTTP, APIProtocolWebSocket}, normalized.Protocols)
 	require.Equal(t, datatypes.JSONSlice[string]{"GET", "POST"}, normalized.AllowedMethods)
 	require.Equal(t, datatypes.JSONSlice[string]{"chat.v1", "chat.v2"}, normalized.WebSocketSubprotocols)
+}
+
+func TestAPIRouteEmptySlugCreatesOneRootRoutePerService(t *testing.T) {
+	core := openSplitTestDB(t)
+	require.NoError(t, MigrateCoreDB(core))
+
+	service := APIService{Slug: "root-route", Name: "Root Route"}
+	require.NoError(t, core.Create(&service).Error)
+	backend := createAPIBackendForTest(t, core, service.ID)
+	root := APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: ""}
+	require.NoError(t, core.Create(&root).Error)
+	require.Error(t, core.Create(&APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: ""}).Error)
+
+	otherService := APIService{Slug: "other-root-route", Name: "Other Root Route"}
+	require.NoError(t, core.Create(&otherService).Error)
+	otherBackend := createAPIBackendForTest(t, core, otherService.ID)
+	require.NoError(t, core.Create(&APIRoute{APIServiceID: otherService.ID, BackendID: otherBackend.ID, Slug: ""}).Error)
+
+	var stored APIRoute
+	require.NoError(t, core.First(&stored, root.ID).Error)
+	require.Empty(t, stored.Slug)
+	require.Error(t, core.Create(&APIService{Slug: "", Name: "Invalid Empty Service"}).Error)
+}
+
+func TestAPIRoutePartialUpdateAcceptsEmptySlug(t *testing.T) {
+	core := openSplitTestDB(t)
+	require.NoError(t, MigrateCoreDB(core))
+	service := APIService{Slug: "root-route-patch", Name: "Root Route Patch"}
+	require.NoError(t, core.Create(&service).Error)
+	backend := createAPIBackendForTest(t, core, service.ID)
+	route := APIRoute{APIServiceID: service.ID, BackendID: backend.ID, Slug: "named"}
+	require.NoError(t, core.Create(&route).Error)
+
+	require.NoError(t, core.Model(&APIRoute{}).Where("id = ?", route.ID).Update("slug", "").Error)
+	var stored APIRoute
+	require.NoError(t, core.First(&stored, route.ID).Error)
+	require.Empty(t, stored.Slug)
 }
 
 func TestAPIRoutingTargetModels(t *testing.T) {

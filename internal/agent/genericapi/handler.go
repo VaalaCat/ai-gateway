@@ -14,6 +14,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type PermissionChecker interface {
@@ -29,7 +30,7 @@ type ProtocolHandler interface {
 }
 
 type ServiceRouteFinder interface {
-	Find(serviceSlug, routeSlug, method, requestedProtocol string) (ServiceRoute, error)
+	Find(serviceSlug, requestPath, method, requestedProtocol string) (ServiceRoute, string, error)
 }
 
 type APIPermit interface {
@@ -119,6 +120,7 @@ type HandlerOptions struct {
 	SourceAgentID         string
 	TraceSettings         APITraceSettingsReader
 	Metrics               *APIMetrics
+	Logger                *zap.Logger
 	Executor              RequestExecutor
 	// Handlers is retained for test and embedding compatibility. New production
 	// assembly should inject Executor explicitly.
@@ -153,18 +155,18 @@ func NewHandler(options HandlerOptions) *Handler {
 		sourceAgentID: options.SourceAgentID, traceSettings: options.TraceSettings,
 		executor: executor, publisher: NewPublisher(PublisherOptions{
 			Usage: options.Usage, Reporter: options.Reporter,
-			SourceAgentID: options.SourceAgentID, Metrics: options.Metrics,
+			SourceAgentID: options.SourceAgentID, Metrics: options.Metrics, Logger: options.Logger,
 		}),
 	}
 }
 
-// RegisterRoutes binds the two fixed public API paths under an authenticated /v1 group.
+// RegisterRoutes binds the service root and its catch-all under an authenticated /v1 group.
 func RegisterRoutes(router gin.IRoutes, handler *Handler) {
 	if router == nil || handler == nil {
 		return
 	}
-	router.Any("/api/:service_slug/:route_slug", handler.Serve)
-	router.Any("/api/:service_slug/:route_slug/*subpath", handler.Serve)
+	router.Any("/api/:service_slug", handler.Serve)
+	router.Any("/api/:service_slug/*path", handler.Serve)
 }
 
 // RequestIDMiddleware canonicalizes the request ID before Generic API auth
@@ -187,12 +189,17 @@ func (h *Handler) Serve(c *gin.Context) {
 	requestID := setRequestID(c)
 	requested, requestedErr := requestedProtocol(c.Request)
 	publication := h.beginPublication(requestID, requested)
+	if requestedErr != nil {
+		writeHandlerError(c, requestID, requestedErr)
+		publication.FinishMetrics(requestedErr)
+		return
+	}
 	if h != nil && h.masterUsageSupport != nil && !h.masterUsageSupport.SupportsGenericAPIUsage() {
 		writeHandlerError(c, requestID, ErrExecutionUnavailable)
 		publication.FinishMetrics(ErrExecutionUnavailable)
 		return
 	}
-	rc, permit, err := h.prepare(c, requestID, requested, requestedErr)
+	rc, permit, err := h.prepare(c, requestID, requested)
 	if err == nil {
 		publication.StartExecution(rc)
 		err = h.dispatch(c.Request.Context(), rc)
@@ -207,21 +214,18 @@ func (h *Handler) beginPublication(requestID, protocol string) *Publication {
 	return h.publisher.Begin(requestID, protocol)
 }
 
-func (h *Handler) prepare(c *gin.Context, requestID, requested string, err error) (*RequestContext, APIPermit, error) {
-	if err != nil {
-		return nil, nil, err
-	}
+func (h *Handler) prepare(c *gin.Context, requestID, requested string) (*RequestContext, APIPermit, error) {
 	if h == nil || h.finder == nil {
 		return nil, nil, ErrExecutionUnavailable
 	}
-	route, err := h.finder.Find(c.Param("service_slug"), c.Param("route_slug"), c.Request.Method, requested)
+	route, subpath, err := h.finder.Find(c.Param("service_slug"), c.Param("path"), c.Request.Method, requested)
 	if err != nil {
 		return nil, nil, err
 	}
-	if c.Param("subpath") != "" && !route.Route.ForwardSubpath {
+	if subpath != "" && !route.Route.ForwardSubpath {
 		return nil, nil, gatewayError(CodeAPINotFound, http.StatusNotFound, "", nil)
 	}
-	rc := newRequestContext(c, route, requestID, apiTracePolicy(c, h.traceSettings))
+	rc := newRequestContext(c, route, subpath, requestID, apiTracePolicy(c, h.traceSettings))
 	rc.QuotaGateDecision, err = h.authorize(c.Request.Context(), c, route)
 	if err != nil {
 		return rc, nil, err
@@ -249,10 +253,10 @@ func (h *Handler) prepare(c *gin.Context, requestID, requested string, err error
 	return rc, permit, nil
 }
 
-func newRequestContext(c *gin.Context, route ServiceRoute, requestID string, tracePolicy apiattempt.APITracePolicy) *RequestContext {
+func newRequestContext(c *gin.Context, route ServiceRoute, subpath, requestID string, tracePolicy apiattempt.APITracePolicy) *RequestContext {
 	return &RequestContext{
 		Context: c, Service: route.Service, Route: route.Route, Protocol: route.Protocol,
-		Subpath: c.Param("subpath"), TokenID: userTokenID(c), TokenName: userTokenName(c), UserID: userID(c), GroupID: userGroupID(c), RequestID: requestID,
+		Subpath: subpath, TokenID: userTokenID(c), TokenName: userTokenName(c), UserID: userID(c), GroupID: userGroupID(c), RequestID: requestID,
 		TracePolicy: tracePolicy,
 	}
 }
@@ -311,8 +315,9 @@ func requestedProtocol(request *http.Request) (string, error) {
 	connectionValues := request.Header.Values(consts.HeaderConnection)
 	upgradeValues := request.Header.Values("Upgrade")
 	connectionUpgrade := headerValuesHaveToken(connectionValues, "upgrade")
+	upgradeClaimed := len(upgradeValues) > 0
 	upgradeWebSocket := headerValuesHaveToken(upgradeValues, ProtocolWebSocket)
-	if len(connectionValues) == 0 && len(upgradeValues) == 0 {
+	if !connectionUpgrade && !upgradeClaimed {
 		return ProtocolHTTP, nil
 	}
 	if !connectionUpgrade || !upgradeWebSocket || !validWebSocketHandshake(request.Header) {

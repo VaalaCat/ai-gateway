@@ -11,13 +11,14 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func TestHandlerRunsOnlyBoundAttemptPipeline(t *testing.T) {
@@ -29,7 +30,7 @@ func TestHandlerRunsOnlyBoundAttemptPipeline(t *testing.T) {
 	rctx := &state.RelayContext{
 		Context: c,
 		Input: state.RelayInput{
-			UserInfo: user, Model: meta.Attempt.RealModel, InboundProto: codec.ProtocolOpenAIChat,
+			UserInfo: user, Model: meta.Attempt.RealModel, InboundProto: llmkit.ProtocolOpenAIChat,
 			Body: []byte(`{"model":"public"}`),
 		},
 		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
@@ -46,7 +47,7 @@ func TestHandlerRunsOnlyBoundAttemptPipeline(t *testing.T) {
 		calls = append(calls, "find")
 		require.Same(t, user, input.User)
 		require.Equal(t, meta.Attempt, input.Attempt)
-		require.Equal(t, codec.ProtocolOpenAIChat, input.InboundProtocol)
+		require.Equal(t, llmkit.ProtocolOpenAIChat, input.InboundProtocol)
 		return wantAttempt, nil
 	}}
 	gate := &handlerAttemptGate{onAttempt: func(got *state.RelayContext, attempt state.Attempt) {
@@ -103,7 +104,7 @@ func TestHandlerPassesOriginalProviderPathForLegacyAndAudio(t *testing.T) {
 			}}
 			provider := providerFunc(func(rctx *state.RelayContext, _ state.Attempt) attemptexec.ProviderResult {
 				require.Equal(t, tt.path, rctx.Request.URL.Path)
-				require.Equal(t, codec.PathToProtocol(tt.path), rctx.Input.InboundProto)
+				require.Equal(t, protocolconfig.PathToProtocol(tt.path), rctx.Input.InboundProto)
 				return attemptexec.ProviderResult{Outcome: state.AttemptResult{Err: state.ErrRateLimited}}
 			})
 			handler := NewHandler(NewContextBuilder(&contextAgent{bodyStore: &contextMemoryStore{}}), finder, provider, NewResponseExecutor())

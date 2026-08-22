@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -23,7 +23,7 @@ import (
 //
 // 校验：传入 Model 必须在 pc.Models 白名单内（防止 SSRF 风格滥用，详见
 // spec §2.3）；传入 EndpointType 接受 chat_completions / responses / messages
-// 及别名 anthropic，统一由 codec.ResolveTestEndpoint 处理。
+// 及别名 anthropic，统一由 protocolconfig.ResolveTestEndpoint 处理。
 type PortalTestRequest struct {
 	api.IDPathRequest
 	Model        string `json:"model" form:"model"`
@@ -45,7 +45,7 @@ type TestResult struct {
 //     在 pc.Models 白名单内，防止任意上游 model 滥用。
 //   - endpoint_type：用户选定的 protocol；空时按 pc.Endpoints/SupportedAPITypes
 //     推导主协议。接受 chat_completions / responses / messages 及别名 anthropic，
-//     统一由 codec.ResolveTestEndpoint 处理。
+//     统一由 protocolconfig.ResolveTestEndpoint 处理。
 func (h *Handler) PortalTest(c *app.Context, req PortalTestRequest) (TestResult, error) {
 	if c.UserInfo == nil {
 		return TestResult{}, api.UnauthorizedError("not authenticated")
@@ -85,14 +85,14 @@ func (h *Handler) PortalTest(c *app.Context, req PortalTestRequest) (TestResult,
 	if baseURL == "" {
 		return TestResult{OK: false, Detail: "no base_url configured"}, nil
 	}
-	// path 与 body 都由 codec.BuildConnectivityTestRequest 统一产出，body 按解析出的
+	// path 与 body 都由 protocolconfig.BuildConnectivityTestRequest 统一产出，body 按解析出的
 	// protocol 成形（responses → {input}；chat/claude → {messages}），与 public/agent
 	// 测试路径同源，避免对 responses 类渠道发出 chat 形态 body。
-	path, reqBody, err := codec.BuildConnectivityTestRequest(pc.Endpoints, pc.SupportedAPITypes, req.EndpointType, model, false)
+	path, reqBody, err := protocolconfig.BuildConnectivityTestRequest(pc.Endpoints, pc.SupportedAPITypes, req.EndpointType, model, false)
 	if err != nil {
 		return TestResult{}, api.BadRequestError(err.Error(), nil)
 	}
-	endpoint, err := codec.JoinUpstreamURL(pc.BaseURL, path)
+	endpoint, err := protocolconfig.JoinUpstreamURL(pc.BaseURL, path)
 	if err != nil {
 		return TestResult{OK: false, Detail: "invalid endpoint: " + err.Error()}, nil
 	}
@@ -148,7 +148,7 @@ func modelInChannelWhitelist(pc *models.PrivateChannel, model string) bool {
 // resolveTestPath 选择测试用上游 path，统一走 codec 解析器（基于 Endpoints/Protocol，
 // 不再用已弃用的 numeric channel type）。空 endpointType 时按渠道 Endpoints 推导主协议。
 func resolveTestPath(pc *models.PrivateChannel, endpointType string) (string, error) {
-	_, _, path, err := codec.ResolveTestEndpoint(pc.Endpoints, pc.SupportedAPITypes, endpointType)
+	_, _, path, err := protocolconfig.ResolveTestEndpoint(pc.Endpoints, pc.SupportedAPITypes, endpointType)
 	if err != nil {
 		return "", err
 	}

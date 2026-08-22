@@ -8,9 +8,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func fakeInlineSettings() settings.AgentSettings {
@@ -20,9 +20,9 @@ func fakeInlineSettings() settings.AgentSettings {
 	}
 }
 
-func imgPass(blocks ...codec.ContentBlock) *Pass {
-	return &Pass{Working: &codec.Request{Messages: []codec.Message{
-		{Role: codec.RoleUser, Content: blocks},
+func imgPass(blocks ...llmkit.ContentBlock) *Pass {
+	return &Pass{Working: &llmkit.Request{Messages: []llmkit.Message{
+		{Role: llmkit.RoleUser, Content: blocks},
 	}}}
 }
 
@@ -32,8 +32,8 @@ func TestStepInlineImages_InlinesURL(t *testing.T) {
 			return "B64DATA", "image/png", nil
 		}}
 	p := imgPass(
-		codec.ContentBlock{Type: codec.ContentTypeText, Text: "hi"},
-		codec.ContentBlock{Type: codec.ContentTypeImage, MediaURL: "https://x/a.png"},
+		llmkit.ContentBlock{Type: llmkit.ContentTypeText, Text: "hi"},
+		llmkit.ContentBlock{Type: llmkit.ContentTypeImage, MediaURL: "https://x/a.png"},
 	)
 	if err := step.Apply(context.Background(), p); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -49,7 +49,7 @@ func TestStepInlineImages_DegradeOnFailure(t *testing.T) {
 		fetch: func(_ context.Context, _ string, _ upstream.FetchConfig) (string, string, error) {
 			return "", "", errors.New("boom")
 		}}
-	p := imgPass(codec.ContentBlock{Type: codec.ContentTypeImage, MediaURL: "https://x/a.png"})
+	p := imgPass(llmkit.ContentBlock{Type: llmkit.ContentTypeImage, MediaURL: "https://x/a.png"})
 	step.Apply(context.Background(), p)
 	blk := p.Working.Messages[0].Content[0]
 	if blk.MediaURL != "https://x/a.png" || blk.MediaB64 != "" {
@@ -65,8 +65,8 @@ func TestStepInlineImages_SkipsAlreadyInlinedAndNonImage(t *testing.T) {
 			return "X", "image/png", nil
 		}}
 	p := imgPass(
-		codec.ContentBlock{Type: codec.ContentTypeText, Text: "t"},
-		codec.ContentBlock{Type: codec.ContentTypeImage, MediaB64: "already", MimeType: "image/png"},
+		llmkit.ContentBlock{Type: llmkit.ContentTypeText, Text: "t"},
+		llmkit.ContentBlock{Type: llmkit.ContentTypeImage, MediaB64: "already", MimeType: "image/png"},
 	)
 	step.Apply(context.Background(), p)
 	if atomic.LoadInt32(&calls) != 0 {
@@ -80,8 +80,8 @@ func TestStepInlineImages_MultipleConcurrent(t *testing.T) {
 			return "b64-" + url, "image/jpeg", nil
 		}}
 	p := imgPass(
-		codec.ContentBlock{Type: codec.ContentTypeImage, MediaURL: "u1"},
-		codec.ContentBlock{Type: codec.ContentTypeImage, MediaURL: "u2"},
+		llmkit.ContentBlock{Type: llmkit.ContentTypeImage, MediaURL: "u1"},
+		llmkit.ContentBlock{Type: llmkit.ContentTypeImage, MediaURL: "u2"},
 	)
 	step.Apply(context.Background(), p)
 	c := p.Working.Messages[0].Content
@@ -101,7 +101,7 @@ func TestStepInlineImages_UsesPassContext(t *testing.T) {
 			sawCancel = fctx.Err() != nil
 			return "b64", "image/png", nil
 		}}
-	p := imgPass(codec.ContentBlock{Type: codec.ContentTypeImage, MediaURL: "u1"})
+	p := imgPass(llmkit.ContentBlock{Type: llmkit.ContentTypeImage, MediaURL: "u1"})
 	step.Apply(ctx, p)
 	if !sawCancel {
 		t.Errorf("fetch should receive the ctx param (cancelled) — got a ctx with no cancellation, i.e. Background()")

@@ -27,6 +27,8 @@ const hooks = vi.hoisted(() => ({
   service: vi.fn(), routes: vi.fn(), routeParams: undefined as Record<string, unknown> | undefined,
   routeQueryCalls: [] as Record<string, unknown>[], deleteService: vi.fn(), deleteRoute: vi.fn(), deleteBackend: vi.fn(), deleteUpstream: vi.fn(),
   previewCalls: [] as unknown[][],
+  download: vi.fn(),
+  document: vi.fn(),
 }));
 interface TableProps {
   routes: APIRoute[];
@@ -69,6 +71,8 @@ vi.mock("@/lib/api/api-services", async (importOriginal) => ({
   useDeleteAPIBackend: () => ({ mutateAsync: hooks.deleteBackend }),
   useDeleteAPIUpstream: () => ({ mutateAsync: hooks.deleteUpstream }),
   useAPIRoutePreview: (...args: unknown[]) => { hooks.previewCalls.push(args); return { data: undefined, isLoading: false, error: null, refetch: vi.fn() }; },
+  downloadServiceOpenAPI: hooks.download,
+  useGetOpenAPIDocument: hooks.document,
 }));
 vi.mock("../_components/route-table/route-data-table", () => ({
   RouteDataTable: (props: TableProps) => {
@@ -107,6 +111,8 @@ describe("APIServiceDetailPage", () => {
     state.routes = { data: page([route()]), error: null, isLoading: false, isFetching: false, isPlaceholderData: false, refetch: vi.fn() };
     hooks.service.mockReset(); hooks.service.mockImplementation(() => state.service); hooks.routeParams = undefined; hooks.routeQueryCalls = []; hooks.previewCalls = [];
     for (const mutation of [hooks.deleteService, hooks.deleteRoute, hooks.deleteBackend, hooks.deleteUpstream]) { mutation.mockReset(); mutation.mockResolvedValue(undefined); }
+    hooks.download.mockReset(); hooks.download.mockResolvedValue(undefined);
+    hooks.document.mockReset(); hooks.document.mockReturnValue({ data: { service: { document: {} }, routes: [] } });
     navigation.replace.mockReset(); navigation.push.mockReset(); table.props = undefined;
   });
 
@@ -116,6 +122,37 @@ describe("APIServiceDetailPage", () => {
     renderPage();
     expect(hooks.routeParams).toEqual({ api_service_id: 7, search: "forecast", status: 1, page: 2, page_size: 20 });
     expect(table.props).toEqual(expect.objectContaining({ requestedPage: 2, displayedPage: 1, displayedPageSize: 10, isPlaceholderData: true, refreshing: true }));
+  });
+
+  it("offers an OpenAPI JSON export in the normal service action area", async () => {
+    renderPage();
+    await userEvent.setup().click(screen.getByRole("button", { name: "exportOpenAPI" }));
+    expect(hooks.download).toHaveBeenCalledWith(7, "weather");
+  });
+
+  it("offers the document editor only for a service that has an OpenAPI document", () => {
+    renderPage();
+    expect(screen.queryByRole("link", { name: "editOpenAPIDocument" })).not.toBeInTheDocument();
+    hooks.document.mockReturnValue({ data: { service: { document: { openapi: "3.1.0" } }, routes: [] } });
+    renderPage();
+    expect(screen.getByRole("link", { name: "editOpenAPIDocument" })).toHaveAttribute("href", "/api-services/openapi?id=7");
+  });
+
+  it.each([
+    { data: undefined, isLoading: true, error: null },
+    { data: undefined, isLoading: false, error: new Error("offline") },
+  ])("keeps the document editor entry fail-closed while its document query is unavailable: %#", (document) => {
+    hooks.document.mockReturnValue(document);
+    renderPage();
+    expect(screen.queryByRole("link", { name: "editOpenAPIDocument" })).not.toBeInTheDocument();
+  });
+
+  it("uses a local export fallback for an unknown API error", async () => {
+    hooks.download.mockRejectedValueOnce(new ApiError(500, "untrusted export wording", { code: "future_code" }));
+    renderPage();
+    await userEvent.setup().click(screen.getByRole("button", { name: "exportOpenAPI" }));
+    expect(await screen.findByText("openAPIExportFailed")).toBeVisible();
+    expect(screen.queryByText("untrusted export wording")).not.toBeInTheDocument();
   });
 
   it("keeps placeholder rows visible without mounting the previous page Route workspace", () => {

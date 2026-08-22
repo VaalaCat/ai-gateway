@@ -21,25 +21,44 @@ var apiStandardMethods = map[string]struct{}{
 	"DELETE": {}, "GET": {}, "HEAD": {}, "OPTIONS": {}, "PATCH": {}, "POST": {}, "PUT": {}, "TRACE": {},
 }
 
+// NormalizeStandardHTTPMethod returns the canonical uppercase form of a
+// standard HTTP method supported by API routes. CONNECT is intentionally not
+// supported because routes do not expose tunnel semantics.
+func NormalizeStandardHTTPMethod(method string) (string, bool) {
+	normalized := strings.ToUpper(method)
+	_, ok := apiStandardMethods[normalized]
+	if !ok {
+		return "", false
+	}
+	return normalized, true
+}
+
 // APIRoute selects an APIService endpoint. An empty AllowedMethods set means
 // every standard HTTP method except CONNECT is accepted.
 type APIRoute struct {
-	ID                    uint                                  `gorm:"primaryKey" json:"id"`
-	APIServiceID          uint                                  `gorm:"not null;uniqueIndex:idx_api_route_service_slug" json:"api_service_id"`
-	BackendID             uint                                  `gorm:"not null;index" json:"backend_id"`
-	Slug                  string                                `gorm:"size:64;not null;uniqueIndex:idx_api_route_service_slug" json:"slug"`
-	Protocols             datatypes.JSONSlice[APIProtocol]      `gorm:"type:text;not null;default:'[\"http\"]'" json:"protocols"`
-	AllowedMethods        datatypes.JSONSlice[string]           `gorm:"type:text;not null;default:'[]'" json:"allowed_methods"`
-	WebSocketSubprotocols datatypes.JSONSlice[string]           `gorm:"type:text;not null;default:'[]'" json:"websocket_subprotocols"`
-	UpstreamPath          string                                `gorm:"type:text;not null;default:''" json:"upstream_path"`
-	ForwardSubpath        bool                                  `gorm:"not null;default:false" json:"forward_subpath"`
-	ExampleRequest        datatypes.JSONType[APIRequestExample] `gorm:"type:text;not null;default:'{}'" json:"example_request"`
-	Status                int                                   `gorm:"not null;default:1" json:"status"`
-	CreatedAt             int64                                 `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt             int64                                 `gorm:"autoUpdateTime" json:"updated_at"`
+	ID                    uint                                           `gorm:"primaryKey" json:"id"`
+	APIServiceID          uint                                           `gorm:"not null;uniqueIndex:idx_api_route_service_slug" json:"api_service_id"`
+	BackendID             uint                                           `gorm:"not null;index" json:"backend_id"`
+	Slug                  string                                         `gorm:"size:64;not null;uniqueIndex:idx_api_route_service_slug" json:"slug"`
+	Protocols             datatypes.JSONSlice[APIProtocol]               `gorm:"type:text;not null;default:'[\"http\"]'" json:"protocols"`
+	AllowedMethods        datatypes.JSONSlice[string]                    `gorm:"type:text;not null;default:'[]'" json:"allowed_methods"`
+	WebSocketSubprotocols datatypes.JSONSlice[string]                    `gorm:"type:text;not null;default:'[]'" json:"websocket_subprotocols"`
+	UpstreamPath          string                                         `gorm:"type:text;not null;default:''" json:"upstream_path"`
+	ForwardSubpath        bool                                           `gorm:"not null;default:false" json:"forward_subpath"`
+	ExampleRequest        datatypes.JSONType[APIRequestExample]          `gorm:"type:text;not null;default:'{}'" json:"example_request"`
+	Status                int                                            `gorm:"not null;default:1" json:"status"`
+	OpenAPIPaths          datatypes.JSONType[map[string]OpenAPIPathItem] `gorm:"column:openapi_paths;type:text;not null;default:'{}'" json:"-"`
+	CreatedAt             int64                                          `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt             int64                                          `gorm:"autoUpdateTime" json:"updated_at"`
 }
 
 func (r *APIRoute) NormalizeForWrite() error {
+	openAPIPaths, err := normalizeOpenAPIPathItemsForWrite(r.OpenAPIPaths.Data())
+	if err != nil {
+		return err
+	}
+	r.OpenAPIPaths = datatypes.NewJSONType(openAPIPaths)
+
 	protocols := r.Protocols
 	if len(protocols) == 0 {
 		protocols = datatypes.JSONSlice[APIProtocol]{APIProtocolHTTP}
@@ -62,15 +81,15 @@ func (r *APIRoute) NormalizeForWrite() error {
 	seenMethods := make(map[string]struct{}, len(r.AllowedMethods))
 	normalizedMethods := make(datatypes.JSONSlice[string], 0, len(r.AllowedMethods))
 	for _, method := range r.AllowedMethods {
-		method = strings.ToUpper(method)
-		if _, valid := apiStandardMethods[method]; !valid {
+		normalizedMethod, valid := NormalizeStandardHTTPMethod(method)
+		if !valid {
 			return fmt.Errorf("api route method must be a standard HTTP method other than CONNECT, got %q", method)
 		}
-		if _, exists := seenMethods[method]; exists {
+		if _, exists := seenMethods[normalizedMethod]; exists {
 			continue
 		}
-		seenMethods[method] = struct{}{}
-		normalizedMethods = append(normalizedMethods, method)
+		seenMethods[normalizedMethod] = struct{}{}
+		normalizedMethods = append(normalizedMethods, normalizedMethod)
 	}
 	sort.Strings(normalizedMethods)
 	r.AllowedMethods = normalizedMethods
@@ -191,6 +210,9 @@ func rejectAPIRouteBackendPartialUpdate(any) error {
 }
 
 func validateAPIRouteSlug(slug string) error {
+	if slug == "" {
+		return nil
+	}
 	if !apiSlugPattern.MatchString(slug) {
 		return fmt.Errorf("api route slug must be lowercase URL-safe, got %q", slug)
 	}

@@ -28,7 +28,7 @@ func (rolloutQuotaGate) Allow(context.Context, uint, protocol.SyncedAPIService) 
 
 type rolloutServiceRouteFinder struct{}
 
-func (rolloutServiceRouteFinder) Find(_, _, _, _ string) (genericapi.ServiceRoute, error) {
+func (rolloutServiceRouteFinder) Find(_, _, _, _ string) (genericapi.ServiceRoute, string, error) {
 	return genericapi.ServiceRoute{
 		Service: protocol.SyncedAPIService{ID: 7, Slug: "weather", Status: 1},
 		Route: protocol.SyncedAPIRoute{
@@ -36,7 +36,7 @@ func (rolloutServiceRouteFinder) Find(_, _, _, _ string) (genericapi.ServiceRout
 			Protocols: []string{genericapi.ProtocolHTTP},
 		},
 		Protocol: genericapi.ProtocolHTTP,
-	}, nil
+	}, "", nil
 }
 
 type rolloutAgentPicker struct{ agentID string }

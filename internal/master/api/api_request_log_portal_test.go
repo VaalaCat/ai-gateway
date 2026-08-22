@@ -34,6 +34,7 @@ func TestAPIRequestLogPortalScopesAndProjectsCurrentUserData(t *testing.T) {
 		ExecutionAgentID: "execution-agent", AgentRouteID: 10, AgentRoutePath: "/internal/route",
 		Protocol: models.APIProtocolHTTP, Method: http.MethodGet, StatusCode: http.StatusOK,
 		DurationMs: 15, FirstByteMs: 4, RequestBytes: 12, ResponseBytes: 34, UnitPrice: 2, TotalCost: 2,
+		ErrorMessage: "dial tcp: secret connection refused",
 	}
 	theirs := models.APIRequestLog{RequestID: "portal-theirs", UserID: other.ID, APIUpstreamName: "other-secret"}
 	require.NoError(t, srv.DB.Create(&mine).Error)
@@ -57,11 +58,19 @@ func TestAPIRequestLogPortalScopesAndProjectsCurrentUserData(t *testing.T) {
 		require.Equal(t, mine.RequestID, body.Data[0]["request_id"])
 		for _, key := range []string{
 			"user_id", "client_ip", "api_upstream_id", "api_upstream_name", "source_agent_id",
-			"execution_agent_id", "agent_route_id", "agent_route_path", "provider_dispatch_known",
+			"execution_agent_id", "agent_route_id", "agent_route_path", "provider_dispatch_known", "error_message",
 			"provider_dispatched", "service_missing_at_settlement", "rate_limit_reason", "rate_limit_hits",
 		} {
 			require.NotContains(t, body.Data[0], key)
 		}
+	})
+
+	t.Run("portal get also omits error message", func(t *testing.T) {
+		response := reqHelper(srv, viewerJWT, http.MethodGet, "/api/api-request-logs/portal-mine", nil)
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+		require.NotContains(t, body, "error_message")
 	})
 
 	t.Run("trace returns the persisted redacted capture only for its owner", func(t *testing.T) {
@@ -81,5 +90,19 @@ func TestAPIRequestLogPortalScopesAndProjectsCurrentUserData(t *testing.T) {
 		require.Equal(t, http.StatusOK, admin.Code, admin.Body.String())
 		require.Contains(t, admin.Body.String(), "secret-upstream")
 		require.Contains(t, admin.Body.String(), "execution-agent")
+		require.Contains(t, admin.Body.String(), "dial tcp: secret connection refused")
+
+		list := reqHelper(srv, loginAsAdmin(t, srv, "admin", "admin123"), http.MethodGet, "/api/admin/api-request-logs", nil)
+		require.Equal(t, http.StatusOK, list.Code, list.Body.String())
+		var listBody struct {
+			Data []map[string]any `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(list.Body.Bytes(), &listBody))
+		require.Len(t, listBody.Data, 2)
+		for _, row := range listBody.Data {
+			if row["request_id"] == mine.RequestID {
+				require.Equal(t, "dial tcp: secret connection refused", row["error_message"])
+			}
+		}
 	})
 }

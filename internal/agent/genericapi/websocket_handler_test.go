@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -156,6 +157,12 @@ type fixedWebSocketRejectionDialer struct {
 type deadlineRecordingWebSocketDialer struct {
 	hasDeadline atomic.Bool
 	deadline    atomic.Int64
+}
+
+type safeErrorWebSocketDialer struct{}
+
+func (safeErrorWebSocketDialer) DialContext(_ context.Context, target string, _ http.Header) (*websocket.Conn, *http.Response, error) {
+	return nil, nil, &url.Error{Op: "dial", URL: target, Err: errors.New("connection refused")}
 }
 
 func (d *deadlineRecordingWebSocketDialer) DialContext(ctx context.Context, _ string, _ http.Header) (*websocket.Conn, *http.Response, error) {
@@ -358,6 +365,28 @@ func TestRemoteWebSocketRejectionResultUsesCurrentControlTimeout(t *testing.T) {
 	}
 }
 
+func TestRemoteWebSocketRejectionPreservesExecutionErrorMessage(t *testing.T) {
+	stream := newRecordingRemoteWebSocketStream()
+	stream.acceptance = app.WebSocketAccepted{
+		ProviderStatus: http.StatusBadGateway,
+		Rejection:      &app.WebSocketRejection{StatusCode: http.StatusBadGateway},
+	}
+	stream.result.UpstreamStatus = http.StatusBadGateway
+	stream.result.ErrorStage = "transport"
+	stream.result.ErrorCode = CodeUnavailable
+	stream.result.ErrorMessage = "dial tcp: connection refused"
+	opener := &queuedRemoteWebSocketOpener{streams: make(chan app.WebSocketAPIStream, 1)}
+	opener.streams <- stream
+	handler := NewRemoteWebSocketHandler(RemoteWebSocketHandlerOptions{Relay: opener})
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodGet, "http://gateway.invalid/socket", nil)
+	rc := newRemoteWebSocketRequestContext(ginContext)
+
+	require.NoError(t, handler.Serve(t.Context(), rc))
+	require.Equal(t, "dial tcp: connection refused", rc.Execution.ErrorMessage)
+}
+
 func serveRemoteWebSocketStream(t *testing.T, handler *RemoteWebSocketHandler) {
 	t.Helper()
 	serveResult := make(chan error, 1)
@@ -510,6 +539,63 @@ func TestWebSocketHandlerPicksTheRouteBackendAndReportsNoCandidateAsUnavailable(
 	require.Equal(t, int32(1), picker.calls.Load(), "one WebSocket connection must keep one frozen upstream lease")
 	require.Equal(t, "upstream_pick", rc.Execution.ErrorStage)
 	require.Equal(t, CodeUnavailable, rc.Execution.ErrorCode)
+}
+
+func TestWebSocketHandlerStoresSafeDialErrorMessage(t *testing.T) {
+	const secret = "provider-secret"
+	picker := &localWebSocketPicker{lease: &APIUpstreamLease{
+		Upstream: protocol.SyncedAPIUpstream{
+			ID: 11, BackendID: 7, Name: "query-auth", BaseURL: "https://upstream.example/socket", AuthType: "query",
+			Credential: protocol.APIUpstreamCredential{QueryName: "token", QueryValue: secret},
+		},
+		permit: newLocalHTTPPermit(),
+	}}
+	handler := NewWebSocketHandler(WebSocketHandlerOptions{Picker: picker, Dialer: safeErrorWebSocketDialer{}})
+	rc, _ := newLocalHTTPRequestContext(httptest.NewRequest(http.MethodGet, "http://gateway.invalid/socket", nil))
+	rc.Protocol = ProtocolWebSocket
+
+	err := handler.Serve(t.Context(), rc)
+
+	require.Error(t, err)
+	require.Equal(t, "transport", rc.Execution.ErrorStage)
+	require.Contains(t, rc.Execution.ErrorMessage, "connection refused")
+	require.NotContains(t, rc.Execution.ErrorMessage, secret)
+	require.NotContains(t, rc.Execution.ErrorMessage, "upstream.example")
+}
+
+func TestWebSocketHandlerStoresPickerErrorMessageWithoutCredential(t *testing.T) {
+	picker := &localWebSocketPicker{err: errors.New("no websocket upstream candidates")}
+	handler := NewWebSocketHandler(WebSocketHandlerOptions{Picker: picker})
+	rc, _ := newLocalHTTPRequestContext(httptest.NewRequest(http.MethodGet, "http://gateway.invalid/socket", nil))
+	rc.Protocol = ProtocolWebSocket
+
+	err := handler.Serve(t.Context(), rc)
+
+	require.EqualError(t, err, "no websocket upstream candidates")
+	require.Equal(t, "no websocket upstream candidates", rc.Execution.ErrorMessage)
+}
+
+func TestWebSocketHandlerStoresClientUpgradeErrorMessage(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		connection, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(writer, request, nil)
+		if err == nil {
+			_ = connection.Close()
+		}
+	}))
+	t.Cleanup(provider.Close)
+	picker := &localWebSocketPicker{lease: &APIUpstreamLease{
+		Upstream: protocol.SyncedAPIUpstream{ID: 11, BackendID: 7, Name: "provider", BaseURL: provider.URL, AuthType: "none"},
+		permit:   newLocalHTTPPermit(),
+	}}
+	handler := NewWebSocketHandler(WebSocketHandlerOptions{Picker: picker})
+	rc, _ := newLocalHTTPRequestContext(httptest.NewRequest(http.MethodGet, "http://gateway.invalid/socket", nil))
+	rc.Protocol = ProtocolWebSocket
+
+	err := handler.Serve(t.Context(), rc)
+
+	require.Error(t, err)
+	require.Equal(t, "client_upgrade", rc.Execution.ErrorStage)
+	require.NotEmpty(t, rc.Execution.ErrorMessage)
 }
 
 func TestWebSocketHandlerReadsLatestHandshakeTimeoutForEachDial(t *testing.T) {
@@ -755,6 +841,7 @@ func TestWebSocketRemoteSessionProviderE2E(t *testing.T) {
 	require.True(t, execution.Result.ProviderDispatchKnown)
 	require.True(t, execution.Result.ProviderDispatched)
 	require.Equal(t, websocket.CloseNormalClosure, execution.Result.WebSocketCloseCode)
+	require.Empty(t, execution.Result.ErrorMessage)
 	require.Equal(t, http.StatusSwitchingProtocols, execution.StatusCode)
 	require.Equal(t, execution.Request.RequestID, responseRequestID)
 	require.Equal(t, int32(1), providerDials.Load())

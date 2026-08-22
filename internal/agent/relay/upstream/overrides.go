@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"sort"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"go.uber.org/zap"
 )
 
@@ -60,11 +60,11 @@ func ApplyOverrides(req *http.Request, body []byte, paramOverride, headerOverrid
 // parseProtocolOverride converts the raw map[string]any decoded from
 // Channel.OtherSettings["protocol_override"] into a map[Protocol]Protocol.
 // Invalid keys, invalid values, "auto", and empty strings are dropped.
-func parseProtocolOverride(raw map[string]any) map[codec.Protocol]codec.Protocol {
+func parseProtocolOverride(raw map[string]any) map[llmkit.Protocol]llmkit.Protocol {
 	if len(raw) == 0 {
 		return nil
 	}
-	result := make(map[codec.Protocol]codec.Protocol, len(raw))
+	result := make(map[llmkit.Protocol]llmkit.Protocol, len(raw))
 	for k, v := range raw {
 		valStr, ok := v.(string)
 		if !ok {
@@ -73,8 +73,8 @@ func parseProtocolOverride(raw map[string]any) map[codec.Protocol]codec.Protocol
 		if valStr == "" || valStr == "auto" {
 			continue
 		}
-		inbound := codec.Protocol(k)
-		outbound := codec.Protocol(valStr)
+		inbound := llmkit.Protocol(k)
+		outbound := llmkit.Protocol(valStr)
 		if !isValidOverrideProtocolKey(inbound) || !isValidOverrideProtocolValue(outbound) {
 			continue
 		}
@@ -87,9 +87,9 @@ func parseProtocolOverride(raw map[string]any) map[codec.Protocol]codec.Protocol
 }
 
 // isValidOverrideProtocolKey accepts the codec-supported inbound protocols.
-func isValidOverrideProtocolKey(p codec.Protocol) bool {
+func isValidOverrideProtocolKey(p llmkit.Protocol) bool {
 	switch p {
-	case codec.ProtocolOpenAIChat, codec.ProtocolOpenAIResponses, codec.ProtocolClaude:
+	case llmkit.ProtocolOpenAIChat, llmkit.ProtocolOpenAIResponses, llmkit.ProtocolClaude:
 		return true
 	}
 	return false
@@ -98,7 +98,7 @@ func isValidOverrideProtocolKey(p codec.Protocol) bool {
 // isValidOverrideProtocolValue accepts the codec-supported outbound protocols.
 // Same set as keys for now; kept as a separate function so future expansion
 // (e.g., outbound-only protocols) does not affect inbound validation.
-func isValidOverrideProtocolValue(p codec.Protocol) bool {
+func isValidOverrideProtocolValue(p llmkit.Protocol) bool {
 	return isValidOverrideProtocolKey(p)
 }
 
@@ -108,14 +108,14 @@ type modelOverrideRule struct {
 	Pattern    *regexp.Regexp
 	PatternRaw string
 	IsExact    bool
-	Overrides  map[codec.Protocol]codec.Protocol // includes ProtocolWildcard sentinel for "*"
+	Overrides  map[llmkit.Protocol]llmkit.Protocol // includes ProtocolWildcard sentinel for "*"
 }
 
 // ProtocolWildcard is a sentinel used as a key in modelOverrideRule.Overrides
 // to mean "all inbound protocols not explicitly listed". It is NEVER passed
-// to codec.NegotiateOutboundProtocol — ResolveOverride expands it before the
+// to llmkit.NegotiateOutboundProtocol — ResolveOverride expands it before the
 // codec call.
-const ProtocolWildcard codec.Protocol = "*"
+const ProtocolWildcard llmkit.Protocol = "*"
 
 // parseModelProtocolOverride converts the raw decoded JSON list into compiled
 // rules. Invalid regex / invalid protocol values cause the offending entry
@@ -169,26 +169,26 @@ func parseModelProtocolOverride(raw []any, channelID uint) []modelOverrideRule {
 
 // parseModelOverridesMap mirrors parseProtocolOverride but additionally
 // accepts "*" as an inbound key (represented internally as ProtocolWildcard).
-func parseModelOverridesMap(raw map[string]any) map[codec.Protocol]codec.Protocol {
+func parseModelOverridesMap(raw map[string]any) map[llmkit.Protocol]llmkit.Protocol {
 	if len(raw) == 0 {
 		return nil
 	}
-	out := make(map[codec.Protocol]codec.Protocol, len(raw))
+	out := make(map[llmkit.Protocol]llmkit.Protocol, len(raw))
 	for k, v := range raw {
 		valStr, ok := v.(string)
 		if !ok || valStr == "" || valStr == "auto" {
 			continue
 		}
-		var inbound codec.Protocol
+		var inbound llmkit.Protocol
 		if k == "*" {
 			inbound = ProtocolWildcard
 		} else {
-			inbound = codec.Protocol(k)
+			inbound = llmkit.Protocol(k)
 			if !isValidOverrideProtocolKey(inbound) {
 				continue
 			}
 		}
-		outbound := codec.Protocol(valStr)
+		outbound := llmkit.Protocol(valStr)
 		if !isValidOverrideProtocolValue(outbound) {
 			continue
 		}
@@ -215,7 +215,7 @@ func regexHasMetaChar(s string) bool {
 // ChannelOverrideRules combines channel-level and model-level overrides
 // parsed from a single Channel.OtherSettings blob.
 type ChannelOverrideRules struct {
-	ChannelLevel map[codec.Protocol]codec.Protocol
+	ChannelLevel map[llmkit.Protocol]llmkit.Protocol
 	ModelLevel   []modelOverrideRule
 }
 
@@ -248,7 +248,7 @@ func ChannelOverrideRulesFor(ch *models.Channel) *ChannelOverrideRules {
 // inbound protocols, and returns a flat map[Protocol]Protocol.
 //
 // Falls back to rules.ChannelLevel when no per-model rule matches.
-func ResolveOverride(rules *ChannelOverrideRules, modelName string) map[codec.Protocol]codec.Protocol {
+func ResolveOverride(rules *ChannelOverrideRules, modelName string) map[llmkit.Protocol]llmkit.Protocol {
 	if rules == nil {
 		return nil
 	}
@@ -296,19 +296,19 @@ func ResolveOverride(rules *ChannelOverrideRules, modelName string) map[codec.Pr
 // determined by the client's request URL on the gateway, NOT by the channel's
 // upstream endpoints — so wildcard expansion uses the fixed protocol set,
 // matching the channel-level protocol_override key set.
-var validInboundProtocols = []codec.Protocol{
-	codec.ProtocolOpenAIChat,
-	codec.ProtocolOpenAIResponses,
-	codec.ProtocolClaude,
+var validInboundProtocols = []llmkit.Protocol{
+	llmkit.ProtocolOpenAIChat,
+	llmkit.ProtocolOpenAIResponses,
+	llmkit.ProtocolClaude,
 }
 
 // expandRuleOverrides materializes rule.Overrides into a flat
 // map[Protocol]Protocol. ProtocolWildcard inbound expands into entries for
 // each valid inbound protocol that isn't already explicitly listed.
 // Reachability of the resulting outbound is verified later inside
-// codec.NegotiateOutboundProtocol.
-func expandRuleOverrides(rule modelOverrideRule) map[codec.Protocol]codec.Protocol {
-	out := make(map[codec.Protocol]codec.Protocol, len(rule.Overrides))
+// llmkit.NegotiateOutboundProtocol.
+func expandRuleOverrides(rule modelOverrideRule) map[llmkit.Protocol]llmkit.Protocol {
+	out := make(map[llmkit.Protocol]llmkit.Protocol, len(rule.Overrides))
 	wildcardTarget, hasWildcard := rule.Overrides[ProtocolWildcard]
 	for k, v := range rule.Overrides {
 		if k == ProtocolWildcard {

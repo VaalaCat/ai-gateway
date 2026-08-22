@@ -1,0 +1,177 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "User API",
+    "description": "Manage users",
+    "version": "1.2.0",
+    "contact": {
+      "name": "API Team",
+      "email": "api@example.test"
+    },
+    "x-info-owner": "identity"
+  },
+  "servers": [
+    {
+      "url": "https://api.example.test/{stage}",
+      "description": "primary",
+      "variables": {
+        "stage": {
+          "default": "v1",
+          "enum": ["v1", "v2"],
+          "x-variable-region": "global"
+        }
+      },
+      "x-server-priority": 1
+    },
+    {
+      "url": "https://backup.example.test/v1",
+      "description": "backup"
+    }
+  ],
+  "tags": [
+    {
+      "name": "users",
+      "description": "User operations",
+      "x-tag-color": "blue"
+    }
+  ],
+  "security": [
+    {"ApiKeyAuth": []}
+  ],
+  "paths": {
+    "/users": {
+      "summary": "Users",
+      "parameters": [
+        {"$ref": "#/components/parameters/TraceID"}
+      ],
+      "get": {
+        "tags": ["users"],
+        "operationId": "listUsers",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {"type": "integer", "minimum": 1},
+            "example": 20,
+            "x-parameter-unit": "items"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Users",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {"$ref": "#/components/schemas/User"}
+                },
+                "x-media-cacheable": true
+              }
+            }
+          },
+          "default": {"$ref": "#/components/responses/Problem"}
+        },
+        "x-operation-audience": "admin"
+      },
+      "post": {
+        "tags": ["users"],
+        "operationId": "createUser",
+        "requestBody": {"$ref": "#/components/requestBodies/NewUser"},
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/User"}
+              }
+            }
+          }
+        }
+      },
+      "x-path-owner": "identity"
+    },
+    "/users/{id}": {
+      "parameters": [
+        {"$ref": "#/components/parameters/UserID"}
+      ],
+      "get": {
+        "operationId": "getUser",
+        "responses": {
+          "200": {
+            "description": "User",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/User"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"}
+        },
+        "x-schema-storage": "primary"
+      },
+      "NewUser": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string"}
+        }
+      }
+    },
+    "parameters": {
+      "TraceID": {
+        "name": "X-Trace-ID",
+        "in": "header",
+        "schema": {"type": "string"}
+      },
+      "UserID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {"type": "string"}
+      }
+    },
+    "requestBodies": {
+      "NewUser": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/NewUser"},
+            "example": {"name": "Ada"}
+          }
+        }
+      }
+    },
+    "responses": {
+      "Problem": {
+        "description": "Problem",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Request ID",
+            "schema": {"type": "string"}
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "x-security-display": "API key"
+      }
+    },
+    "x-components-owner": "platform"
+  },
+  "x-document-id": "users-v1"
+}

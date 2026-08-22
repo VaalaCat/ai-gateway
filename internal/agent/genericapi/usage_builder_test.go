@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestUsageBuilderProjectsSuccessFailureAndNilBoundary(t *testing.T) {
+func TestUsageBuilderProjectsErrorMessageSuccessFailureAndNilBoundary(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	builder := NewUsageBuilder(func() time.Time { return now })
 	rc := &RequestContext{
@@ -27,6 +27,7 @@ func TestUsageBuilderProjectsSuccessFailureAndNilBoundary(t *testing.T) {
 		Result: apiattempt.APIExecutionResult{
 			APIUpstreamID: 11, UpstreamStatus: http.StatusCreated, ProviderDispatchKnown: true,
 			ProviderDispatched: true, RequestBytes: 20, ResponseBytes: 30, FirstByteMs: 4,
+			ErrorMessage: "connection refused",
 		},
 	})
 	require.Equal(t, "request", entry.RequestID)
@@ -37,6 +38,7 @@ func TestUsageBuilderProjectsSuccessFailureAndNilBoundary(t *testing.T) {
 	require.Equal(t, "execution", entry.ExecutionAgentID)
 	require.Equal(t, http.StatusCreated, entry.StatusCode)
 	require.Equal(t, now.Unix(), entry.Timestamp)
+	require.Equal(t, "connection refused", entry.ErrorMessage)
 
 	failed := builder.Build(APIExecution{Request: rc, SourceAgentID: "source", Err: ErrAPIRateLimited})
 	require.Equal(t, http.StatusTooManyRequests, failed.StatusCode)

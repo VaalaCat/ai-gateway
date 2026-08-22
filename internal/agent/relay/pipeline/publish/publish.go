@@ -81,10 +81,15 @@ func (p *Publisher) recordAffinity(rctx *state.RelayContext, e *protocol.UsageLo
 	default:
 		e.AffinityStatus = affinity.StatusNone
 	}
-	if success && dec.Record && (e.CacheReadTokens > 0 || e.CacheWriteTokens > 0) {
-		p.affinity.Remember(affinity.Key{
-			UserID: uid, TokenID: rctx.Input.UserInfo.TokenID, RealModel: u.RealModel,
-		}, u.Source, u.SourceID, ovr.TTLSec)
+	cacheActive := e.CacheReadTokens > 0 || e.CacheWriteTokens > 0
+	if success && dec.Record && (rctx.Input.AffinityIdentity.Key != "" || cacheActive) {
+		key := affinity.BuildKey(
+			rctx.Input.AffinityIdentity,
+			uid,
+			rctx.Input.UserInfo.TokenID,
+			u.RealModel,
+		)
+		p.affinity.Remember(key, u.Source, u.SourceID, ovr.TTLSec)
 		e.AffinityRecorded = true
 	}
 }

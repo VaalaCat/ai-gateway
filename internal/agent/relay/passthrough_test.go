@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	relayupstream "github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // TestShouldPassthrough 已迁移到 pipeline/plan/mode_test.go——shouldPassthrough
@@ -239,7 +239,7 @@ func TestExtractUsageFromPassthroughBody_EmptyBody(t *testing.T) {
 
 func TestNormalizeUsage_OpenAICachedTokens(t *testing.T) {
 	// OpenAI: PromptTokens includes cached, CachedTokens is set, CacheReadTokens is 0
-	u := relayupstream.NormalizeUsage(codec.Usage{
+	u := relayupstream.NormalizeUsage(llmkit.Usage{
 		PromptTokens: 1000,
 		CachedTokens: 800,
 	})
@@ -253,7 +253,7 @@ func TestNormalizeUsage_OpenAICachedTokens(t *testing.T) {
 
 func TestNormalizeUsage_ClaudeUnchanged(t *testing.T) {
 	// Claude: PromptTokens already excludes cached, CacheReadTokens is set directly
-	u := relayupstream.NormalizeUsage(codec.Usage{
+	u := relayupstream.NormalizeUsage(llmkit.Usage{
 		PromptTokens:     200,
 		CacheReadTokens:  800,
 		CacheWriteTokens: 50,
@@ -267,7 +267,7 @@ func TestNormalizeUsage_ClaudeUnchanged(t *testing.T) {
 }
 
 func TestNormalizeUsage_NoCaching(t *testing.T) {
-	u := relayupstream.NormalizeUsage(codec.Usage{
+	u := relayupstream.NormalizeUsage(llmkit.Usage{
 		PromptTokens:     500,
 		CompletionTokens: 100,
 	})

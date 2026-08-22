@@ -47,6 +47,7 @@ export interface APIRequestLog {
   quota_gate_decision: string;
   error_stage: string;
   error_code: string;
+  error_message?: string;
   service_missing_at_settlement?: boolean;
   rate_limit_decision: string;
   rate_limit_wait_ms: number;

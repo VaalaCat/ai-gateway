@@ -102,6 +102,34 @@ func TestApplyAffinity_IsolatesByTokenID(t *testing.T) {
 	})
 }
 
+func TestApplyAffinity_IsolatesBySessionIdentity(t *testing.T) {
+	eng := affinity.New(affStubCfg{on: 1})
+	identity := state.AffinityIdentity{
+		Key:       "session-a",
+		Partition: state.AffinityPartition{ByUser: true, ByToken: true, ByModel: true},
+	}
+	eng.Remember(affinity.BuildKey(identity, 1, 11, "m"), state.SourceAdmin, 20, nil)
+	s := &defaultSolver{Affinity: eng}
+	in := []ScoredCandidate{affCand(10, state.SourceAdmin), affCand(20, state.SourceAdmin)}
+
+	rctx := newAffTokenRctx(1, 11)
+	rctx.Input.AffinityIdentity = identity
+	out := s.applyAffinity(rctx, "m", in)
+	if out[0].SourceID != 20 || !out[0].ByAffinity {
+		t.Fatalf("same session should hit source 20, got source=%d by_affinity=%v", out[0].SourceID, out[0].ByAffinity)
+	}
+
+	rctx = newAffTokenRctx(1, 11)
+	rctx.Input.AffinityIdentity = state.AffinityIdentity{
+		Key:       "session-b",
+		Partition: state.AffinityPartition{ByUser: true, ByToken: true, ByModel: true},
+	}
+	out = s.applyAffinity(rctx, "m", in)
+	if out[0].SourceID != 10 || out[0].ByAffinity {
+		t.Fatalf("different session should miss, got source=%d by_affinity=%v", out[0].SourceID, out[0].ByAffinity)
+	}
+}
+
 func TestApplyAffinity_NilEngine(t *testing.T) {
 	s := &defaultSolver{Affinity: nil}
 	rctx := newAffRctx(1)

@@ -193,4 +193,10 @@ describe("APIServicesPage", () => {
     expect(screen.getByRole("link", { name: "Weather" })).toHaveAttribute("href", "/api-services/detail?id=7");
     expect(screen.getByRole("link", { name: "createService" })).toHaveAttribute("href", "/api-services/new");
   });
+
+  it("keeps OpenAPI import beside blank service creation in the primary action flow", () => {
+    render(<APIServicesPage />);
+    expect(screen.getByRole("link", { name: "importOpenAPI" })).toHaveAttribute("href", "/api-services/import");
+    expect(screen.getByRole("link", { name: "createService" })).toHaveAttribute("href", "/api-services/new");
+  });
 });

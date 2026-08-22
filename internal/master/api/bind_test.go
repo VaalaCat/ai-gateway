@@ -78,3 +78,36 @@ func TestBindURIAndOptionalJSON_EmptyBodyValidatesURI(t *testing.T) {
 		t.Fatal("missing id should error even with empty body")
 	}
 }
+
+func TestBindURIAndStrictJSONTextRejectsTrailingInvalidEncodingAndUnknownFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "valid", body: `{"key":"value"}`},
+		{name: "trailing JSON", body: `{"key":"value"}{}`, wantErr: true},
+		{name: "invalid UTF-8", body: string([]byte{'{', '"', 'k', 'e', 'y', '"', ':', '"', 0xff, '"', '}'}), wantErr: true},
+		{name: "invalid surrogate", body: `{"key":"\ud800"}`, wantErr: true},
+		{name: "unknown field", body: `{"key":"value","ignored":true}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := newCtx(t, "7", test.body)
+			var req uriJSONReq
+			err := (DefaultRequestBinder{}).Bind(c, BindURIAndStrictJSONText, &req)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("expected strict binding error, got request %+v", req)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected success, got %v", err)
+			}
+			if req.ID != "7" || req.Key != "value" {
+				t.Fatalf("fields not bound: %+v", req)
+			}
+		})
+	}
+}

@@ -4,16 +4,16 @@ import (
 	"context"
 	"sort"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	relayplan "github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/plan"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
-var marketplaceInboundProtocols = []codec.Protocol{
-	codec.ProtocolOpenAIChat,
-	codec.ProtocolOpenAIResponses,
-	codec.ProtocolClaude,
+var marketplaceInboundProtocols = []llmkit.Protocol{
+	llmkit.ProtocolOpenAIChat,
+	llmkit.ProtocolOpenAIResponses,
+	llmkit.ProtocolClaude,
 }
 
 type ModelOfferPlanFinder interface {
@@ -69,7 +69,7 @@ func findMarketplaceOfferPlans(
 		plan, err := finder.Find(ctx, relayplan.ModelOfferPlanQuery{
 			Model:            modelName,
 			UserInfo:         userInfo,
-			InboundProtocols: append([]codec.Protocol(nil), marketplaceInboundProtocols...),
+			InboundProtocols: append([]llmkit.Protocol(nil), marketplaceInboundProtocols...),
 		})
 		if err != nil || plan.RequestModel != modelName {
 			continue
@@ -193,11 +193,11 @@ func plannedSupportedEndpoints(
 			continue
 		}
 		switch mode.Protocol {
-		case codec.ProtocolOpenAIChat:
+		case llmkit.ProtocolOpenAIChat:
 			available[EndpointChatCompletions] = struct{}{}
-		case codec.ProtocolOpenAIResponses:
+		case llmkit.ProtocolOpenAIResponses:
 			available[EndpointResponses] = struct{}{}
-		case codec.ProtocolClaude:
+		case llmkit.ProtocolClaude:
 			available[EndpointMessages] = struct{}{}
 		}
 	}

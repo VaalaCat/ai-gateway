@@ -79,6 +79,55 @@ func TestComputeRequestIDCanonicalizesAndRewritesRequestHeader(t *testing.T) {
 	require.Equal(t, "req-0ec9eb33e74510bcdd1f2ea55206e82f", c.Request.Header.Get(consts.HeaderXRequestID))
 }
 
+func TestFindAffinityIdentityFromSessionIDHeader(t *testing.T) {
+	tests := []struct {
+		name    string
+		header  string
+		value   string
+		wantKey string
+		wantOK  bool
+	}{
+		{
+			name:    "session id",
+			header:  "Session-Id",
+			value:   "session-a",
+			wantKey: "session-a",
+			wantOK:  true,
+		},
+		{
+			name:    "case insensitive header and surrounding whitespace",
+			header:  "session-id",
+			value:   "  session-b\t",
+			wantKey: "session-b",
+			wantOK:  true,
+		},
+		{
+			name:   "blank session id",
+			header: "Session-Id",
+			value:  " \t ",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			header := make(http.Header)
+			header.Set(tt.header, tt.value)
+			got, ok := findAffinityIdentity(affinityIdentityInput{
+				Header: header,
+				Body:   []byte(`{"future_body_key":"unused"}`),
+			})
+			require.Equal(t, tt.wantOK, ok)
+			require.Equal(t, tt.wantKey, got.Key)
+			if ok {
+				require.True(t, got.Partition.ByUser)
+				require.True(t, got.Partition.ByToken)
+				require.True(t, got.Partition.ByModel)
+			}
+		})
+	}
+}
+
 func TestBuildParsesHardAgentIDAndTagSelectors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -268,6 +317,7 @@ func TestBuildSuccess(t *testing.T) {
 	body := []byte(`{"model":"gpt-4","stream":true}`)
 	c := newGinCtxForTest(func(c *gin.Context) {
 		c.Request = httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+		c.Request.Header.Set(consts.HeaderSessionID, "session-a")
 		c.Set(consts.CtxKeyUserInfo, &app.UserInfo{UserID: 1, TokenID: 2})
 	})
 	rctx := newTestRelayCtx(t, c)
@@ -292,6 +342,12 @@ func TestBuildSuccess(t *testing.T) {
 	if len(rctx.Input.Body) == 0 {
 		t.Error("Body empty")
 	}
+	require.Equal(t, state.AffinityIdentity{
+		Key: "session-a",
+		Partition: state.AffinityPartition{
+			ByUser: true, ByToken: true, ByModel: true,
+		},
+	}, rctx.Input.AffinityIdentity)
 }
 
 func TestBuildSuccessNoStream(t *testing.T) {

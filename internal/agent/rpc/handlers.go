@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/netaddr"
 	"go.uber.org/zap"
@@ -38,7 +38,7 @@ func HandleChannelTest(ctx context.Context, params json.RawMessage, store *cache
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
-	relayPath, reqBody, err := codec.BuildConnectivityTestRequest("", "", p.EndpointType, p.Model, p.Stream)
+	relayPath, reqBody, err := protocolconfig.BuildConnectivityTestRequest("", "", p.EndpointType, p.Model, p.Stream)
 	if err != nil {
 		return &ChannelTestResult{Success: false, Error: err.Error(), Model: p.Model}, nil
 	}
@@ -92,4 +92,3 @@ func HandleChannelTest(ctx context.Context, params json.RawMessage, store *cache
 		Model:      p.Model,
 	}, nil
 }
-

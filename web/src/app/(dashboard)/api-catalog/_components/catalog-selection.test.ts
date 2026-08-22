@@ -33,10 +33,12 @@ const websocketRoute: APICatalogRoute = {
 };
 
 describe("parseCatalogSelection", () => {
-  it("parses only positive safe IDs and supported protocols", () => {
-    expect(parseCatalogSelection(new URLSearchParams("service_id=7&route_id=9&protocol=websocket"))).toEqual({
+  it("parses only positive safe IDs, supported protocols, and an OpenAPI operation without a Token ID", () => {
+    expect(parseCatalogSelection(new URLSearchParams("service_id=7&route_id=9&path=%2Fusers%2F%7Bid%7D&method=get&protocol=websocket&token_id=19"))).toEqual({
       serviceID: 7,
       routeID: 9,
+      path: "/users/{id}",
+      method: "get",
       protocol: "websocket",
     });
   });
@@ -47,6 +49,10 @@ describe("parseCatalogSelection", () => {
     ["service_id=%20&route_id=1e2&protocol=http", { protocol: "http" }],
   ])("rejects malformed or unsupported values from %s", (search, expected) => {
     expect(parseCatalogSelection(new URLSearchParams(search))).toEqual(expected);
+  });
+
+  it("rejects an empty path or non-HTTP operation method", () => {
+    expect(parseCatalogSelection(new URLSearchParams("path=&method=BREW"))).toEqual({});
   });
 });
 

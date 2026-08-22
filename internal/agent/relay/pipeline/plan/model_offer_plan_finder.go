@@ -5,10 +5,10 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 var (
@@ -28,7 +28,7 @@ type ModelOfferPlanQuery struct {
 	Model            string
 	UserInfo         *app.UserInfo
 	ForcedChannelID  uint
-	InboundProtocols []codec.Protocol
+	InboundProtocols []llmkit.Protocol
 }
 
 type ModelOfferPlan struct {
@@ -47,7 +47,7 @@ type ModelOfferCandidate struct {
 }
 
 type ModelOfferCandidateMode struct {
-	Protocol codec.Protocol
+	Protocol llmkit.Protocol
 	Mode     state.RelayMode
 }
 
@@ -159,7 +159,7 @@ func allowedModelForViewer(model string, ui *app.UserInfo) bool {
 func offerCandidateFromScored(
 	realModel string,
 	candidate ScoredCandidate,
-	protocols []codec.Protocol,
+	protocols []llmkit.Protocol,
 ) ModelOfferCandidate {
 	result := ModelOfferCandidate{
 		RealModel: realModel,

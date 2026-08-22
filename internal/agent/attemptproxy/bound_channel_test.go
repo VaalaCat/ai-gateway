@@ -6,13 +6,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 type privateChannelQuery struct {
@@ -55,7 +54,7 @@ func TestBoundChannelFinderRestoresAdminAttempt(t *testing.T) {
 	got, err := finder.Find(BoundChannelInput{
 		User:            allowedUser(11),
 		Attempt:         boundAttempt(attemptwire.SourceAdmin, 7, "gpt-4o", attemptwire.ModeNative),
-		InboundProtocol: codec.ProtocolOpenAIChat,
+		InboundProtocol: llmkit.ProtocolOpenAIChat,
 	})
 
 	require.NoError(t, err)
@@ -77,7 +76,7 @@ func TestBoundChannelFinderRestoresPrivateAttemptWithPlaintextKey(t *testing.T) 
 	got, err := finder.Find(BoundChannelInput{
 		User:            allowedUser(11),
 		Attempt:         boundAttempt(attemptwire.SourcePrivate, 7, "gpt-4o", attemptwire.ModeNative),
-		InboundProtocol: codec.ProtocolOpenAIChat,
+		InboundProtocol: llmkit.ProtocolOpenAIChat,
 	})
 
 	require.NoError(t, err)
@@ -104,7 +103,7 @@ func TestBoundChannelFinderNeverCrossesSourceOnIDCollision(t *testing.T) {
 		got, err := finder.Find(BoundChannelInput{
 			User:            allowedUser(11),
 			Attempt:         boundAttempt(attemptwire.SourcePrivate, 7, "gpt-4o", attemptwire.ModeNative),
-			InboundProtocol: codec.ProtocolOpenAIChat,
+			InboundProtocol: llmkit.ProtocolOpenAIChat,
 		})
 
 		require.NoError(t, err)
@@ -123,7 +122,7 @@ func TestBoundChannelFinderNeverCrossesSourceOnIDCollision(t *testing.T) {
 		got, err := finder.Find(BoundChannelInput{
 			User:            allowedUser(11),
 			Attempt:         boundAttempt(attemptwire.SourceAdmin, 7, "gpt-4o", attemptwire.ModeNative),
-			InboundProtocol: codec.ProtocolOpenAIChat,
+			InboundProtocol: llmkit.ProtocolOpenAIChat,
 		})
 
 		require.NoError(t, err)
@@ -157,7 +156,7 @@ func TestBoundChannelFinderRejectsInvalidInputBeforeCacheLookup(t *testing.T) {
 			_, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 				User:            tt.user,
 				Attempt:         tt.attempt,
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			requireBoundChannelError(t, err, tt.code)
@@ -195,7 +194,7 @@ func TestBoundChannelFinderEnforcesTokenAndGroupModels(t *testing.T) {
 			got, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 				User:            tt.user,
 				Attempt:         boundAttempt(attemptwire.SourceAdmin, 7, "gpt-4o", attemptwire.ModeNative),
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			if tt.code != "" {
@@ -233,7 +232,7 @@ func TestBoundChannelFinderRejectsUnavailableAdminChannels(t *testing.T) {
 			_, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 				User:            allowedUser(11),
 				Attempt:         boundAttempt(attemptwire.SourceAdmin, 7, "gpt-4o", attemptwire.ModeNative),
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			requireBoundChannelError(t, err, "bound_channel_not_found")
@@ -265,7 +264,7 @@ func TestBoundChannelFinderEnforcesAdminChannelWhitelists(t *testing.T) {
 			got, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 				User:            user,
 				Attempt:         boundAttempt(attemptwire.SourceAdmin, 7, "gpt-4o", attemptwire.ModeNative),
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			if tt.wantErrorCode != "" {
@@ -286,7 +285,7 @@ func TestBoundChannelFinderRejectsAdminForBYOKOnlyUser(t *testing.T) {
 	_, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 		User:            user,
 		Attempt:         boundAttempt(attemptwire.SourceAdmin, 7, "gpt-4o", attemptwire.ModeNative),
-		InboundProtocol: codec.ProtocolOpenAIChat,
+		InboundProtocol: llmkit.ProtocolOpenAIChat,
 	})
 
 	requireBoundChannelError(t, err, "bound_channel_forbidden")
@@ -309,7 +308,7 @@ func TestBoundChannelFinderPrivateAuthorizationBoundaries(t *testing.T) {
 		got, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 			User:            user,
 			Attempt:         boundAttempt(attemptwire.SourcePrivate, 7, "gpt-4o", attemptwire.ModeNative),
-			InboundProtocol: codec.ProtocolOpenAIChat,
+			InboundProtocol: llmkit.ProtocolOpenAIChat,
 		})
 
 		require.NoError(t, err)
@@ -331,7 +330,7 @@ func TestBoundChannelFinderPrivateAuthorizationBoundaries(t *testing.T) {
 			_, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 				User:            tt.user,
 				Attempt:         boundAttempt(attemptwire.SourcePrivate, 7, "gpt-4o", attemptwire.ModeNative),
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			requireBoundChannelError(t, err, "bound_model_forbidden")
@@ -346,7 +345,7 @@ func TestBoundChannelFinderPrivateAuthorizationBoundaries(t *testing.T) {
 		_, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 			User:            allowedUser(0),
 			Attempt:         boundAttempt(attemptwire.SourcePrivate, 7, "gpt-4o", attemptwire.ModeNative),
-			InboundProtocol: codec.ProtocolOpenAIChat,
+			InboundProtocol: llmkit.ProtocolOpenAIChat,
 		})
 
 		requireBoundChannelError(t, err, "bound_channel_forbidden")
@@ -376,7 +375,7 @@ func TestBoundChannelFinderPrivateAuthorizationBoundaries(t *testing.T) {
 			_, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 				User:            allowedUser(11),
 				Attempt:         boundAttempt(attemptwire.SourcePrivate, 7, "gpt-4o", attemptwire.ModeNative),
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			requireBoundChannelError(t, err, "bound_channel_not_found")
@@ -410,7 +409,7 @@ func TestBoundChannelFinderRechecksExecutionMode(t *testing.T) {
 			got, err := NewBoundChannelFinder(cache).Find(BoundChannelInput{
 				User:            allowedUser(11),
 				Attempt:         boundAttempt(attemptwire.SourceAdmin, 7, "gpt-4o", tt.boundMode),
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			if tt.wantCode != "" {
@@ -473,7 +472,7 @@ func TestBoundChannelErrorCodesAreStableAndDoNotLeakSecrets(t *testing.T) {
 			_, err := NewBoundChannelFinder(tt.cache).Find(BoundChannelInput{
 				User:            tt.user,
 				Attempt:         tt.attempt,
-				InboundProtocol: codec.ProtocolOpenAIChat,
+				InboundProtocol: llmkit.ProtocolOpenAIChat,
 			})
 
 			requireBoundChannelError(t, err, tt.code)

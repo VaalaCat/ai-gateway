@@ -3,7 +3,7 @@ package upstream
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -12,11 +12,11 @@ func TestEmitDroppedToolsLog(t *testing.T) {
 	core, recorded := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
 
-	req := &codec.Request{Metadata: map[string]any{"dropped_tools": []codec.DroppedTool{
-		{Type: "web_search", Reason: codec.DroppedToolReasonCrossProtocolIncompatible},
+	req := &llmkit.Request{Metadata: map[string]any{"dropped_tools": []llmkit.DroppedTool{
+		{Type: "web_search", Reason: llmkit.DroppedToolReasonCrossProtocolIncompatible},
 	}}}
 
-	EmitDroppedToolsLog(logger, req, 42, codec.ProtocolOpenAIResponses, codec.ProtocolOpenAIChat, "drop")
+	EmitDroppedToolsLog(logger, req, 42, llmkit.ProtocolOpenAIResponses, llmkit.ProtocolOpenAIChat, "drop")
 
 	entries := recorded.All()
 	if len(entries) != 1 {
@@ -38,14 +38,14 @@ func TestEmitDroppedToolsLog_NoopWhenEmpty(t *testing.T) {
 	core, recorded := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
 
-	req := &codec.Request{} // no Metadata
-	EmitDroppedToolsLog(logger, req, 42, codec.ProtocolOpenAIChat, codec.ProtocolOpenAIChat, "drop")
+	req := &llmkit.Request{} // no Metadata
+	EmitDroppedToolsLog(logger, req, 42, llmkit.ProtocolOpenAIChat, llmkit.ProtocolOpenAIChat, "drop")
 	if len(recorded.All()) != 0 {
 		t.Errorf("want 0 entries, got %d", len(recorded.All()))
 	}
 
-	req2 := &codec.Request{Metadata: map[string]any{"dropped_tools": []codec.DroppedTool{}}}
-	EmitDroppedToolsLog(logger, req2, 42, codec.ProtocolOpenAIChat, codec.ProtocolOpenAIChat, "drop")
+	req2 := &llmkit.Request{Metadata: map[string]any{"dropped_tools": []llmkit.DroppedTool{}}}
+	EmitDroppedToolsLog(logger, req2, 42, llmkit.ProtocolOpenAIChat, llmkit.ProtocolOpenAIChat, "drop")
 	if len(recorded.All()) != 0 {
 		t.Errorf("want 0 entries for empty slice, got %d", len(recorded.All()))
 	}

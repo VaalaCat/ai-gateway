@@ -18,10 +18,15 @@ type APIServiceQuery interface {
 	GetByID(id uint) (*models.APIService, error)
 	LockByID(id uint) (*models.APIService, error)
 	GetBySlug(slug string) (*models.APIService, error)
+	GetOpenAPIDocument(id uint) (models.OpenAPIServiceDocument, int64, error)
 	List(opts ListOptions, filter APIServiceFilter) ([]models.APIService, int64, error)
 	MaxID() (uint, error)
 	ListKeyset(afterID, snapshotMaxID uint, limit int) ([]models.APIService, error)
 	CountThroughID(snapshotMaxID uint) (int64, error)
+}
+
+var apiServiceRuntimeColumns = []string{
+	"id", "slug", "name", "description", "price_per_call", "status", "created_at", "updated_at",
 }
 
 func (q *apiServiceQuery) MaxID() (uint, error) {
@@ -32,7 +37,7 @@ func (q *apiServiceQuery) MaxID() (uint, error) {
 
 func (q *apiServiceQuery) ListKeyset(afterID, snapshotMaxID uint, limit int) ([]models.APIService, error) {
 	var rows []models.APIService
-	err := q.ctx.GetCoreDB().Where("id > ? AND id <= ?", afterID, snapshotMaxID).
+	err := q.ctx.GetCoreDB().Select(apiServiceRuntimeColumns).Where("id > ? AND id <= ?", afterID, snapshotMaxID).
 		Order("id ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -56,20 +61,29 @@ var errInvalidAPIServiceID = errors.New("api service id must not be zero")
 
 func (q *apiServiceQuery) GetByID(id uint) (*models.APIService, error) {
 	var service models.APIService
-	err := q.ctx.GetCoreDB().First(&service, id).Error
+	err := q.ctx.GetCoreDB().Select(apiServiceRuntimeColumns).First(&service, id).Error
 	return &service, err
 }
 
 func (q *apiServiceQuery) LockByID(id uint) (*models.APIService, error) {
 	var service models.APIService
-	err := q.ctx.GetCoreDB().Clauses(clause.Locking{Strength: "UPDATE"}).First(&service, id).Error
+	err := q.ctx.GetCoreDB().Select(apiServiceRuntimeColumns).Clauses(clause.Locking{Strength: "UPDATE"}).First(&service, id).Error
 	return &service, err
 }
 
 func (q *apiServiceQuery) GetBySlug(slug string) (*models.APIService, error) {
 	var service models.APIService
-	err := q.ctx.GetCoreDB().Where("slug = ?", slug).First(&service).Error
+	err := q.ctx.GetCoreDB().Select(apiServiceRuntimeColumns).Where("slug = ?", slug).First(&service).Error
 	return &service, err
+}
+
+func (q *apiServiceQuery) GetOpenAPIDocument(id uint) (models.OpenAPIServiceDocument, int64, error) {
+	if id == 0 {
+		return models.OpenAPIServiceDocument{}, 0, errInvalidAPIServiceID
+	}
+	var service models.APIService
+	err := q.ctx.GetCoreDB().Select("id", "openapi_document", "updated_at").Where("id = ?", id).First(&service).Error
+	return service.OpenAPIDocument.Data(), service.UpdatedAt, err
 }
 
 func (q *apiServiceQuery) List(opts ListOptions, filter APIServiceFilter) ([]models.APIService, int64, error) {
@@ -91,7 +105,7 @@ func (q *apiServiceQuery) List(opts ListOptions, filter APIServiceFilter) ([]mod
 		return nil, 0, err
 	}
 	var rows []models.APIService
-	err := db.Order("id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&rows).Error
+	err := db.Select(apiServiceRuntimeColumns).Order("id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&rows).Error
 	return rows, total, err
 }
 

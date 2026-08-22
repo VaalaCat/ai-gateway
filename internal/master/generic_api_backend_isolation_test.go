@@ -166,12 +166,12 @@ func backendIsolationRoute(id uint, slug string, backendID uint, requestedProtoc
 	}
 }
 
-func (f backendIsolationFixture) Find(serviceSlug, routeSlug, method, requestedProtocol string) (genericapi.ServiceRoute, error) {
-	route, ok := f.routes[routeSlug]
+func (f backendIsolationFixture) Find(serviceSlug, requestPath, method, requestedProtocol string) (genericapi.ServiceRoute, string, error) {
+	route, ok := f.routes[strings.TrimPrefix(requestPath, "/")]
 	if !ok || serviceSlug != f.service.Slug || requestedProtocol != string(f.protocol) || len(route.AllowedMethods) != 1 || method != route.AllowedMethods[0] {
-		return genericapi.ServiceRoute{}, genericapi.ErrExecutionUnavailable
+		return genericapi.ServiceRoute{}, "", genericapi.ErrExecutionUnavailable
 	}
-	return genericapi.ServiceRoute{Service: f.service, Route: route, Protocol: requestedProtocol}, nil
+	return genericapi.ServiceRoute{Service: f.service, Route: route, Protocol: requestedProtocol}, "", nil
 }
 
 func (f backendIsolationFixture) FindServiceRouteByID(serviceID, routeID uint) (genericapi.ServiceRoute, error) {

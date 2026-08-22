@@ -157,15 +157,41 @@ func (b *unavailableDirectAPIBuilder) BuildDirectHTTPAPITransport(context.Contex
 }
 
 type recordingRelayAPIOpener struct {
-	calls int
-	open  app.APIOpen
-	err   error
+	calls  int
+	open   app.APIOpen
+	stream app.HTTPAPIStream
+	err    error
 }
 
 func (o *recordingRelayAPIOpener) OpenHTTPAPIStream(_ context.Context, open app.APIOpen) (app.HTTPAPIStream, error) {
 	o.calls++
 	o.open = open
-	return nil, o.err
+	return o.stream, o.err
+}
+
+func TestRemoteHTTPPreservesExecutionErrorMessage(t *testing.T) {
+	result := apiattempt.APIExecutionResult{
+		ProviderDispatchKnown: true, ErrorStage: "transport", ErrorCode: CodeUnavailable,
+		ErrorMessage: "dial tcp: connection refused",
+	}
+	stream := newScriptedRemoteHTTPStream(
+		app.APIResponseEvent{Kind: app.APIResponseHeaders, Headers: &wire.Headers{StatusCode: http.StatusServiceUnavailable}},
+		app.APIResponseEvent{Kind: app.APIResponseEnd, Trailers: &wire.Trailers{}},
+		app.APIResponseEvent{Kind: app.APIResponseResult, Result: &result},
+	)
+	relay := &recordingRelayAPIOpener{stream: stream}
+	handler := NewRemoteHTTPHandler(RemoteHTTPHandlerOptions{Relay: relay})
+	rc := &RequestContext{
+		Context: testGinContext(t, httptest.NewRequest(http.MethodGet, "http://gateway.invalid/weather", nil)),
+		Service: protocol.SyncedAPIService{ID: 7}, Route: protocol.SyncedAPIRoute{ID: 9},
+		Protocol: ProtocolHTTP, RequestID: "request", Agent: AgentPick{
+			ExecutionAgentID: "target-a",
+			Target:           models.Agent{AgentID: "target-a", RelayInboundEnabled: true},
+		},
+	}
+
+	require.NoError(t, handler.Serve(t.Context(), rc))
+	require.Equal(t, "dial tcp: connection refused", rc.Execution.ErrorMessage)
 }
 
 func TestRemoteHTTPDirectPreOpenFailureFallsBackToRelayForSameFrozenAgent(t *testing.T) {

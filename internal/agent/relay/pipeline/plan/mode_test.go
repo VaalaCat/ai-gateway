@@ -3,20 +3,16 @@ package plan
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
-
-	// Register codec implementations so GetInbound / GetOutbound 不是 nil
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // TestModePicker_Legacy: success — channel 显式 UseLegacyAdaptor → legacy。
 func TestModePicker_Legacy(t *testing.T) {
 	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI, UseLegacyAdaptor: true}}
-	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
+	got := defaultModePicker{}.Pick(ch, "gpt-4", llmkit.ProtocolOpenAIChat)
 	if got != state.ModeLegacy {
 		t.Errorf("UseLegacyAdaptor=true → legacy, got %q", got)
 	}
@@ -25,7 +21,7 @@ func TestModePicker_Legacy(t *testing.T) {
 // TestModePicker_LegacyUnknownProtocol: success — inbound Unknown → 没 native codec，回退 legacy。
 func TestModePicker_LegacyUnknownProtocol(t *testing.T) {
 	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI}}
-	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolUnknown)
+	got := defaultModePicker{}.Pick(ch, "gpt-4", llmkit.ProtocolUnknown)
 	if got != state.ModeLegacy {
 		t.Errorf("ProtocolUnknown → legacy, got %q", got)
 	}
@@ -37,7 +33,7 @@ func TestModePicker_Passthrough(t *testing.T) {
 		Type:               consts.ChannelTypeOpenAI, // ChannelTypeToProtocol → OpenAIChat
 		PassthroughEnabled: true,
 	}}
-	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
+	got := defaultModePicker{}.Pick(ch, "gpt-4", llmkit.ProtocolOpenAIChat)
 	if got != state.ModePassthrough {
 		t.Errorf("Passthrough channel + inbound==outbound → passthrough, got %q", got)
 	}
@@ -52,7 +48,7 @@ func TestModePicker_FunctionToolFallbackDisablesPassthrough(t *testing.T) {
 		PassthroughEnabled: true,
 		OtherSettings:      `{"builtin_tool_fallback":"function"}`,
 	}}
-	got := defaultModePicker{}.Pick(ch, "glm-5.2", codec.ProtocolOpenAIResponses)
+	got := defaultModePicker{}.Pick(ch, "glm-5.2", llmkit.ProtocolOpenAIResponses)
 	if got != state.ModeNative {
 		t.Fatalf("function tool fallback requires native mode, got %q", got)
 	}
@@ -65,7 +61,7 @@ func TestModePicker_FunctionToolFallbackKeepsChatPassthrough(t *testing.T) {
 		PassthroughEnabled: true,
 		OtherSettings:      `{"builtin_tool_fallback":"function"}`,
 	}}
-	got := defaultModePicker{}.Pick(ch, "glm-5.2", codec.ProtocolOpenAIChat)
+	got := defaultModePicker{}.Pick(ch, "glm-5.2", llmkit.ProtocolOpenAIChat)
 	if got != state.ModePassthrough {
 		t.Fatalf("chat channel does not use Responses function fallback, got %q", got)
 	}
@@ -74,7 +70,7 @@ func TestModePicker_FunctionToolFallbackKeepsChatPassthrough(t *testing.T) {
 // TestModePicker_NativeDefault: success — 普通 OpenAI channel → native。
 func TestModePicker_NativeDefault(t *testing.T) {
 	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI}}
-	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
+	got := defaultModePicker{}.Pick(ch, "gpt-4", llmkit.ProtocolOpenAIChat)
 	if got != state.ModeNative {
 		t.Errorf("default OpenAI channel → native, got %q", got)
 	}
@@ -84,7 +80,7 @@ func TestModePicker_NativeDefault(t *testing.T) {
 // 复刻原 (*Handler) 顺序：shouldUseLegacy 先判，true 就直接返回。
 func TestModePicker_LegacyOverPassthrough(t *testing.T) {
 	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI, UseLegacyAdaptor: true, PassthroughEnabled: true}}
-	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolOpenAIChat)
+	got := defaultModePicker{}.Pick(ch, "gpt-4", llmkit.ProtocolOpenAIChat)
 	if got != state.ModeLegacy {
 		t.Errorf("legacy should win over passthrough, got %q", got)
 	}
@@ -93,7 +89,7 @@ func TestModePicker_LegacyOverPassthrough(t *testing.T) {
 // TestModePicker_NilChannel: boundary — nil channel 不 panic，默认走 native。
 // （生产路径不会传 nil；这只是契约防御测试）。
 func TestModePicker_NilChannel(t *testing.T) {
-	got := defaultModePicker{}.Pick(nil, "gpt-4", codec.ProtocolOpenAIChat)
+	got := defaultModePicker{}.Pick(nil, "gpt-4", llmkit.ProtocolOpenAIChat)
 	if got != state.ModeNative {
 		t.Errorf("nil channel → native (defensive), got %q", got)
 	}
@@ -108,7 +104,7 @@ func TestModePicker_PassthroughOnlyWhenProtoMatches(t *testing.T) {
 		PassthroughEnabled: true,
 	}}
 	// Claude inbound + OpenAI channel → outbound = OpenAIChat ≠ Claude → not passthrough
-	got := defaultModePicker{}.Pick(ch, "gpt-4", codec.ProtocolClaude)
+	got := defaultModePicker{}.Pick(ch, "gpt-4", llmkit.ProtocolClaude)
 	if got != state.ModeNative {
 		t.Errorf("inbound!=outbound 时 Passthrough 应失效 → native, got %q", got)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/genericapipath"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -53,14 +54,24 @@ func newWebSocketDialerWithoutHandshakeCeiling() *websocket.Dialer {
 	return &dialer
 }
 
-func (h *WebSocketHandler) Serve(ctx context.Context, rc *RequestContext) error {
+func (h *WebSocketHandler) Serve(ctx context.Context, rc *RequestContext) (returnErr error) {
 	if err := validLocalWebSocketRequest(ctx, h, rc); err != nil {
 		return err
 	}
 	startedAt := time.Now()
 	result := &apiattempt.APIExecutionResult{ProviderDispatchKnown: true}
 	var executionErr error
-	defer func() { rc.Execution = *result }()
+	credential := protocol.APIUpstreamCredential{}
+	defer func() {
+		terminalErr := executionErr
+		if terminalErr == nil {
+			terminalErr = returnErr
+		}
+		if terminalErr != nil {
+			result.ErrorMessage = safeAPIErrorMessage(terminalErr, credential)
+		}
+		rc.Execution = *result
+	}()
 
 	lease, err := h.picker.Pick(rc.Route.BackendID, apiattempt.APIProtocolWebSocket, rc.RequestID)
 	if err != nil || lease == nil || !lease.valid() {
@@ -74,6 +85,7 @@ func (h *WebSocketHandler) Serve(ctx context.Context, rc *RequestContext) error 
 		lease.Finish(APIBreakerCompletion{Result: result, Err: executionErr, ClientAbort: clientAbortReason(ctx)})
 	}()
 	result.APIUpstreamID, result.APIUpstreamName = lease.Upstream.ID, lease.Upstream.Name
+	credential = lease.Upstream.Credential
 	rc.UpstreamName = lease.Upstream.Name
 
 	permit, err := h.acquireUpstreamLimiter(ctx, rc, lease.Upstream.ID)

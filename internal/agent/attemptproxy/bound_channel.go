@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/auth"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/executionmode"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
@@ -14,6 +13,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 const (
@@ -27,7 +27,7 @@ const (
 type BoundChannelInput struct {
 	User            *app.UserInfo
 	Attempt         attemptwire.BoundAttempt
-	InboundProtocol codec.Protocol
+	InboundProtocol llmkit.Protocol
 }
 
 type BoundChannelFinder interface {

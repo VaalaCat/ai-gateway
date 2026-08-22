@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"go.uber.org/zap"
 )
 
@@ -13,7 +13,7 @@ import (
 // prompt_tokens_details.cached_tokens (mapped to CachedTokens in IR). Claude
 // already excludes cached tokens from input_tokens. This function detects the
 // OpenAI case (CachedTokens > 0 but CacheReadTokens == 0) and adjusts accordingly.
-func NormalizeUsage(u codec.Usage) codec.Usage {
+func NormalizeUsage(u llmkit.Usage) llmkit.Usage {
 	if u.CachedTokens > 0 && u.CacheReadTokens == 0 {
 		u.CacheReadTokens = u.CachedTokens
 		u.PromptTokens -= u.CachedTokens
@@ -27,9 +27,9 @@ func NormalizeUsage(u codec.Usage) codec.Usage {
 // isContentEvent returns true for event types that carry actual response
 // content (text, tool calls, thinking). Control events like StreamStart,
 // Usage, Done, and Error are excluded.
-func isContentEvent(t codec.EventType) bool {
+func isContentEvent(t llmkit.EventType) bool {
 	switch t {
-	case codec.EventContentDelta, codec.EventToolCallDelta, codec.EventThinkingDelta:
+	case llmkit.EventContentDelta, llmkit.EventToolCallDelta, llmkit.EventThinkingDelta:
 		return true
 	default:
 		return false
@@ -40,9 +40,9 @@ func isContentEvent(t codec.EventType) bool {
 // warn 日志。与编码路径解耦，便于单元测试。
 func EmitDroppedToolsLog(
 	logger *zap.Logger,
-	req *codec.Request,
+	req *llmkit.Request,
 	channelID uint,
-	inbound, outbound codec.Protocol,
+	inbound, outbound llmkit.Protocol,
 	policy string,
 ) {
 	if logger == nil || req == nil || req.Metadata == nil {
@@ -52,8 +52,21 @@ func EmitDroppedToolsLog(
 	if !ok {
 		return
 	}
-	dropped, ok := raw.([]codec.DroppedTool)
+	dropped, ok := raw.([]llmkit.DroppedTool)
 	if !ok || len(dropped) == 0 {
+		return
+	}
+	EmitDroppedTools(logger, dropped, channelID, inbound, outbound, policy)
+}
+
+func EmitDroppedTools(
+	logger *zap.Logger,
+	dropped []llmkit.DroppedTool,
+	channelID uint,
+	inbound, outbound llmkit.Protocol,
+	policy string,
+) {
+	if logger == nil || len(dropped) == 0 {
 		return
 	}
 	logger.Warn("codec dropped incompatible tools",
@@ -126,7 +139,7 @@ func ExtractUsageFromPassthroughBody(body []byte, isStream bool) (prompt, comple
 				}
 			}
 			// llama.cpp fallback: no standard usage, derive from `timings`
-			// (same gating/mapping as codec.usageFromWire — usage wins over timings).
+			// (same gating/mapping as llmkit.usageFromWire — usage wins over timings).
 			if p, c, cr, ok := parseTimingsJSON(evt.Timings); ok {
 				return p, c, cr, 0
 			}
@@ -153,7 +166,7 @@ func ExtractUsageFromPassthroughBody(body []byte, isStream bool) (prompt, comple
 }
 
 // parseTimingsJSON maps llama.cpp's non-standard `timings` object to gateway
-// usage, mirroring codec.usageFromWire exactly: prompt_n/predicted_n/cache_n are
+// usage, mirroring llmkit.usageFromWire exactly: prompt_n/predicted_n/cache_n are
 // mutually-exclusive counters mapped 1:1 to prompt/completion/cacheRead (no
 // prompt_n+cache_n). It reports ok=false unless prompt_n or predicted_n is
 // positive, gating out other upstreams' incidental empty/irrelevant timings.

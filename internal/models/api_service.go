@@ -5,6 +5,7 @@ import (
 	"regexp"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -13,14 +14,15 @@ var apiSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._~-]*$`)
 // APIService is an externally invokable generic API product. PricePerCall is
 // measured in quota units: 100000 is one USD and zero means free.
 type APIService struct {
-	ID           uint   `gorm:"primaryKey" json:"id"`
-	Slug         string `gorm:"uniqueIndex;size:64;not null" json:"slug"`
-	Name         string `gorm:"size:128;not null" json:"name"`
-	Description  string `gorm:"type:text" json:"description"`
-	PricePerCall int64  `gorm:"not null;default:0;check:chk_api_service_price_per_call,price_per_call >= 0" json:"price_per_call"`
-	Status       int    `gorm:"not null;default:1" json:"status"`
-	CreatedAt    int64  `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt    int64  `gorm:"autoUpdateTime" json:"updated_at"`
+	ID              uint                                       `gorm:"primaryKey" json:"id"`
+	Slug            string                                     `gorm:"uniqueIndex;size:64;not null" json:"slug"`
+	Name            string                                     `gorm:"size:128;not null" json:"name"`
+	Description     string                                     `gorm:"type:text" json:"description"`
+	PricePerCall    int64                                      `gorm:"not null;default:0;check:chk_api_service_price_per_call,price_per_call >= 0" json:"price_per_call"`
+	Status          int                                        `gorm:"not null;default:1" json:"status"`
+	OpenAPIDocument datatypes.JSONType[OpenAPIServiceDocument] `gorm:"column:openapi_document;type:text;not null;default:'{}'" json:"-"`
+	CreatedAt       int64                                      `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt       int64                                      `gorm:"autoUpdateTime" json:"updated_at"`
 }
 
 func (s *APIService) Validate() error {
@@ -39,13 +41,32 @@ func (s *APIService) Validate() error {
 	return nil
 }
 
+func (s *APIService) NormalizeForWrite() error {
+	document := s.OpenAPIDocument.Data()
+	pathItems, err := normalizeOpenAPIPathItemsForWrite(document.Components.PathItems)
+	if err != nil {
+		return err
+	}
+	document.Components.PathItems = pathItems
+	s.OpenAPIDocument = datatypes.NewJSONType(document)
+	return nil
+}
+
 // BeforeCreate protects the initial persisted contract. Partial updates use
 // zero-value GORM receivers, so later DAO code must load, patch, and call
 // Validate explicitly instead of relying on a full-object update hook.
-func (s *APIService) BeforeCreate(*gorm.DB) error { return s.Validate() }
+func (s *APIService) BeforeCreate(*gorm.DB) error {
+	if err := s.NormalizeForWrite(); err != nil {
+		return err
+	}
+	return s.Validate()
+}
 
 func (s *APIService) BeforeUpdate(tx *gorm.DB) error {
 	if apiFullObjectUpdate(tx) {
+		if err := s.NormalizeForWrite(); err != nil {
+			return err
+		}
 		return s.Validate()
 	}
 	return apiValidatePatch(tx,

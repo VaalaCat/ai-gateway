@@ -145,6 +145,20 @@ Web UI 全部页面的展示。所有截图都使用预置 demo 数据 — 每�
 
 ## 工具
 
+### API 服务与 OpenAPI 导入 / API Services and OpenAPI Import
+
+管理员进入 `/api-services`，选择 **导入 OpenAPI**，依次确认文件、server 和 Route 三步预览后创建
+Service。Service 详情页提供平台文档编辑和脱敏导出；创建完成后，平台文档才是准确信息源，原上传文件
+不再作为后续编辑依据。
+
+### API 目录 / API Catalog
+
+普通用户进入 `/api-catalog` 后先选择 Token。Service/Route 导航、path/method 选择、参数替换、最终公开
+URL 和在线调用都在页面正文中展示；目录不会显示所选 Token 的 Route 权限范围之外的 path 或 operation。
+
+空 slug 根 Route 使用 `/v1/api/{service_slug}`（后接动态 subpath）。Route 权限覆盖 Route 路径前缀及其
+运行时 method/subpath 策略，不是逐个 OpenAPI operation 的独立白名单。
+
 ### 对话测试 / Playground
 
 浏览器内对任意已配置模型发起对话测试。支持 Chat / JSON / SSE 视图以及自定义 system prompt。

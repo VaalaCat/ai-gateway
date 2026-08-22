@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -20,6 +19,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -86,7 +86,7 @@ func newPassthroughTestCtx(t *testing.T, body []byte, isStream bool) (*state.Rel
 		Input: state.RelayInput{
 			Body:         body,
 			Model:        "gpt-4o",
-			InboundProto: codec.ProtocolOpenAIChat,
+			InboundProto: llmkit.ProtocolOpenAIChat,
 			IsStream:     isStream,
 			StartTime:    time.Now(),
 		},
@@ -763,7 +763,7 @@ func TestBuildPassthroughRequest_RejectsHostRewrite(t *testing.T) {
 	ch.BaseURL = "https://api.openai.com"
 	ch.ChannelCore.Endpoints = `{"chat_completions":"@evil.example/v1/chat/completions"}`
 	req, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	_, err := buildPassthroughRequest(req, ch, codec.ProtocolOpenAIChat, []byte(`{}`))
+	_, err := buildPassthroughRequest(req, ch, llmkit.ProtocolOpenAIChat, []byte(`{}`))
 	if err == nil {
 		t.Fatal("want host-mismatch error, got nil")
 	}

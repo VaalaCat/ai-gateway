@@ -16,6 +16,7 @@ import {
   type APICatalogRoute,
   type APICatalogService,
   useAPICatalogEffective,
+  useAPICatalogOpenAPI,
   useAPICatalogRoutes,
   useAPICatalogServices,
 } from "@/lib/api/api-access";
@@ -33,7 +34,7 @@ import {
   toCatalogAccessScope,
   type CatalogAccessScope,
 } from "./_components/catalog-token-scope";
-import { findCatalogScopeFailure } from "./_components/catalog-scope-failure";
+import { findCatalogScopeFailure, isCatalogTokenUnavailable } from "./_components/catalog-scope-failure";
 import {
   initialCatalogTokenInvalidationGuard,
   transitionCatalogTokenInvalidationGuard,
@@ -44,12 +45,18 @@ import {
 } from "./_components/catalog-scope-visit";
 import { RouteNavigator } from "./_components/route-navigator";
 import { InvocationWorkbench } from "./_components/invocation-workbench";
+import { OpenAPIOperationDocument } from "./_components/openapi-operation-document";
+import { OpenAPIInvocationWorkbench } from "./_components/openapi-invocation-workbench";
+import { OpenAPIOperationNavigator } from "./_components/openapi-operation-navigator";
+import { findOpenAPIOperation, listOpenAPIOperations } from "./_components/openapi-operation-selection";
+import { unresolvedOpenAPIRouteSlugs } from "./_components/openapi-operation-contract";
 import { CatalogTokenPicker, CatalogToolbar } from "./_components/catalog-toolbar";
 import {
   createRequestExampleDraft,
   type RequestExampleDraft,
 } from "./_components/request-example-draft";
 import { ServiceNavigator } from "./_components/service-navigator";
+import { catalogPageExhausted, MAX_CATALOG_PAGE } from "./_components/catalog-pagination";
 import { useInvocationToken } from "../api-services/_components/use-invocation-token";
 
 interface LoadedPage<T> {
@@ -132,10 +139,6 @@ function statusOf(error: unknown) {
   return typeof error === "object" && error !== null && "status" in error ? (error as { status?: number }).status : undefined;
 }
 
-function currentPageExhausted<T>(data: { data: T[]; total: number } | undefined, loadedCount: number) {
-  return data !== undefined && (loadedCount >= data.total || data.data.length === 0);
-}
-
 export default function APICatalogPage() {
   const t = useTranslations("apiCatalog");
   const workspace = useCatalogWorkspace();
@@ -206,6 +209,10 @@ function useCatalogWorkspace() {
   const routeID = routePages.choice.id;
   const selectedRoute = routePages.items.find((route) => route.id === routeID);
   const effective = useAPICatalogEffective(viewerUserID, catalogScope, serviceID ?? 0, { enabled: serviceID !== undefined });
+  const openAPI = useAPICatalogOpenAPI(viewerUserID, catalogScope, serviceID ?? 0, {
+    enabled: serviceID !== undefined,
+    queryIdentity: scopeVisitKey,
+  });
   const protocol = normalizeProtocol(requested.protocol, selectedRoute);
   const serviceSearch = serviceSearchState.scopeKey === scopeKey ? serviceSearchState.value : "";
   const committedServiceSearch = serviceSearch.trim();
@@ -228,6 +235,31 @@ function useCatalogWorkspace() {
   const routeOptionTotal = routeSearchActive ? routeCandidates.total : routePages.total;
   const serviceOptionLoaded = serviceSearchActive ? serviceCandidates.items.length : servicePages.loadedCount;
   const routeOptionLoaded = routeSearchActive ? routeCandidates.items.length : routePages.loadedCount;
+  const unresolvedOpenAPIRoutes = unresolvedOpenAPIRouteSlugs(openAPI.data?.document, routePages.items);
+  const openAPIRouteIdentitiesLoading = Boolean(
+    openAPI.data
+    && unresolvedOpenAPIRoutes.length > 0
+    && !routePages.exhausted,
+  );
+  const openAPIRouteIdentitiesUnresolved = Boolean(
+    openAPI.data
+    && unresolvedOpenAPIRoutes.length > 0
+    && routePages.exhausted,
+  );
+  const openAPIRouteIdentitiesReady = Boolean(openAPI.data && unresolvedOpenAPIRoutes.length === 0);
+  const openAPIOperations = listOpenAPIOperations(openAPI.data?.document, routePages.items);
+  const selectedOpenAPIOperation = findOpenAPIOperation(openAPIOperations, {
+    routeID: requested.routeID,
+    path: requested.path,
+    method: requested.method,
+  }, { identitiesComplete: openAPIRouteIdentitiesReady });
+  const selectedOpenAPIRoute = selectedOpenAPIOperation
+    ? routePages.items.find((route) => route.id === selectedOpenAPIOperation.routeID)
+    : undefined;
+  const routeIdentityExhausted = routePages.exhausted;
+  const loadMoreRouteIdentities = routePages.loadMore;
+  const routeIdentityPage = routePages.query.data;
+  const routeIdentityPageFetching = routePages.query.isFetching;
   const invocationToken = useInvocationToken({
     viewerUserID,
     // behavior change: the catalog's selected Token, including an administrator-selected external Token, is authoritative.
@@ -246,6 +278,9 @@ function useCatalogWorkspace() {
       ...(serviceID !== undefined ? [{ error: routePages.query.error, retry: routePages.query.refetch }] : []),
       ...(routeSearchActive ? [{ error: routeCandidates.query.error, retry: routeCandidates.query.refetch }] : []),
       ...(serviceID !== undefined ? [{ error: effective.error, retry: effective.refetch }] : []),
+      ...(isCatalogTokenUnavailable(openAPI.error)
+        ? [{ error: openAPI.error, retry: openAPI.refetch }]
+        : []),
     ])
     : undefined;
   const [requestDraft, setRequestDraft] = useState<{ scopeKey: string; routeID: number; draft: RequestExampleDraft }>();
@@ -272,15 +307,37 @@ function useCatalogWorkspace() {
 
   useEffect(() => {
     if (!servicePages.settled || !routePages.settled) return;
-    if (requested.serviceID === serviceID && requested.routeID === routeID && requested.protocol === protocol) return;
-    patchSearchParams({ service_id: serviceID, route_id: routeID, protocol });
-  }, [patchSearchParams, protocol, requested.protocol, requested.routeID, requested.serviceID, routeID, routePages.settled, serviceID, servicePages.settled]);
+    const targetProtocol = openAPIRouteIdentitiesReady && selectedOpenAPIOperation ? undefined : protocol;
+    if (requested.serviceID === serviceID && requested.routeID === routeID && requested.protocol === targetProtocol) return;
+    patchSearchParams({ service_id: serviceID, route_id: routeID, protocol: targetProtocol ?? null });
+  }, [openAPIRouteIdentitiesReady, patchSearchParams, protocol, requested.protocol, requested.routeID, requested.serviceID, routeID, routePages.settled, selectedOpenAPIOperation, serviceID, servicePages.settled]);
+
+  useEffect(() => {
+    if (!openAPI.data || unresolvedOpenAPIRoutes.length === 0 || routeIdentityExhausted || routeIdentityPageFetching || !routeIdentityPage) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) loadMoreRouteIdentities();
+    });
+    return () => { cancelled = true; };
+  }, [loadMoreRouteIdentities, openAPI.data, routeIdentityExhausted, routeIdentityPage, routeIdentityPageFetching, unresolvedOpenAPIRoutes.length]);
+
+  useEffect(() => {
+    if (!openAPI.data) return;
+    if (!openAPIRouteIdentitiesReady) return;
+    if (!selectedOpenAPIOperation) {
+      if (requested.path !== undefined || requested.method !== undefined) patchSearchParams({ path: null, method: null });
+      return;
+    }
+    const method = selectedOpenAPIOperation.method.toLowerCase();
+    if (requested.routeID === selectedOpenAPIOperation.routeID && requested.path === selectedOpenAPIOperation.path && requested.method === method && requested.protocol === undefined) return;
+    patchSearchParams({ route_id: selectedOpenAPIOperation.routeID, path: selectedOpenAPIOperation.path, method, protocol: null });
+  }, [openAPI.data, openAPIRouteIdentitiesReady, patchSearchParams, requested.method, requested.path, requested.protocol, requested.routeID, selectedOpenAPIOperation]);
 
   useEffect(() => {
     if (previousScopeKey.current === scopeKey) return;
     previousScopeKey.current = scopeKey;
     // behavior change: selections and request fields never carry into another Token catalog.
-    patchSearchParams({ service_id: null, route_id: null, protocol: null });
+    patchSearchParams({ service_id: null, route_id: null, protocol: null, path: null, method: null });
   }, [patchSearchParams, scopeKey]);
 
   const selectService = (id: number) => {
@@ -288,7 +345,7 @@ function useCatalogWorkspace() {
     if (candidate) setKnownService({ scopeKey, item: candidate });
     setServiceSearchState({ scopeKey, value: "" });
     setRouteSearchState({ scopeKey, serviceID: id, value: "" });
-    patchSearchParams({ service_id: id, route_id: null, protocol: null });
+    patchSearchParams({ service_id: id, route_id: null, protocol: null, path: null, method: null });
   };
   const selectRoute = (id: number) => {
     const nextRoute = routePages.items.find((route) => route.id === id)
@@ -297,7 +354,7 @@ function useCatalogWorkspace() {
       setKnownRoutes((current) => new Map(current).set(serviceID, { scopeKey, item: nextRoute }));
     }
     setRouteSearchState({ scopeKey, serviceID, value: "" });
-    patchSearchParams({ route_id: id, protocol: normalizeProtocol(requested.protocol, nextRoute) });
+    patchSearchParams({ route_id: id, protocol: normalizeProtocol(requested.protocol, nextRoute), path: null, method: null });
   };
   const selectProtocol = (nextProtocol: CatalogProtocol) => patchSearchParams({ protocol: nextProtocol });
 
@@ -318,6 +375,14 @@ function useCatalogWorkspace() {
     selectedService,
     routes: routePages.query,
     effective,
+    openAPI,
+    openAPIOperations,
+    openAPIRouteIdentitiesLoading,
+    openAPIRouteIdentitiesUnresolved,
+    openAPIRouteIdentitiesReady,
+    selectedOpenAPIOperation,
+    selectedOpenAPIRoute,
+    scopeVisitKey,
     scopeFailure,
     routeItems: routePages.items,
     routeTotal: routePages.total,
@@ -334,6 +399,9 @@ function useCatalogWorkspace() {
     selectService,
     selectRoute,
     selectProtocol,
+    selectOpenAPIOperation: (operation: NonNullable<typeof selectedOpenAPIOperation>) => {
+      patchSearchParams({ route_id: operation.routeID, path: operation.path, method: operation.method.toLowerCase(), protocol: null });
+    },
     setServiceSearch: (value: string) => setServiceSearchState({ scopeKey, value }),
     setRouteSearch: (value: string) => setRouteSearchState({ scopeKey, serviceID, value }),
     setDraft: (nextDraft: RequestExampleDraft) => {
@@ -354,10 +422,16 @@ function usePagedServices(viewerUserID: number, scope: CatalogAccessScope, scope
   const loadedItems = mergeItems(current.items, query.data?.data ?? []);
   const items = mergeItems(loadedItems, known ? [known] : []);
   const total = query.data?.total ?? current.total;
-  const exhausted = currentPageExhausted(query.data, loadedItems.length);
+  const exhausted = query.data !== undefined && catalogPageExhausted({
+    page: current.page,
+    pageItemCount: query.data.data.length,
+    previousLoadedCount: current.items.length,
+    loadedCount: loadedItems.length,
+    total: query.data.total,
+  });
   const choice = pickCatalogID(requestedID, items, exhausted);
   const loadMore = useCallback(() => {
-    if (!query.data) return;
+    if (!query.data || current.page >= MAX_CATALOG_PAGE) return;
     const expectedPage = current.page;
     setServicePages((saved) => {
       if (scopeWitness.current !== scopeKey) return saved;
@@ -396,10 +470,16 @@ function usePagedRoutes(viewerUserID: number, scope: CatalogAccessScope, scopeKe
   const loadedItems = mergeItems(current.items, query.data?.data ?? []);
   const items = mergeItems(loadedItems, known && known.api_service_id === serviceID ? [known] : []);
   const total = query.data?.total ?? current.total;
-  const exhausted = currentPageExhausted(query.data, loadedItems.length);
+  const exhausted = query.data !== undefined && catalogPageExhausted({
+    page: current.page,
+    pageItemCount: query.data.data.length,
+    previousLoadedCount: current.items.length,
+    loadedCount: loadedItems.length,
+    total: query.data.total,
+  });
   const choice = pickCatalogID(requestedID, items, exhausted);
   const loadMore = useCallback(() => {
-    if (serviceID === undefined || !query.data) return;
+    if (serviceID === undefined || !query.data || current.page >= MAX_CATALOG_PAGE) return;
     const expectedPage = current.page;
     setRoutePages((savedState) => {
       if (scopeWitness.current !== scopeKey) return savedState;
@@ -428,6 +508,7 @@ function usePagedRoutes(viewerUserID: number, scope: CatalogAccessScope, scopeKe
     total,
     choice,
     settled: serviceID === undefined || (!choice.pending && (items.length > 0 || query.data !== undefined)),
+    exhausted,
     loadMore,
   };
 }
@@ -512,11 +593,19 @@ function CatalogWorkspace({ workspace }: { workspace: ReturnType<typeof useCatal
     routeSearch,
     routeID,
     selectedRoute,
+    openAPI,
+    openAPIOperations,
+    selectedOpenAPIOperation,
+    selectedOpenAPIRoute,
   } = workspace;
   const scopeRequired = workspace.catalogScope.mode === "required";
   const scopeHasToken = workspace.catalogScope.mode === "token";
   const tokenInvalidationGuard = useRef(initialCatalogTokenInvalidationGuard);
   const scopeIdentity = catalogScopeIdentity(workspace.viewerUserID, workspace.catalogScope);
+  const hasOpenAPIOperations = !openAPI.isFetching
+    && !openAPI.error
+    && workspace.openAPIRouteIdentitiesReady
+    && openAPIOperations.length > 0;
   const scopeFailureKind = workspace.scopeFailure?.kind;
   const tokenID = workspace.invocationToken.tokenID;
   const clearToken = workspace.invocationToken.clearToken;
@@ -538,6 +627,7 @@ function CatalogWorkspace({ workspace }: { workspace: ReturnType<typeof useCatal
   return (
     <div className="flex min-w-0 flex-col gap-4 overflow-x-clip">
       <CatalogScopeBar workspace={workspace} />
+      <OpenAPICatalogStatus workspace={workspace} />
       {scopeRequired ? (
         <Empty>
           <EmptyHeader>
@@ -589,6 +679,7 @@ function CatalogWorkspace({ workspace }: { workspace: ReturnType<typeof useCatal
           routesLoading={routeOptionQuery.isFetching}
           routesError={routeOptionQuery.error}
           routesHaveMore={routeOptionLoaded < routeOptionTotal}
+          showRoutePicker={!hasOpenAPIOperations}
           onServiceChange={workspace.selectService}
           onRouteChange={workspace.selectRoute}
           onServiceSearch={workspace.setServiceSearch}
@@ -598,7 +689,7 @@ function CatalogWorkspace({ workspace }: { workspace: ReturnType<typeof useCatal
           onRetryServices={workspace.retryServices}
           onRetryRoutes={workspace.retryRoutes}
           />
-          <div className="grid min-w-0 gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]">
+          <div className={hasOpenAPIOperations ? "grid min-w-0 gap-4 lg:grid-cols-[18rem_16rem_minmax(0,1fr)]" : "grid min-w-0 gap-4 lg:grid-cols-[18rem_minmax(0,1fr)]"}>
           <div data-testid="catalog-desktop-service-navigation" className="hidden lg:block">
             <ServiceNavigator
               items={serviceOptionItems}
@@ -613,8 +704,18 @@ function CatalogWorkspace({ workspace }: { workspace: ReturnType<typeof useCatal
               onRetry={workspace.retryServices}
             />
           </div>
+          {hasOpenAPIOperations ? (
+            <div data-testid="catalog-desktop-operation-navigation" className="hidden min-w-0 lg:block">
+              <OpenAPIOperationNavigator operations={openAPIOperations} selected={selectedOpenAPIOperation} onSelect={workspace.selectOpenAPIOperation} />
+            </div>
+          ) : null}
           <main data-testid="catalog-main" className="min-w-0 space-y-4" aria-label={selectedService?.name}>
             <ServiceSummary service={selectedService} />
+            {hasOpenAPIOperations ? (
+              <section className="flex min-w-0 flex-col gap-3 lg:hidden">
+                <OpenAPIOperationNavigator operations={openAPIOperations} selected={selectedOpenAPIOperation} onSelect={workspace.selectOpenAPIOperation} />
+              </section>
+            ) : (
             <section className="hidden min-w-0 flex-col gap-3 lg:flex">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-lg font-semibold tracking-tight">{t("routes")}</h2>
@@ -633,7 +734,17 @@ function CatalogWorkspace({ workspace }: { workspace: ReturnType<typeof useCatal
                 onRetry={workspace.retryRoutes}
               />
             </section>
-            {selectedService && selectedRoute && workspace.protocol && workspace.draft ? (
+            )}
+            {hasOpenAPIOperations && selectedService && selectedOpenAPIOperation && selectedOpenAPIRoute ? (
+              <CatalogOpenAPIWorkbench
+                scopeKey={workspace.scopeVisitKey}
+                service={selectedService}
+                operation={selectedOpenAPIOperation}
+                route={selectedOpenAPIRoute}
+                openAPIDocument={openAPI.data?.document}
+                invocationToken={workspace.invocationToken}
+              />
+            ) : selectedService && selectedRoute && workspace.protocol && workspace.draft ? (
               <CatalogRouteWorkbench
                 service={selectedService}
                 route={selectedRoute}
@@ -651,6 +762,30 @@ function CatalogWorkspace({ workspace }: { workspace: ReturnType<typeof useCatal
       )}
     </div>
   );
+}
+
+function OpenAPICatalogStatus({ workspace }: { workspace: ReturnType<typeof useCatalogWorkspace> }) {
+  const t = useTranslations("apiCatalog");
+  const tc = useTranslations("common");
+  if (workspace.serviceID === undefined) return null;
+  if (workspace.openAPI.isFetching || workspace.openAPIRouteIdentitiesLoading) {
+    return <p className="text-sm text-muted-foreground" role="status">{t("openAPILoading")}</p>;
+  }
+  if (workspace.openAPI.error) {
+    return (
+      <Alert>
+        <AlertTitle>{t("openAPILoadFailed")}</AlertTitle>
+        <AlertDescription><Button type="button" variant="outline" size="sm" onClick={() => void workspace.openAPI.refetch()}>{tc("retry")}</Button></AlertDescription>
+      </Alert>
+    );
+  }
+  if (workspace.openAPIRouteIdentitiesUnresolved) {
+    return <Alert><AlertTitle>{t("openAPIRoutesUnresolved")}</AlertTitle></Alert>;
+  }
+  if (workspace.openAPI.data && workspace.openAPIOperations.length === 0) {
+    return <p className="text-sm text-muted-foreground" role="status">{t("openAPIEmpty")}</p>;
+  }
+  return null;
 }
 
 function CatalogScopeBar({ workspace }: { workspace: ReturnType<typeof useCatalogWorkspace> }) {
@@ -684,6 +819,47 @@ function ServiceSummary({ service }: { service?: APICatalogService }) {
       <h2 className="text-xl font-semibold tracking-tight">{service.name}</h2>
       <p className="text-sm text-muted-foreground">{service.description || t("noDescription")}</p>
     </header>
+  );
+}
+
+function CatalogOpenAPIWorkbench({
+  scopeKey,
+  service,
+  operation,
+  route,
+  openAPIDocument,
+  invocationToken,
+}: {
+  scopeKey: string;
+  service: APICatalogService;
+  operation: ReturnType<typeof findOpenAPIOperation>;
+  route: APICatalogRoute;
+  openAPIDocument?: Record<string, unknown>;
+  invocationToken: ReturnType<typeof useInvocationToken>;
+}) {
+  const origin = useBrowserOrigin();
+  if (!operation) return null;
+  const components = openAPIDocument?.components !== null && typeof openAPIDocument?.components === "object" && !Array.isArray(openAPIDocument.components)
+    ? openAPIDocument.components as Record<string, unknown>
+    : undefined;
+  const chooseToken = () => document.getElementById("catalog-token-picker")?.click();
+  return (
+    <section data-testid="catalog-openapi-workbench" className="flex min-w-0 flex-col gap-4">
+      <OpenAPIOperationDocument origin={origin} serviceSlug={service.slug} operation={operation} components={components} />
+      <OpenAPIInvocationWorkbench
+        scopeKey={scopeKey}
+        origin={origin}
+        serviceSlug={service.slug}
+        operation={operation}
+        route={route}
+        components={components}
+        token={invocationToken.token}
+        tokenChecking={invocationToken.isChecking}
+        tokenFailure={invocationToken.failure}
+        onChooseToken={chooseToken}
+        onTokenCommandCopied={invocationToken.rememberToken}
+      />
+    </section>
   );
 }
 

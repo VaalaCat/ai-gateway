@@ -12,12 +12,12 @@ import (
 // Production break caught: an API terminal record must remain a typed API log
 // throughout delivery, preserve request-id correlation, and not lose body or
 // header/trailer capture flags during the source-to-log-db conversion.
-func TestAPIUsageBuildLogBatchCorrelatesTraceAndPersistsCaptureFlags(t *testing.T) {
+func TestAPIUsageBuildLogBatchProjectsErrorMessageAndPersistsCaptureFlags(t *testing.T) {
 	batch, err := BuildLogBatch(protocol.APIUsageEntry{
 		RequestID: "api-trace-1", UserID: 9, TokenID: 7, TokenName: "production", APIServiceID: 3,
 		ServiceName: "weather", SourceAgentID: "edge", ExecutionAgentID: "worker",
 		Protocol: "http", Method: "POST", Subpath: "/forecast", StatusCode: 201,
-		ProviderDispatchKnown: true, ProviderDispatched: true,
+		ProviderDispatchKnown: true, ProviderDispatched: true, ErrorMessage: "connection refused",
 		Trace: &apiattempt.APIExecutionTrace{
 			SourceRequestHeaders:           map[string][]string{"X-Source": {"one"}},
 			SourceRequestTrailersTruncated: true,
@@ -37,6 +37,7 @@ func TestAPIUsageBuildLogBatchCorrelatesTraceAndPersistsCaptureFlags(t *testing.
 	require.Equal(t, int64(12345), batch.APIRequest.UnitPrice)
 	require.Equal(t, int64(12345), batch.APIRequest.TotalCost)
 	require.False(t, batch.APIRequest.ServiceMissingAtSettlement)
+	require.Equal(t, "connection refused", batch.APIRequest.ErrorMessage)
 	require.Len(t, batch.APITraces, 1)
 	trace := batch.APITraces[0]
 	require.Equal(t, "api-trace-1", trace.RequestID)

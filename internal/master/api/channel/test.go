@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
@@ -86,7 +86,7 @@ func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
 	}
 	tokenKey := token.Key
 
-	relayPath, reqBody, err := codec.BuildConnectivityTestRequest(
+	relayPath, reqBody, err := protocolconfig.BuildConnectivityTestRequest(
 		channel.Endpoints, channel.SupportedAPITypes, req.EndpointType, model, req.Stream)
 	if err != nil {
 		return TestResponse{}, api.BadRequestError(err.Error(), nil)

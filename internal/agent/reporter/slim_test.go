@@ -204,6 +204,7 @@ func TestSlimOversizedAPITracePreservesIdentityDispatchAndRateLimitFacts(t *test
 	entry := protocol.APIUsageEntry{
 		RequestID: "api-large", APIServiceID: 7, APIRouteID: 9, APIUpstreamID: 11,
 		ProviderDispatchKnown: true, ProviderDispatched: true, RequestBytes: 123, ResponseBytes: 456,
+		ErrorMessage:      "connection refused",
 		RateLimitDecision: "rejected", RateLimitHitTotal: 1,
 		RateLimitHits: []models.RateLimitHit{{LimiterID: 3, Name: "limit", Dimension: "rate/shared", Bucket: "api", Decision: "rejected"}},
 		Trace: &protocol.APITraceEntry{ResponseBody: &apiattempt.APIBodyCapture{
@@ -224,6 +225,7 @@ func TestSlimOversizedAPITracePreservesIdentityDispatchAndRateLimitFacts(t *test
 	require.Equal(t, int64(456), got[0].API.ResponseBytes)
 	require.Equal(t, "rejected", got[0].API.RateLimitDecision)
 	require.Equal(t, 1, got[0].API.RateLimitHitTotal)
+	require.Equal(t, "connection refused", got[0].API.ErrorMessage)
 	require.Less(t, entrySize(got[0]), entrySize(usage))
 }
 

@@ -3,8 +3,8 @@ package upstream
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func TestBuildChannelConfigReadsBuiltinToolFallback(t *testing.T) {
@@ -25,7 +25,7 @@ func TestBuildChannelConfigReadsBuiltinToolFallback(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ch := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: c.otherSettings}}
-			cfg := BuildChannelConfig(ch, "test-model", codec.ProtocolOpenAIChat)
+			cfg := BuildChannelConfig(ch, "test-model", llmkit.ProtocolOpenAIChat)
 			if cfg.BuiltinToolFallback != c.want {
 				t.Errorf("want %q, got %q", c.want, cfg.BuiltinToolFallback)
 			}
@@ -37,17 +37,17 @@ func TestBuildChannelConfigReadsRequestFieldPolicy(t *testing.T) {
 	tests := []struct {
 		name          string
 		otherSettings string
-		want          codec.RequestFieldPermissions
+		want          llmkit.RequestFieldPermissions
 		wantBeta      bool
 	}{
 		{
 			name: "defaults",
-			want: codec.RequestFieldPermissions{AllowStore: true},
+			want: llmkit.RequestFieldPermissions{AllowStore: true},
 		},
 		{
 			name:          "all explicit",
 			otherSettings: `{"allow_service_tier":true,"allow_inference_geo":true,"disable_store":true,"allow_safety_identifier":true,"allow_include_obfuscation":true,"claude_beta_query":true}`,
-			want: codec.RequestFieldPermissions{
+			want: llmkit.RequestFieldPermissions{
 				AllowServiceTier:        true,
 				AllowInferenceGeo:       true,
 				AllowStore:              false,
@@ -59,7 +59,7 @@ func TestBuildChannelConfigReadsRequestFieldPolicy(t *testing.T) {
 		{
 			name:          "wrong types ignored independently",
 			otherSettings: `{"allow_service_tier":"yes","allow_inference_geo":true,"disable_store":0,"allow_safety_identifier":[],"allow_include_obfuscation":null,"claude_beta_query":"yes"}`,
-			want: codec.RequestFieldPermissions{
+			want: llmkit.RequestFieldPermissions{
 				AllowInferenceGeo: true,
 				AllowStore:        true,
 			},
@@ -67,14 +67,14 @@ func TestBuildChannelConfigReadsRequestFieldPolicy(t *testing.T) {
 		{
 			name:          "malformed json uses defaults",
 			otherSettings: `{not-json`,
-			want:          codec.RequestFieldPermissions{AllowStore: true},
+			want:          llmkit.RequestFieldPermissions{AllowStore: true},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ch := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: tt.otherSettings}}
-			cfg := BuildChannelConfig(ch, "test-model", codec.ProtocolOpenAIResponses)
+			cfg := BuildChannelConfig(ch, "test-model", llmkit.ProtocolOpenAIResponses)
 			if cfg.RequestFieldPermissions != tt.want {
 				t.Fatalf("permissions = %#v, want %#v", cfg.RequestFieldPermissions, tt.want)
 			}
@@ -87,7 +87,7 @@ func TestBuildChannelConfigReadsRequestFieldPolicy(t *testing.T) {
 
 func TestBuildChannelConfig_SendBackThinkingMatched(t *testing.T) {
 	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://x", OtherSettings: `{"model_thinking_passthrough":[{"model_pattern":"deepseek-(v4|chat).*","send_back_thinking":true}]}`}, Key: "k"}
-	cfg := BuildChannelConfig(ch, "deepseek-v4-pro", codec.ProtocolOpenAIChat)
+	cfg := BuildChannelConfig(ch, "deepseek-v4-pro", llmkit.ProtocolOpenAIChat)
 	if !cfg.SendBackThinking {
 		t.Fatal("expected SendBackThinking=true after pattern match")
 	}
@@ -95,7 +95,7 @@ func TestBuildChannelConfig_SendBackThinkingMatched(t *testing.T) {
 
 func TestBuildChannelConfig_SendBackThinkingDefaultFalse(t *testing.T) {
 	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://x"}, Key: "k"}
-	cfg := BuildChannelConfig(ch, "gpt-4o", codec.ProtocolOpenAIChat)
+	cfg := BuildChannelConfig(ch, "gpt-4o", llmkit.ProtocolOpenAIChat)
 	if cfg.SendBackThinking {
 		t.Fatal("expected SendBackThinking=false when no rules configured")
 	}
@@ -103,7 +103,7 @@ func TestBuildChannelConfig_SendBackThinkingDefaultFalse(t *testing.T) {
 
 func TestBuildChannelConfig_SendBackThinkingUnmatchedFalse(t *testing.T) {
 	ch := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, BaseURL: "https://x", OtherSettings: `{"model_thinking_passthrough":[{"model_pattern":"deepseek-.*","send_back_thinking":true}]}`}, Key: "k"}
-	cfg := BuildChannelConfig(ch, "gpt-4o", codec.ProtocolOpenAIChat)
+	cfg := BuildChannelConfig(ch, "gpt-4o", llmkit.ProtocolOpenAIChat)
 	if cfg.SendBackThinking {
 		t.Fatal("expected SendBackThinking=false when model does not match any rule")
 	}
@@ -114,7 +114,7 @@ func TestBuildChannelConfig_SendBackThinkingFirstMatchWins(t *testing.T) {
 			{"model_pattern":"deepseek-r1","send_back_thinking":false},
 			{"model_pattern":"deepseek-.*","send_back_thinking":true}
 		]}`}, Key: "k"}
-	cfg := BuildChannelConfig(ch, "deepseek-r1", codec.ProtocolOpenAIChat)
+	cfg := BuildChannelConfig(ch, "deepseek-r1", llmkit.ProtocolOpenAIChat)
 	if cfg.SendBackThinking {
 		t.Fatal("first matching rule should win (r1 explicitly false), got SendBackThinking=true")
 	}
@@ -122,15 +122,15 @@ func TestBuildChannelConfig_SendBackThinkingFirstMatchWins(t *testing.T) {
 
 func TestBuildChannelConfig_InlineImageURL(t *testing.T) {
 	on := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: `{"inline_image_url":true}`}}
-	if cfg := BuildChannelConfig(on, "", codec.ProtocolOpenAIChat); !cfg.InlineImageURL {
+	if cfg := BuildChannelConfig(on, "", llmkit.ProtocolOpenAIChat); !cfg.InlineImageURL {
 		t.Errorf("inline_image_url:true -> InlineImageURL should be true")
 	}
 	off := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: `{"inline_image_url":false}`}}
-	if cfg := BuildChannelConfig(off, "", codec.ProtocolOpenAIChat); cfg.InlineImageURL {
+	if cfg := BuildChannelConfig(off, "", llmkit.ProtocolOpenAIChat); cfg.InlineImageURL {
 		t.Errorf("inline_image_url:false -> InlineImageURL should be false")
 	}
 	absent := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: `{}`}}
-	if cfg := BuildChannelConfig(absent, "", codec.ProtocolOpenAIChat); cfg.InlineImageURL {
+	if cfg := BuildChannelConfig(absent, "", llmkit.ProtocolOpenAIChat); cfg.InlineImageURL {
 		t.Errorf("absent key -> InlineImageURL should default false")
 	}
 }

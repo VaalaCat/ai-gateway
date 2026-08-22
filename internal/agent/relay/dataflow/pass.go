@@ -1,27 +1,23 @@
-// Package dataflow 把 channel 内部"解码后请求 → 待发送上游 HTTP 请求"的处理
+// Package dataflow 把 channel 内部、llmkit 编码前的公共 IR 请求处理
 // 表达成一串独立的 Step,由 ChannelDataFlow 统一运行与描述。
 package dataflow
 
 import (
 	"encoding/json"
-	"net/http"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // Pass 是一次请求在 channel 内部流动时携带的数据。
 //
-// 翻译(StepEncode)之前,各 Step 作用在 Working(IR)上;翻译之后作用在
-// HTTPReq / Body 上。Original 是进入本 channel 处理那一刻的冻结快照,只读——
+// 各 Step 只作用在 Working(IR)上。Original 是进入本 channel 处理那一刻的
+// 冻结快照,只读——
 // 需要"原始输入值"(如请求模型 Original.Model)的 Step 读它;默认语义是读 Working。
 type Pass struct {
-	Original *codec.Request // 冻结只读快照
-	Working  *codec.Request // 被各 Step 加工的工作副本(翻译前有效)
-
-	HTTPReq *http.Request // StepEncode 产出;翻译后有效
-	Body    []byte        // 工作 body 字节;翻译后有效
+	Original *llmkit.Request // 冻结只读快照
+	Working  *llmkit.Request // 被各 Step 加工的工作副本
 
 	Rec *trace.Recorder // 透传给 Step 打 stage / WithFail;可能为 nil
 
@@ -43,7 +39,7 @@ type Pass struct {
 //
 // 另注:marshal 失败时(不应发生)兜底走浅拷贝,而浅拷贝与入参共享 slice/map 引用,
 // 因此这条非预期路径上 Original 不再与 Working 完全独立。
-func CloneRequest(r *codec.Request) *codec.Request {
+func CloneRequest(r *llmkit.Request) *llmkit.Request {
 	if r == nil {
 		return nil
 	}
@@ -53,7 +49,7 @@ func CloneRequest(r *codec.Request) *codec.Request {
 		cp := *r
 		return &cp
 	}
-	var out codec.Request
+	var out llmkit.Request
 	if err := json.Unmarshal(b, &out); err != nil {
 		cp := *r
 		return &cp

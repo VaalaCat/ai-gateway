@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/passthrough"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 )
 
@@ -42,7 +42,7 @@ func TestRelayPassthrough_InvalidRequestBodyJSON_ErrNotPanic(t *testing.T) {
 		Input: state.RelayInput{
 			Body:         []byte(`not-json-at-all`),
 			Model:        "gpt-4o",
-			InboundProto: codec.ProtocolOpenAIChat,
+			InboundProto: llmkit.ProtocolOpenAIChat,
 			StartTime:    time.Now(),
 		},
 		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},

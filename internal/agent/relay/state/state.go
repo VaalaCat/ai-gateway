@@ -20,13 +20,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // Phase 是 pipeline 外层阶段（4 个），跟 attempt 内部的 Stage 严格区分。
@@ -76,16 +76,30 @@ type RelayContext struct {
 
 // RelayInput 是请求 immutable 输入（ctxBuilder 装配完不再改）。
 type RelayInput struct {
-	RequestID       string
-	StartTime       time.Time
-	UserInfo        *app.UserInfo
-	Body            []byte
-	Model           string
-	IsStream        bool
-	InboundProto    codec.Protocol
-	ForcedChannelID uint
-	BodyLimits      app.BodyLimits
-	HardSelector    app.AgentSelector
+	RequestID        string
+	StartTime        time.Time
+	UserInfo         *app.UserInfo
+	Body             []byte
+	Model            string
+	IsStream         bool
+	InboundProto     llmkit.Protocol
+	ForcedChannelID  uint
+	BodyLimits       app.BodyLimits
+	HardSelector     app.AgentSelector
+	AffinityIdentity AffinityIdentity
+}
+
+// AffinityIdentity 是从请求中识别出的路由粘性身份。Partition 明确哪些请求
+// 维度参与隔离；后续 Header / Body finder 可按各自协议返回不同组合。
+type AffinityIdentity struct {
+	Key       string
+	Partition AffinityPartition
+}
+
+type AffinityPartition struct {
+	ByUser  bool
+	ByToken bool
+	ByModel bool
 }
 
 var (

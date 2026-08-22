@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/pkg/apiattempt"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/sourcegraph/conc/pool"
 )
 
@@ -53,7 +54,7 @@ func NewHTTPHandler(picker HTTPUpstreamPicker, transport *HTTPTransport, limiter
 	return handler
 }
 
-func (h *HTTPHandler) Serve(ctx context.Context, rc *RequestContext) error {
+func (h *HTTPHandler) Serve(ctx context.Context, rc *RequestContext) (returnErr error) {
 	if err := validLocalHTTPRequest(ctx, h, rc); err != nil {
 		return err
 	}
@@ -61,9 +62,17 @@ func (h *HTTPHandler) Serve(ctx context.Context, rc *RequestContext) error {
 	result := &apiattempt.APIExecutionResult{ProviderDispatchKnown: true}
 	traceCapture := newExecutionAPITraceCapture(rc.TracePolicy, rc.Protocol)
 	var executionErr error
-	defer func() { rc.Execution = *result }()
+	credential := protocol.APIUpstreamCredential{}
 	defer func() {
-		result.Trace = traceCapture.finish(infrastructureAPIFailure(ctx, *result, executionErr))
+		terminalErr := executionErr
+		if terminalErr == nil {
+			terminalErr = returnErr
+		}
+		if terminalErr != nil {
+			result.ErrorMessage = safeAPIErrorMessage(terminalErr, credential)
+		}
+		result.Trace = traceCapture.finish(infrastructureAPIFailure(ctx, *result, terminalErr))
+		rc.Execution = *result
 	}()
 	lease, err := h.picker.Pick(rc.Route.BackendID, apiattempt.APIProtocolHTTP, rc.RequestID)
 	if err != nil {
@@ -81,6 +90,7 @@ func (h *HTTPHandler) Serve(ctx context.Context, rc *RequestContext) error {
 		executionErr = unavailableUpstream("picker returned invalid upstream lease")
 		return executionErr
 	}
+	credential = lease.Upstream.Credential
 	result.APIUpstreamID = lease.Upstream.ID
 	result.APIUpstreamName = lease.Upstream.Name
 	rc.UpstreamName = lease.Upstream.Name

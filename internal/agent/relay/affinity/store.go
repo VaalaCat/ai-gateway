@@ -10,11 +10,31 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
 )
 
-// Key 粘性映射键：用户 + API token + 真实模型名。
+// Key 是粘性映射键；显式 CacheKey 可按 identity partition 选择是否叠加用户、Token 和模型维度。
 type Key struct {
 	UserID    uint
 	TokenID   uint
 	RealModel string
+	CacheKey  string
+}
+
+// BuildKey 把 finder 输出的身份隔离规则投影为实际 Store key。没有显式身份时
+// 保持原有 user + token + model 粘性键。
+func BuildKey(identity state.AffinityIdentity, userID, tokenID uint, realModel string) Key {
+	if identity.Key == "" {
+		return Key{UserID: userID, TokenID: tokenID, RealModel: realModel}
+	}
+	key := Key{CacheKey: identity.Key}
+	if identity.Partition.ByUser {
+		key.UserID = userID
+	}
+	if identity.Partition.ByToken {
+		key.TokenID = tokenID
+	}
+	if identity.Partition.ByModel {
+		key.RealModel = realModel
+	}
+	return key
 }
 
 // Entry 粘性记录值。带 Source 是因为 private/admin 的 ID 是两套空间，

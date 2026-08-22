@@ -46,6 +46,7 @@ type APIUsageEntry struct {
 	QuotaGateDecision     string `json:"quota_gate_decision"`
 	ErrorStage            string `json:"error_stage"`
 	ErrorCode             string `json:"error_code"`
+	ErrorMessage          string `json:"error_message,omitempty"`
 
 	RateLimitDecision      string                `json:"rate_limit_decision"`
 	RateLimitWaitMs        int                   `json:"rate_limit_wait_ms"`

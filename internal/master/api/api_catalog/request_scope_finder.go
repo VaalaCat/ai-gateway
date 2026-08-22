@@ -64,30 +64,37 @@ func NewCatalogRequestScopeFinder(ctx dao.Context) *CatalogRequestScopeFinder {
 }
 
 func (f *CatalogRequestScopeFinder) Find(ctx context.Context, viewer CatalogViewer, tokenID uint) (CatalogRequestScope, error) {
+	var scope CatalogRequestScope
+	err := dao.RunInCoreTx[dao.Context](f.ctx, func(txCtx dao.Context) error {
+		txFinder := *f
+		txFinder.ctx = txCtx
+		var findErr error
+		scope, findErr = txFinder.findInTx(ctx, viewer, tokenID)
+		return findErr
+	})
+	if err != nil {
+		return CatalogRequestScope{}, err
+	}
+	return scope, nil
+}
+
+func (f *CatalogRequestScopeFinder) findInTx(ctx context.Context, viewer CatalogViewer, tokenID uint) (CatalogRequestScope, error) {
 	if tokenID == 0 {
 		if viewer.IsAdmin {
 			return CatalogRequestScope{AdminAll: true}, nil
 		}
 		return CatalogRequestScope{}, ErrCatalogTokenRequired
 	}
-	var scope CatalogRequestScope
-	err := dao.RunInCoreTx[dao.Context](f.ctx, func(txCtx dao.Context) error {
-		query := dao.NewAdminQuery(txCtx)
-		token, err := f.findUsableToken(query, tokenID, viewer)
-		if err != nil {
-			return err
-		}
-		roleSet, err := apirbac.NewRoleSetFinder(query.User(), query.Token(), query.APIRBAC()).FindToken(ctx, token.ID)
-		if err != nil || !roleSet.Exists {
-			return catalogAccessError("find token API role set", err)
-		}
-		scope, err = f.projectInvokeScope(ctx, query, token.ID, roleSet.RoleIDs)
-		return err
-	})
+	query := dao.NewAdminQuery(f.ctx)
+	token, err := f.findUsableToken(query, tokenID, viewer)
 	if err != nil {
 		return CatalogRequestScope{}, err
 	}
-	return scope, nil
+	roleSet, err := apirbac.NewRoleSetFinder(query.User(), query.Token(), query.APIRBAC()).FindToken(ctx, token.ID)
+	if err != nil || !roleSet.Exists {
+		return CatalogRequestScope{}, catalogAccessError("find token API role set", err)
+	}
+	return f.projectInvokeScope(ctx, query, token.ID, roleSet.RoleIDs)
 }
 
 func (f *CatalogRequestScopeFinder) findUsableToken(query dao.AdminQuery, tokenID uint, viewer CatalogViewer) (*models.Token, error) {

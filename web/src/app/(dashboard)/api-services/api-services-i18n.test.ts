@@ -18,7 +18,65 @@ const routeTableKeys = [
   "routesLabel", "routesLoadFailed", "routesLoadFailedDescription",
 ] as const;
 
+const openAPIKeys = [
+  "importOpenAPI", "importOpenAPIDescription", "openAPIJSON", "openAPIFile",
+  "openAPIFileDescription", "openAPIFileStepDescription", "openAPIFileError",
+  "openAPIFileJSONOnly", "openAPIFileInvalid", "previewOpenAPI", "previewingOpenAPI",
+  "openAPIPreview", "openAPIPreviewDescription", "openAPIPreviewFailed", "openAPIService",
+  "openAPIServers", "openAPIRoutes", "openAPINoServersDescription", "upstreamBaseURL",
+  "route", "paths", "methods", "gatewayURL", "rootRoute", "openAPIWarnings",
+  "confirmImport", "importingOpenAPI", "openAPIImportFailed", "exportOpenAPI",
+  "exportingOpenAPI", "openAPIExportFailed", "openAPIServiceSlugConflict",
+  "openAPIServerSelectionRequired", "openAPISelectedServerInvalid", "openAPIInvalidDocument",
+  "openAPIRequestTooLarge", "openAPISyncPublishFailed", "openAPIUpstreamURLRequired",
+  "editOpenAPIDocument", "editOpenAPIDocumentDescription", "saveOpenAPIDocument", "savingOpenAPIDocument",
+  "openAPIUpdateFailed", "openAPIUpdateConflict", "openAPIUpdateConflictDescription", "reloadOpenAPIDocument",
+  "confirmReloadOpenAPIDocument", "keepOpenAPIDraft",
+] as const;
+
+const openAPIEditorPlainKeys = [
+  "openAPIRouteList", "openAPIRouteListDescription", "openAPIRouteLabel", "openAPINoRoute",
+  "openAPIServiceFactsDescription", "openAPIVersion", "openAPIDocumentVersion", "openAPITags",
+  "openAPIComponents", "openAPIPathsEmpty", "openAPIPathsEmptyDescription", "openAPIRoutesEmpty",
+  "openAPIRoutesEmptyDescription", "openAPIFinalPublicURL", "openAPIPathLabel",
+  "openAPIPathMustStartWithSlash", "openAPIPathOutsideRoute", "openAPIPublicPathDuplicate",
+  "openAPIStoredPathDuplicate", "openAPIPathInvalid", "openAPIAddMethodLabel", "openAPINoMethodsAvailable", "openAPIAddOperation",
+  "openAPIMethodLabel", "openAPIRemoveOperation", "openAPIOperationSummary",
+  "openAPIOperationDescription", "openAPIRequestBody", "openAPIResponses", "openAPIPathParameters",
+  "openAPIOperationParameters", "openAPIParameterName", "openAPIParameterLocation",
+  "openAPIParameterRequired", "openAPIParameterSchema", "openAPIParameterActions",
+  "openAPIParametersEmpty", "openAPIAddPathParameter", "openAPIAddOperationParameter",
+  "openAPIJSONInvalid", "openAPIJSONObjectRequired", "openAPIMethodDuplicate", "openAPIPathMissing",
+  "openAPIOperationMissing", "openAPIParameterMissing", "openAPISavedRefreshFailed",
+  "openAPISavedRefreshFailedDescription",
+] as const;
+
 describe("apiServices runtime messages", () => {
+  it.each([["en", en], ["zh", zh]] as const)("resolves every platform OpenAPI editor message for %s", (locale, messages) => {
+    const errors: unknown[] = [];
+    const t = createTranslator({ locale, messages, namespace: "apiServices", onError: (error) => errors.push(error) });
+    for (const key of openAPIEditorPlainKeys) expect(t(key), `${locale}.${key}`).not.toBe(key);
+    expect(t("openAPIRouteCount", { count: 2 })).toContain("2");
+    expect(t("openAPIServiceID", { id: 7 })).toContain("7");
+    expect(t("openAPIUpstreamPath", { path: "/users" })).toContain("/users");
+    for (const key of ["openAPIParameterNameAt", "openAPIParameterLocationAt", "openAPIParameterRequiredAt", "openAPIParameterSchemaAt", "openAPIRemoveParameter"] as const) {
+      expect(t(key, { index: 2 }), `${locale}.${key}`).toContain("2");
+    }
+    expect(errors, `${locale} missing platform OpenAPI editor messages`).toEqual([]);
+  });
+
+  it.each([["en", en], ["zh", zh]] as const)("resolves every OpenAPI import and export message for %s", (locale, messages) => {
+    const errors: unknown[] = [];
+    const t = createTranslator({ locale, messages, namespace: "apiServices", onError: (error) => errors.push(error) });
+    for (const key of openAPIKeys) {
+      const value = lookup(messages, `apiServices.${key}`);
+      expect(value, `${locale}.apiServices.${key}`).toEqual(expect.any(String));
+      expect((value as string).trim(), `${locale}.apiServices.${key} empty`).not.toBe("");
+      expect(t(key), `${locale}.${key} unresolved`).not.toBe(key);
+    }
+    expect(errors, `${locale} missing OpenAPI messages`).toEqual([]);
+  });
+
   it.each([["en", en], ["zh", zh]] as const)("resolves route table messages for %s", (locale, messages) => {
     const errors: unknown[] = [];
     const t = createTranslator({ locale, messages, namespace: "apiServices", onError: (error) => errors.push(error) });

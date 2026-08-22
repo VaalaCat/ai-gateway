@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -18,10 +19,18 @@ type APIRouteQuery interface {
 	GetByID(id uint) (*models.APIRoute, error)
 	LockByID(id uint) (*models.APIRoute, error)
 	GetByServiceAndSlug(serviceID uint, slug string) (*models.APIRoute, error)
+	ListOpenAPIPaths(serviceID uint, routeIDs *[]uint) ([]models.APIRoute, error)
+	ListVisibleOpenAPIPaths(serviceID uint, routeIDs *[]uint) ([]models.APIRoute, error)
 	List(opts ListOptions, filter APIRouteFilter) ([]models.APIRoute, int64, error)
 	MaxID() (uint, error)
 	ListKeyset(afterID, snapshotMaxID uint, limit int) ([]models.APIRoute, error)
 	CountThroughID(snapshotMaxID uint) (int64, error)
+}
+
+var apiRouteRuntimeColumns = []string{
+	"id", "api_service_id", "backend_id", "slug", "protocols", "allowed_methods",
+	"web_socket_subprotocols", "upstream_path", "forward_subpath", "example_request",
+	"status", "created_at", "updated_at",
 }
 
 func (q *apiRouteQuery) MaxID() (uint, error) {
@@ -32,7 +41,7 @@ func (q *apiRouteQuery) MaxID() (uint, error) {
 
 func (q *apiRouteQuery) ListKeyset(afterID, snapshotMaxID uint, limit int) ([]models.APIRoute, error) {
 	var rows []models.APIRoute
-	err := q.ctx.GetCoreDB().Where("id > ? AND id <= ?", afterID, snapshotMaxID).
+	err := q.ctx.GetCoreDB().Select(apiRouteRuntimeColumns).Where("id > ? AND id <= ?", afterID, snapshotMaxID).
 		Order("id ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -54,20 +63,48 @@ type apiRouteMutation struct{ ctx *baseContext }
 
 func (q *apiRouteQuery) GetByID(id uint) (*models.APIRoute, error) {
 	var route models.APIRoute
-	err := q.ctx.GetCoreDB().First(&route, id).Error
+	err := q.ctx.GetCoreDB().Select(apiRouteRuntimeColumns).First(&route, id).Error
 	return &route, err
 }
 
 func (q *apiRouteQuery) LockByID(id uint) (*models.APIRoute, error) {
 	var route models.APIRoute
-	err := q.ctx.GetCoreDB().Clauses(clause.Locking{Strength: "UPDATE"}).First(&route, id).Error
+	err := q.ctx.GetCoreDB().Select(apiRouteRuntimeColumns).Clauses(clause.Locking{Strength: "UPDATE"}).First(&route, id).Error
 	return &route, err
 }
 
 func (q *apiRouteQuery) GetByServiceAndSlug(serviceID uint, slug string) (*models.APIRoute, error) {
 	var route models.APIRoute
-	err := q.ctx.GetCoreDB().Where("api_service_id = ? AND slug = ?", serviceID, slug).First(&route).Error
+	err := q.ctx.GetCoreDB().Select(apiRouteRuntimeColumns).Where("api_service_id = ? AND slug = ?", serviceID, slug).First(&route).Error
 	return &route, err
+}
+
+func (q *apiRouteQuery) ListOpenAPIPaths(serviceID uint, routeIDs *[]uint) ([]models.APIRoute, error) {
+	return q.listOpenAPIPaths(serviceID, routeIDs, nil)
+}
+
+// ListVisibleOpenAPIPaths keeps disabled route documents out of the SQL read,
+// including documents that cannot be decoded safely.
+func (q *apiRouteQuery) ListVisibleOpenAPIPaths(serviceID uint, routeIDs *[]uint) ([]models.APIRoute, error) {
+	status := consts.StatusEnabled
+	return q.listOpenAPIPaths(serviceID, routeIDs, &status)
+}
+
+func (q *apiRouteQuery) listOpenAPIPaths(serviceID uint, routeIDs *[]uint, status *int) ([]models.APIRoute, error) {
+	if routeIDs != nil && len(*routeIDs) == 0 {
+		return []models.APIRoute{}, nil
+	}
+	db := q.ctx.GetCoreDB().Select("id", "api_service_id", "openapi_paths").
+		Where("api_service_id = ?", serviceID)
+	if status != nil {
+		db = db.Where("status = ?", *status)
+	}
+	if routeIDs != nil {
+		db = db.Where("id IN ?", *routeIDs)
+	}
+	var routes []models.APIRoute
+	err := db.Order("id ASC").Find(&routes).Error
+	return routes, err
 }
 
 func (q *apiRouteQuery) List(opts ListOptions, filter APIRouteFilter) ([]models.APIRoute, int64, error) {
@@ -93,7 +130,7 @@ func (q *apiRouteQuery) List(opts ListOptions, filter APIRouteFilter) ([]models.
 		return nil, 0, err
 	}
 	var rows []models.APIRoute
-	err := db.Order("id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&rows).Error
+	err := db.Select(apiRouteRuntimeColumns).Order("id DESC").Offset(opts.Offset()).Limit(opts.PageSize).Find(&rows).Error
 	return rows, total, err
 }
 
@@ -153,7 +190,7 @@ func (m *apiRouteMutation) Update(id uint, patch map[string]any) error {
 		// updates. Persist the fully locked and validated object with Updates
 		// (not Save), so a concurrent delete remains a zero-row update rather
 		// than turning into an upsert.
-		result := txCtx.GetCoreDB().Model(route).Select("*").Where("id = ?", id).Updates(route)
+		result := txCtx.GetCoreDB().Model(route).Select(apiRouteRuntimeColumns).Where("id = ?", id).Updates(route)
 		if result.Error != nil {
 			return result.Error
 		}

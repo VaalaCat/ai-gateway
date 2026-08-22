@@ -3,14 +3,11 @@ package executionmode
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/stretchr/testify/require"
-
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/claude"
-	_ "github.com/VaalaCat/ai-gateway/internal/agent/relay/codec/openai"
 )
 
 func TestForChannelPreservesExecutionModeParity(t *testing.T) {
@@ -18,7 +15,7 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 		name    string
 		channel *models.Channel
 		model   string
-		inbound codec.Protocol
+		inbound llmkit.Protocol
 		want    attemptproxy.ExecutionMode
 	}{
 		{
@@ -27,14 +24,14 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 				Type:             consts.ChannelTypeOpenAI,
 				UseLegacyAdaptor: true,
 			}},
-			model: "gpt-4", inbound: codec.ProtocolOpenAIChat, want: attemptproxy.ModeLegacy,
+			model: "gpt-4", inbound: llmkit.ProtocolOpenAIChat, want: attemptproxy.ModeLegacy,
 		},
 		{
 			name: "unknown inbound uses legacy",
 			channel: &models.Channel{ChannelCore: models.ChannelCore{
 				Type: consts.ChannelTypeOpenAI,
 			}},
-			model: "gpt-4", inbound: codec.ProtocolUnknown, want: attemptproxy.ModeLegacy,
+			model: "gpt-4", inbound: llmkit.ProtocolUnknown, want: attemptproxy.ModeLegacy,
 		},
 		{
 			name: "same protocol passthrough",
@@ -42,7 +39,7 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 				Type:               consts.ChannelTypeOpenAI,
 				PassthroughEnabled: true,
 			}},
-			model: "gpt-4", inbound: codec.ProtocolOpenAIChat, want: attemptproxy.ModePassthrough,
+			model: "gpt-4", inbound: llmkit.ProtocolOpenAIChat, want: attemptproxy.ModePassthrough,
 		},
 		{
 			name: "responses builtin tool fallback uses native",
@@ -52,7 +49,7 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 				PassthroughEnabled: true,
 				OtherSettings:      `{"builtin_tool_fallback":"function"}`,
 			}},
-			model: "glm-5.2", inbound: codec.ProtocolOpenAIResponses, want: attemptproxy.ModeNative,
+			model: "glm-5.2", inbound: llmkit.ProtocolOpenAIResponses, want: attemptproxy.ModeNative,
 		},
 		{
 			name: "chat ignores responses builtin tool fallback",
@@ -62,14 +59,14 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 				PassthroughEnabled: true,
 				OtherSettings:      `{"builtin_tool_fallback":"function"}`,
 			}},
-			model: "glm-5.2", inbound: codec.ProtocolOpenAIChat, want: attemptproxy.ModePassthrough,
+			model: "glm-5.2", inbound: llmkit.ProtocolOpenAIChat, want: attemptproxy.ModePassthrough,
 		},
 		{
 			name: "native default",
 			channel: &models.Channel{ChannelCore: models.ChannelCore{
 				Type: consts.ChannelTypeOpenAI,
 			}},
-			model: "gpt-4", inbound: codec.ProtocolOpenAIChat, want: attemptproxy.ModeNative,
+			model: "gpt-4", inbound: llmkit.ProtocolOpenAIChat, want: attemptproxy.ModeNative,
 		},
 		{
 			name: "legacy wins over passthrough",
@@ -78,11 +75,11 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 				UseLegacyAdaptor:   true,
 				PassthroughEnabled: true,
 			}},
-			model: "gpt-4", inbound: codec.ProtocolOpenAIChat, want: attemptproxy.ModeLegacy,
+			model: "gpt-4", inbound: llmkit.ProtocolOpenAIChat, want: attemptproxy.ModeLegacy,
 		},
 		{
 			name:  "nil channel uses native",
-			model: "gpt-4", inbound: codec.ProtocolOpenAIChat, want: attemptproxy.ModeNative,
+			model: "gpt-4", inbound: llmkit.ProtocolOpenAIChat, want: attemptproxy.ModeNative,
 		},
 		{
 			name: "different protocol uses native",
@@ -90,7 +87,7 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 				Type:               consts.ChannelTypeOpenAI,
 				PassthroughEnabled: true,
 			}},
-			model: "gpt-4", inbound: codec.ProtocolClaude, want: attemptproxy.ModeNative,
+			model: "gpt-4", inbound: llmkit.ProtocolClaude, want: attemptproxy.ModeNative,
 		},
 	}
 
@@ -106,14 +103,14 @@ func TestForChannelPreservesPassthroughCombinations(t *testing.T) {
 		name        string
 		passthrough bool
 		supported   string
-		inbound     codec.Protocol
+		inbound     llmkit.Protocol
 		want        attemptproxy.ExecutionMode
 	}{
-		{"disabled", false, `["responses"]`, codec.ProtocolOpenAIResponses, attemptproxy.ModeNative},
-		{"enabled same protocol", true, `["responses"]`, codec.ProtocolOpenAIResponses, attemptproxy.ModePassthrough},
-		{"enabled different protocol", true, `["chat-completion"]`, codec.ProtocolOpenAIResponses, attemptproxy.ModeNative},
-		{"enabled no supported types defaults to chat", true, "", codec.ProtocolOpenAIChat, attemptproxy.ModePassthrough},
-		{"enabled both supported inbound matches", true, `["responses","chat-completion"]`, codec.ProtocolOpenAIResponses, attemptproxy.ModePassthrough},
+		{"disabled", false, `["responses"]`, llmkit.ProtocolOpenAIResponses, attemptproxy.ModeNative},
+		{"enabled same protocol", true, `["responses"]`, llmkit.ProtocolOpenAIResponses, attemptproxy.ModePassthrough},
+		{"enabled different protocol", true, `["chat-completion"]`, llmkit.ProtocolOpenAIResponses, attemptproxy.ModeNative},
+		{"enabled no supported types defaults to chat", true, "", llmkit.ProtocolOpenAIChat, attemptproxy.ModePassthrough},
+		{"enabled both supported inbound matches", true, `["responses","chat-completion"]`, llmkit.ProtocolOpenAIResponses, attemptproxy.ModePassthrough},
 	}
 
 	for _, tt := range tests {

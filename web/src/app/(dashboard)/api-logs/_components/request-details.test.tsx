@@ -66,6 +66,7 @@ function request(overrides: Partial<APIRequestLog> = {}): APIRequestLog {
     quota_gate_decision: "allow",
     error_stage: "",
     error_code: "",
+    error_message: "",
     service_missing_at_settlement: false,
     rate_limit_decision: "allow",
     rate_limit_wait_ms: 0,
@@ -139,6 +140,49 @@ describe("APIRequestDetails", () => {
     for (const hidden of ["Primary", "agent-source", "agent-exec", "/egress/weather", "203.0.113.8"]) {
       expect(screen.queryByText(hidden)).not.toBeInTheDocument();
     }
+  });
+
+  it("shows a multiline error message only for administrators", () => {
+    const errorMessage = "dial tcp 127.0.0.1:1:\nconnection refused";
+    const { rerender } = render(
+      <APIRequestDetails
+        request={request({
+          error_stage: "transport",
+          error_code: "api_unavailable",
+          error_message: errorMessage,
+        })}
+      />,
+    );
+
+    expect(screen.getByText((_, element) => (
+      element?.tagName === "PRE" && element.textContent === errorMessage
+    ))).toBeInTheDocument();
+
+    rerender(
+      <APIRequestDetails
+        request={request({ error_message: errorMessage })}
+        showInternal={false}
+      />,
+    );
+    expect(screen.queryByText((_, element) => (
+      element?.tagName === "PRE" && element.textContent === errorMessage
+    ))).not.toBeInTheDocument();
+  });
+
+  it("does not render an empty error message for a successful request", () => {
+    render(<APIRequestDetails request={request({ error_message: "" })} />);
+
+    expect(screen.queryByText("errorMessage")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows the failure area when only an error message is available", () => {
+    const errorMessage = "connection refused";
+
+    render(<APIRequestDetails request={request({ error_message: errorMessage })} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("failureDetails");
+    expect(screen.getByText(errorMessage)).toBeInTheDocument();
   });
 
   it("truncates a long request ID, reveals it on hover, and copies the full value", async () => {

@@ -335,11 +335,12 @@ func (e *Executor) forgetAffinity(rctx *state.RelayContext, attempt state.Attemp
 	if !attempt.ByAffinity || e.Affinity == nil || rctx.Input.UserInfo == nil || rctx.Input.UserInfo.UserID == 0 {
 		return
 	}
-	e.Affinity.Forget(affinity.Key{
-		UserID:    rctx.Input.UserInfo.UserID,
-		TokenID:   rctx.Input.UserInfo.TokenID,
-		RealModel: attempt.RealModel,
-	})
+	e.Affinity.Forget(affinity.BuildKey(
+		rctx.Input.AffinityIdentity,
+		rctx.Input.UserInfo.UserID,
+		rctx.Input.UserInfo.TokenID,
+		attempt.RealModel,
+	))
 }
 
 func (e *Executor) sleepBeforeNextAttempt(rctx *state.RelayContext, attemptErr error) bool {

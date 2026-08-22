@@ -3,8 +3,8 @@ package channel
 import (
 	"strconv"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/dataflow"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
@@ -29,11 +29,10 @@ type DataFlowResponse struct {
 // buildDataFlowResponse 纯逻辑:按 channel 主出站协议装配 dataflow,
 // 把 AllStepInfos()(全 11 道)与 flow.Describe()(实跑工序+Detail)合并成有序 DTO。
 func buildDataFlowResponse(ch *models.Channel) DataFlowResponse {
-	proto := codec.PrimaryOutboundProtocol(ch.Endpoints, ch.SupportedAPITypes)
-	flow := dataflow.BuildChannelDataFlow(ch, proto, codec.GetOutbound(proto), dataflow.StepDeps{})
+	proto := protocolconfig.PrimaryOutboundProtocol(ch.Endpoints, ch.SupportedAPITypes)
 
 	active := map[string]dataflow.StepInfo{}
-	for _, s := range flow.Describe() {
+	for _, s := range dataflow.DescribeChannelDataFlow(ch, proto) {
 		active[s.Key] = s
 	}
 	steps := make([]DataFlowStepDTO, 0, len(dataflow.AllStepInfos()))

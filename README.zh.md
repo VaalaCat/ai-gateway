@@ -98,6 +98,33 @@ docker compose up -d
 
 完整模板参见 [`config.example.yaml`](config.example.yaml)。
 
+### 通用 API 网关
+
+管理员可在 **API 服务 → 导入 OpenAPI** 上传 OpenAPI 3.0 或 3.1 JSON。导入前先确认识别出的
+server 和 Route 分组；导入后，以平台保存的文档为准，可在 Service 详情页编辑，并导出脱敏后的
+OpenAPI 文档。需要复制配置时，把导出的文档再次导入为另一个 Service。
+
+普通用户在 **API 目录** 选择自己的 Token，只会看到该 Token 有权调用的 Service、Route、path 和
+operation。operation 视图可替换 path 参数、生成最终公开 URL，并发起在线调用。显式 Route 的公开
+URL 是：
+
+```text
+/v1/api/{service_slug}/{route_slug}
+/v1/api/{service_slug}/{route_slug}/{subpath...}
+```
+
+如果文档的可调用 path 是 `/`，或首段就是 path 参数，导入时可生成空 slug 的根 Route。根 Route
+不占公开 URL 的 Route 段：
+
+```text
+/v1/api/{service_slug}
+/v1/api/{service_slug}/{dynamic_path...}
+```
+
+安全边界：Route 授权的是路径前缀，不是 OpenAPI operation 白名单。Token 获得某个 Route 的调用权后，
+运行时按该 Route 的协议、合并后的 HTTP Method 和 subpath 策略校验，不会再对每个 OpenAPI operation
+单独授权。需要不同权限的 operation 应拆到不同 Route。
+
 ## 部署
 
 ### 单节点（Docker Compose）

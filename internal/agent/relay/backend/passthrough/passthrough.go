@@ -10,7 +10,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/scripthook"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/transform"
@@ -18,6 +18,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -268,13 +269,13 @@ func applyPassthroughOverrides(upstreamReq *http.Request, newBody []byte, ch *mo
 // buildPassthroughRequest 根据原始 *http.Request + channel 配置 + 新 body 构造上行 HTTP 请求。
 // 处理：endpoint 解析 / URL 拼接 / 经 upstream.ForwardClientHeaders 诚实透传客户端 header
 // (剥离受管头) / Authorization 覆盖 / Organization。
-func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundProto codec.Protocol, newBody []byte) (*http.Request, error) {
+func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundProto llmkit.Protocol, newBody []byte) (*http.Request, error) {
 	// Build upstream URL: prefer Endpoints config path, fallback to original request path
-	endpointPath := codec.ResolveEndpointPath(ch.Endpoints, inboundProto)
+	endpointPath := protocolconfig.ResolveEndpointPath(ch.Endpoints, inboundProto)
 	if endpointPath == "" {
 		endpointPath = origReq.URL.Path
 	}
-	upstreamURL, err := codec.JoinUpstreamURL(ch.GetBaseURL(), endpointPath)
+	upstreamURL, err := protocolconfig.JoinUpstreamURL(ch.GetBaseURL(), endpointPath)
 	if err != nil {
 		return nil, fmt.Errorf("build passthrough url: %w", err)
 	}
@@ -317,7 +318,7 @@ func buildPassthroughBody(bodyBytes []byte, ch *models.Channel, modelName, upstr
 							if msg, ok := msgRaw.(map[string]any); ok {
 								if roleRaw, ok := msg["role"]; ok {
 									if role, ok := roleRaw.(string); ok {
-										if targetRole, ok := mapping[codec.Role(role)]; ok {
+										if targetRole, ok := mapping[llmkit.Role(role)]; ok {
 											msg["role"] = string(targetRole)
 											messages[i] = msg
 										}

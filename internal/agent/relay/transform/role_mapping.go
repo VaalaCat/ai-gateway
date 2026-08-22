@@ -7,15 +7,15 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // RoleMappingConfig represents the role mapping configuration for a channel.
 type RoleMappingConfig struct {
 	// Default mappings applied to all models in this channel
-	Default map[codec.Role]codec.Role `json:"default,omitempty"`
+	Default map[llmkit.Role]llmkit.Role `json:"default,omitempty"`
 	// Per-model mappings; keys support wildcard patterns (e.g., "claude-*")
-	Models map[string]map[codec.Role]codec.Role `json:"models,omitempty"`
+	Models map[string]map[llmkit.Role]llmkit.Role `json:"models,omitempty"`
 }
 
 // ParseRoleMapping parses a JSON string into a RoleMappingConfig.
@@ -37,7 +37,7 @@ func ParseRoleMapping(raw string) *RoleMappingConfig {
 // ResolveRoleMapping returns the applicable role mapping for a given model name.
 // Priority: exact model match > wildcard match > default.
 // Returns nil if no mapping applies.
-func (c *RoleMappingConfig) ResolveRoleMapping(modelName string) map[codec.Role]codec.Role {
+func (c *RoleMappingConfig) ResolveRoleMapping(modelName string) map[llmkit.Role]llmkit.Role {
 	// 1. Try exact match
 	if mapping, ok := c.Models[modelName]; ok {
 		return mapping
@@ -45,7 +45,7 @@ func (c *RoleMappingConfig) ResolveRoleMapping(modelName string) map[codec.Role]
 
 	// 2. Try wildcard match (longest prefix wins)
 	var bestMatch string
-	var bestMapping map[codec.Role]codec.Role
+	var bestMapping map[llmkit.Role]llmkit.Role
 	for pattern, mapping := range c.Models {
 		if strings.HasSuffix(pattern, "*") {
 			prefix := strings.TrimSuffix(pattern, "*")
@@ -69,7 +69,7 @@ func (c *RoleMappingConfig) ResolveRoleMapping(modelName string) map[codec.Role]
 
 // ApplyRoleMapping applies role mapping to a list of IR messages.
 // Messages are modified in place. Unknown roles are preserved.
-func ApplyRoleMapping(messages []codec.Message, mapping map[codec.Role]codec.Role) {
+func ApplyRoleMapping(messages []llmkit.Message, mapping map[llmkit.Role]llmkit.Role) {
 	if mapping == nil {
 		return
 	}
@@ -78,31 +78,4 @@ func ApplyRoleMapping(messages []codec.Message, mapping map[codec.Role]codec.Rol
 			messages[i].Role = targetRole
 		}
 	}
-}
-
-// RoleMappingTransformer 按 channel 配置的 RoleMapping 改写 IR 中各消息的 Role。
-// 复用同包内的 ParseRoleMapping / ApplyRoleMapping。模型匹配语义遵循
-// RoleMappingConfig.ResolveRoleMapping：精确 model > 通配符 > default。
-type RoleMappingTransformer struct{}
-
-func (RoleMappingTransformer) Name() string { return "role_mapping" }
-
-// AppliesTo 返回 true：所有出站协议都生效。
-func (RoleMappingTransformer) AppliesTo(p codec.Protocol) bool { return true }
-
-func (RoleMappingTransformer) Transform(req *codec.Request, cfg *codec.ChannelConfig) {
-	if cfg.RoleMapping == "" {
-		return
-	}
-	rm := ParseRoleMapping(cfg.RoleMapping)
-	if rm == nil {
-		return
-	}
-	// 按 inbound model 名匹配 RoleMapping（即 ApplyModelMapping 之前用户视角的
-	// 模型名）。RoleMapping 的语义维度是入站模型，不是上游被替换后的模型。
-	mapping := rm.ResolveRoleMapping(cfg.InboundModel)
-	if mapping == nil {
-		return
-	}
-	ApplyRoleMapping(req.Messages, mapping)
 }

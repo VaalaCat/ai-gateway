@@ -158,3 +158,14 @@ func TestDispatcherRegistersAllThreeModes(t *testing.T) {
 		t.Error("passthrough not registered")
 	}
 }
+
+func TestDispatcherInjectsSharedLLMKitDependenciesIntoNative(t *testing.T) {
+	dispatcher := NewDispatcher(nil)
+	backend, ok := dispatcher.Backends[state.ModeNative].(*native.Backend)
+	if !ok {
+		t.Fatalf("native backend = %T, want *native.Backend", dispatcher.Backends[state.ModeNative])
+	}
+	if backend.Codec == nil || backend.Client == nil {
+		t.Fatalf("native dependencies not injected: Codec=%v Client=%v", backend.Codec, backend.Client)
+	}
+}

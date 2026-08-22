@@ -9,10 +9,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 var errScriptRejected = errors.New("request rejected by script hook")
@@ -42,9 +42,43 @@ func RunUpstreamScripts(
 	c *gin.Context,
 	rctx *state.RelayContext,
 	attempt state.Attempt,
-	proto codec.Protocol,
+	proto llmkit.Protocol,
 	upstreamReq *http.Request,
 	outboundBody []byte,
+) ([]byte, bool, state.AttemptResult) {
+	return runUpstreamScripts(
+		agent, c, rctx, attempt, proto, upstreamReq, outboundBody,
+		func() http.Header { return c.Request.Header },
+	)
+}
+
+// RunUpstreamScriptsWithUpstreamHeaders exposes the fully prepared upstream
+// request headers to ctx.headers. The legacy RunUpstreamScripts entry keeps its
+// inbound Gin-header snapshot for existing production callers.
+func RunUpstreamScriptsWithUpstreamHeaders(
+	agent app.AgentApplication,
+	c *gin.Context,
+	rctx *state.RelayContext,
+	attempt state.Attempt,
+	proto llmkit.Protocol,
+	upstreamReq *http.Request,
+	outboundBody []byte,
+) ([]byte, bool, state.AttemptResult) {
+	return runUpstreamScripts(
+		agent, c, rctx, attempt, proto, upstreamReq, outboundBody,
+		func() http.Header { return upstreamReq.Header },
+	)
+}
+
+func runUpstreamScripts(
+	agent app.AgentApplication,
+	c *gin.Context,
+	rctx *state.RelayContext,
+	attempt state.Attempt,
+	proto llmkit.Protocol,
+	upstreamReq *http.Request,
+	outboundBody []byte,
+	headers func() http.Header,
 ) ([]byte, bool, state.AttemptResult) {
 	if attempt.Channel == nil {
 		return outboundBody, false, state.AttemptResult{}
@@ -68,7 +102,7 @@ func RunUpstreamScripts(
 			GroupID:   groupID,
 		},
 		User:     scriptUserMap(rctx.Input.UserInfo),
-		Headers:  scriptHeaderMap(c.Request.Header),
+		Headers:  scriptHeaderMap(headers()),
 		Channel:  map[string]any{"id": attempt.SourceID, "name": attempt.Channel.Name},
 		Protocol: string(proto),
 		Body:     outboundBody,

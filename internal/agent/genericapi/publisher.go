@@ -3,7 +3,9 @@ package genericapi
 import (
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // Publisher owns the terminal lifecycle shared by every Generic API request.
@@ -13,6 +15,7 @@ type Publisher struct {
 	reporter      APIUsageReporter
 	sourceAgentID string
 	metrics       *APIMetrics
+	logger        *zap.Logger
 }
 
 type PublisherOptions struct {
@@ -20,12 +23,17 @@ type PublisherOptions struct {
 	Reporter      APIUsageReporter
 	SourceAgentID string
 	Metrics       *APIMetrics
+	Logger        *zap.Logger
 }
 
 func NewPublisher(options PublisherOptions) *Publisher {
+	logger := options.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &Publisher{
 		usage: options.Usage, reporter: options.Reporter,
-		sourceAgentID: options.SourceAgentID, metrics: options.Metrics,
+		sourceAgentID: options.SourceAgentID, metrics: options.Metrics, logger: logger,
 	}
 }
 
@@ -87,16 +95,17 @@ func (p *Publication) Publish(c *gin.Context, request *RequestContext, permit AP
 	if permit != nil {
 		permit.Release()
 	}
-	p.publishUsage(c, request, executionErr)
+	entry := p.publishUsage(c, request, executionErr)
+	p.logFailure(request, entry, executionErr)
 	p.observeDispatch(request, executionErr)
 	if executionErr != nil && (request == nil || !request.ClientUpgradeCommitted) && c != nil && !c.Writer.Written() {
 		writeHandlerError(c, p.requestID, executionErr)
 	}
 }
 
-func (p *Publication) publishUsage(c *gin.Context, request *RequestContext, executionErr error) {
+func (p *Publication) publishUsage(c *gin.Context, request *RequestContext, executionErr error) protocol.APIUsageEntry {
 	if p.publisher == nil || p.publisher.usage == nil {
-		return
+		return protocol.APIUsageEntry{}
 	}
 	statusCode := 0
 	if c != nil {
@@ -111,8 +120,59 @@ func (p *Publication) publishUsage(c *gin.Context, request *RequestContext, exec
 		SourceAgentID: p.publisher.sourceAgentID, QuotaGateDecision: quotaGateDecision(request),
 	})
 	if p.publisher.reporter != nil {
-		_ = p.publisher.reporter.EnqueueAPI(entry)
+		if err := p.publisher.reporter.EnqueueAPI(entry); err != nil {
+			p.publisher.logger.Error("enqueue generic api usage failed",
+				zap.String("request_id", p.requestID),
+				zap.String("error_message", safeAPIErrorMessage(err, protocol.APIUpstreamCredential{})),
+			)
+		}
 	}
+	return entry
+}
+
+func (p *Publication) logFailure(request *RequestContext, entry protocol.APIUsageEntry, executionErr error) {
+	if p.publisher == nil || (executionErr == nil && entry.ErrorStage == "" && entry.ErrorCode == "") {
+		return
+	}
+	p.publisher.logger.Warn("generic api request failed",
+		zap.String("request_id", p.requestID),
+		zap.Uint("api_service_id", apiServiceID(request)),
+		zap.Uint("api_route_id", apiRouteID(request)),
+		zap.Uint("api_upstream_id", executionResult(request).APIUpstreamID),
+		zap.String("source_agent_id", p.publisher.sourceAgentID),
+		zap.String("execution_agent_id", executionAgentID(request)),
+		zap.String("error_stage", entry.ErrorStage),
+		zap.String("error_code", entry.ErrorCode),
+		zap.String("error_message", safePublishedErrorMessage(entry, executionErr)),
+	)
+}
+
+func safePublishedErrorMessage(entry protocol.APIUsageEntry, executionErr error) string {
+	if entry.ErrorMessage != "" {
+		return entry.ErrorMessage
+	}
+	return safeAPIErrorMessage(executionErr, protocol.APIUpstreamCredential{})
+}
+
+func apiServiceID(request *RequestContext) uint {
+	if request == nil {
+		return 0
+	}
+	return request.Service.ID
+}
+
+func apiRouteID(request *RequestContext) uint {
+	if request == nil {
+		return 0
+	}
+	return request.Route.ID
+}
+
+func executionAgentID(request *RequestContext) string {
+	if request == nil {
+		return ""
+	}
+	return request.Agent.ExecutionAgentID
 }
 
 func (p *Publication) observeDispatch(request *RequestContext, executionErr error) {

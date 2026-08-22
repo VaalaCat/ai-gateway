@@ -1,0 +1,37 @@
+{
+  "model": "gpt-5",
+  "input": [
+    {
+      "role": "user",
+      "content": "use spawn_agent"
+    }
+  ],
+  "tools": [
+    {
+      "type": "namespace",
+      "name": "multi_agent_v1",
+      "tools": [
+        {
+          "type": "function",
+          "name": "spawn_agent",
+          "description": "Spawn a sub-agent",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              }
+            },
+            "required": ["task"]
+          },
+          "strict": false
+        }
+      ]
+    }
+  ],
+  "tool_choice": {
+    "type": "function",
+    "namespace": "multi_agent_v1",
+    "name": "spawn_agent"
+  }
+}

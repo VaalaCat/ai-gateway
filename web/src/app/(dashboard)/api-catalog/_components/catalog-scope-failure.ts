@@ -24,16 +24,20 @@ function codeOf(error: unknown) {
     : undefined;
 }
 
+export function isCatalogTokenUnavailable(error: unknown) {
+  return codeOf(error) === "token_not_available";
+}
+
 export function findCatalogScopeFailure(queries: CatalogScopeQuery[]): CatalogScopeFailure | undefined {
   const failedQueries = queries.filter(({ error }) =>
-    codeOf(error) === "token_not_available"
+    isCatalogTokenUnavailable(error)
     || codeOf(error) === "catalog_access_unavailable"
     || statusOf(error) === 503,
   );
   if (failedQueries.length === 0) return undefined;
 
   return {
-    kind: failedQueries.some(({ error }) => codeOf(error) === "token_not_available")
+    kind: failedQueries.some(({ error }) => isCatalogTokenUnavailable(error))
       ? "token_not_available"
       : "access_unavailable",
     retry: () => { for (const query of failedQueries) void query.retry(); },

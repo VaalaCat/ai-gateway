@@ -6,6 +6,8 @@ export interface CatalogSelection {
   serviceID?: number;
   routeID?: number;
   protocol?: CatalogProtocol;
+  path?: string;
+  method?: string;
 }
 
 export interface CatalogIDPick {
@@ -26,11 +28,19 @@ export function parseCatalogSelection(params: URLSearchParams): CatalogSelection
   const protocol = requestedProtocol === "http" || requestedProtocol === "websocket"
     ? requestedProtocol
     : undefined;
+  const requestedPath = params.get("path");
+  const path = requestedPath && requestedPath.startsWith("/") ? requestedPath : undefined;
+  const requestedMethod = params.get("method")?.toLowerCase();
+  const method = requestedMethod && ["get", "post", "put", "patch", "delete", "head", "options", "trace"].includes(requestedMethod)
+    ? requestedMethod
+    : undefined;
 
   return {
     ...(serviceID === undefined ? {} : { serviceID }),
     ...(routeID === undefined ? {} : { routeID }),
     ...(protocol === undefined ? {} : { protocol }),
+    ...(path === undefined ? {} : { path }),
+    ...(method === undefined ? {} : { method }),
   };
 }
 

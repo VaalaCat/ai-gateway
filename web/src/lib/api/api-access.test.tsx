@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestQueryClient } from "@/test/render";
-import { useAPICatalogEffective, useAPICatalogRoutes, useAPICatalogService, useAPICatalogServices, useAPIRole, useAPIRoleBindings, useAPIRoles, useCreateAPIRole, useCreateAPIRoleBinding, useReplaceAPIAccessGrant } from "./api-access";
+import { useAPICatalogEffective, useAPICatalogOpenAPI, useAPICatalogRoutes, useAPICatalogService, useAPICatalogServices, useAPIRole, useAPIRoleBindings, useAPIRoles, useCreateAPIRole, useCreateAPIRoleBinding, useReplaceAPIAccessGrant } from "./api-access";
 
 const adminAll = { mode: "admin-all" } as const;
 const token17 = { mode: "token", tokenID: 17 } as const;
@@ -179,6 +179,46 @@ describe("generic API access hooks", () => {
       invalidRoutes: useAPICatalogRoutes(1, adminAll, 0),
       invalidEffective: useAPICatalogEffective(1, adminAll, Number.NaN),
     }), { wrapper });
+    expect(apiGet).not.toHaveBeenCalled();
+  });
+
+  it("keys a catalog OpenAPI document by viewer, Token scope, and Service ID", async () => {
+    apiGet.mockResolvedValue({ document: { openapi: "3.1.0", paths: {} } });
+    const client = createTestQueryClient();
+    const localWrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    const { result } = renderHook(() => ({
+      viewerA: useAPICatalogOpenAPI(1, token17, 7),
+      viewerB: useAPICatalogOpenAPI(2, token17, 7),
+      otherToken: useAPICatalogOpenAPI(1, { mode: "token", tokenID: 18 }, 7),
+    }), { wrapper: localWrapper });
+
+    await waitFor(() => expect(result.current.otherToken.isSuccess).toBe(true));
+    expect(client.getQueryCache().getAll().map((query) => query.queryKey)).toEqual(expect.arrayContaining([
+      ["api-catalog", "openapi", 1, ["token", 17], 7, undefined],
+      ["api-catalog", "openapi", 2, ["token", 17], 7, undefined],
+      ["api-catalog", "openapi", 1, ["token", 18], 7, undefined],
+    ]));
+    expect(apiGet).toHaveBeenCalledWith("/api-catalog/openapi?service_id=7&token_id=17");
+  });
+
+  it("drops the prior OpenAPI document while the catalog scope changes", async () => {
+    const client = createTestQueryClient();
+    const localWrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+    let resolveSecond: ((value: { document: { openapi: string; paths: Record<string, never> } }) => void) | undefined;
+    apiGet
+      .mockResolvedValueOnce({ document: { openapi: "3.1.0", paths: {} } })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+    const { result, rerender } = renderHook(({ scope }) => useAPICatalogOpenAPI(1, scope, 7), { initialProps: { scope: token17 }, wrapper: localWrapper });
+    await waitFor(() => expect(result.current.data?.document.openapi).toBe("3.1.0"));
+
+    rerender({ scope: { mode: "token", tokenID: 18 } });
+    expect(result.current.data).toBeUndefined();
+    resolveSecond?.({ document: { openapi: "3.1.1", paths: {} } });
+    await waitFor(() => expect(result.current.data?.document.openapi).toBe("3.1.1"));
+  });
+
+  it("does not request a catalog OpenAPI document without a selected Token", () => {
+    renderHook(() => useAPICatalogOpenAPI(1, required, 7), { wrapper });
     expect(apiGet).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // Dispatcher 按 Attempt.Mode 选择后端执行，并在结果上叠加统一的 token 计数调和。
@@ -23,9 +24,11 @@ type Dispatcher struct {
 // NewDispatcher 注册 3 个内置 backend 并把 agent 注入到所有 backend。
 // agent 允许为 nil（测试场景），backend 内部各 Getter 会做 nil 守卫。
 func NewDispatcher(agent app.AgentApplication) *Dispatcher {
+	codec := llmkit.NewCodec()
+	client := llmkit.NewClient(llmkit.ClientOptions{Codec: codec})
 	return &Dispatcher{
 		Backends: map[state.RelayMode]Backend{
-			state.ModeNative:      &native.Backend{Agent: agent},
+			state.ModeNative:      &native.Backend{Agent: agent, Codec: codec, Client: client},
 			state.ModeLegacy:      &legacy.Backend{Agent: agent},
 			state.ModePassthrough: &passthrough.Backend{Agent: agent},
 		},

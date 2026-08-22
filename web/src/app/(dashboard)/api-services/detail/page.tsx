@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Suspense, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { Copy, MoreHorizontal, Play } from "lucide-react";
+import { Copy, Download, LoaderCircle, MoreHorizontal, Play } from "lucide-react";
 
 import { StatusBadge } from "@/components/business/status-badge";
 import { PageLayout } from "@/components/layout/page-layout";
@@ -25,12 +25,14 @@ import {
   useDeleteAPIRoute,
   useDeleteAPIService,
   useDeleteAPIUpstream,
+  useGetOpenAPIDocument,
+  downloadServiceOpenAPI,
 } from "@/lib/api/api-services";
 import { useAuth } from "@/lib/auth";
 import { copyTextWithFeedback } from "@/lib/utils/clipboard";
 import { formatMoneyCompact } from "@/lib/utils/format";
 
-import { apiBackendDeleteErrorMessage } from "../api-service-error";
+import { apiBackendDeleteErrorMessage, apiServiceErrorMessage } from "../api-service-error";
 import { DeleteConfirmationDialog } from "../delete-confirmation-dialog";
 import { RouteDataTable, type RouteTableFilters } from "../_components/route-table/route-data-table";
 import { RouteExpandedWorkspace } from "../_components/route-table/route-expanded-workspace";
@@ -100,6 +102,14 @@ function ServiceError({ error }: { error: unknown }) {
 function ServiceActions({ service, onDelete }: { service: APIService; onDelete: () => void }) {
   const t = useTranslations("apiServices");
   return <DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="outline" size="icon" aria-label={t("serviceActions")}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuGroup><DropdownMenuItem asChild><Link href={`/api-services/edit?id=${service.id}`}>{t("editService")}</Link></DropdownMenuItem><DropdownMenuItem asChild><Link href="/api-access">{t("apiAccess")}</Link></DropdownMenuItem><DropdownMenuItem asChild><Link href={`/rate-limiters?target_type=api_service&target_id=${service.id}`}>{t("rateLimiters")}</Link></DropdownMenuItem><DropdownMenuItem asChild><Link href={`/api-logs?api_service_id=${service.id}`}>{t("apiLogs")}</Link></DropdownMenuItem><DropdownMenuItem asChild><Link href={`/agent-routes?source_type=api_service&source_id=${service.id}`}>{t("agentRoutes")}</Link></DropdownMenuItem></DropdownMenuGroup><DropdownMenuSeparator /><DropdownMenuGroup><DropdownMenuItem variant="destructive" onSelect={onDelete}>{t("deleteService")}</DropdownMenuItem></DropdownMenuGroup></DropdownMenuContent></DropdownMenu>;
+}
+
+function OpenAPIEditorAction({ serviceID }: { serviceID: number }) {
+  const t = useTranslations("apiServices");
+  const document = useGetOpenAPIDocument(serviceID);
+  const version = document.data?.service.document.openapi;
+  if (typeof version !== "string" || version.trim() === "") return null;
+  return <Button asChild type="button" variant="outline"><Link href={`/api-services/openapi?id=${serviceID}`}>{t("editOpenAPIDocument")}</Link></Button>;
 }
 
 type DeletingEntity =
@@ -189,6 +199,8 @@ export function APIServiceWorkspace({ service, canManage, origin }: { service: A
   const removeEndpoint = useDeleteAPIUpstream();
   const [deleteServiceOpen, setDeleteServiceOpen] = useState(false);
   const [serviceDeleted, setServiceDeleted] = useState(false);
+  const [exportingOpenAPI, setExportingOpenAPI] = useState(false);
+  const [openAPIExportError, setOpenAPIExportError] = useState<string>();
   const routeHeadingRef = useRef<HTMLHeadingElement>(null);
   const lastPageConvergence = useRef<string | undefined>(undefined);
   const response = routes.data;
@@ -222,6 +234,14 @@ export function APIServiceWorkspace({ service, canManage, origin }: { service: A
     restoreFocus: restoreRouteHeadingFocus,
   });
 
+  const exportOpenAPI = async () => {
+    setOpenAPIExportError(undefined);
+    setExportingOpenAPI(true);
+    try { await downloadServiceOpenAPI(service.id, service.slug); }
+    catch (reason) { setOpenAPIExportError(apiServiceErrorMessage(t, reason, "openAPIExportFailed")); }
+    finally { setExportingOpenAPI(false); }
+  };
+
   if (serviceDeleted) return <DetailSkeleton />;
   return (
     <PageLayout
@@ -229,13 +249,21 @@ export function APIServiceWorkspace({ service, canManage, origin }: { service: A
       description={service.description || t("serviceDescriptionEmpty")}
       metadata={<><StatusBadge status={service.status} /><Badge variant="outline" className="font-mono">{service.slug}</Badge><Badge variant="outline"><span className="sr-only">{t("pricePerCall")}: </span>{formatMoneyCompact(service.price_per_call)}</Badge></>}
       maxWidth="full"
-      actions={<><Button asChild><Link href={`/api-catalog?service_id=${service.id}`}><Play data-icon="inline-start" />{t("tryAPI")}</Link></Button>{canManage ? <ServiceActions service={service} onDelete={() => setDeleteServiceOpen(true)} /> : null}</>}
+      actions={<><Button asChild><Link href={`/api-catalog?service_id=${service.id}`}><Play data-icon="inline-start" />{t("tryAPI")}</Link></Button>{canManage ? <OpenAPIEditorAction serviceID={service.id} /> : null}{canManage ? <Button type="button" variant="outline" onClick={() => void exportOpenAPI()} disabled={exportingOpenAPI}>{exportingOpenAPI ? <><LoaderCircle data-icon="inline-start" className="animate-spin" />{t("exportingOpenAPI")}</> : <><Download data-icon="inline-start" />{t("exportOpenAPI")}</>}</Button> : null}{canManage ? <ServiceActions service={service} onDelete={() => setDeleteServiceOpen(true)} /> : null}</>}
     >
       <div data-testid="api-service-workspace" className="flex min-w-0 max-w-full flex-col gap-6 overflow-x-clip">
         <div className="flex min-w-0 items-start gap-2">
           <div className="min-w-0 flex-1"><p className="text-xs font-medium text-muted-foreground">{t("baseUrl")}</p><code className="block min-w-0 overflow-x-auto whitespace-nowrap text-sm font-semibold">{baseURL}</code></div>
           <Button type="button" variant="ghost" size="icon-sm" className="size-11" aria-label={t("copyBaseUrl")} onClick={() => void copyTextWithFeedback(baseURL, { success: tc("copied"), error: tc("copyFailed") })}><Copy /></Button>
         </div>
+        {openAPIExportError ? (
+          <Alert variant="destructive">
+            <AlertTitle>{t("openAPIExportFailed")}</AlertTitle>
+            {openAPIExportError === t("openAPIExportFailed") ? null : (
+              <AlertDescription>{openAPIExportError}</AlertDescription>
+            )}
+          </Alert>
+        ) : null}
         <section className="flex min-w-0 max-w-full flex-col gap-4">
           <h2 ref={routeHeadingRef} tabIndex={-1} className="text-xl font-semibold tracking-tight">{t("routesLabel")}</h2>
           {routeOutsideCurrentPage ? <Alert><AlertTitle>{t("routeOutsideCurrentPage")}</AlertTitle><AlertDescription className="flex flex-col items-start gap-2"><span>{t("routeOutsideCurrentPageDescription")}</span><Button type="button" size="sm" variant="outline" onClick={() => replaceRouteState({ search: "", page: 1, pageSize: routeState.pageSize })}>{t("clearRouteFilters")}</Button></AlertDescription></Alert> : null}

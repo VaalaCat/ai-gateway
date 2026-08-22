@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	newAPIConstant "github.com/QuantumNous/new-api/constant"
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -1045,7 +1045,7 @@ func TestPortalUpdate_SubsetCheckRunsForNonEmptyPatch(t *testing.T) {
 
 // TestPortalTest_JoinUpstreamURL_RejectsMaliciousEndpoint covers the SSRF
 // hardening at Site 1: a malicious endpoints path stored in the DB (e.g. via
-// a "@evil.example" userinfo redirect) must be rejected by codec.JoinUpstreamURL
+// a "@evil.example" userinfo redirect) must be rejected by llmkit.JoinUpstreamURL
 // before the bearer key is forwarded.
 // === Task 5: affinity override CRUD + DetailResponse ===
 
@@ -1164,7 +1164,7 @@ func TestPortalTest_JoinUpstreamURL_RejectsMaliciousEndpoint(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveTestPath unexpected error: %v", err)
 			}
-			_, joinErr := codec.JoinUpstreamURL(pc.BaseURL, path)
+			_, joinErr := protocolconfig.JoinUpstreamURL(pc.BaseURL, path)
 			if tc.wantErr && joinErr == nil {
 				t.Fatalf("expected JoinUpstreamURL to reject malicious path %q, but it passed", path)
 			}

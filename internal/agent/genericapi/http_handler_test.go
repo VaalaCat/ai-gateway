@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,6 +114,51 @@ func TestHTTPHandlerPicksTheRouteBackendAndReportsNoCandidateAsUnavailable(t *te
 	require.Equal(t, int32(1), picker.calls.Load(), "one HTTP request must make one frozen upstream pick")
 	require.Equal(t, "upstream_pick", rc.Execution.ErrorStage)
 	require.Equal(t, CodeUnavailable, rc.Execution.ErrorCode)
+}
+
+func TestHTTPHandlerStoresSafeExecutionErrorMessage(t *testing.T) {
+	const secret = "provider-secret"
+	transport := newHTTPTransportWithRoundTripper(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, &url.Error{
+			Op:  "Get",
+			URL: "https://upstream.example/forecast?token=" + secret,
+			Err: errors.New("connection refused"),
+		}
+	}))
+	handler, picker, _ := newLocalHTTPHandler("https://upstream.example", transport)
+	picker.lease.Upstream.AuthType = "query"
+	picker.lease.Upstream.Credential = protocol.APIUpstreamCredential{QueryName: "token", QueryValue: secret}
+	rc, _ := newLocalHTTPRequestContext(httptest.NewRequest(http.MethodGet, "http://gateway.invalid/forecast", nil))
+
+	err := handler.Serve(t.Context(), rc)
+
+	require.Error(t, err)
+	require.Equal(t, "transport", rc.Execution.ErrorStage)
+	require.Contains(t, rc.Execution.ErrorMessage, "connection refused")
+	require.NotContains(t, rc.Execution.ErrorMessage, secret)
+	require.NotContains(t, rc.Execution.ErrorMessage, "upstream.example")
+}
+
+func TestHTTPHandlerStoresPickerErrorMessageWithoutCredential(t *testing.T) {
+	picker := &localHTTPPicker{err: errors.New("no upstream candidates")}
+	handler := NewHTTPHandler(picker, NewHTTPTransport(""))
+	rc, _ := newLocalHTTPRequestContext(httptest.NewRequest(http.MethodGet, "http://gateway.invalid/forecast", nil))
+
+	err := handler.Serve(t.Context(), rc)
+
+	require.EqualError(t, err, "no upstream candidates")
+	require.Equal(t, "no upstream candidates", rc.Execution.ErrorMessage)
+}
+
+func TestHTTPHandlerKeepsErrorMessageEmptyOnSuccess(t *testing.T) {
+	transport := newHTTPTransportWithRoundTripper(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+	}))
+	handler, _, _ := newLocalHTTPHandler("http://upstream.invalid", transport)
+	rc, _ := newLocalHTTPRequestContext(httptest.NewRequest(http.MethodGet, "http://gateway.invalid/forecast", nil))
+
+	require.NoError(t, handler.Serve(t.Context(), rc))
+	require.Empty(t, rc.Execution.ErrorMessage)
 }
 
 func TestHTTPHandlerReadsLatestTransportSettingsForEachRequest(t *testing.T) {

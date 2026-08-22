@@ -87,6 +87,34 @@ func TestWebSocketTargetHandlerPicksTheRouteBackendAndReportsNoCandidateAsUnavai
 	require.Equal(t, CodeUnavailable, result.ErrorCode)
 }
 
+func TestWebSocketTargetSendsSafeErrorMessage(t *testing.T) {
+	const secret = "provider-secret"
+	stream := newSettingsTargetWebSocketStream()
+	route := ServiceRoute{
+		Service: protocol.SyncedAPIService{ID: 7, Slug: "weather", Status: 1},
+		Route: protocol.SyncedAPIRoute{ID: 9, ServiceID: 7, BackendID: 20, Slug: "radar", Status: 1,
+			Protocols: []string{ProtocolWebSocket}, AllowedMethods: []string{http.MethodGet}},
+		Protocol: ProtocolWebSocket,
+	}
+	picker := &localWebSocketPicker{lease: &APIUpstreamLease{
+		Upstream: protocol.SyncedAPIUpstream{
+			ID: 11, BackendID: 20, BaseURL: "https://upstream.example/socket", AuthType: "query",
+			Credential: protocol.APIUpstreamCredential{QueryName: "token", QueryValue: secret},
+		},
+		permit: newLocalHTTPPermit(),
+	}}
+	handler := NewWebSocketTargetHandler(WebSocketTargetHandlerOptions{
+		Finder: fixedServiceRouteByIDFinder{route: route}, Picker: picker, Dialer: safeErrorWebSocketDialer{},
+	})
+
+	require.Error(t, handler.serveStream(t.Context(), stream))
+	result := <-stream.results
+	require.Equal(t, "transport", result.ErrorStage)
+	require.Contains(t, result.ErrorMessage, "connection refused")
+	require.NotContains(t, result.ErrorMessage, secret)
+	require.NotContains(t, result.ErrorMessage, "upstream.example")
+}
+
 type recordedContext struct {
 	hasDeadline bool
 	deadline    time.Time

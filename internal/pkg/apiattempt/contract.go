@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 )
@@ -23,6 +25,7 @@ const (
 	MaxRateLimitBucketBytes    = 256
 	MaxRateLimitReasonBytes    = 256
 	MaxTraceBodyBytes          = 16 * 1024 * 1024
+	MaxAPIErrorMessageBytes    = 1024
 )
 
 type APITraceMode string
@@ -74,6 +77,7 @@ type APIExecutionResult struct {
 	WebSocketCloseCode     int                   `json:"websocket_close_code,omitempty"`
 	ErrorStage             string                `json:"error_stage,omitempty"`
 	ErrorCode              string                `json:"error_code,omitempty"`
+	ErrorMessage           string                `json:"error_message,omitempty"`
 	RateLimitDecision      string                `json:"rate_limit_decision,omitempty"`
 	RateLimitWaitMs        int                   `json:"rate_limit_wait_ms,omitempty"`
 	RateLimitReason        string                `json:"rate_limit_reason,omitempty"`
@@ -121,11 +125,26 @@ var (
 func (result APIExecutionResult) Validate() error {
 	if !result.ProviderDispatchKnown || result.RequestBytes < 0 || result.ResponseBytes < 0 || result.FirstByteMs < 0 ||
 		!validUpstreamStatus(result.UpstreamStatus) || !validWebSocketCloseCode(result.WebSocketCloseCode) ||
-		!validExecutionError(result.ErrorStage, result.ErrorCode) || !validRateLimitResult(result) || validateBodyCapture(result.traceSourceRequestBody()) != nil || validateBodyCapture(result.traceRequestBody()) != nil ||
+		!validExecutionError(result.ErrorStage, result.ErrorCode) || !validErrorMessage(result.ErrorMessage) || !validRateLimitResult(result) || validateBodyCapture(result.traceSourceRequestBody()) != nil || validateBodyCapture(result.traceRequestBody()) != nil ||
 		validateBodyCapture(result.traceResponseBody()) != nil {
 		return ErrInvalidExecutionResult
 	}
 	return nil
+}
+
+func validErrorMessage(message string) bool {
+	if message == "" {
+		return true
+	}
+	if len(message) > MaxAPIErrorMessageBytes || !utf8.ValidString(message) {
+		return false
+	}
+	for _, r := range message {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func (result APIExecutionResult) traceSourceRequestBody() *APIBodyCapture {

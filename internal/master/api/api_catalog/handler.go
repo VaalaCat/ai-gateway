@@ -153,10 +153,14 @@ func catalogScope(c *app.Context, tokenID uint) (CatalogRequestScope, error) {
 }
 
 func requireCatalogService(c *app.Context, scope CatalogRequestScope, serviceID uint) (*models.APIService, error) {
+	return requireCatalogServiceInDAO(catalogDAOContext(c), scope, serviceID)
+}
+
+func requireCatalogServiceInDAO(ctx dao.Context, scope CatalogRequestScope, serviceID uint) (*models.APIService, error) {
 	if _, visible := scope.RouteIDsFor(serviceID); !visible {
 		return nil, catalogResourceNotFound()
 	}
-	service, err := catalogQuery(c).APIService().GetByID(serviceID)
+	service, err := dao.NewAdminQuery(ctx).APIService().GetByID(serviceID)
 	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && service != nil && service.Status != consts.StatusEnabled) {
 		return nil, catalogResourceNotFound()
 	}

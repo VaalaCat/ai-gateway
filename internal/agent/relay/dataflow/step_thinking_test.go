@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/internal/agent/relay/codec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 func mkThinkingRules(t *testing.T, pattern string, sendBack bool) upstream.ThinkingRules {
@@ -22,31 +22,31 @@ func mkThinkingRules(t *testing.T, pattern string, sendBack bool) upstream.Think
 
 func TestStepThinkingPassthrough_AddsWhenSendBack(t *testing.T) {
 	s := &StepThinkingPassthrough{rules: mkThinkingRules(t, "up.*", true)}
-	p := &Pass{Working: &codec.Request{Model: "upstream", Messages: []codec.Message{
-		{Role: codec.RoleAssistant, ToolCalls: []codec.ToolCall{{}},
-			Content: []codec.ContentBlock{{Type: codec.ContentTypeText, Text: "x"}}},
+	p := &Pass{Working: &llmkit.Request{Model: "upstream", Messages: []llmkit.Message{
+		{Role: llmkit.RoleAssistant, ToolCalls: []llmkit.ToolCall{{}},
+			Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "x"}}},
 	}}}
 	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
-	if p.Working.Messages[0].Content[0].Type != codec.ContentTypeThinking {
+	if p.Working.Messages[0].Content[0].Type != llmkit.ContentTypeThinking {
 		t.Fatal("placeholder thinking not added when SendBack true")
 	}
 }
 
 func TestStepThinkingStrip_StripsWhenSendBackFalse(t *testing.T) {
 	s := &StepThinkingStrip{rules: mkThinkingRules(t, "", false)}
-	p := &Pass{Working: &codec.Request{Model: "upstream", Messages: []codec.Message{
-		{Role: codec.RoleAssistant, Content: []codec.ContentBlock{
-			{Type: codec.ContentTypeThinking, Text: "secret"},
-			{Type: codec.ContentTypeText, Text: "answer"},
+	p := &Pass{Working: &llmkit.Request{Model: "upstream", Messages: []llmkit.Message{
+		{Role: llmkit.RoleAssistant, Content: []llmkit.ContentBlock{
+			{Type: llmkit.ContentTypeThinking, Text: "secret"},
+			{Type: llmkit.ContentTypeText, Text: "answer"},
 		}},
 	}}}
 	if err := s.Apply(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	for _, b := range p.Working.Messages[0].Content {
-		if b.Type == codec.ContentTypeThinking {
+		if b.Type == llmkit.ContentTypeThinking {
 			t.Fatal("thinking not stripped when SendBack false")
 		}
 	}

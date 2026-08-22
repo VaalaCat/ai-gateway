@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api, buildQuery, type StatusResponse } from "./client";
+import { ApiError, api, buildQuery, type StatusResponse } from "./client";
 
 export type APIProtocol = "http" | "websocket";
 export type APIUpstreamAuthType = "none" | "bearer" | "header" | "query" | "basic";
@@ -129,6 +129,131 @@ export interface APIRoutePreviewEndpoint {
 export interface APIRoutePreview {
 	endpoints: APIRoutePreviewEndpoint[];
 	diagnostics: string[];
+}
+
+export interface OpenAPIProblem {
+	path: string;
+	code: string;
+	message: string;
+}
+
+export interface OpenAPIServiceDraft {
+	slug: string;
+	name: string;
+	description: string;
+}
+
+export interface OpenAPIServerDraft {
+	index: number;
+	url: string;
+	description?: string;
+}
+
+export interface OpenAPIRouteDraft {
+	slug: string;
+	display_name: string;
+	upstream_path: string;
+	allowed_methods: string[];
+	paths: string[];
+	public_paths: Record<string, string>;
+	path_count: number;
+	operation_count: number;
+}
+
+export interface OpenAPIPreviewResponse {
+	service: OpenAPIServiceDraft;
+	servers: OpenAPIServerDraft[];
+	routes: OpenAPIRouteDraft[];
+	problems: OpenAPIProblem[];
+}
+
+interface OpenAPIRouteDraftWire extends Omit<OpenAPIRouteDraft, "allowed_methods" | "paths" | "public_paths"> {
+	allowed_methods?: string[] | null;
+	paths?: string[] | null;
+	public_paths?: Record<string, string> | null;
+}
+
+interface OpenAPIPreviewResponseWire {
+	service: OpenAPIServiceDraft;
+	servers?: OpenAPIServerDraft[] | null;
+	routes?: OpenAPIRouteDraftWire[] | null;
+	problems?: OpenAPIProblem[] | null;
+}
+
+export interface OpenAPIImportInput {
+	document: unknown;
+	slug: string;
+	choices: Array<{ slug: string; paths: string[] }>;
+	selected_server?: number;
+	backend_name: string;
+	upstream: {
+		name: string;
+		base_url?: string;
+		weight: number;
+		priority: number;
+		auth_type: APIUpstreamAuthType;
+		credential?: APIUpstreamCredential;
+		proxy_url?: string;
+		header_override?: Record<string, string>;
+		status?: number;
+	};
+	price_per_call: number;
+}
+
+export interface OpenAPIImportResult {
+	service_id: number;
+	backend_id: number;
+	upstream_id: number;
+	route_ids: number[];
+}
+
+export type OpenAPIJSONValue = null | boolean | number | string | OpenAPIJSONValue[] | { [key: string]: OpenAPIJSONValue };
+
+export interface OpenAPIPathItemDocument {
+  $ref?: string;
+  summary?: string;
+  description?: string;
+  parameters?: Array<Record<string, OpenAPIJSONValue>>;
+  operations?: Record<string, Record<string, OpenAPIJSONValue>>;
+  [key: string]: OpenAPIJSONValue | undefined;
+}
+
+export interface OpenAPIDocumentResponse {
+  service: { id: number; slug: string; name: string; description: string; updated_at: number; document: Record<string, OpenAPIJSONValue> };
+  routes: Array<{ id: number; slug: string; upstream_path: string; updated_at: number; paths: Record<string, OpenAPIPathItemDocument> }>;
+  export: unknown;
+}
+
+interface OpenAPIDocumentResponseWire {
+  service: Omit<OpenAPIDocumentResponse["service"], "document"> & { document?: unknown };
+  routes?: Array<Omit<OpenAPIDocumentResponse["routes"][number], "paths"> & { paths?: Record<string, OpenAPIPathItemDocument> | null }> | null;
+  export?: unknown;
+}
+
+export interface OpenAPIUpdateRequest {
+  service: { id: number; updated_at: number; document: Record<string, OpenAPIJSONValue> };
+  routes: Array<{ id: number; updated_at: number; paths: Record<string, OpenAPIPathItemDocument> }>;
+}
+
+function isJSONObject(value: unknown): value is Record<string, OpenAPIJSONValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeOpenAPIDocumentResponse(response: OpenAPIDocumentResponseWire): OpenAPIDocumentResponse {
+  if (!response?.service || !isJSONObject(response.service.document)) throw new Error("invalid OpenAPI document response");
+  return {
+    service: { ...response.service, document: response.service.document },
+    routes: (response.routes ?? []).map((route) => ({ ...route, paths: isJSONObject(route.paths) ? route.paths : {} })),
+    export: response.export,
+  };
+}
+
+export type OpenAPIImportOutcome =
+	| ({ kind: "imported" } & OpenAPIImportResult)
+	| { kind: "committed-with-sync-failure"; service_id: number };
+
+interface OpenAPIExportResponse {
+	export: unknown;
 }
 
 const previewRevisions = new WeakMap<object, number>();
@@ -294,6 +419,94 @@ export function useAPIRoutePreview(draft: APIRoutePreviewInput | undefined, opti
 		},
 		enabled: draft !== undefined && validID(draft.api_service_id) && (options.enabled ?? true),
 	});
+}
+
+export function useOpenAPIPreview() {
+	return useMutation({
+		mutationFn: async (document: unknown) => {
+			const response = await api.post<OpenAPIPreviewResponseWire>("/admin/api-services/openapi/preview", { document });
+			return {
+				...response,
+				servers: response.servers ?? [],
+				routes: (response.routes ?? []).map((route) => ({
+					...route,
+					allowed_methods: route.allowed_methods ?? [],
+					paths: route.paths ?? [],
+					public_paths: route.public_paths ?? {},
+				})),
+				problems: response.problems ?? [],
+			} satisfies OpenAPIPreviewResponse;
+		},
+	});
+}
+
+export function useImportOpenAPI() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationFn: async (input: OpenAPIImportInput): Promise<OpenAPIImportOutcome> => {
+			try {
+				const result = await api.post<OpenAPIImportResult>("/admin/api-services/openapi/import", input);
+				return { kind: "imported", ...result };
+			} catch (reason) {
+				if (reason instanceof ApiError && reason.body?.code === "sync_publish_failed") {
+					const details = reason.body.details;
+					const serviceID = typeof details === "object" && details !== null && "service_id" in details
+						&& typeof details.service_id === "number"
+						? details.service_id
+						: 0;
+					if (validID(serviceID)) return { kind: "committed-with-sync-failure", service_id: serviceID };
+				}
+				throw reason;
+			}
+		},
+		onSuccess: () => Promise.all(["api-services", "api-routes", "api-backends", "api-upstreams"].map((key) => queryClient.invalidateQueries({ queryKey: [key] }))),
+	});
+}
+
+export async function downloadServiceOpenAPI(id: number, slug: string) {
+	const response = await api.get<OpenAPIExportResponse>(`/admin/api-services/${id}/openapi`);
+	const href = URL.createObjectURL(new Blob([JSON.stringify(response.export)], { type: "application/json" }));
+	let anchor: HTMLAnchorElement | undefined;
+	try {
+		anchor = document.createElement("a");
+		anchor.href = href;
+		anchor.download = `${slug}.openapi.json`;
+		document.body.appendChild(anchor);
+		anchor.click();
+	} finally {
+		try {
+			if (anchor) {
+				try {
+					anchor.remove();
+				} catch (reason) {
+					if (anchor.parentNode) anchor.parentNode.removeChild(anchor);
+					throw reason;
+				}
+			}
+		} finally {
+			URL.revokeObjectURL(href);
+		}
+	}
+}
+
+export function useGetOpenAPIDocument(serviceID: number, options: QueryOptions = {}) {
+  return useQuery({
+    queryKey: ["api-service-openapi", serviceID],
+    queryFn: async () => normalizeOpenAPIDocumentResponse(await api.get<OpenAPIDocumentResponseWire>(`/admin/api-services/${serviceID}/openapi`)),
+    enabled: validID(serviceID) && (options.enabled ?? true),
+  });
+}
+
+export function useUpdateOpenAPIDocument(serviceID: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: OpenAPIUpdateRequest) => normalizeOpenAPIDocumentResponse(await api.put<OpenAPIDocumentResponseWire>(`/admin/api-services/${serviceID}/openapi`, body)),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["api-service-openapi", serviceID] }),
+      queryClient.invalidateQueries({ queryKey: ["api-service", serviceID] }),
+      queryClient.invalidateQueries({ queryKey: ["api-routes"] }),
+    ]),
+  });
 }
 
 const invalidationKeys = ["api-services", "api-service", "api-backends", "api-backend", "api-routes", "api-route", "api-upstreams", "api-upstream", "api-route-preview"] as const;

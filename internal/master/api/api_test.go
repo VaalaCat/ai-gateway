@@ -247,6 +247,49 @@ func TestAPIRouteCreateDefaultsProtocolsAndNormalizesMethods(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, invalid.Code, invalid.Body.String())
 }
 
+// Break caught: an empty route slug represents the service root, so the HTTP
+// binder must admit it for route create and preview without weakening service
+// slug validation or the one-root-route-per-service database constraint.
+func TestAPIRootRouteControlPlaneCreateAndPreview(t *testing.T) {
+	srv := setupTestMaster(t)
+	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
+	adminJWT := loginAsAdmin(t, srv, "admin", "admin123")
+	service := models.APIService{Slug: "root-control-plane", Name: "Root Control Plane", Status: consts.StatusEnabled}
+	require.NoError(t, srv.DB.Create(&service).Error)
+	backend := models.APIBackend{APIServiceID: service.ID, Name: "primary"}
+	require.NoError(t, srv.DB.Create(&backend).Error)
+	upstream := models.APIUpstream{
+		BackendID: backend.ID, Name: "origin", BaseURL: "https://upstream.example",
+		AuthType: models.APIUpstreamAuthNone, Status: consts.StatusEnabled, Priority: 1, Weight: 1,
+	}
+	require.NoError(t, srv.DB.Create(&upstream).Error)
+	target := map[string]any{"mode": "existing", "backend_id": backend.ID}
+
+	created := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes", map[string]any{
+		"api_service_id": service.ID, "slug": "", "target": target,
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var root models.APIRoute
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &root))
+	require.Empty(t, root.Slug)
+
+	duplicate := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes", map[string]any{
+		"api_service_id": service.ID, "slug": "", "target": target,
+	})
+	require.Equal(t, http.StatusBadRequest, duplicate.Code, duplicate.Body.String())
+
+	preview := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-routes/preview", map[string]any{
+		"api_service_id": service.ID, "slug": "", "target": target,
+		"sample": map[string]any{"method": http.MethodGet, "subpath": "/accounts"},
+	})
+	require.Equal(t, http.StatusOK, preview.Code, preview.Body.String())
+
+	invalidService := reqHelper(srv, adminJWT, http.MethodPost, "/api/admin/api-services", map[string]any{
+		"slug": "", "name": "Invalid Empty Service",
+	})
+	require.Equal(t, http.StatusBadRequest, invalidService.Code, invalidService.Body.String())
+}
+
 func TestRouteTargetCreateAndSwitchAreAtomic(t *testing.T) {
 	srv := setupTestMaster(t)
 	require.NoError(t, srv.InitAdminUser("admin", "admin123"))

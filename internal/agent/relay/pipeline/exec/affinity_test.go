@@ -81,6 +81,39 @@ func TestExecutor_ForgetsOnlyCurrentTokenAffinity(t *testing.T) {
 	}
 }
 
+func TestExecutor_ForgetsOnlyCurrentSessionAffinity(t *testing.T) {
+	eng := affinity.New(affStubCfg{})
+	partition := state.AffinityPartition{ByUser: true, ByToken: true, ByModel: true}
+	currentIdentity := state.AffinityIdentity{Key: "session-a", Partition: partition}
+	otherIdentity := state.AffinityIdentity{Key: "session-b", Partition: partition}
+	currentKey := affinity.BuildKey(currentIdentity, 1, 11, "m")
+	otherKey := affinity.BuildKey(otherIdentity, 1, 11, "m")
+	eng.Remember(currentKey, state.SourceAdmin, 5, nil)
+	eng.Remember(otherKey, state.SourceAdmin, 6, nil)
+
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/", nil)
+	plan := state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 5, ByAffinity: true},
+		{Channel: &models.Channel{}, RealModel: "m", Source: state.SourceAdmin, SourceID: 7},
+	}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	rctx.Context = c
+	rctx.Input.UserInfo = &app.UserInfo{UserID: 1, TokenID: 11}
+	rctx.Input.AffinityIdentity = currentIdentity
+	ex := newLocalTestExecutor(failDispatcher{}, nil, nil)
+	ex.Affinity = eng
+	ex.Run(rctx)
+
+	if _, ok := eng.Lookup(currentKey); ok {
+		t.Fatal("failed affinity attempt should forget the current session entry")
+	}
+	if _, ok := eng.Lookup(otherKey); !ok {
+		t.Fatal("failed affinity attempt must preserve another session entry")
+	}
+}
+
 // TestExecutor_AffinityNotForgottenOnSuccess 验证成功路径不误删粘性记录。
 func TestExecutor_AffinityNotForgottenOnSuccess(t *testing.T) {
 	eng := affinity.New(affStubCfg{})
