@@ -15,7 +15,15 @@ export interface OpenAPIOperationNavigatorProps {
 
 export function OpenAPIOperationNavigator({ operations, selected, onSelect }: OpenAPIOperationNavigatorProps) {
   const t = useTranslations("apiCatalog");
-  const grouped = Map.groupBy(operations, (operation) => operation.path);
+  const grouped = new Map<string, OpenAPIOperation[]>();
+  for (const operation of operations) {
+    const pathOperations = grouped.get(operation.path);
+    if (pathOperations) {
+      pathOperations.push(operation);
+    } else {
+      grouped.set(operation.path, [operation]);
+    }
+  }
 
   if (operations.length === 0) {
     return <Empty className="min-h-28"><EmptyHeader><EmptyTitle>{t("emptyOpenAPIOperations")}</EmptyTitle></EmptyHeader></Empty>;
