@@ -194,6 +194,119 @@ func TestEncodeRequest_ThinkingConfig(t *testing.T) {
 	}
 }
 
+func TestEncodeRequest_ReasoningUsesStructuredFieldsOverRawJSON(t *testing.T) {
+	req := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{
+		{Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{
+			Summary: []string{"summary"}, Content: []string{"new content"}, Encrypted: "native-signature",
+			RawJSON: json.RawMessage(`{"type":"thinking","thinking":"old","signature":"old-signature","future":true,"cache_control":{"type":"ephemeral"}}`),
+		}},
+		{Type: ir.ContentTypeText, Text: "answer"},
+	}}}}
+	body := encodeClaudeRequestBody(t, req)
+	blocks := body["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %#v", blocks)
+	}
+	reasoning := blocks[0].(map[string]any)
+	if reasoning["thinking"] != "new content" || reasoning["signature"] != "native-signature" || reasoning["future"] != true || reasoning["cache_control"] == nil {
+		t.Fatalf("reasoning block = %#v", reasoning)
+	}
+}
+
+func TestEncodeRequest_ReasoningBadEnvelopeDropsOnlyEncrypted(t *testing.T) {
+	req := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{{
+		Type:      ir.ContentTypeThinking,
+		Reasoning: &ir.ReasoningContent{Summary: []string{"fallback"}, Encrypted: "llmkit:v2:not-supported"},
+	}}}}}
+	body := encodeClaudeRequestBody(t, req)
+	blocks := body["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	reasoning := blocks[0].(map[string]any)
+	if reasoning["thinking"] != "fallback" {
+		t.Fatalf("thinking = %#v", reasoning["thinking"])
+	}
+	if _, exists := reasoning["signature"]; exists {
+		t.Fatalf("bad envelope leaked into signature: %#v", reasoning)
+	}
+}
+
+func TestEncodeStream_ReasoningFirstReadableChannelWinsAndDoneCarriesEnvelope(t *testing.T) {
+	raw := runClaudeEncodeStream(t, []ir.Event{
+		{Type: ir.EventStreamStart},
+		{Type: ir.EventReasoningSummaryDelta, Reasoning: &ir.ReasoningContent{Summary: []string{"summary"}}},
+		{Type: ir.EventReasoningContentDelta, Reasoning: &ir.ReasoningContent{Content: []string{"private"}}},
+		{Type: ir.EventReasoningDone, ReasoningStatus: ir.ReasoningCompleted, Reasoning: &ir.ReasoningContent{
+			Summary: []string{"summary"}, Content: []string{"private"}, Encrypted: "enc",
+			RawJSON: json.RawMessage(`{"type":"reasoning","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"private"}],"encrypted_content":"enc"}`),
+		}},
+		{Type: ir.EventDone},
+	})
+	events := parseClaudeSSE(raw)
+	var thinking, signature string
+	for _, event := range events {
+		if event.Event != "content_block_delta" {
+			continue
+		}
+		var frame struct {
+			Delta struct {
+				Type      string `json:"type"`
+				Thinking  string `json:"thinking"`
+				Signature string `json:"signature"`
+			} `json:"delta"`
+		}
+		_ = json.Unmarshal([]byte(event.Data), &frame)
+		if frame.Delta.Type == "thinking_delta" {
+			thinking += frame.Delta.Thinking
+		}
+		if frame.Delta.Type == "signature_delta" {
+			signature = frame.Delta.Signature
+		}
+	}
+	if thinking != "summary" {
+		t.Fatalf("thinking = %q, want first channel summary", thinking)
+	}
+	if !strings.HasPrefix(signature, "llmkit:v1:") {
+		t.Fatalf("signature = %q", signature)
+	}
+}
+
+func TestEncodeNonStream_ReasoningDonePreservesUnknownRawFields(t *testing.T) {
+	events := make(chan ir.Event, 1)
+	events <- ir.Event{Type: ir.EventReasoningDone, ReasoningStatus: ir.ReasoningCompleted, Reasoning: &ir.ReasoningContent{
+		Content: []string{"new"}, Encrypted: "sig", RawJSON: json.RawMessage(`{"type":"thinking","thinking":"old","signature":"old","future":{"x":1}}`),
+	}}
+	close(events)
+	recorder := httptest.NewRecorder()
+	if err := (&handler{}).encodeHTTPResponse(events, recorder, false); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Content) != 1 || response.Content[0]["thinking"] != "new" || response.Content[0]["future"] == nil {
+		t.Fatalf("content = %#v", response.Content)
+	}
+}
+
+func encodeClaudeRequestBody(t *testing.T, req *ir.Request) map[string]any {
+	t.Helper()
+	httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{BaseURL: "https://api.anthropic.com", Model: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyBytes, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
 // ---------------------------------------------------------------------------
 // C6: non-stream encode ignores thinking events
 // ---------------------------------------------------------------------------

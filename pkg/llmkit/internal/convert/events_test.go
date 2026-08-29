@@ -2,6 +2,7 @@ package convert
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -9,6 +10,29 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
+
+func TestEncodeReasoningBlockSameProtocolKeepsCrossProtocolEnvelopeStable(t *testing.T) {
+	source := json.RawMessage(`{"protocol":"responses","data":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"short"}],"content":[{"type":"reasoning_text","text":"deep"}],"encrypted_content":"enc-native"}}`)
+	envelope := "llmkit:v1:" + base64.RawURLEncoding.EncodeToString(source)
+	reasoning := &ir.ReasoningContent{
+		Content:   []string{"deep"},
+		Encrypted: envelope,
+		RawJSON:   json.RawMessage(`{"type":"thinking","thinking":"deep","signature":"` + envelope + `","cache_control":{"type":"ephemeral"}}`),
+	}
+
+	first := EncodeReasoningBlock(reasoning, ReasoningProtocolClaude)
+	second := EncodeReasoningBlock(reasoning, ReasoningProtocolClaude)
+	if string(first) != string(second) {
+		t.Fatalf("same history encoded differently:\n%s\n%s", first, second)
+	}
+	var block map[string]any
+	if err := json.Unmarshal(first, &block); err != nil {
+		t.Fatal(err)
+	}
+	if block["signature"] != envelope || block["cache_control"] == nil {
+		t.Fatalf("same-protocol envelope/cache metadata changed: %#v", block)
+	}
+}
 
 func TestAssertStreamingToolCallInvariant(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {

@@ -136,6 +136,7 @@ func TestResponses2Responses_StreamThinkingText(t *testing.T) {
 
 	assertEventSequence(t, events, []expectedEvent{
 		{Type: codec.EventStreamStart},
+		{Type: codec.EventReasoningDone},
 		{Type: codec.EventContentDelta, Text: "Why did the chicken cross the road?"},
 		{Type: codec.EventUsage},
 		{Type: codec.EventDone, FinishReason: "stop"},

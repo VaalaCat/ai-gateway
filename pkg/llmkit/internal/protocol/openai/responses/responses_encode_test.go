@@ -14,6 +14,176 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
+func TestResponsesEncodeRequestReasoningPreservesUnknownPartOrderAndOverridesStructured(t *testing.T) {
+	req := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{
+		{Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{
+			Summary: []string{"new one", "new two"}, Content: []string{"deep"}, Encrypted: "enc-new",
+			RawJSON: json.RawMessage(`{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"old one"},{"type":"future_summary","value":7},{"type":"summary_text","text":"old two"}],"content":[],"encrypted_content":"enc-old","future":"kept"}`),
+		}},
+		{Type: ir.ContentTypeText, Text: "answer"},
+	}}}}
+	body := encodeResponsesRequestBody(t, req)
+	input := body["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("input = %#v", input)
+	}
+	reasoning := input[0].(map[string]any)
+	if reasoning["encrypted_content"] != "enc-new" || reasoning["future"] != "kept" {
+		t.Fatalf("reasoning = %#v", reasoning)
+	}
+	summary := reasoning["summary"].([]any)
+	if summary[0].(map[string]any)["text"] != "new one" || summary[1].(map[string]any)["type"] != "future_summary" || summary[2].(map[string]any)["text"] != "new two" {
+		t.Fatalf("summary order = %#v", summary)
+	}
+}
+
+func TestResponsesEncodeRequestBadEnvelopeDropsOnlyEncrypted(t *testing.T) {
+	req := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{{
+		Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{Summary: []string{"readable"}, Encrypted: "llmkit:v1:%%%"},
+	}}}}}
+	body := encodeResponsesRequestBody(t, req)
+	reasoning := body["input"].([]any)[0].(map[string]any)
+	if _, exists := reasoning["encrypted_content"]; exists {
+		t.Fatalf("bad envelope leaked: %#v", reasoning)
+	}
+	if reasoning["summary"].([]any)[0].(map[string]any)["text"] != "readable" {
+		t.Fatalf("summary lost: %#v", reasoning)
+	}
+}
+
+func TestResponsesEncodeStreamReasoningHasLifecycleAndCompletedOpaque(t *testing.T) {
+	raw := runEncodeStream(t, []ir.Event{
+		{Type: ir.EventStreamStart},
+		{Type: ir.EventReasoningContentDelta, Reasoning: &ir.ReasoningContent{Content: []string{"deep"}}},
+		{Type: ir.EventReasoningDone, ReasoningStatus: ir.ReasoningCompleted, Reasoning: &ir.ReasoningContent{Content: []string{"deep"}, Encrypted: "enc-complete"}},
+		{Type: ir.EventDone},
+	})
+	events := parseSSE(raw)
+	var added, delta, done bool
+	for _, event := range events {
+		switch event.Event {
+		case "response.output_item.added":
+			var frame respStreamEvent
+			_ = json.Unmarshal([]byte(event.Data), &frame)
+			added = frame.Item != nil && frame.Item.Type == "reasoning"
+		case "response.reasoning_text.delta":
+			delta = strings.Contains(event.Data, "deep")
+		case "response.output_item.done":
+			var frame respStreamEvent
+			_ = json.Unmarshal([]byte(event.Data), &frame)
+			done = frame.Item != nil && frame.Item.Type == "reasoning" && frame.Item.EncryptedContent == "enc-complete"
+		}
+	}
+	if !added || !delta || !done {
+		t.Fatalf("reasoning lifecycle added=%v delta=%v done=%v\n%s", added, delta, done, raw)
+	}
+}
+
+func TestResponsesEncodeNonStreamReasoningDonePreservesUnknownRawFields(t *testing.T) {
+	events := make(chan ir.Event, 1)
+	events <- ir.Event{Type: ir.EventReasoningDone, ReasoningStatus: ir.ReasoningCompleted, Reasoning: &ir.ReasoningContent{
+		Summary: []string{"new"}, Encrypted: "enc", RawJSON: json.RawMessage(`{"type":"reasoning","summary":[{"type":"summary_text","text":"old"},{"type":"future_part","value":1}],"encrypted_content":"old","future":{"x":1}}`),
+	}}
+	close(events)
+	recorder := httptest.NewRecorder()
+	if err := (&handler{}).encodeHTTPResponse(events, recorder, false); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Output []map[string]any `json:"output"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Output) != 1 || response.Output[0]["future"] == nil || response.Output[0]["encrypted_content"] != "enc" {
+		t.Fatalf("output = %#v", response.Output)
+	}
+	summary := response.Output[0]["summary"].([]any)
+	if len(summary) != 2 || summary[1].(map[string]any)["type"] != "future_part" {
+		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestResponsesReasoningSameProtocolRoundTripKeepsItemIdentity(t *testing.T) {
+	decoded := collectResponsesStreamEvents(t, `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_original","type":"reasoning","status":"in_progress"}}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","item_id":"rs_original","output_index":0,"delta":"deep"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_original","type":"reasoning","status":"completed","content":[{"type":"reasoning_text","text":"deep"}],"encrypted_content":"enc"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+`)
+	raw := runEncodeStream(t, decoded)
+	var addedID, deltaID, doneID string
+	for _, event := range parseSSE(raw) {
+		var frame respStreamEvent
+		_ = json.Unmarshal([]byte(event.Data), &frame)
+		switch event.Event {
+		case "response.output_item.added":
+			if frame.Item != nil && frame.Item.Type == "reasoning" {
+				addedID = frame.Item.ID
+			}
+		case "response.reasoning_text.delta":
+			deltaID = frame.ItemID
+		case "response.output_item.done":
+			if frame.Item != nil && frame.Item.Type == "reasoning" {
+				doneID = frame.Item.ID
+			}
+		}
+	}
+	if addedID != "rs_original" || deltaID != addedID || doneID != addedID {
+		t.Fatalf("reasoning identity added=%q delta=%q done=%q\n%s", addedID, deltaID, doneID, raw)
+	}
+}
+
+func TestResponsesEncodeStreamReasoningKeepsMessageOutputIndexConsistent(t *testing.T) {
+	raw := runEncodeStream(t, []ir.Event{
+		{Type: ir.EventStreamStart},
+		{Type: ir.EventReasoningContentDelta, Reasoning: &ir.ReasoningContent{Content: []string{"deep"}}},
+		{Type: ir.EventReasoningDone, ReasoningStatus: ir.ReasoningCompleted, Reasoning: &ir.ReasoningContent{Content: []string{"deep"}}},
+		{Type: ir.EventContentDelta, Delta: &ir.DeltaPayload{Text: "answer"}},
+		{Type: ir.EventDone},
+	})
+	messageIndex := -1
+	for _, event := range parseSSE(raw) {
+		var frame respStreamEvent
+		_ = json.Unmarshal([]byte(event.Data), &frame)
+		if event.Event == "response.output_item.added" && frame.Item != nil && frame.Item.Type == "message" {
+			messageIndex = *frame.OutputIndex
+			continue
+		}
+		if messageIndex >= 0 && (event.Event == "response.content_part.added" || event.Event == "response.output_text.delta" || event.Event == "response.output_text.done" || event.Event == "response.content_part.done") {
+			if frame.OutputIndex == nil || *frame.OutputIndex != messageIndex {
+				t.Fatalf("%s output_index=%v, want %d\n%s", event.Event, frame.OutputIndex, messageIndex, raw)
+			}
+		}
+	}
+	if messageIndex != 1 {
+		t.Fatalf("message output index = %d, want 1\n%s", messageIndex, raw)
+	}
+}
+
+func encodeResponsesRequestBody(t *testing.T, req *ir.Request) map[string]any {
+	t.Helper()
+	httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{BaseURL: "https://api.openai.com", Model: "gpt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyBytes, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers for stream encode tests
 // ---------------------------------------------------------------------------

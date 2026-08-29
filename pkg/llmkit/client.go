@@ -252,6 +252,7 @@ func eventsWithBodyLifecycle(ctx context.Context, events <-chan Event, body inte
 		for {
 			select {
 			case <-ctx.Done():
+				go drainClientEvents(events)
 				return
 			case event, ok := <-events:
 				if !ok {
@@ -260,6 +261,7 @@ func eventsWithBodyLifecycle(ctx context.Context, events <-chan Event, body inte
 				select {
 				case out <- event:
 				case <-ctx.Done():
+					go drainClientEvents(events)
 					return
 				}
 				if event.Type == EventDone || event.Type == EventError {
@@ -317,6 +319,13 @@ func cloneMessages(messages []Message) []Message {
 				cloned[index].Content[contentIndex] = content
 				cloned[index].Content[contentIndex].Metadata = cloneStringAnyMap(content.Metadata)
 				cloned[index].Content[contentIndex].RawJSON = append([]byte(nil), content.RawJSON...)
+				if content.Reasoning != nil {
+					reasoning := *content.Reasoning
+					reasoning.Summary = append([]string(nil), content.Reasoning.Summary...)
+					reasoning.Content = append([]string(nil), content.Reasoning.Content...)
+					reasoning.RawJSON = append([]byte(nil), content.Reasoning.RawJSON...)
+					cloned[index].Content[contentIndex].Reasoning = &reasoning
+				}
 			}
 		}
 		cloned[index].ToolCalls = append([]ToolCall(nil), message.ToolCalls...)

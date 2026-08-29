@@ -401,11 +401,27 @@ func TestClientCallDoesNotMutateInputRequest(t *testing.T) {
 
 func TestClientCallOwnsNestedRequestContainers(t *testing.T) {
 	request := Request{
+		Messages: []Message{{
+			Role: RoleAssistant,
+			Content: []ContentBlock{{
+				Type: ContentTypeThinking,
+				Reasoning: &ReasoningContent{
+					Summary: []string{"summary"},
+					Content: []string{"content"},
+					RawJSON: json.RawMessage(`{"type":"thinking","thinking":"content"}`),
+				},
+			}},
+		}},
 		Metadata: map[string]any{
 			"typed": map[string][]string{"items": {"original"}},
 		},
 	}
 	want := map[string][]string{"items": {"original"}}
+	wantReasoning := ReasoningContent{
+		Summary: []string{"summary"},
+		Content: []string{"content"},
+		RawJSON: json.RawMessage(`{"type":"thinking","thinking":"content"}`),
+	}
 	client := NewClient(ClientOptions{
 		Codec: mutatingEncodeCodec{Codec: NewCodec()},
 		HTTPClient: responseDoer(
@@ -423,6 +439,57 @@ func TestClientCallOwnsNestedRequestContainers(t *testing.T) {
 	}
 	if got := request.Metadata["typed"].(map[string][]string); !reflect.DeepEqual(got, want) {
 		t.Fatalf("nested caller-owned map = %#v, want %#v", got, want)
+	}
+	if got := request.Messages[0].Content[0].Reasoning; got == nil || !reflect.DeepEqual(*got, wantReasoning) {
+		t.Fatalf("caller-owned reasoning = %#v, want %#v", got, wantReasoning)
+	}
+}
+
+func TestClientCallCancellationDrainsProducer(t *testing.T) {
+	for _, cancelWhile := range []string{"waiting for source", "forwarding event"} {
+		t.Run(cancelWhile, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			start := make(chan struct{})
+			firstSent := make(chan struct{})
+			producerDone := make(chan struct{})
+			client := NewClient(ClientOptions{
+				Codec: drainingProducerCodec{
+					Codec: NewCodec(), Start: start, FirstSent: firstSent, ProducerDone: producerDone,
+				},
+				HTTPClient: responseDoer(http.StatusOK, newTrackedReadCloser(strings.NewReader("unused"))),
+			})
+			events, err := client.Call(ctx, Request{}, Target{
+				Protocol: ProtocolOpenAIChat,
+				BaseURL:  "https://provider.example",
+			}, CallOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if events == nil {
+				t.Fatal("Call returned nil events")
+			}
+
+			if cancelWhile == "forwarding event" {
+				close(start)
+				select {
+				case <-firstSent:
+				case <-time.After(time.Second):
+					t.Fatal("producer did not send first event")
+				}
+				cancel()
+			} else {
+				cancel()
+				close(start)
+			}
+
+			select {
+			case <-producerDone:
+			case <-time.After(time.Second):
+				t.Fatal("producer remained blocked after client cancellation")
+			}
+			for range events {
+			}
+		})
 	}
 }
 
@@ -656,6 +723,29 @@ type terminalProducerCodec struct {
 	producerDone chan struct{}
 }
 
+type drainingProducerCodec struct {
+	Codec
+	Start        <-chan struct{}
+	FirstSent    chan<- struct{}
+	ProducerDone chan<- struct{}
+}
+
+func (codec drainingProducerCodec) DecodeResponse(context.Context, DecodeResponseInput) (<-chan Event, error) {
+	events := make(chan Event, 4)
+	go func() {
+		defer close(codec.ProducerDone)
+		defer close(events)
+		<-codec.Start
+		for index := 0; index < 256; index++ {
+			events <- Event{Type: EventContentDelta, Delta: &DeltaPayload{Text: "chunk"}}
+			if index == 0 {
+				close(codec.FirstSent)
+			}
+		}
+	}()
+	return events, nil
+}
+
 func (codec terminalProducerCodec) DecodeResponse(context.Context, DecodeResponseInput) (<-chan Event, error) {
 	events := make(chan Event)
 	go func() {
@@ -669,6 +759,10 @@ func (codec terminalProducerCodec) DecodeResponse(context.Context, DecodeRespons
 
 func (codec mutatingEncodeCodec) EncodeRequest(input EncodeRequestInput) (EncodedRequest, error) {
 	input.Request.Metadata["typed"].(map[string][]string)["items"][0] = "mutated"
+	reasoning := input.Request.Messages[0].Content[0].Reasoning
+	reasoning.Summary[0] = "mutated"
+	reasoning.Content[0] = "mutated"
+	reasoning.RawJSON[0] = '['
 	return codec.Codec.EncodeRequest(input)
 }
 

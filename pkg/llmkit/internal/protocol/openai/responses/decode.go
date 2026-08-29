@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -88,6 +89,26 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 										Arguments: fc.Arguments,
 									},
 								},
+							})
+						}
+						continue
+					}
+
+					if peek.Type == "reasoning" {
+						var item respOutputItem
+						if err := json.Unmarshal(rawItem, &item); err == nil {
+							reasoning := newResponsesReasoning(rawItem, item)
+							readable := reasoning.Content
+							if len(readable) == 0 {
+								readable = reasoning.Summary
+							}
+							req.Messages = append(req.Messages, ir.Message{
+								Role: ir.RoleAssistant,
+								Content: []ir.ContentBlock{{
+									Type:      ir.ContentTypeThinking,
+									Text:      strings.Join(readable, ""),
+									Reasoning: reasoning,
+								}},
 							})
 						}
 						continue
@@ -336,7 +357,11 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 
 	// R4: infer FinishReason from output items
 	finishReason := consts.FinishReasonStop
-	for _, item := range respObj.Output {
+	var rawResponse struct {
+		Output []json.RawMessage `json:"output"`
+	}
+	_ = json.Unmarshal(body, &rawResponse)
+	for itemIndex, item := range respObj.Output {
 		switch item.Type {
 		case "message":
 			for _, block := range item.Content {
@@ -351,17 +376,32 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 				}
 			}
 		case "reasoning":
+			var rawItem json.RawMessage
+			if itemIndex < len(rawResponse.Output) {
+				rawItem = rawResponse.Output[itemIndex]
+			}
+			reasoning := newResponsesReasoning(rawItem, item)
 			for _, block := range item.Summary {
 				if block.Type == "summary_text" && block.Text != "" {
 					ch <- ir.Event{
-						Type: ir.EventThinkingDelta,
-						Delta: &ir.DeltaPayload{
-							ContentType: ir.ContentTypeThinking,
-							Text:        block.Text,
-						},
+						Type:      ir.EventReasoningSummaryDelta,
+						Reasoning: &ir.ReasoningContent{Summary: []string{block.Text}},
 					}
 				}
 			}
+			for _, block := range item.Content {
+				if block.Type == "reasoning_text" && block.Text != "" {
+					ch <- ir.Event{Type: ir.EventReasoningContentDelta, Reasoning: &ir.ReasoningContent{Content: []string{block.Text}}}
+				}
+			}
+			readable := reasoning.Content
+			if len(readable) == 0 {
+				readable = reasoning.Summary
+			}
+			for _, text := range readable {
+				ch <- ir.Event{Type: ir.EventThinkingDelta, Delta: &ir.DeltaPayload{ContentType: ir.ContentTypeThinking, Text: text}}
+			}
+			ch <- ir.Event{Type: ir.EventReasoningDone, Reasoning: reasoning, ReasoningStatus: ir.ReasoningCompleted}
 		case "function_call":
 			finishReason = consts.FinishReasonToolCalls
 			ch <- ir.Event{
@@ -417,6 +457,50 @@ type responsesItemAggState struct {
 	namespace string
 }
 
+type responsesReasoningAggState struct {
+	rawJSON         json.RawMessage
+	summary         strings.Builder
+	content         strings.Builder
+	readableChannel string
+	outputIndex     int
+	hasOutputIndex  bool
+	order           int
+}
+
+func reasoningTexts(blocks []respContentBlock, blockType string) []string {
+	var texts []string
+	for _, block := range blocks {
+		if block.Type == blockType {
+			texts = append(texts, block.Text)
+		}
+	}
+	return texts
+}
+
+func newResponsesReasoning(raw json.RawMessage, item respOutputItem) *ir.ReasoningContent {
+	reasoning := &ir.ReasoningContent{
+		Summary:   reasoningTexts(item.Summary, "summary_text"),
+		Content:   reasoningTexts(item.Content, "reasoning_text"),
+		Encrypted: item.EncryptedContent,
+		RawJSON:   append(json.RawMessage(nil), raw...),
+	}
+	if len(reasoning.RawJSON) == 0 {
+		reasoning.RawJSON, _ = json.Marshal(item)
+	}
+	return reasoning
+}
+
+func interruptedResponsesReasoning(state *responsesReasoningAggState) *ir.ReasoningContent {
+	item := respOutputItem{Type: "reasoning"}
+	if state.summary.Len() > 0 {
+		item.Summary = []respContentBlock{{Type: "summary_text", Text: state.summary.String()}}
+	}
+	if state.content.Len() > 0 {
+		item.Content = []respContentBlock{{Type: "reasoning_text", Text: state.content.String()}}
+	}
+	return newResponsesReasoning(state.rawJSON, item)
+}
+
 func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	defer close(ch)
 	defer resp.Body.Close()
@@ -435,6 +519,32 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	startedCallIDs := map[string]bool{}
 	// endedCallIDs tracks callIDs for which EventToolCallEnd was emitted.
 	endedCallIDs := map[string]bool{}
+	reasoningStates := map[string]*responsesReasoningAggState{}
+	lastReasoningID := ""
+	nextReasoningOrder := 0
+	newReasoningState := func() *responsesReasoningAggState {
+		state := &responsesReasoningAggState{order: nextReasoningOrder}
+		nextReasoningOrder++
+		return state
+	}
+	finalizeInterruptedReasoning := func() {
+		states := make([]*responsesReasoningAggState, 0, len(reasoningStates))
+		allHaveOutputIndex := true
+		for _, state := range reasoningStates {
+			states = append(states, state)
+			allHaveOutputIndex = allHaveOutputIndex && state.hasOutputIndex
+		}
+		sort.SliceStable(states, func(left, right int) bool {
+			if allHaveOutputIndex && states[left].outputIndex != states[right].outputIndex {
+				return states[left].outputIndex < states[right].outputIndex
+			}
+			return states[left].order < states[right].order
+		})
+		for _, state := range states {
+			ch <- ir.Event{Type: ir.EventReasoningDone, Reasoning: interruptedResponsesReasoning(state), ReasoningStatus: ir.ReasoningInterrupted}
+		}
+		clear(reasoningStates)
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -462,25 +572,32 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		// because some providers send it as a string ("Hi") while others
 		// send it as an object ({"type":"text_delta","text":"Hi"}).
 		var raw struct {
-			Type      string            `json:"type"`
-			Response  *respResponse     `json:"response,omitempty"`
-			Item      *respOutputItem   `json:"item,omitempty"`
-			Part      *respContentBlock `json:"part,omitempty"`
-			Delta     json.RawMessage   `json:"delta,omitempty"`
-			ItemID    string            `json:"item_id,omitempty"`
-			Arguments string            `json:"arguments,omitempty"`
+			Type        string            `json:"type"`
+			Response    *respResponse     `json:"response,omitempty"`
+			Item        *respOutputItem   `json:"item,omitempty"`
+			Part        *respContentBlock `json:"part,omitempty"`
+			Delta       json.RawMessage   `json:"delta,omitempty"`
+			ItemID      string            `json:"item_id,omitempty"`
+			Arguments   string            `json:"arguments,omitempty"`
+			OutputIndex *int              `json:"output_index,omitempty"`
+			ItemRaw     json.RawMessage   `json:"-"`
 		}
 		if err := json.Unmarshal([]byte(data), &raw); err != nil {
 			continue
 		}
+		var rawFields map[string]json.RawMessage
+		if json.Unmarshal([]byte(data), &rawFields) == nil {
+			raw.ItemRaw = rawFields["item"]
+		}
 
 		evt := respStreamEvent{
-			Type:      raw.Type,
-			Response:  raw.Response,
-			Item:      raw.Item,
-			Part:      raw.Part,
-			ItemID:    raw.ItemID,
-			Arguments: raw.Arguments,
+			Type:        raw.Type,
+			Response:    raw.Response,
+			Item:        raw.Item,
+			Part:        raw.Part,
+			ItemID:      raw.ItemID,
+			Arguments:   raw.Arguments,
+			OutputIndex: raw.OutputIndex,
 		}
 
 		// Parse delta: try object first, then string.
@@ -542,14 +659,34 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 				ch <- irEvt
 			}
 
-		case sseconsts.ReasoningTextDelta:
+		case sseconsts.ReasoningTextDelta, "response.reasoning_summary_text.delta":
 			if evt.Delta != nil {
-				ch <- ir.Event{
-					Type: ir.EventThinkingDelta,
-					Delta: &ir.DeltaPayload{
-						ContentType: ir.ContentTypeThinking,
-						Text:        evt.Delta.Text,
-					},
+				itemID := evt.ItemID
+				if itemID == "" {
+					itemID = lastReasoningID
+				}
+				state := reasoningStates[itemID]
+				if state == nil {
+					state = newReasoningState()
+					reasoningStates[itemID] = state
+				}
+				isSummary := currentEvent == "response.reasoning_summary_text.delta"
+				if isSummary {
+					state.summary.WriteString(evt.Delta.Text)
+					ch <- ir.Event{Type: ir.EventReasoningSummaryDelta, Reasoning: &ir.ReasoningContent{Summary: []string{evt.Delta.Text}, RawJSON: append(json.RawMessage(nil), state.rawJSON...)}}
+				} else {
+					state.content.WriteString(evt.Delta.Text)
+					ch <- ir.Event{Type: ir.EventReasoningContentDelta, Reasoning: &ir.ReasoningContent{Content: []string{evt.Delta.Text}, RawJSON: append(json.RawMessage(nil), state.rawJSON...)}}
+				}
+				channel := "content"
+				if isSummary {
+					channel = "summary"
+				}
+				if state.readableChannel == "" {
+					state.readableChannel = channel
+				}
+				if state.readableChannel == channel {
+					ch <- ir.Event{Type: ir.EventThinkingDelta, Delta: &ir.DeltaPayload{ContentType: ir.ContentTypeThinking, Text: evt.Delta.Text}}
 				}
 			}
 
@@ -580,6 +717,18 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 						Name:      name,
 						Namespace: namespace,
 					},
+				}
+			} else if evt.Item != nil && evt.Item.Type == "reasoning" {
+				lastReasoningID = evt.Item.ID
+				state := reasoningStates[evt.Item.ID]
+				if state == nil {
+					state = newReasoningState()
+					reasoningStates[evt.Item.ID] = state
+				}
+				state.rawJSON = append(json.RawMessage(nil), raw.ItemRaw...)
+				if evt.OutputIndex != nil {
+					state.outputIndex = *evt.OutputIndex
+					state.hasOutputIndex = true
 				}
 			} else {
 				// Non-function_call output_item.added: passthrough
@@ -632,6 +781,19 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 						},
 					}
 				}
+			} else if evt.Item != nil && evt.Item.Type == "reasoning" {
+				state := reasoningStates[evt.Item.ID]
+				reasoning := newResponsesReasoning(raw.ItemRaw, *evt.Item)
+				if state != nil {
+					if len(reasoning.Summary) == 0 && state.summary.Len() > 0 {
+						reasoning.Summary = []string{state.summary.String()}
+					}
+					if len(reasoning.Content) == 0 && state.content.Len() > 0 {
+						reasoning.Content = []string{state.content.String()}
+					}
+				}
+				ch <- ir.Event{Type: ir.EventReasoningDone, Reasoning: reasoning, ReasoningStatus: ir.ReasoningCompleted}
+				delete(reasoningStates, evt.Item.ID)
 			} else {
 				// Non-function_call output_item.done: passthrough
 				ch <- ir.Event{
@@ -727,6 +889,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			}
 
 		case sseconsts.ResponseCompleted:
+			finalizeInterruptedReasoning()
 			if evt.Response != nil && evt.Response.Usage != nil {
 				u := &ir.Usage{
 					PromptTokens:     evt.Response.Usage.InputTokens,
@@ -768,6 +931,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			sentDone = true
 
 		case sseconsts.ResponseFailed:
+			finalizeInterruptedReasoning()
 			msg := "response failed"
 			if evt.Response != nil && evt.Response.Error != nil {
 				msg = evt.Response.Error.Message
@@ -776,8 +940,10 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 				Type:  ir.EventError,
 				Error: &ir.ErrorPayload{Message: msg},
 			}
+			sentDone = true
 
 		case sseconsts.ResponseIncomplete:
+			finalizeInterruptedReasoning()
 			if evt.Response != nil && evt.Response.Usage != nil {
 				u := &ir.Usage{
 					PromptTokens:     evt.Response.Usage.InputTokens,
@@ -810,13 +976,16 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	}
 
 	if err := scanner.Err(); err != nil {
+		finalizeInterruptedReasoning()
 		ch <- ir.Event{Type: ir.EventError, Error: &ir.ErrorPayload{Message: "stream read error: " + err.Error()}}
+		return
 	}
 
-	// Ensure EventDone is always sent. The scanner may stop early if a line
-	// exceeds its buffer (e.g. a very large response.completed payload) or
-	// if the upstream connection drops unexpectedly.
+	// A clean transport EOF is not a provider terminal event. Treat it as an
+	// interrupted stream unless response.completed/failed/incomplete already
+	// closed the protocol lifecycle explicitly.
 	if !sentDone {
-		ch <- ir.Event{Type: ir.EventDone}
+		finalizeInterruptedReasoning()
+		ch <- ir.Event{Type: ir.EventError, Error: &ir.ErrorPayload{Message: "responses stream ended before a terminal event"}}
 	}
 }

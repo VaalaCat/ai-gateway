@@ -43,6 +43,23 @@ func BuildConnectivityTestRequest(endpoints, supportedAPITypes, endpointType, mo
 	if err != nil {
 		return "", nil, err
 	}
+	body, err = buildConnectivityTestBody(protocol, model, stream)
+	return path, body, err
+}
+
+func BuildRelayConnectivityTestRequest(protocol llmkit.Protocol, model string, stream bool) (path string, body map[string]any, err error) {
+	if !IsSupportedProtocol(protocol) {
+		return "", nil, fmt.Errorf("unsupported connectivity test protocol: %s", protocol)
+	}
+	body, err = buildConnectivityTestBody(protocol, model, stream)
+	return DefaultEndpointPath(protocol), body, err
+}
+
+func buildConnectivityTestBody(protocol llmkit.Protocol, model string, stream bool) (map[string]any, error) {
+	if !IsSupportedProtocol(protocol) {
+		return nil, fmt.Errorf("unsupported connectivity test protocol: %s", protocol)
+	}
+	var body map[string]any
 	switch protocol {
 	case llmkit.ProtocolOpenAIResponses:
 		body = map[string]any{"model": model, "input": "Say 'ok' and nothing else."}
@@ -55,7 +72,7 @@ func BuildConnectivityTestRequest(endpoints, supportedAPITypes, endpointType, mo
 	if stream {
 		body["stream"] = true
 	}
-	return path, body, nil
+	return body, nil
 }
 
 func protocolToEndpointKey(protocol llmkit.Protocol) string {

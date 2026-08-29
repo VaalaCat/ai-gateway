@@ -77,7 +77,12 @@ func (handler *handler) DecodeResponse(ctx context.Context, input protocol.Decod
 	if err != nil {
 		return nil, err
 	}
-	return protocol.EventsWithContext(ctx, events), nil
+	if input.Body != nil {
+		if _, canClose := input.Body.(io.Closer); !canClose {
+			events = protocol.EventsWithContext(ctx, events)
+		}
+	}
+	return events, nil
 }
 
 func (handler *handler) EncodeResponse(ctx context.Context, input protocol.EncodeResponseInput) (<-chan protocol.EncodedChunk, error) {

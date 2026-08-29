@@ -17,6 +17,17 @@ const (
 	EventToolCallStart                           // streaming: a tool call began (call_id + name)
 	EventToolCallArgumentsDelta                  // streaming: incremental arguments fragment
 	EventToolCallEnd                             // streaming: tool call ended with full accumulated arguments
+	EventReasoningSummaryDelta                   // incremental readable reasoning summary
+	EventReasoningContentDelta                   // incremental full reasoning content
+	EventReasoningDone                           // reasoning block completed or was interrupted
+)
+
+// ReasoningStatus describes why a reasoning stream stopped.
+type ReasoningStatus string
+
+const (
+	ReasoningCompleted   ReasoningStatus = "completed"
+	ReasoningInterrupted ReasoningStatus = "interrupted"
 )
 
 // RawSSEEvent carries a raw SSE event that could not be parsed into a known IR event.
@@ -41,6 +52,8 @@ type Event struct {
 	Extras            map[string]any     `json:"extras,omitempty"` // non-streaming response unknown field passthrough
 	ContentBlockIndex *int               `json:"content_block_index,omitempty"`
 	StopSequence      string             `json:"stop_sequence,omitempty"`
+	Reasoning         *ReasoningContent  `json:"reasoning,omitempty"`
+	ReasoningStatus   ReasoningStatus    `json:"reasoning_status,omitempty"`
 }
 
 // DeltaPayload carries incremental content for delta events.

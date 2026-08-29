@@ -1,14 +1,26 @@
 event: message_start
-data: {"message":{"content":[],"id":"msg_23d9c48bc3947c40f8997bf6","model":"o4-mini","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
+data: {"message":{"content":[],"id":"msg_5635950f35fdfe50a8258745","model":"o4-mini","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
 
 event: content_block_start
-data: {"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"}
+data: {"content_block":{"thinking":"","type":"thinking"},"index":0,"type":"content_block_start"}
 
 event: content_block_delta
-data: {"delta":{"text":"Why did the chicken cross the road?","type":"text_delta"},"index":0,"type":"content_block_delta"}
+data: {"delta":{"thinking":"The user is asking for a joke.","type":"thinking_delta"},"index":0,"type":"content_block_delta"}
+
+event: content_block_delta
+data: {"delta":{"signature":"llmkit:v1:eyJwcm90b2NvbCI6InJlc3BvbnNlcyIsImRhdGEiOnsiY29udGVudCI6W10sImlkIjoicnNfMDEiLCJzdW1tYXJ5IjpbeyJ0ZXh0IjoiVGhlIHVzZXIgaXMgYXNraW5nIGZvciBhIGpva2UuIiwidHlwZSI6InN1bW1hcnlfdGV4dCJ9XSwidHlwZSI6InJlYXNvbmluZyJ9fQ","type":"signature_delta"},"index":0,"type":"content_block_delta"}
 
 event: content_block_stop
 data: {"index":0,"type":"content_block_stop"}
+
+event: content_block_start
+data: {"content_block":{"text":"","type":"text"},"index":1,"type":"content_block_start"}
+
+event: content_block_delta
+data: {"delta":{"text":"Why did the chicken cross the road?","type":"text_delta"},"index":1,"type":"content_block_delta"}
+
+event: content_block_stop
+data: {"index":1,"type":"content_block_stop"}
 
 event: message_delta
 data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"input_tokens":10,"output_tokens":148}}

@@ -525,6 +525,8 @@ func normalizeSSEIDs(s string) string {
 	s = regexp.MustCompile(`call_[0-9a-zA-Z]+`).ReplaceAllString(s, "call_NORMALIZED")
 	// Replace item_<hex> IDs (Responses item IDs)
 	s = regexp.MustCompile(`item_[0-9a-f]+`).ReplaceAllString(s, "item_NORMALIZED")
+	// Replace rs_<hex> IDs (Responses reasoning item IDs)
+	s = regexp.MustCompile(`rs_[0-9a-f]+`).ReplaceAllString(s, "rs_NORMALIZED")
 	// Replace fc_<hex or id> IDs (function call item IDs)
 	s = regexp.MustCompile(`fc_[0-9a-zA-Z_]+`).ReplaceAllString(s, "fc_NORMALIZED")
 	// Normalize "created":<timestamp> values (Unix timestamps change between runs)

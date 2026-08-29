@@ -96,7 +96,22 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 			continue
 		}
 
-		// Assistant messages with ToolCalls become function_call input items
+		var messageContent []ir.ContentBlock
+		hadReasoning := false
+		for _, content := range m.Content {
+			if content.Type == ir.ContentTypeThinking && content.Reasoning != nil {
+				hadReasoning = true
+				if item := convert.EncodeReasoningBlock(content.Reasoning, convert.ReasoningProtocolResponses); len(item) > 0 {
+					inputItems = append(inputItems, item)
+				}
+				continue
+			}
+			messageContent = append(messageContent, content)
+		}
+
+		// Assistant tool calls are emitted after any readable assistant message so
+		// the original reasoning/message/tool order remains stable.
+		var functionCalls []json.RawMessage
 		if m.Role == ir.RoleAssistant && len(m.ToolCalls) > 0 {
 			for _, tc := range m.ToolCalls {
 				fc := respFunctionCallInput{
@@ -107,9 +122,8 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 					Arguments: tc.Arguments,
 				}
 				b, _ := json.Marshal(fc)
-				inputItems = append(inputItems, b)
+				functionCalls = append(functionCalls, b)
 			}
-			continue
 		}
 
 		// Regular message item
@@ -121,7 +135,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		// Content — drop empty text blocks first: an OpenAI-compatible upstream
 		// rejects an input_text part with no/empty text field (same defect the Chat
 		// encoder had). Inbound history can carry such blocks into the IR.
-		filtered := convert.DropEmptyTextBlocks(m.Content)
+		filtered := convert.DropEmptyTextBlocks(messageContent)
 		if len(filtered) == 1 && filtered[0].Type == ir.ContentTypeText && filtered[0].RawJSON == nil {
 			item["content"] = filtered[0].Text
 		} else if len(filtered) > 0 {
@@ -146,13 +160,16 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 				}
 			}
 			item["content"] = blocks
-		} else if len(m.Content) > 0 {
+		} else if len(messageContent) > 0 {
 			// message carried only empty text blocks → legal empty string
 			item["content"] = ""
 		}
 
-		b, _ := json.Marshal(item)
-		inputItems = append(inputItems, b)
+		if len(filtered) > 0 || len(messageContent) > 0 || (!hadReasoning && len(functionCalls) == 0) {
+			b, _ := json.Marshal(item)
+			inputItems = append(inputItems, b)
+		}
+		inputItems = append(inputItems, functionCalls...)
 	}
 
 	out["input"] = inputItems
@@ -339,6 +356,8 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 	var usage *respUsage
 	var responseExtras map[string]any
 	var model string
+	var reasoningOutputs []json.RawMessage
+	structuredReasoning := false
 
 	for ev := range events {
 		// Capture model from any event that carries it
@@ -352,8 +371,18 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 				content.WriteString(ev.Delta.Text)
 			}
 		case ir.EventThinkingDelta:
+			if structuredReasoning {
+				continue
+			}
 			if ev.Delta != nil {
 				thinking.WriteString(ev.Delta.Text)
+			}
+		case ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta:
+			structuredReasoning = true
+		case ir.EventReasoningDone:
+			structuredReasoning = true
+			if raw := convert.EncodeReasoningBlock(ev.Reasoning, convert.ReasoningProtocolResponses); len(raw) > 0 {
+				reasoningOutputs = append(reasoningOutputs, raw)
 			}
 		case ir.EventToolCallDelta:
 			if ev.Delta != nil && ev.Delta.ToolCall != nil {
@@ -396,38 +425,43 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 		}
 	}
 
-	var output []respOutputItem
+	var output []json.RawMessage
+	output = append(output, reasoningOutputs...)
 	// Reasoning output (if any) comes before message
 	if thinking.Len() > 0 {
-		output = append(output, respOutputItem{
+		item, _ := json.Marshal(respOutputItem{
 			Type: "reasoning",
 			Summary: []respContentBlock{
 				{Type: "summary_text", Text: thinking.String()},
 			},
 		})
+		output = append(output, item)
 	}
 	if content.Len() > 0 {
-		output = append(output, respOutputItem{
+		item, _ := json.Marshal(respOutputItem{
 			Type: "message",
 			Role: "assistant",
 			Content: []respContentBlock{
 				{Type: "output_text", Text: content.String()},
 			},
 		})
+		output = append(output, item)
 	}
-	output = append(output, toolCalls...)
+	for _, toolCall := range toolCalls {
+		item, _ := json.Marshal(toolCall)
+		output = append(output, item)
+	}
 
 	// If no output items, still include an empty message
 	if len(output) == 0 {
-		output = []respOutputItem{
-			{
-				Type: "message",
-				Role: "assistant",
-				Content: []respContentBlock{
-					{Type: "output_text", Text: ""},
-				},
+		item, _ := json.Marshal(respOutputItem{
+			Type: "message",
+			Role: "assistant",
+			Content: []respContentBlock{
+				{Type: "output_text", Text: ""},
 			},
-		}
+		})
+		output = []json.RawMessage{item}
 	}
 
 	// Build response as map to allow extras merging
@@ -479,6 +513,28 @@ type fcState struct {
 	accumulated strings.Builder
 }
 
+type reasoningEncodeState struct {
+	started     bool
+	outputIndex int
+	itemID      string
+}
+
+func encodeReasoningDoneItem(raw json.RawMessage, fallbackID, status string) json.RawMessage {
+	var item map[string]json.RawMessage
+	if json.Unmarshal(raw, &item) != nil || item == nil {
+		item = make(map[string]json.RawMessage)
+	}
+	item["type"] = json.RawMessage(`"reasoning"`)
+	var itemID string
+	_ = json.Unmarshal(item["id"], &itemID)
+	if itemID == "" {
+		item["id"], _ = json.Marshal(fallbackID)
+	}
+	item["status"], _ = json.Marshal(status)
+	encoded, _ := json.Marshal(item)
+	return encoded
+}
+
 func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -506,6 +562,8 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 
 	// fcStates aggregates Start/ArgsDelta/End events keyed by callID.
 	fcStates := map[string]*fcState{}
+	reasoningState := reasoningEncodeState{}
+	structuredReasoning := false
 
 	writeSSE := func(event string, data []byte) {
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
@@ -517,8 +575,44 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 		seqNum++
 		return n
 	}
+	writeRawSSE := func(event, raw string) {
+		data := []byte(raw)
+		var object map[string]json.RawMessage
+		if json.Unmarshal(data, &object) == nil {
+			var rawSequence int
+			if json.Unmarshal(object["sequence_number"], &rawSequence) == nil {
+				if rawSequence < seqNum {
+					rawSequence = seqNum
+					object["sequence_number"], _ = json.Marshal(rawSequence)
+					data, _ = json.Marshal(object)
+				}
+				seqNum = rawSequence + 1
+			}
+		}
+		writeSSE(event, data)
+	}
 
 	idx0 := 0 // reusable pointer to 0
+	ensureReasoning := func(reasoning *ir.ReasoningContent) {
+		if reasoningState.started {
+			return
+		}
+		reasoningState.started = true
+		reasoningState.outputIndex = outputIndex
+		outputIndex++
+		reasoningState.itemID = fmt.Sprintf("rs_%s%x", id[5:], reasoningState.outputIndex)
+		if raw := convert.EncodeReasoningBlock(reasoning, convert.ReasoningProtocolResponses); len(raw) > 0 {
+			var item respOutputItem
+			if json.Unmarshal(raw, &item) == nil && item.ID != "" {
+				reasoningState.itemID = item.ID
+			}
+		}
+		data, _ := json.Marshal(respStreamEvent{
+			Type: sseconsts.OutputItemAdded, SequenceNumber: nextSeq(), OutputIndex: &reasoningState.outputIndex,
+			Item: &respOutputItem{Type: "reasoning", ID: reasoningState.itemID, Status: "in_progress"},
+		})
+		writeSSE(sseconsts.OutputItemAdded, data)
+	}
 
 	// ensureMessage lazily initializes the message output item and content part.
 	// It reserves outputIndex 0 for the message item.
@@ -543,7 +637,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 		data, _ = json.Marshal(respStreamEvent{
 			Type:           sseconsts.ContentPartAdded,
 			SequenceNumber: nextSeq(),
-			OutputIndex:    &idx0,
+			OutputIndex:    &messageOutputIndex,
 			ContentIndex:   &idx0,
 			ItemID:         itemID,
 			Part:           &respContentBlock{Type: "output_text", Text: ""},
@@ -561,7 +655,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 		case ir.EventStreamStart:
 			if ev.RawPassthrough != nil && ev.RawPassthrough.EventName == sseconsts.ResponseCreated {
 				// Preserve original upstream response.created data
-				writeSSE(sseconsts.ResponseCreated, []byte(ev.RawPassthrough.Data))
+				writeRawSSE(sseconsts.ResponseCreated, ev.RawPassthrough.Data)
 				// Extract upstream response ID for use in response.completed
 				var parsed struct {
 					Response struct {
@@ -600,13 +694,13 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			// Prefer original upstream data to preserve all fields
 			// (content_index, item_id, output_index, sequence_number, etc.)
 			if ev.RawPassthrough != nil && ev.RawPassthrough.EventName == sseconsts.OutputTextDelta {
-				writeSSE(sseconsts.OutputTextDelta, []byte(ev.RawPassthrough.Data))
+				writeRawSSE(sseconsts.OutputTextDelta, ev.RawPassthrough.Data)
 			} else {
 				// Cross-protocol: generate from IR with structural fields
 				data, _ := json.Marshal(respStreamEvent{
 					Type:           sseconsts.OutputTextDelta,
 					SequenceNumber: nextSeq(),
-					OutputIndex:    &idx0,
+					OutputIndex:    &messageOutputIndex,
 					ContentIndex:   &idx0,
 					ItemID:         itemID,
 					Delta:          &respDelta{Type: "text_delta", Text: ev.Delta.Text},
@@ -615,6 +709,9 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			}
 
 		case ir.EventThinkingDelta:
+			if structuredReasoning {
+				continue
+			}
 			if ev.Delta != nil {
 				data, _ := json.Marshal(respStreamEvent{
 					Type:           sseconsts.ReasoningTextDelta,
@@ -737,7 +834,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			// RawPassthrough set. Forward those raw bytes so responses→responses
 			// same-protocol passthrough continues to work correctly.
 			if ev.RawPassthrough != nil {
-				writeSSE(ev.RawPassthrough.EventName, []byte(ev.RawPassthrough.Data))
+				writeRawSSE(ev.RawPassthrough.EventName, ev.RawPassthrough.Data)
 			}
 			continue
 
@@ -753,6 +850,43 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 					usage.InputTokensDetails = &respTokenDetail{CachedTokens: ev.Usage.CachedTokens}
 				}
 			}
+
+		case ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta:
+			structuredReasoning = true
+			if ev.Reasoning == nil {
+				continue
+			}
+			ensureReasoning(ev.Reasoning)
+			eventName := "response.reasoning_summary_text.delta"
+			deltaType := "summary_text_delta"
+			fragments := ev.Reasoning.Summary
+			if ev.Type == ir.EventReasoningContentDelta {
+				eventName = sseconsts.ReasoningTextDelta
+				deltaType = "text_delta"
+				fragments = ev.Reasoning.Content
+			}
+			for _, fragment := range fragments {
+				data, _ := json.Marshal(respStreamEvent{
+					Type: eventName, SequenceNumber: nextSeq(), OutputIndex: &reasoningState.outputIndex,
+					ItemID: reasoningState.itemID, Delta: &respDelta{Type: deltaType, Text: fragment},
+				})
+				writeSSE(eventName, data)
+			}
+
+		case ir.EventReasoningDone:
+			structuredReasoning = true
+			ensureReasoning(ev.Reasoning)
+			raw := convert.EncodeReasoningBlock(ev.Reasoning, convert.ReasoningProtocolResponses)
+			status := "completed"
+			if ev.ReasoningStatus == ir.ReasoningInterrupted {
+				status = "incomplete"
+			}
+			item := encodeReasoningDoneItem(raw, reasoningState.itemID, status)
+			data, _ := json.Marshal(map[string]any{
+				"type": sseconsts.OutputItemDone, "sequence_number": nextSeq(), "output_index": reasoningState.outputIndex, "item": item,
+			})
+			writeSSE(sseconsts.OutputItemDone, data)
+			reasoningState = reasoningEncodeState{}
 
 		case ir.EventDone:
 			// Close message structure only if one was started AND the upstream
@@ -796,7 +930,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 
 			// Send response.completed — prefer original upstream data when available
 			if ev.RawPassthrough != nil && ev.RawPassthrough.EventName == sseconsts.ResponseCompleted {
-				writeSSE(sseconsts.ResponseCompleted, []byte(ev.RawPassthrough.Data))
+				writeRawSSE(sseconsts.ResponseCompleted, ev.RawPassthrough.Data)
 			} else {
 				completedResp := &respResponse{ID: id, Status: "completed", Model: model}
 				if usage != nil {
@@ -847,7 +981,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 						}
 					}
 				}
-				writeSSE(ev.RawPassthrough.EventName, []byte(ev.RawPassthrough.Data))
+				writeRawSSE(ev.RawPassthrough.EventName, ev.RawPassthrough.Data)
 			}
 
 		case ir.EventError:

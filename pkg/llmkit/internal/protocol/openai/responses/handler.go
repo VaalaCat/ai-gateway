@@ -80,7 +80,11 @@ func (handler *handler) DecodeResponse(ctx context.Context, input protocol.Decod
 	if err != nil {
 		return nil, err
 	}
-	events = protocol.EventsWithContext(ctx, events)
+	if input.Body != nil {
+		if _, canClose := input.Body.(io.Closer); !canClose {
+			events = protocol.EventsWithContext(ctx, events)
+		}
+	}
 	if typed, ok := state.(conversionState); ok {
 		events = convert.AdaptFunctionFallbackEvents(ctx, events, typed.functionFallbacks)
 	}

@@ -88,3 +88,45 @@ func TestBuildConnectivityTestRequest(t *testing.T) {
 		t.Error("embeddings should error")
 	}
 }
+
+// behavior change: relay connectivity tests must always enter ai-gateway
+// through a standard inbound route; channel endpoints are outbound-only.
+func TestBuildRelayConnectivityTestRequest(t *testing.T) {
+	tests := []struct {
+		name        string
+		protocol    llmkit.Protocol
+		stream      bool
+		wantPath    string
+		wantBodyKey string
+		wantErr     bool
+	}{
+		{name: "chat", protocol: llmkit.ProtocolOpenAIChat, wantPath: "/v1/chat/completions", wantBodyKey: "messages"},
+		{name: "responses streaming", protocol: llmkit.ProtocolOpenAIResponses, stream: true, wantPath: "/v1/responses", wantBodyKey: "input"},
+		{name: "claude boundary", protocol: llmkit.ProtocolClaudeMessages, wantPath: "/v1/messages", wantBodyKey: "messages"},
+		{name: "unknown protocol", protocol: llmkit.ProtocolUnknown, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path, body, err := BuildRelayConnectivityTestRequest(tt.protocol, "test-model", tt.stream)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if path != tt.wantPath {
+				t.Errorf("path = %q, want %q", path, tt.wantPath)
+			}
+			if body["model"] != "test-model" || body[tt.wantBodyKey] == nil {
+				t.Errorf("body = %#v", body)
+			}
+			if got, exists := body["stream"]; exists != tt.stream || (exists && got != true) {
+				t.Errorf("stream = %#v, exists=%v, want enabled=%v", got, exists, tt.stream)
+			}
+		})
+	}
+}

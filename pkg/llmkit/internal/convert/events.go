@@ -2,12 +2,198 @@ package convert
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
+
+const (
+	ReasoningProtocolClaude    = "claude"
+	ReasoningProtocolResponses = "responses"
+	reasoningEnvelopePrefix    = "llmkit:v1:"
+)
+
+type reasoningEnvelope struct {
+	Protocol string          `json:"protocol"`
+	Data     json.RawMessage `json:"data"`
+}
+
+// EncodeReasoningBlock projects protocol-neutral reasoning into a complete
+// Claude thinking block or Responses reasoning item. Unknown source fields are
+// preserved, while structured fields remain authoritative.
+func EncodeReasoningBlock(reasoning *ir.ReasoningContent, targetProtocol string) json.RawMessage {
+	if reasoning == nil {
+		return nil
+	}
+
+	rawProtocol := reasoningProtocol(reasoning.RawJSON)
+	envelope, envelopeOK, envelopeInvalid := decodeReasoningEnvelope(reasoning.Encrypted)
+
+	sourceProtocol := rawProtocol
+	sourceRaw := append(json.RawMessage(nil), reasoning.RawJSON...)
+	if envelopeOK && envelope.Protocol == targetProtocol {
+		sourceProtocol = envelope.Protocol
+		sourceRaw = envelope.Data
+	} else if sourceProtocol == "" && envelopeOK {
+		sourceProtocol = envelope.Protocol
+		sourceRaw = envelope.Data
+	}
+
+	if sourceProtocol == targetProtocol {
+		nativeEncrypted := reasoning.Encrypted
+		if envelopeOK && envelope.Protocol == targetProtocol {
+			nativeEncrypted = reasoningNativeEncrypted(envelope.Data, envelope.Protocol)
+		} else if envelopeInvalid {
+			nativeEncrypted = ""
+		}
+		return overlayReasoning(sourceRaw, targetProtocol, reasoning, nativeEncrypted)
+	}
+
+	if sourceProtocol != "" {
+		sourceEncrypted := reasoning.Encrypted
+		if envelopeOK {
+			sourceEncrypted = reasoningNativeEncrypted(envelope.Data, envelope.Protocol)
+		} else if envelopeInvalid {
+			sourceEncrypted = ""
+		}
+		sourceRaw = overlayReasoning(sourceRaw, sourceProtocol, reasoning, sourceEncrypted)
+		targetEncrypted := encodeReasoningEnvelope(sourceProtocol, sourceRaw)
+		return overlayReasoning(nil, targetProtocol, reasoning, targetEncrypted)
+	}
+
+	nativeEncrypted := reasoning.Encrypted
+	if envelopeInvalid {
+		nativeEncrypted = ""
+	}
+	return overlayReasoning(nil, targetProtocol, reasoning, nativeEncrypted)
+}
+
+func reasoningProtocol(raw json.RawMessage) string {
+	var value struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	switch value.Type {
+	case "thinking":
+		return ReasoningProtocolClaude
+	case "reasoning":
+		return ReasoningProtocolResponses
+	default:
+		return ""
+	}
+}
+
+func encodeReasoningEnvelope(protocol string, raw json.RawMessage) string {
+	data, _ := json.Marshal(reasoningEnvelope{Protocol: protocol, Data: raw})
+	return reasoningEnvelopePrefix + base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeReasoningEnvelope(value string) (reasoningEnvelope, bool, bool) {
+	if !strings.HasPrefix(value, "llmkit:") {
+		return reasoningEnvelope{}, false, false
+	}
+	if !strings.HasPrefix(value, reasoningEnvelopePrefix) {
+		return reasoningEnvelope{}, false, true
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, reasoningEnvelopePrefix))
+	if err != nil {
+		return reasoningEnvelope{}, false, true
+	}
+	var envelope reasoningEnvelope
+	if json.Unmarshal(decoded, &envelope) != nil || (envelope.Protocol != ReasoningProtocolClaude && envelope.Protocol != ReasoningProtocolResponses) || reasoningProtocol(envelope.Data) != envelope.Protocol {
+		return reasoningEnvelope{}, false, true
+	}
+	return envelope, true, false
+}
+
+func reasoningNativeEncrypted(raw json.RawMessage, protocol string) string {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return ""
+	}
+	field := "signature"
+	if protocol == ReasoningProtocolResponses {
+		field = "encrypted_content"
+	}
+	var encrypted string
+	_ = json.Unmarshal(object[field], &encrypted)
+	return encrypted
+}
+
+func overlayReasoning(raw json.RawMessage, protocol string, reasoning *ir.ReasoningContent, encrypted string) json.RawMessage {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || object == nil {
+		object = make(map[string]json.RawMessage)
+	}
+	if protocol == ReasoningProtocolClaude {
+		object["type"] = json.RawMessage(`"thinking"`)
+		readable := reasoning.Content
+		if len(readable) == 0 {
+			readable = reasoning.Summary
+		}
+		object["thinking"], _ = json.Marshal(strings.Join(readable, ""))
+		setReasoningString(object, "signature", encrypted)
+	} else {
+		object["type"] = json.RawMessage(`"reasoning"`)
+		object["summary"] = overlayReasoningParts(object["summary"], "summary_text", reasoning.Summary)
+		object["content"] = overlayReasoningParts(object["content"], "reasoning_text", reasoning.Content)
+		setReasoningString(object, "encrypted_content", encrypted)
+	}
+	encoded, _ := json.Marshal(object)
+	return encoded
+}
+
+func setReasoningString(object map[string]json.RawMessage, field, value string) {
+	if value == "" {
+		delete(object, field)
+		return
+	}
+	object[field], _ = json.Marshal(value)
+}
+
+func overlayReasoningParts(raw json.RawMessage, partType string, texts []string) json.RawMessage {
+	if texts == nil && len(raw) > 0 {
+		return append(json.RawMessage(nil), raw...)
+	}
+	var parts []json.RawMessage
+	_ = json.Unmarshal(raw, &parts)
+	result := make([]json.RawMessage, 0, len(parts)+len(texts))
+	textIndex := 0
+	for _, part := range parts {
+		var value struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(part, &value) != nil || value.Type != partType {
+			result = append(result, part)
+			continue
+		}
+		if textIndex < len(texts) {
+			result = append(result, reasoningTextPart(part, partType, texts[textIndex]))
+			textIndex++
+		}
+	}
+	for ; textIndex < len(texts); textIndex++ {
+		result = append(result, reasoningTextPart(nil, partType, texts[textIndex]))
+	}
+	encoded, _ := json.Marshal(result)
+	return encoded
+}
+
+func reasoningTextPart(raw json.RawMessage, partType, text string) json.RawMessage {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || object == nil {
+		object = make(map[string]json.RawMessage)
+	}
+	object["type"], _ = json.Marshal(partType)
+	object["text"], _ = json.Marshal(text)
+	encoded, _ := json.Marshal(object)
+	return encoded
+}
 
 type toolCallState int
 

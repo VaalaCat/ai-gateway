@@ -1,9 +1,11 @@
 package responses
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,6 +13,146 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 	"github.com/stretchr/testify/require"
 )
+
+func findResponsesReasoningDone(t *testing.T, events []ir.Event) ir.Event {
+	t.Helper()
+	for _, event := range events {
+		if event.Type == ir.EventReasoningDone {
+			return event
+		}
+	}
+	t.Fatal("missing EventReasoningDone")
+	return ir.Event{}
+}
+
+func TestResponsesDecodeNonStreamAggregatesReasoning(t *testing.T) {
+	body := `{"id":"resp_1","object":"response","output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"short"},{"type":"future_summary","value":1}],"content":[{"type":"reasoning_text","text":"deep"}],"encrypted_content":"enc_full","future":"kept"}]}`
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
+	eventCh, err := (&handler{}).decodeHTTPResponse(resp, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []ir.Event
+	for event := range eventCh {
+		events = append(events, event)
+	}
+	done := findResponsesReasoningDone(t, events)
+	if done.ReasoningStatus != ir.ReasoningCompleted || done.Reasoning == nil || !reflect.DeepEqual(done.Reasoning.Summary, []string{"short"}) || !reflect.DeepEqual(done.Reasoning.Content, []string{"deep"}) || done.Reasoning.Encrypted != "enc_full" {
+		t.Fatalf("done = %#v", done)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(done.Reasoning.RawJSON, &raw); err != nil || raw["future"] != "kept" {
+		t.Fatalf("RawJSON = %s, error = %v", done.Reasoning.RawJSON, err)
+	}
+}
+
+func TestResponsesDecodeStreamForwardsChannelsAndCompletesFromFullItem(t *testing.T) {
+	sse := `event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","status":"in_progress","future":"start"}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"sum"}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":{"type":"text_delta","text":"deep"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"summary full"}],"content":[{"type":"reasoning_text","text":"content full"}],"encrypted_content":"enc_complete","future":"kept"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+`
+	events := collectResponsesStreamEvents(t, sse)
+	var summaryDeltas, contentDeltas []string
+	for _, event := range events {
+		switch event.Type {
+		case ir.EventReasoningSummaryDelta:
+			summaryDeltas = append(summaryDeltas, event.Reasoning.Summary...)
+		case ir.EventReasoningContentDelta:
+			contentDeltas = append(contentDeltas, event.Reasoning.Content...)
+		}
+	}
+	if !reflect.DeepEqual(summaryDeltas, []string{"sum"}) || !reflect.DeepEqual(contentDeltas, []string{"deep"}) {
+		t.Fatalf("summary=%#v content=%#v", summaryDeltas, contentDeltas)
+	}
+	done := findResponsesReasoningDone(t, events)
+	if done.Reasoning == nil || !reflect.DeepEqual(done.Reasoning.Summary, []string{"summary full"}) || !reflect.DeepEqual(done.Reasoning.Content, []string{"content full"}) || done.Reasoning.Encrypted != "enc_complete" {
+		t.Fatalf("done = %#v", done)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(done.Reasoning.RawJSON, &raw); err != nil || raw["future"] != "kept" {
+		t.Fatalf("RawJSON = %s, error = %v", done.Reasoning.RawJSON, err)
+	}
+}
+
+func TestResponsesDecodeStreamFinalizesReasoningAsInterruptedAtEOF(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","status":"in_progress"}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"partial"}
+`)
+	done := findResponsesReasoningDone(t, events)
+	if done.ReasoningStatus != ir.ReasoningInterrupted || done.Reasoning == nil || !reflect.DeepEqual(done.Reasoning.Summary, []string{"partial"}) {
+		t.Fatalf("done = %#v", done)
+	}
+	if events[len(events)-1].Type != ir.EventError || events[len(events)-1].Error == nil || events[len(events)-1].Error.Message != "responses stream ended before a terminal event" {
+		t.Fatalf("last event = %#v, want stable incomplete-stream error", events[len(events)-1])
+	}
+	for _, event := range events {
+		if event.Type == ir.EventDone {
+			t.Fatalf("premature EOF emitted normal Done: %#v", events)
+		}
+	}
+}
+
+func TestResponsesDecodeStreamPartialMessageEOFIsErrorWithoutDone(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"partial answer"}
+`)
+	var text string
+	for _, event := range events {
+		if event.Type == ir.EventContentDelta && event.Delta != nil {
+			text += event.Delta.Text
+		}
+		if event.Type == ir.EventDone {
+			t.Fatalf("premature EOF emitted normal Done: %#v", events)
+		}
+	}
+	if text != "partial answer" || events[len(events)-1].Type != ir.EventError || events[len(events)-1].Error == nil || events[len(events)-1].Error.Message != "responses stream ended before a terminal event" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestResponsesDecodeStreamFinalizesInterruptedReasoningBeforeResponseCompleted(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","status":"in_progress"}}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"partial"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+`)
+	var reasoningIndex, doneIndex = -1, -1
+	for index, event := range events {
+		if event.Type == ir.EventReasoningDone {
+			reasoningIndex = index
+			if event.ReasoningStatus != ir.ReasoningInterrupted {
+				t.Fatalf("reasoning status = %q", event.ReasoningStatus)
+			}
+		}
+		if event.Type == ir.EventDone {
+			doneIndex = index
+		}
+	}
+	if reasoningIndex < 0 || doneIndex < 0 || reasoningIndex > doneIndex {
+		t.Fatalf("reasoning must finalize before response done: %#v", events)
+	}
+}
 
 // collectResponsesStreamEvents runs the responses stream decoder on the given SSE string
 // and returns all emitted events. This is a test helper used by streaming tests.

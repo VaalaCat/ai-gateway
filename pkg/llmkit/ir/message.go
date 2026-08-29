@@ -59,15 +59,26 @@ func TextMessage(role Role, text string) Message {
 
 // ContentBlock is a single piece of typed content within a message.
 type ContentBlock struct {
-	Type     ContentType    `json:"type"`
-	Text     string         `json:"text,omitempty"`
-	MediaURL string         `json:"media_url,omitempty"`
-	MediaB64 string         `json:"media_b64,omitempty"`
-	MimeType string         `json:"mime_type,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
+	Type      ContentType       `json:"type"`
+	Text      string            `json:"text,omitempty"`
+	MediaURL  string            `json:"media_url,omitempty"`
+	MediaB64  string            `json:"media_b64,omitempty"`
+	MimeType  string            `json:"mime_type,omitempty"`
+	Metadata  map[string]any    `json:"metadata,omitempty"`
+	Reasoning *ReasoningContent `json:"reasoning,omitempty"`
 
 	// RawJSON preserves the original JSON for unknown content block types.
 	// When set, the encoder should emit this JSON as-is instead of
 	// constructing from typed fields.
 	RawJSON json.RawMessage `json:"raw_json,omitempty"`
+}
+
+// ReasoningContent is the protocol-neutral representation of a model's
+// reasoning block. Structured fields are authoritative over RawJSON when a
+// codec re-encodes the value.
+type ReasoningContent struct {
+	Summary   []string        `json:"summary,omitempty"`
+	Content   []string        `json:"content,omitempty"`
+	Encrypted string          `json:"encrypted,omitempty"`
+	RawJSON   json.RawMessage `json:"raw_json,omitempty"`
 }

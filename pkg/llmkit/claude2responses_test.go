@@ -1,12 +1,33 @@
 package llmkit_test
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 
 	codec "github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
+
+func TestClaudeResponsesClaudeReasoningEnvelopeRoundTrip(t *testing.T) {
+	claude := `{"model":"claude","max_tokens":1024,"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"deep","signature":"sig-1","future":"kept"},{"type":"text","text":"answer"}]}]}`
+	responses := roundTripRequest(t, codec.ProtocolClaude, codec.ProtocolOpenAIResponses, claude)
+	input := mustGetArray(t, responses, "input")
+	if input[0].(map[string]any)["type"] != "reasoning" || !strings.HasPrefix(input[0].(map[string]any)["encrypted_content"].(string), "llmkit:v1:") {
+		t.Fatalf("responses reasoning = %#v", input[0])
+	}
+
+	responsesBytes, err := json.Marshal(responses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := roundTripRequest(t, codec.ProtocolOpenAIResponses, codec.ProtocolClaude, string(responsesBytes))
+	blocks := mustGetArray(t, mustGetArray(t, restored, "messages")[0].(map[string]any), "content")
+	reasoning := blocks[0].(map[string]any)
+	if reasoning["thinking"] != "deep" || reasoning["signature"] != "sig-1" || reasoning["future"] != "kept" {
+		t.Fatalf("restored reasoning = %#v", reasoning)
+	}
+}
 
 func TestClaude2Responses_SimpleText(t *testing.T) {
 	body := `{"model":"claude-sonnet-4","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}`
@@ -131,8 +152,9 @@ func TestClaude2Responses_StreamThinkingText(t *testing.T) {
 
 	assertEventSequence(t, events, []expectedEvent{
 		{Type: codec.EventStreamStart},
+		{Type: codec.EventReasoningContentDelta},
 		{Type: codec.EventThinkingDelta, Text: "Let me analyze this step by step."},
-		{Type: codec.EventSignatureDelta, Signature: "sig_abc123"},
+		{Type: codec.EventReasoningDone},
 		{Type: codec.EventContentBlockStop},
 		{Type: codec.EventContentDelta, Text: "The answer is 42."},
 		{Type: codec.EventContentBlockStop},
@@ -154,8 +176,9 @@ func TestClaude2Responses_StreamThinkingTool(t *testing.T) {
 
 	assertEventSequence(t, events, []expectedEvent{
 		{Type: codec.EventStreamStart},
+		{Type: codec.EventReasoningContentDelta},
 		{Type: codec.EventThinkingDelta, Text: "I need to call the weather API."},
-		{Type: codec.EventSignatureDelta, Signature: "sig_def456"},
+		{Type: codec.EventReasoningDone},
 		{Type: codec.EventContentBlockStop},
 		{Type: codec.EventContentDelta, Text: "Let me check the weather."},
 		{Type: codec.EventContentBlockStop},

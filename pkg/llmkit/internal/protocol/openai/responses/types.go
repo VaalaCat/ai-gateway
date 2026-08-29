@@ -99,17 +99,18 @@ type respError struct {
 }
 
 type respOutputItem struct {
-	Type      string             `json:"type"`
-	ID        string             `json:"id,omitempty"`
-	Status    string             `json:"status,omitempty"`
-	Role      string             `json:"role,omitempty"`
-	Content   []respContentBlock `json:"content,omitempty"`
-	Summary   []respContentBlock `json:"summary,omitempty"`
-	CallID    string             `json:"call_id,omitempty"`
-	Name      string             `json:"name,omitempty"`
-	Namespace string             `json:"namespace,omitempty"`
-	Arguments string             `json:"arguments,omitempty"`
-	Input     string             `json:"input,omitempty"`
+	Type             string             `json:"type"`
+	ID               string             `json:"id,omitempty"`
+	Status           string             `json:"status,omitempty"`
+	Role             string             `json:"role,omitempty"`
+	Content          []respContentBlock `json:"content,omitempty"`
+	Summary          []respContentBlock `json:"summary,omitempty"`
+	CallID           string             `json:"call_id,omitempty"`
+	Name             string             `json:"name,omitempty"`
+	Namespace        string             `json:"namespace,omitempty"`
+	Arguments        string             `json:"arguments,omitempty"`
+	Input            string             `json:"input,omitempty"`
+	EncryptedContent string             `json:"encrypted_content,omitempty"`
 }
 
 // respFunctionCallOutputInput represents a function_call_output input item.

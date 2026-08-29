@@ -21,6 +21,8 @@ type DeltaPayload = ir.DeltaPayload
 type StreamingToolCall = ir.StreamingToolCall
 type ToolCallDelta = ir.ToolCallDelta
 type ErrorPayload = ir.ErrorPayload
+type ReasoningContent = ir.ReasoningContent
+type ReasoningStatus = ir.ReasoningStatus
 
 const (
 	ProtocolOpenAIChat      = ir.ProtocolOpenAIChat
@@ -63,4 +65,10 @@ const (
 	EventToolCallStart          = ir.EventToolCallStart
 	EventToolCallArgumentsDelta = ir.EventToolCallArgumentsDelta
 	EventToolCallEnd            = ir.EventToolCallEnd
+	EventReasoningSummaryDelta  = ir.EventReasoningSummaryDelta
+	EventReasoningContentDelta  = ir.EventReasoningContentDelta
+	EventReasoningDone          = ir.EventReasoningDone
+
+	ReasoningCompleted   = ir.ReasoningCompleted
+	ReasoningInterrupted = ir.ReasoningInterrupted
 )

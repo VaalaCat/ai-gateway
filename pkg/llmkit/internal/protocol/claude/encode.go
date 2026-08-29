@@ -137,6 +137,10 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 						}
 						b, _ := json.Marshal(block)
 						rawBlocks = append(rawBlocks, b)
+					case ir.ContentTypeThinking:
+						if block := convert.EncodeReasoningBlock(cb.Reasoning, convert.ReasoningProtocolClaude); len(block) > 0 {
+							rawBlocks = append(rawBlocks, block)
+						}
 					}
 				}
 			}
@@ -260,10 +264,11 @@ func (c *handler) encodeHTTPResponse(events <-chan ir.Event, w http.ResponseWrit
 
 func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter) error {
 	id := generateID()
-	var contentBlocks []claudeRespContent
+	var contentBlocks []json.RawMessage
 	var usage *claudeUsage
 	stopReason := consts.ClaudeStopEndTurn
 	sawToolCall := false
+	structuredReasoning := false
 
 	for ev := range events {
 		// Read finish reason at top of loop before switch
@@ -274,18 +279,23 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 		switch ev.Type {
 		case ir.EventContentDelta:
 			if ev.Delta != nil {
-				contentBlocks = append(contentBlocks, claudeRespContent{
+				block, _ := json.Marshal(claudeRespContent{
 					Type: "text",
 					Text: ev.Delta.Text,
 				})
+				contentBlocks = append(contentBlocks, block)
 			}
 		// C6: non-stream thinking
 		case ir.EventThinkingDelta:
+			if structuredReasoning {
+				continue
+			}
 			if ev.Delta != nil {
-				contentBlocks = append(contentBlocks, claudeRespContent{
+				block, _ := json.Marshal(claudeRespContent{
 					Type:     "thinking",
 					Thinking: ev.Delta.Text,
 				})
+				contentBlocks = append(contentBlocks, block)
 			}
 		case ir.EventToolCallDelta:
 			if ev.Delta != nil && ev.Delta.ToolCall != nil {
@@ -295,12 +305,13 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 				if tc.Arguments != "" {
 					_ = json.Unmarshal([]byte(tc.Arguments), &input)
 				}
-				contentBlocks = append(contentBlocks, claudeRespContent{
+				block, _ := json.Marshal(claudeRespContent{
 					Type:  "tool_use",
 					ID:    tc.ID,
 					Name:  tc.Name,
 					Input: input,
 				})
+				contentBlocks = append(contentBlocks, block)
 			}
 		case ir.EventUsage:
 			if ev.Usage != nil {
@@ -324,19 +335,28 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 					CacheCreationInputTokens: ev.Usage.CacheWriteTokens,
 				}
 			}
+		case ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta:
+			structuredReasoning = true
+		case ir.EventReasoningDone:
+			structuredReasoning = true
+			if block := convert.EncodeReasoningBlock(ev.Reasoning, convert.ReasoningProtocolClaude); len(block) > 0 {
+				contentBlocks = append(contentBlocks, block)
+			}
 		}
 	}
 	if sawToolCall && stopReason == consts.ClaudeStopEndTurn {
 		stopReason = consts.ClaudeStopToolUse
 	}
 
-	resp := claudeResponse{
-		ID:         id,
-		Type:       "message",
-		Role:       "assistant",
-		Content:    contentBlocks,
-		StopReason: stopReason,
-		Usage:      usage,
+	resp := struct {
+		ID         string            `json:"id"`
+		Type       string            `json:"type"`
+		Role       string            `json:"role"`
+		Content    []json.RawMessage `json:"content"`
+		StopReason string            `json:"stop_reason,omitempty"`
+		Usage      *claudeUsage      `json:"usage,omitempty"`
+	}{
+		ID: id, Type: "message", Role: "assistant", Content: contentBlocks, StopReason: stopReason, Usage: usage,
 	}
 
 	body, err := json.Marshal(resp)
@@ -360,6 +380,16 @@ type blockState struct {
 type claudeFcBlockState struct {
 	blockIndex int
 	name       string
+}
+
+func readableReasoningFragments(fragments []string) []string {
+	readable := make([]string, 0, len(fragments))
+	for _, fragment := range fragments {
+		if fragment != "" {
+			readable = append(readable, fragment)
+		}
+	}
+	return readable
 }
 
 func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) error {
@@ -427,6 +457,8 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 	var model string
 	var bs blockState
 	nextIndex := 0
+	reasoningChannel := ""
+	structuredReasoning := false
 
 	// fcBlockStates tracks tool_use content blocks keyed by callID for the
 	// EventToolCallStart / EventToolCallArgumentsDelta / EventToolCallEnd events.
@@ -508,6 +540,9 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			}
 
 		case ir.EventThinkingDelta:
+			if structuredReasoning {
+				continue
+			}
 			if ev.Delta != nil {
 				// If block open and type != "thinking", close it
 				if bs.open && bs.blockType != "thinking" {
@@ -530,6 +565,93 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 					return err
 				}
 			}
+
+		case ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta:
+			structuredReasoning = true
+			channel := "summary"
+			var fragments []string
+			if ev.Type == ir.EventReasoningContentDelta {
+				channel = "content"
+				if ev.Reasoning != nil {
+					fragments = ev.Reasoning.Content
+				}
+			} else if ev.Reasoning != nil {
+				fragments = ev.Reasoning.Summary
+			}
+			readableFragments := readableReasoningFragments(fragments)
+			if len(readableFragments) == 0 {
+				continue
+			}
+			if reasoningChannel == "" {
+				reasoningChannel = channel
+			}
+			if reasoningChannel != channel {
+				continue
+			}
+			if bs.open && bs.blockType != "thinking" {
+				if err := closeBlock(&bs); err != nil {
+					return err
+				}
+			}
+			if !bs.open {
+				if err := openThinkingBlock(&bs, nextIndex); err != nil {
+					return err
+				}
+				nextIndex++
+			}
+			for _, fragment := range readableFragments {
+				delta := map[string]any{"type": sseconsts.ContentBlockDelta, "index": bs.index, "delta": map[string]any{"type": sseconsts.ClaudeThinkingDelta, "thinking": fragment}}
+				if err := writeSSE(sseconsts.ContentBlockDelta, delta); err != nil {
+					return err
+				}
+			}
+
+		case ir.EventReasoningDone:
+			structuredReasoning = true
+			block := convert.EncodeReasoningBlock(ev.Reasoning, convert.ReasoningProtocolClaude)
+			var completed claudeRespContent
+			_ = json.Unmarshal(block, &completed)
+			if reasoningChannel == "" && ev.Reasoning != nil {
+				readable := readableReasoningFragments(ev.Reasoning.Content)
+				if len(readable) == 0 {
+					readable = readableReasoningFragments(ev.Reasoning.Summary)
+				}
+				if len(readable) > 0 {
+					if bs.open && bs.blockType != "thinking" {
+						if err := closeBlock(&bs); err != nil {
+							return err
+						}
+					}
+					if !bs.open {
+						if err := openThinkingBlock(&bs, nextIndex); err != nil {
+							return err
+						}
+						nextIndex++
+					}
+					for _, fragment := range readable {
+						delta := map[string]any{"type": sseconsts.ContentBlockDelta, "index": bs.index, "delta": map[string]any{"type": sseconsts.ClaudeThinkingDelta, "thinking": fragment}}
+						if err := writeSSE(sseconsts.ContentBlockDelta, delta); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			if completed.Signature != "" {
+				if !bs.open {
+					if err := openThinkingBlock(&bs, nextIndex); err != nil {
+						return err
+					}
+					nextIndex++
+				}
+				delta := map[string]any{"type": sseconsts.ContentBlockDelta, "index": bs.index, "delta": map[string]any{"type": sseconsts.ClaudeSignatureDelta, "signature": completed.Signature}}
+				if err := writeSSE(sseconsts.ContentBlockDelta, delta); err != nil {
+					return err
+				}
+			}
+			if err := closeBlock(&bs); err != nil {
+				return err
+			}
+			reasoningChannel = ""
 
 		case ir.EventSignatureDelta:
 			if ev.Delta != nil && ev.Delta.Signature != "" {

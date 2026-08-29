@@ -3069,7 +3069,7 @@ func TestResponsesDecodeStream_UnknownEventsPassthrough(t *testing.T) {
 	}
 
 	// Expect: StreamStart, Passthrough(response.in_progress), Passthrough(response.output_item.added),
-	// ContentDelta, Passthrough(response.reasoning_summary_text.delta),
+	// ContentDelta, ReasoningSummaryDelta plus the transitional ThinkingDelta,
 	// Passthrough(response.content_part.added), Passthrough(response.output_item.done for message),
 	// Usage, Done
 
@@ -3084,9 +3084,11 @@ func TestResponsesDecodeStream_UnknownEventsPassthrough(t *testing.T) {
 		}
 	}
 
-	// Should have known events: StreamStart, ContentDelta, Usage, Done
-	if len(knownEvents) != 4 {
-		t.Errorf("known events count = %d, want 4; events: %v", len(knownEvents), knownEvents)
+	// Should have known events: StreamStart, ContentDelta, ReasoningSummaryDelta,
+	// transitional ThinkingDelta, interrupted ReasoningDone (the fixture omits
+	// output_item.done), Usage, and global Done.
+	if len(knownEvents) != 7 {
+		t.Errorf("known events count = %d, want 7; events: %v", len(knownEvents), knownEvents)
 	}
 	if knownEvents[0].Type != ir.EventStreamStart {
 		t.Errorf("knownEvents[0].Type = %v, want EventStreamStart", knownEvents[0].Type)
@@ -3098,10 +3100,9 @@ func TestResponsesDecodeStream_UnknownEventsPassthrough(t *testing.T) {
 		t.Errorf("knownEvents[1].Delta.Text = %v, want Hello", knownEvents[1].Delta)
 	}
 
-	// Should have passthrough events for: response.in_progress, response.output_item.added,
-	// response.reasoning_summary_text.delta, response.content_part.added, response.output_item.done (message type)
-	if len(passthroughs) != 5 {
-		t.Errorf("passthrough events count = %d, want 5", len(passthroughs))
+	// The recognized reasoning delta is no longer a raw passthrough.
+	if len(passthroughs) != 4 {
+		t.Errorf("passthrough events count = %d, want 4", len(passthroughs))
 		for i, p := range passthroughs {
 			t.Logf("  passthrough[%d]: event=%q", i, p.RawPassthrough.EventName)
 		}
@@ -3111,7 +3112,6 @@ func TestResponsesDecodeStream_UnknownEventsPassthrough(t *testing.T) {
 	expectedPassthroughNames := []string{
 		"response.in_progress",
 		"response.output_item.added",
-		"response.reasoning_summary_text.delta",
 		"response.content_part.added",
 		"response.output_item.done",
 	}
@@ -3517,14 +3517,9 @@ func TestResponsesStream_RealWorldCodexResponse_Roundtrip(t *testing.T) {
 	}
 	expectedPassthroughEventNames := []string{
 		"response.in_progress",
-		"response.output_item.added", // reasoning
 		"response.reasoning_summary_part.added",
-		"response.reasoning_summary_text.delta", // x3
-		"response.reasoning_summary_text.delta",
-		"response.reasoning_summary_text.delta",
 		"response.reasoning_summary_text.done",
 		"response.reasoning_summary_part.done",
-		"response.output_item.done",  // reasoning (not function_call)
 		"response.output_item.added", // message
 		"response.content_part.added",
 		"response.output_text.done",

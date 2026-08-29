@@ -1,16 +1,146 @@
 package claude
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
+
+func collectClaudeEvents(t *testing.T, body string, stream bool) []ir.Event {
+	t.Helper()
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
+	events, err := (&handler{}).decodeHTTPResponse(resp, stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []ir.Event
+	for event := range events {
+		got = append(got, event)
+	}
+	return got
+}
+
+func findReasoningDone(t *testing.T, events []ir.Event) ir.Event {
+	t.Helper()
+	for _, event := range events {
+		if event.Type == ir.EventReasoningDone {
+			return event
+		}
+	}
+	t.Fatal("missing EventReasoningDone")
+	return ir.Event{}
+}
+
+func TestDecodeNonStreamAggregatesReasoning(t *testing.T) {
+	events := collectClaudeEvents(t, `{
+		"id":"msg_1","type":"message","role":"assistant",
+		"content":[{"type":"thinking","thinking":"deep thought","signature":"sig_native","future":{"x":1}}],
+		"stop_reason":"end_turn"
+	}`, false)
+
+	done := findReasoningDone(t, events)
+	if done.ReasoningStatus != ir.ReasoningCompleted {
+		t.Fatalf("status = %q", done.ReasoningStatus)
+	}
+	if done.Reasoning == nil || !reflect.DeepEqual(done.Reasoning.Content, []string{"deep thought"}) || done.Reasoning.Encrypted != "sig_native" {
+		t.Fatalf("reasoning = %#v", done.Reasoning)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(done.Reasoning.RawJSON, &raw); err != nil || raw["future"] == nil {
+		t.Fatalf("RawJSON = %s, error = %v", done.Reasoning.RawJSON, err)
+	}
+}
+
+func TestDecodeStreamAggregatesReasoningAtBlockStop(t *testing.T) {
+	events := collectClaudeEvents(t, `event: message_start
+data: {"type":"message_start","message":{"type":"message","role":"assistant"}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"thinking","thinking":"","signature":"","future":"kept"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"deep "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"thinking_delta","thinking":"thought"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"signature_delta","signature":"sig_done"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: message_stop
+data: {"type":"message_stop"}
+`, true)
+
+	var deltas []string
+	for _, event := range events {
+		if event.Type == ir.EventReasoningContentDelta && event.Reasoning != nil {
+			deltas = append(deltas, event.Reasoning.Content...)
+		}
+		if event.Type == ir.EventSignatureDelta {
+			t.Fatal("signature_delta must be aggregated, not forwarded")
+		}
+	}
+	if !reflect.DeepEqual(deltas, []string{"deep ", "thought"}) {
+		t.Fatalf("content deltas = %#v", deltas)
+	}
+	done := findReasoningDone(t, events)
+	if done.ReasoningStatus != ir.ReasoningCompleted || done.Reasoning == nil || !reflect.DeepEqual(done.Reasoning.Content, []string{"deep thought"}) || done.Reasoning.Encrypted != "sig_done" {
+		t.Fatalf("done = %#v", done)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(done.Reasoning.RawJSON, &raw); err != nil || raw["future"] != "kept" || raw["thinking"] != "deep thought" || raw["signature"] != "sig_done" {
+		t.Fatalf("RawJSON = %s, error = %v", done.Reasoning.RawJSON, err)
+	}
+}
+
+func TestDecodeStreamFinalizesOpenReasoningAsInterruptedAtEOF(t *testing.T) {
+	events := collectClaudeEvents(t, `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"partial"}}
+`, true)
+
+	done := findReasoningDone(t, events)
+	if done.ReasoningStatus != ir.ReasoningInterrupted || done.Reasoning == nil || !reflect.DeepEqual(done.Reasoning.Content, []string{"partial"}) {
+		t.Fatalf("done = %#v", done)
+	}
+}
+
+func TestDecodeStreamFinalizesInterruptedReasoningBeforeMessageDone(t *testing.T) {
+	events := collectClaudeEvents(t, `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"partial"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+`, true)
+	var reasoningIndex, doneIndex = -1, -1
+	for index, event := range events {
+		if event.Type == ir.EventReasoningDone {
+			reasoningIndex = index
+		}
+		if event.Type == ir.EventDone {
+			doneIndex = index
+		}
+	}
+	if reasoningIndex < 0 || doneIndex < 0 || reasoningIndex > doneIndex {
+		t.Fatalf("reasoning must finalize before message done: %#v", events)
+	}
+}
 
 func loadFixture(t *testing.T, name string) []byte {
 	t.Helper()
@@ -259,12 +389,12 @@ data: {"type":"message_stop"}`
 	}
 	var foundSig bool
 	for ev := range ch {
-		if ev.Type == ir.EventSignatureDelta && ev.Delta != nil && ev.Delta.Signature == "abc123sig" {
+		if ev.Type == ir.EventReasoningDone && ev.Reasoning != nil && ev.Reasoning.Encrypted == "abc123sig" {
 			foundSig = true
 		}
 	}
 	if !foundSig {
-		t.Error("expected EventSignatureDelta with signature 'abc123sig'")
+		t.Error("expected EventReasoningDone with encrypted signature 'abc123sig'")
 	}
 }
 

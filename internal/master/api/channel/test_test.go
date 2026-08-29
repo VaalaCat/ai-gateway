@@ -1,11 +1,13 @@
 package channel
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -13,6 +15,17 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
+
+type channelTestHub struct {
+	params map[string]any
+}
+
+func (h *channelTestHub) Call(_ string, _ string, params any, _ time.Duration) (json.RawMessage, error) {
+	h.params, _ = params.(map[string]any)
+	return json.RawMessage(`{"success":true,"status_code":200,"model":"glm-5.3-flash"}`), nil
+}
+
+func (*channelTestHub) IsOnline(string) bool { return true }
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -88,6 +101,82 @@ func TestChannelTest_LocalUsesLoopbackPort(t *testing.T) {
 	}
 	if !strings.Contains(resp.Response, "chatcmpl-test") {
 		t.Errorf("expected upstream JSON in response, got %q", resp.Response)
+	}
+}
+
+// behavior change: channel endpoints are outbound-only; a local channel test
+// must enter the normal relay through the protocol's standard inbound route.
+func TestChannelTest_LocalCustomResponsesEndpointUsesStandardRelayRoute(t *testing.T) {
+	var capturedPath string
+	var capturedBody map[string]any
+
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp-test","output":[]}`))
+	}))
+	defer relay.Close()
+	relayURL, _ := url.Parse(relay.URL)
+
+	db := setupTestDB(t)
+	db.Create(&models.Channel{
+		ChannelCore: models.ChannelCore{
+			Name:      "responses",
+			Status:    1,
+			Endpoints: `{"responses":"/provider/private/responses"}`,
+		},
+		Models: "glm-5.3-flash",
+	})
+
+	h := &Handler{MasterListen: ":" + relayURL.Port()}
+	c := newTestContext(t, db, "")
+	resp, err := h.Test(c, TestRequest{ID: "1", Model: "glm-5.3-flash"})
+	if err != nil {
+		t.Fatalf("Test returned error: %v", err)
+	}
+
+	if capturedPath != "/v1/responses" {
+		t.Errorf("relay path = %q, want /v1/responses", capturedPath)
+	}
+	if capturedBody["model"] != "glm-5.3-flash" || capturedBody["input"] == "" {
+		t.Errorf("responses request body = %#v", capturedBody)
+	}
+	if !resp.Success {
+		t.Errorf("expected Success=true, got %+v", resp)
+	}
+}
+
+// behavior change: the master must tell a remote agent which canonical relay
+// route to use even when the request leaves endpoint_type empty.
+func TestChannelTest_RemoteUsesResolvedEndpointType(t *testing.T) {
+	db := setupTestDB(t)
+	db.Create(&models.Channel{
+		ChannelCore: models.ChannelCore{
+			Name:      "responses",
+			Status:    1,
+			Endpoints: `{"responses":"/provider/private/responses"}`,
+		},
+		Models: "glm-5.3-flash",
+	})
+
+	hub := &channelTestHub{}
+	h := &Handler{Hub: hub}
+	resp, err := h.Test(newTestContext(t, db, ""), TestRequest{
+		ID:      "1",
+		Model:   "glm-5.3-flash",
+		AgentID: "remote-1",
+	})
+	if err != nil {
+		t.Fatalf("Test returned error: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("expected success, got %+v", resp)
+	}
+	if got := hub.params["endpoint_type"]; got != "responses" {
+		t.Errorf("endpoint_type = %#v, want responses", got)
 	}
 }
 

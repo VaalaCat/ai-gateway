@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	sseconsts "github.com/VaalaCat/ai-gateway/internal/consts/sse"
@@ -129,8 +130,9 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 						var b claudeContentBlock
 						json.Unmarshal(rawBlock, &b)
 						otherBlocks = append(otherBlocks, ir.ContentBlock{
-							Type: ir.ContentTypeThinking,
-							Text: b.Thinking,
+							Type:      ir.ContentTypeThinking,
+							Text:      b.Thinking,
+							Reasoning: newClaudeReasoning(rawBlock, b.Thinking, b.Signature),
 						})
 					case string(ir.ContentTypeImage):
 						var b claudeContentBlock
@@ -287,9 +289,23 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 
 	ch <- ir.Event{Type: ir.EventStreamStart}
 
-	for _, block := range cResp.Content {
+	var rawResponse struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	_ = json.Unmarshal(body, &rawResponse)
+	for index, block := range cResp.Content {
 		switch block.Type {
 		case string(ir.ContentTypeThinking):
+			var rawBlock json.RawMessage
+			if index < len(rawResponse.Content) {
+				rawBlock = rawResponse.Content[index]
+			}
+			reasoning := newClaudeReasoning(rawBlock, block.Thinking, block.Signature)
+			if block.Thinking != "" {
+				ch <- ir.Event{Type: ir.EventReasoningContentDelta, Reasoning: &ir.ReasoningContent{Content: []string{block.Thinking}}}
+			}
+			ch <- ir.Event{Type: ir.EventReasoningDone, Reasoning: reasoning, ReasoningStatus: ir.ReasoningCompleted}
+			// Transitional compatibility for codecs that have not migrated yet.
 			ch <- ir.Event{
 				Type: ir.EventThinkingDelta,
 				Delta: &ir.DeltaPayload{
@@ -356,6 +372,40 @@ type claudeToolUseAggState struct {
 	accumulated strings.Builder
 }
 
+type claudeReasoningAggState struct {
+	rawJSON   json.RawMessage
+	content   strings.Builder
+	encrypted strings.Builder
+}
+
+func newClaudeReasoning(raw json.RawMessage, content, encrypted string) *ir.ReasoningContent {
+	reasoning := &ir.ReasoningContent{Encrypted: encrypted}
+	if content != "" {
+		reasoning.Content = []string{content}
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || object == nil {
+		object = make(map[string]json.RawMessage)
+	}
+	object["type"] = json.RawMessage(`"thinking"`)
+	object["thinking"], _ = json.Marshal(content)
+	if encrypted != "" {
+		object["signature"], _ = json.Marshal(encrypted)
+	} else {
+		delete(object, "signature")
+	}
+	reasoning.RawJSON, _ = json.Marshal(object)
+	return reasoning
+}
+
+func emitClaudeReasoningDone(ch chan<- ir.Event, state *claudeReasoningAggState, status ir.ReasoningStatus) {
+	ch <- ir.Event{
+		Type:            ir.EventReasoningDone,
+		Reasoning:       newClaudeReasoning(state.rawJSON, state.content.String(), state.encrypted.String()),
+		ReasoningStatus: status,
+	}
+}
+
 func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	defer close(ch)
 	defer resp.Body.Close()
@@ -367,6 +417,18 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 
 	// toolUseStates tracks in-flight tool_use content blocks by content_block index.
 	toolUseStates := map[int]*claudeToolUseAggState{}
+	reasoningStates := map[int]*claudeReasoningAggState{}
+	finalizeReasoning := func(status ir.ReasoningStatus) {
+		indexes := make([]int, 0, len(reasoningStates))
+		for index := range reasoningStates {
+			indexes = append(indexes, index)
+		}
+		sort.Ints(indexes)
+		for _, index := range indexes {
+			emitClaudeReasoningDone(ch, reasoningStates[index], status)
+			delete(reasoningStates, index)
+		}
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	// Increase scanner buffer to 1 MB for large SSE payloads.
@@ -406,6 +468,16 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		case sseconsts.ContentBlockStart:
 			var block claudeSSEContentBlockStart
 			if err := json.Unmarshal([]byte(data), &block); err == nil {
+				if block.ContentBlock.Type == "thinking" {
+					var rawStart struct {
+						ContentBlock json.RawMessage `json:"content_block"`
+					}
+					_ = json.Unmarshal([]byte(data), &rawStart)
+					state := &claudeReasoningAggState{rawJSON: append(json.RawMessage(nil), rawStart.ContentBlock...)}
+					state.content.WriteString(block.ContentBlock.Thinking)
+					state.encrypted.WriteString(block.ContentBlock.Signature)
+					reasoningStates[block.Index] = state
+				}
 				if block.ContentBlock.Type == "tool_use" {
 					// Record aggregation state for this content_block index.
 					toolUseStates[block.Index] = &claudeToolUseAggState{
@@ -429,6 +501,11 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			if err := json.Unmarshal([]byte(data), &delta); err == nil {
 				switch delta.Delta.Type {
 				case sseconsts.ClaudeThinkingDelta:
+					if state := reasoningStates[delta.Index]; state != nil {
+						state.content.WriteString(delta.Delta.Thinking)
+					}
+					ch <- ir.Event{Type: ir.EventReasoningContentDelta, Reasoning: &ir.ReasoningContent{Content: []string{delta.Delta.Thinking}}}
+					// Transitional compatibility for codecs that have not migrated yet.
 					ch <- ir.Event{
 						Type: ir.EventThinkingDelta,
 						Delta: &ir.DeltaPayload{
@@ -445,11 +522,8 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 						},
 					}
 				case sseconsts.ClaudeSignatureDelta:
-					ch <- ir.Event{
-						Type: ir.EventSignatureDelta,
-						Delta: &ir.DeltaPayload{
-							Signature: delta.Delta.Signature,
-						},
+					if state := reasoningStates[delta.Index]; state != nil {
+						state.encrypted.WriteString(delta.Delta.Signature)
 					}
 				case sseconsts.ClaudeInputJSONDelta:
 					// Emit new EventToolCallArgumentsDelta.
@@ -473,6 +547,10 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 				Index int `json:"index"`
 			}
 			if err := json.Unmarshal([]byte(data), &blockStop); err == nil {
+				if state, ok := reasoningStates[blockStop.Index]; ok {
+					emitClaudeReasoningDone(ch, state, ir.ReasoningCompleted)
+					delete(reasoningStates, blockStop.Index)
+				}
 				if state, ok := toolUseStates[blockStop.Index]; ok {
 					ch <- ir.Event{
 						Type: ir.EventToolCallEnd,
@@ -512,6 +590,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			}
 
 		case sseconsts.MessageStop:
+			finalizeReasoning(ir.ReasoningInterrupted)
 			total := inputTokens + outputTokens
 			ch <- ir.Event{
 				Type: ir.EventUsage,
@@ -533,6 +612,9 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	}
 
 	if err := scanner.Err(); err != nil {
+		finalizeReasoning(ir.ReasoningInterrupted)
 		ch <- ir.Event{Type: ir.EventError, Error: &ir.ErrorPayload{Message: "stream read error: " + err.Error()}}
+		return
 	}
+	finalizeReasoning(ir.ReasoningInterrupted)
 }

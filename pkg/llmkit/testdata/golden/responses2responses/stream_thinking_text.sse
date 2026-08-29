@@ -5,10 +5,10 @@ event: response.in_progress
 data: {"type":"response.in_progress","response":{"id":"resp_04","object":"response","created_at":1700000000,"status":"in_progress","output":[]},"sequence_number":1}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_01","type":"reasoning","summary":[]},"sequence_number":2}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_01","status":"in_progress"},"output_index":0}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_01","type":"reasoning","summary":[{"type":"summary_text","text":"The user is asking for a joke."}]},"sequence_number":3}
+data: {"item":{"content":[],"id":"rs_01","status":"completed","summary":[{"text":"The user is asking for a joke.","type":"summary_text"}],"type":"reasoning"},"output_index":0,"sequence_number":3,"type":"response.output_item.done"}
 
 event: response.output_item.added
 data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_01","type":"message","role":"assistant","status":"in_progress","content":[]},"sequence_number":4}

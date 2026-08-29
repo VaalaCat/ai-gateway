@@ -39,6 +39,11 @@ func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
 	if model == "" {
 		return TestResponse{}, api.BadRequestError("no model available for testing", nil)
 	}
+	endpointKey, protocol, _, err := protocolconfig.ResolveTestEndpoint(
+		channel.Endpoints, channel.SupportedAPITypes, req.EndpointType)
+	if err != nil {
+		return TestResponse{}, api.BadRequestError(err.Error(), nil)
+	}
 
 	// Remote agent test via WS RPC
 	if req.AgentID != "" && req.AgentID != "embedded" {
@@ -51,7 +56,7 @@ func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
 		params := map[string]any{
 			"channel_id":    req.ID,
 			"model":         model,
-			"endpoint_type": req.EndpointType,
+			"endpoint_type": endpointKey,
 			"stream":        req.Stream,
 		}
 		result, err := h.Hub.Call(req.AgentID, consts.RPCChannelTest, params, 35*time.Second)
@@ -86,8 +91,7 @@ func (h *Handler) Test(c *app.Context, req TestRequest) (TestResponse, error) {
 	}
 	tokenKey := token.Key
 
-	relayPath, reqBody, err := protocolconfig.BuildConnectivityTestRequest(
-		channel.Endpoints, channel.SupportedAPITypes, req.EndpointType, model, req.Stream)
+	relayPath, reqBody, err := protocolconfig.BuildRelayConnectivityTestRequest(protocol, model, req.Stream)
 	if err != nil {
 		return TestResponse{}, api.BadRequestError(err.Error(), nil)
 	}

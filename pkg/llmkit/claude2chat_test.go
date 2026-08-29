@@ -126,8 +126,9 @@ func TestClaude2Chat_StreamThinkingText(t *testing.T) {
 
 	assertEventSequence(t, events, []expectedEvent{
 		{Type: codec.EventStreamStart},
+		{Type: codec.EventReasoningContentDelta},
 		{Type: codec.EventThinkingDelta, Text: "Let me analyze this step by step."},
-		{Type: codec.EventSignatureDelta, Signature: "sig_abc123"},
+		{Type: codec.EventReasoningDone},
 		{Type: codec.EventContentBlockStop},
 		{Type: codec.EventContentDelta, Text: "The answer is 42."},
 		{Type: codec.EventContentBlockStop},
@@ -149,8 +150,9 @@ func TestClaude2Chat_StreamThinkingTool(t *testing.T) {
 
 	assertEventSequence(t, events, []expectedEvent{
 		{Type: codec.EventStreamStart},
+		{Type: codec.EventReasoningContentDelta},
 		{Type: codec.EventThinkingDelta, Text: "I need to call the weather API."},
-		{Type: codec.EventSignatureDelta, Signature: "sig_def456"},
+		{Type: codec.EventReasoningDone},
 		{Type: codec.EventContentBlockStop},
 		{Type: codec.EventContentDelta, Text: "Let me check the weather."},
 		{Type: codec.EventContentBlockStop},

@@ -50,7 +50,8 @@ type claudeContentBlock struct {
 	Text string `json:"text,omitempty"`
 
 	// thinking block
-	Thinking string `json:"thinking,omitempty"`
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 
 	// image block
 	Source *claudeImageSource `json:"source,omitempty"`
@@ -91,12 +92,13 @@ type claudeResponse struct {
 }
 
 type claudeRespContent struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Thinking string `json:"thinking,omitempty"`
-	ID       string `json:"id,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Input    any    `json:"input,omitempty"`
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Input     any    `json:"input,omitempty"`
 }
 
 type claudeUsage struct {

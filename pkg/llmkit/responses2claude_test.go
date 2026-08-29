@@ -2,10 +2,31 @@ package llmkit_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	codec "github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
+
+func TestResponsesClaudeResponsesReasoningEnvelopeRoundTrip(t *testing.T) {
+	responses := `{"model":"gpt","input":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"short"}],"content":[{"type":"reasoning_text","text":"deep"}],"encrypted_content":"enc-1","future":"kept"},{"type":"message","role":"assistant","content":"answer"}]}`
+	claude := roundTripRequest(t, codec.ProtocolOpenAIResponses, codec.ProtocolClaude, responses)
+	blocks := mustGetArray(t, mustGetArray(t, claude, "messages")[0].(map[string]any), "content")
+	reasoning := blocks[0].(map[string]any)
+	if reasoning["thinking"] != "deep" || !strings.HasPrefix(reasoning["signature"].(string), "llmkit:v1:") {
+		t.Fatalf("claude reasoning = %#v", reasoning)
+	}
+
+	claudeBytes, err := json.Marshal(claude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := roundTripRequest(t, codec.ProtocolClaude, codec.ProtocolOpenAIResponses, string(claudeBytes))
+	item := mustGetArray(t, restored, "input")[0].(map[string]any)
+	if item["encrypted_content"] != "enc-1" || item["future"] != "kept" || item["id"] != "rs_1" {
+		t.Fatalf("restored reasoning = %#v", item)
+	}
+}
 
 func TestResponses2Claude_SimpleText(t *testing.T) {
 	body := `{"model":"gpt-4o","input":[{"role":"user","content":"Hello"}],"stream":false}`
@@ -155,6 +176,7 @@ func TestResponses2Claude_StreamThinkingText(t *testing.T) {
 
 	assertEventSequence(t, events, []expectedEvent{
 		{Type: codec.EventStreamStart},
+		{Type: codec.EventReasoningDone},
 		{Type: codec.EventContentDelta, Text: "Why did the chicken cross the road?"},
 		{Type: codec.EventUsage},
 		{Type: codec.EventDone, FinishReason: "stop"},
