@@ -236,6 +236,36 @@ func TestModelOfferPlanFinderExhaustsConvergingRoutingBranches(t *testing.T) {
 	}, modelOfferCandidateKeys(got.Candidates))
 }
 
+func TestModelOfferPlanFinderSameNameRoutingMatchesRelayCandidates(t *testing.T) {
+	store := cache.NewStore(nil, config.AgentCacheConfig{})
+	t.Cleanup(store.Close)
+	store.SetGlobalRouting("same", &protocol.SyncedRouting{
+		ID: 301, Name: "same", Scope: "global", Enabled: true,
+		Members: []protocol.RoutingMember{
+			{Ref: "same", Priority: 10, Weight: 1},
+			{Ref: "fallback-model", Priority: 1, Weight: 1},
+		},
+	})
+	addPlanChannel(store, 1, "same", true, models.ChannelCore{})
+	addPlanChannel(store, 2, "fallback-model", true, models.ChannelCore{})
+	store.SetModelConfig(&models.ModelConfig{ModelName: "same"})
+	store.SetModelConfig(&models.ModelConfig{ModelName: "fallback-model"})
+	store.RebuildModelIndex()
+	loadPlanSettings(store, 100, 0)
+
+	finderPlan, err := NewModelOfferPlanFinder(store).Find(t.Context(), ModelOfferPlanQuery{
+		Model: "same", InboundProtocols: []llmkit.Protocol{llmkit.ProtocolOpenAIChat},
+	})
+	require.NoError(t, err)
+	require.True(t, finderPlan.Routing)
+	require.Equal(t, []string{"fallback-model", "same"}, finderPlan.RealModels)
+
+	relayContext := modelOfferRelayContext(store, "same", nil, 0, llmkit.ProtocolOpenAIChat)
+	require.NoError(t, NewSolver(nil).Solve(relayContext))
+	require.Equal(t, "same", relayContext.State.Plan.RoutingName)
+	require.Equal(t, modelOfferCandidateKeys(finderPlan.Candidates), attemptCandidateKeys(relayContext.State.Plan.Attempts))
+}
+
 func TestModelOfferPlanFinderFailsClosedWhenPlannerOrQuotaFactsAreUnavailable(t *testing.T) {
 	_, err := NewModelOfferPlanFinder(nil).Find(t.Context(), ModelOfferPlanQuery{Model: "model-a"})
 	require.ErrorIs(t, err, ErrModelOfferPlanUnavailable)

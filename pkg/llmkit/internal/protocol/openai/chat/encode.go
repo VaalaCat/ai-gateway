@@ -113,7 +113,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		} else if len(filtered) > 0 {
 			var blocks []json.RawMessage
 			for _, cb := range filtered {
-				if cb.RawJSON != nil {
+				if cb.RawJSON != nil && cb.Type != ir.ContentTypeImage {
 					blocks = append(blocks, cb.RawJSON)
 				} else {
 					switch cb.Type {

@@ -1,9 +1,9 @@
 event: response.created
-data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_578a789dac7f36ccda03cd41","object":"","status":"in_progress","output":null}}
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_39f1d705dcfc90525a89ee4f","object":"response","status":"in_progress","output":[]}}
 
 event: response.in_progress
-data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_578a789dac7f36ccda03cd41","object":"","status":"in_progress","output":null}}
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_39f1d705dcfc90525a89ee4f","object":"response","status":"in_progress","output":[]}}
 
 event: response.completed
-data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_578a789dac7f36ccda03cd41","object":"","model":"gpt-4o","status":"completed","output":null}}
+data: {"response":{"id":"resp_39f1d705dcfc90525a89ee4f","model":"gpt-4o","object":"response","output":[],"status":"completed"},"sequence_number":2,"type":"response.completed"}
 

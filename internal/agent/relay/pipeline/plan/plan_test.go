@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"reflect"
 	"testing"
 
 	"go.uber.org/zap"
@@ -104,6 +105,28 @@ func TestPlanner_NoRoutableModel(t *testing.T) {
 	}
 }
 
+func TestPlanner_EmptyRoutingChainPreservesIdentity(t *testing.T) {
+	rctx := newPlannerTestRctx(nil, &app.UserInfo{}, "smart", 5)
+	solver := &defaultSolver{
+		ChainBuilder: staticChainBuilder{
+			routingName: "smart",
+			trace:       []string{"global:smart", "cycle:global:smart"},
+		},
+	}
+
+	err := solver.Solve(rctx)
+	if err != state.ErrNoRoutableModel {
+		t.Fatalf("err = %v, want state.ErrNoRoutableModel", err)
+	}
+	if rctx.State.Plan.RoutingName != "smart" {
+		t.Errorf("Plan.RoutingName = %q, want smart", rctx.State.Plan.RoutingName)
+	}
+	wantTrace := []string{"global:smart", "cycle:global:smart"}
+	if !reflect.DeepEqual(rctx.State.Plan.Trace, wantTrace) {
+		t.Errorf("Plan.Trace = %v, want %v", rctx.State.Plan.Trace, wantTrace)
+	}
+}
+
 // TestPlanner_NoChannelAvailable: 有 model 但 store 没 channel → state.ErrNoChannelAvailable。
 func TestPlanner_NoChannelAvailable(t *testing.T) {
 	rctx := newPlannerTestRctx(nil, &app.UserInfo{}, "gpt-4", 5)
@@ -167,7 +190,8 @@ func TestSolve_RetryMaxOne_SingleAttempt(t *testing.T) {
 // 旧 HEAD（Task 9 done）：404 + "no channel available for model X (whitelist 后缀)"
 // 新 HEAD：               502 + "no available channels"（state.StatusFromState 映射）
 // main 对照：handler.go:271-273 主循环 attemptsLeft<=0 跳过 →
-//   :553 else 分支 → 502 + consts.ErrNoChannelAvailable。
+//
+//	:553 else 分支 → 502 + consts.ErrNoChannelAvailable。
 //
 // 配套断言：Attempts 必须为空（budget=0 决不能产 attempt）。
 func TestSolve_RetryMaxZero_ReturnsRoutingFallback(t *testing.T) {

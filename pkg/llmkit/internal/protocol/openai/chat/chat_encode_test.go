@@ -185,6 +185,34 @@ func TestChatEncodeRequest_Base64Image_MediaURLFallback(t *testing.T) {
 	}
 }
 
+func TestChatEncodeRequest_TypedTextPreservesRawJSON(t *testing.T) {
+	request := &ir.Request{
+		Model: "gpt-4o",
+		Messages: []ir.Message{{
+			Role: ir.RoleUser,
+			Content: []ir.ContentBlock{{
+				Type: ir.ContentTypeText, Text: "hello",
+				RawJSON: json.RawMessage(`{"type":"text","text":"hello","future":"kept"}`),
+			}},
+		}},
+	}
+	httpRequest, err := (&handler{}).encodeHTTPRequest(request, &channelConfig{
+		BaseURL: "https://api.openai.com", APIKey: "sk-test", Model: "gpt-4o",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(httpRequest.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	messages := payload["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	if content[0].(map[string]any)["future"] != "kept" {
+		t.Errorf("typed text RawJSON fields lost: %#v", content[0])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // O2: Stream encode tool_calls must have index field
 // ---------------------------------------------------------------------------

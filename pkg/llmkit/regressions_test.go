@@ -479,11 +479,8 @@ func TestRegression_CodexToolCallChatStreamToResponses(t *testing.T) {
 	// ---------- 断言 E：累积参数 delta == wantArgs，且是合法 JSON ----------
 	var cumArgs strings.Builder
 	for _, ev := range argsDelta {
-		delta, _ := ev.data["delta"].(map[string]any)
-		if delta != nil {
-			if text, ok := delta["text"].(string); ok {
-				cumArgs.WriteString(text)
-			}
+		if delta, ok := ev.data["delta"].(string); ok {
+			cumArgs.WriteString(delta)
 		}
 	}
 	gotArgs := cumArgs.String()
@@ -499,11 +496,7 @@ func TestRegression_CodexToolCallChatStreamToResponses(t *testing.T) {
 	// ---------- 断言 F：没有空文本的 response.output_text.delta ----------
 	textDelta := filterEvents("response.output_text.delta")
 	for i, ev := range textDelta {
-		delta, _ := ev.data["delta"].(map[string]any)
-		text := ""
-		if delta != nil {
-			text, _ = delta["text"].(string)
-		}
+		text, _ := ev.data["delta"].(string)
 		if text == "" {
 			t.Errorf("output_text.delta[%d] has empty text — regression", i)
 		}

@@ -306,6 +306,7 @@ function RoutingModelCard({
     "model_not_found",
     "no_visible_offer",
   ]);
+  const routeUnavailable = model.routing.flattened_destinations.length === 0;
 
   return (
     <article
@@ -340,7 +341,7 @@ function RoutingModelCard({
         <p className="text-meta text-muted-foreground">{t("viewReachableRealModels")}</p>
       </div>
       {model.routing.routing_warnings.length > 0 ? (
-        <Alert variant="destructive" className="md:col-span-2">
+        <Alert variant={routeUnavailable ? "destructive" : "default"} className="md:col-span-2">
           <AlertTriangle aria-hidden="true" />
           <AlertTitle>{t("routingWarning.title")}</AlertTitle>
           <AlertDescription className="flex flex-wrap gap-1.5">

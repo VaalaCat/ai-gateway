@@ -77,13 +77,12 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 			)
 		}
 	}
-	if len(chain.Models) == 0 {
-		return state.ErrNoRoutableModel
-	}
-
 	plan := &rctx.State.Plan
 	plan.RoutingName = chain.RoutingName
 	plan.Trace = chain.Trace
+	if len(chain.Models) == 0 {
+		return state.ErrNoRoutableModel
+	}
 
 	budget := rctx.Agent.GetCache().Settings().RetryMaxChannels
 	if budget <= 0 {

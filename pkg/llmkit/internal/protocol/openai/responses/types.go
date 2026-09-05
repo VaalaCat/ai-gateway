@@ -117,12 +117,13 @@ type respOutputItem struct {
 type respFunctionCallOutputInput struct {
 	Type   string `json:"type"` // "function_call_output"
 	CallID string `json:"call_id"`
-	Output string `json:"output"`
+	Output any    `json:"output"`
 }
 
 type respContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Annotations *[]any `json:"annotations,omitempty"`
 }
 
 // R3: respUsage includes input_tokens_details for cached token reporting.

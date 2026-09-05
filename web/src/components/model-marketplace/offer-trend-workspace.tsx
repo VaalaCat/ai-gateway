@@ -48,6 +48,7 @@ const MAX_TREND_OFFERS = 5;
 export type TrendMetric =
   | "ttft_avg_ms"
   | "tps_avg"
+  | "cache_hit_rate"
   | "success_rate"
   | "total"
   | "input"
@@ -63,6 +64,7 @@ type MetricFormatter = Readonly<{
 export const TREND_METRIC_FORMATTERS = {
   ttft_avg_ms: { axis: formatDuration, tooltip: formatDuration },
   tps_avg: { axis: formatTpsAxis, tooltip: formatTpsValue },
+  cache_hit_rate: { axis: formatPercentAxis, tooltip: formatPercentValue },
   success_rate: { axis: formatPercentAxis, tooltip: formatPercentValue },
   total: { axis: formatTokensCompact, tooltip: formatTokensExact },
   input: { axis: formatTokensCompact, tooltip: formatTokensExact },
@@ -82,6 +84,7 @@ const TOKEN_TREND_METRICS = [
 const PRIMARY_TREND_METRICS = [
   "ttft_avg_ms",
   "tps_avg",
+  "cache_hit_rate",
   "success_rate",
   "token",
 ] as const;
@@ -92,13 +95,22 @@ type PrimaryTrendMetric = (typeof PRIMARY_TREND_METRICS)[number];
 const PRIMARY_TREND_METRIC_LABEL_KEYS = {
   ttft_avg_ms: "trendMetric.ttft_avg_ms",
   tps_avg: "trendMetric.tps_avg",
+  cache_hit_rate: "trendMetric.cache_hit_rate",
   success_rate: "trendMetricSla",
   token: "trendMetricToken",
 } as const satisfies Record<PrimaryTrendMetric, string>;
 
+function cacheHitRate(point: MarketplacePerformanceTrendPoint) {
+  const input = nonNegativeFiniteNumber(point.token_units.input);
+  const cacheRead = nonNegativeFiniteNumber(point.token_units.cache_read);
+  if (input === null || cacheRead === null || input + cacheRead === 0) return null;
+  return cacheRead * 100 / (input + cacheRead);
+}
+
 const METRIC_VALUE = {
   ttft_avg_ms: (point) => nonNegativeFiniteNumber(point.ttft_avg_ms),
   tps_avg: (point) => nonNegativeFiniteNumber(point.tps_avg),
+  cache_hit_rate: cacheHitRate,
   success_rate: (point) => percentValueOrNull(point.success_rate),
   total: (point) => nonNegativeFiniteNumber(point.token_units.total),
   input: (point) => nonNegativeFiniteNumber(point.token_units.input),
@@ -120,9 +132,6 @@ function isTokenTrendMetric(metric: TrendMetric): metric is TokenTrendMetric {
   return (TOKEN_TREND_METRICS as readonly TrendMetric[]).includes(metric);
 }
 
-function isPrimaryTrendMetric(value: string): value is PrimaryTrendMetric {
-  return (PRIMARY_TREND_METRICS as readonly string[]).includes(value);
-}
 
 function isTokenTrendMetricValue(value: string): value is TokenTrendMetric {
   return (TOKEN_TREND_METRICS as readonly string[]).includes(value);

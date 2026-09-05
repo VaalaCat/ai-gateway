@@ -299,7 +299,9 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 
 func encodeFunctionFallbackInputItem(raw json.RawMessage) json.RawMessage {
 	var item map[string]any
-	if err := json.Unmarshal(raw, &item); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&item); err != nil {
 		return raw
 	}
 	typ, _ := item["type"].(string)
@@ -328,13 +330,65 @@ func encodeFunctionFallbackInputItem(raw json.RawMessage) json.RawMessage {
 		converted := map[string]any{
 			"type":    "function_call_output",
 			"call_id": item["call_id"],
-			"output":  item["output"],
+			"output":  normalizeFunctionCallOutput(item["output"]),
 		}
 		if encoded, err := json.Marshal(converted); err == nil {
 			return encoded
 		}
 	}
 	return raw
+}
+
+func normalizeFunctionCallOutput(output any) string {
+	if text, ok := output.(string); ok {
+		return text
+	}
+
+	if content, ok := output.([]any); ok {
+		if len(content) == 0 {
+			return ""
+		}
+		var text strings.Builder
+		for _, rawBlock := range content {
+			block, ok := rawBlock.(map[string]any)
+			if !ok || block["type"] != "input_text" {
+				return marshalFunctionCallOutput(output)
+			}
+			value, ok := block["text"].(string)
+			if !ok {
+				return marshalFunctionCallOutput(output)
+			}
+			text.WriteString(value)
+		}
+		return text.String()
+	}
+
+	return marshalFunctionCallOutput(output)
+}
+
+func hasStructuredFunctionCallOutputContent(output any) bool {
+	content, ok := output.([]any)
+	if !ok || len(content) == 0 {
+		return false
+	}
+	for _, rawBlock := range content {
+		block, ok := rawBlock.(map[string]any)
+		if !ok || block["type"] != "input_text" {
+			return true
+		}
+		if _, ok := block["text"].(string); !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func marshalFunctionCallOutput(output any) string {
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		return fmt.Sprint(output)
+	}
+	return string(encoded)
 }
 
 // ---------------------------------------------------------------------------
@@ -514,9 +568,30 @@ type fcState struct {
 }
 
 type reasoningEncodeState struct {
-	started     bool
-	outputIndex int
-	itemID      string
+	started            bool
+	contentPartStarted bool
+	outputIndex        int
+	itemID             string
+	content            strings.Builder
+}
+
+func marshalStringDeltaEvent(eventType string, sequenceNumber, outputIndex int, itemID, delta string, contentIndex *int) []byte {
+	event := map[string]any{
+		"type": eventType, "sequence_number": sequenceNumber,
+		"output_index": outputIndex, "item_id": itemID, "delta": delta,
+	}
+	if contentIndex != nil {
+		indexField := "content_index"
+		if eventType == "response.reasoning_summary_text.delta" {
+			indexField = "summary_index"
+		}
+		event[indexField] = *contentIndex
+	}
+	if eventType == sseconsts.OutputTextDelta {
+		event["logprobs"] = []any{}
+	}
+	data, _ := json.Marshal(event)
+	return data
 }
 
 func encodeReasoningDoneItem(raw json.RawMessage, fallbackID, status string) json.RawMessage {
@@ -546,14 +621,15 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 	w.Header().Set(consts.HeaderConnection, consts.ConnectionKeepAlive)
 
 	id := generateResponseID()
-	itemID := "item_" + id[5:]          // derive item ID from response ID
-	messageStarted := false             // tracks whether output_item.added (message) has been sent
-	messageOutputIndex := 0             // output_index reserved for the message item (always 0 when used)
-	var usage *respUsage                // saved from EventUsage for response.completed
-	var model string                    // track model for response.completed
-	var accumulatedText strings.Builder // accumulate text for output_text.done
-	seqNum := 0                         // sequence number counter for all events
-	outputIndex := 0                    // next available output index
+	itemID := "msg_" + id[5:]              // Responses message IDs must use the msg_ namespace.
+	messageStarted := false                // tracks whether output_item.added (message) has been sent
+	messageOutputIndex := 0                // output_index reserved for the message item (always 0 when used)
+	var usage *respUsage                   // saved from EventUsage for response.completed
+	var model string                       // track model for response.completed
+	var accumulatedText strings.Builder    // accumulate text for output_text.done
+	completedOutput := []json.RawMessage{} // full response.output for response.completed
+	seqNum := 0                            // sequence number counter for all events
+	outputIndex := 0                       // next available output index
 
 	// Passthrough-aware state: tracks structural events already emitted via
 	// RawPassthrough so the encode side does not generate duplicates.
@@ -562,6 +638,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 
 	// fcStates aggregates Start/ArgsDelta/End events keyed by callID.
 	fcStates := map[string]*fcState{}
+	var fcOrder []string
 	reasoningState := reasoningEncodeState{}
 	structuredReasoning := false
 
@@ -574,6 +651,12 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 		n := seqNum
 		seqNum++
 		return n
+	}
+	setCompletedOutput := func(index int, item json.RawMessage) {
+		if missing := index + 1 - len(completedOutput); missing > 0 {
+			completedOutput = append(completedOutput, make([]json.RawMessage, missing)...)
+		}
+		completedOutput[index] = item
 	}
 	writeRawSSE := func(event, raw string) {
 		data := []byte(raw)
@@ -613,6 +696,65 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 		})
 		writeSSE(sseconsts.OutputItemAdded, data)
 	}
+	emptyAnnotations := []any{}
+	ensureReasoningContentPart := func(reasoning *ir.ReasoningContent) {
+		ensureReasoning(reasoning)
+		if reasoningState.contentPartStarted {
+			return
+		}
+		reasoningState.contentPartStarted = true
+		data, _ := json.Marshal(respStreamEvent{
+			Type: sseconsts.ContentPartAdded, SequenceNumber: nextSeq(),
+			OutputIndex: &reasoningState.outputIndex, ContentIndex: &idx0,
+			ItemID: reasoningState.itemID, Part: &respContentBlock{Type: "reasoning_text", Text: ""},
+		})
+		writeSSE(sseconsts.ContentPartAdded, data)
+	}
+	closeReasoningContentPart := func() {
+		if !reasoningState.contentPartStarted {
+			return
+		}
+		text := reasoningState.content.String()
+		data, _ := json.Marshal(map[string]any{
+			"type": sseconsts.ReasoningTextDone, "sequence_number": nextSeq(),
+			"output_index": reasoningState.outputIndex, "content_index": idx0,
+			"item_id": reasoningState.itemID, "text": text,
+		})
+		writeSSE(sseconsts.ReasoningTextDone, data)
+		data, _ = json.Marshal(respStreamEvent{
+			Type: sseconsts.ContentPartDone, SequenceNumber: nextSeq(),
+			OutputIndex: &reasoningState.outputIndex, ContentIndex: &idx0,
+			ItemID: reasoningState.itemID, Part: &respContentBlock{Type: "reasoning_text", Text: text},
+		})
+		writeSSE(sseconsts.ContentPartDone, data)
+		reasoningState.contentPartStarted = false
+	}
+	finishToolCall := func(callID, fullArgs string) {
+		state, ok := fcStates[callID]
+		if !ok {
+			return
+		}
+		if fullArgs == "" {
+			fullArgs = state.accumulated.String()
+		}
+		doneData, _ := json.Marshal(respStreamEvent{
+			Type: sseconsts.FunctionCallArgumentsDone, SequenceNumber: nextSeq(),
+			OutputIndex: &state.outputIndex, ItemID: state.fcItemID, Arguments: fullArgs,
+		})
+		writeSSE(sseconsts.FunctionCallArgumentsDone, doneData)
+		item := &respOutputItem{
+			Type: "function_call", ID: state.fcItemID, Status: "completed",
+			CallID: callID, Name: state.name, Namespace: state.namespace, Arguments: fullArgs,
+		}
+		data, _ := json.Marshal(respStreamEvent{
+			Type: sseconsts.OutputItemDone, SequenceNumber: nextSeq(),
+			OutputIndex: &state.outputIndex, Item: item,
+		})
+		writeSSE(sseconsts.OutputItemDone, data)
+		encodedItem, _ := json.Marshal(item)
+		setCompletedOutput(state.outputIndex, encodedItem)
+		delete(fcStates, callID)
+	}
 
 	// ensureMessage lazily initializes the message output item and content part.
 	// It reserves outputIndex 0 for the message item.
@@ -640,7 +782,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			OutputIndex:    &messageOutputIndex,
 			ContentIndex:   &idx0,
 			ItemID:         itemID,
-			Part:           &respContentBlock{Type: "output_text", Text: ""},
+			Part:           &respContentBlock{Type: "output_text", Text: "", Annotations: &emptyAnnotations},
 		})
 		writeSSE(sseconsts.ContentPartAdded, data)
 	}
@@ -664,13 +806,16 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 				}
 				if json.Unmarshal([]byte(ev.RawPassthrough.Data), &parsed) == nil && parsed.Response.ID != "" {
 					id = parsed.Response.ID
-					itemID = "item_" + id[5:]
+					itemID = "msg_" + id[5:]
 				}
 			} else {
 				data, _ := json.Marshal(respStreamEvent{
 					Type:           sseconsts.ResponseCreated,
 					SequenceNumber: nextSeq(),
-					Response:       &respResponse{ID: id, Status: "in_progress", Model: model},
+					Response: &respResponse{
+						ID: id, Object: "response", Status: "in_progress", Model: model,
+						Output: []respOutputItem{},
+					},
 				})
 				writeSSE(sseconsts.ResponseCreated, data)
 
@@ -678,7 +823,10 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 				data, _ = json.Marshal(respStreamEvent{
 					Type:           sseconsts.ResponseInProgress,
 					SequenceNumber: nextSeq(),
-					Response:       &respResponse{ID: id, Status: "in_progress", Model: model},
+					Response: &respResponse{
+						ID: id, Object: "response", Status: "in_progress", Model: model,
+						Output: []respOutputItem{},
+					},
 				})
 				writeSSE(sseconsts.ResponseInProgress, data)
 			}
@@ -696,30 +844,26 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			if ev.RawPassthrough != nil && ev.RawPassthrough.EventName == sseconsts.OutputTextDelta {
 				writeRawSSE(sseconsts.OutputTextDelta, ev.RawPassthrough.Data)
 			} else {
-				// Cross-protocol: generate from IR with structural fields
-				data, _ := json.Marshal(respStreamEvent{
-					Type:           sseconsts.OutputTextDelta,
-					SequenceNumber: nextSeq(),
-					OutputIndex:    &messageOutputIndex,
-					ContentIndex:   &idx0,
-					ItemID:         itemID,
-					Delta:          &respDelta{Type: "text_delta", Text: ev.Delta.Text},
-				})
+				// Cross-protocol: generate the official Responses wire shape.
+				data := marshalStringDeltaEvent(
+					sseconsts.OutputTextDelta, nextSeq(), messageOutputIndex,
+					itemID, ev.Delta.Text, &idx0,
+				)
 				writeSSE(sseconsts.OutputTextDelta, data)
 			}
 
 		case ir.EventThinkingDelta:
-			if structuredReasoning {
+			if structuredReasoning || ev.Delta == nil || ev.Delta.Text == "" {
 				continue
 			}
-			if ev.Delta != nil {
-				data, _ := json.Marshal(respStreamEvent{
-					Type:           sseconsts.ReasoningTextDelta,
-					SequenceNumber: nextSeq(),
-					Delta:          &respDelta{Type: "text_delta", Text: ev.Delta.Text},
-				})
-				writeSSE(sseconsts.ReasoningTextDelta, data)
-			}
+			reasoning := &ir.ReasoningContent{Content: []string{ev.Delta.Text}}
+			ensureReasoningContentPart(reasoning)
+			reasoningState.content.WriteString(ev.Delta.Text)
+			data := marshalStringDeltaEvent(
+				sseconsts.ReasoningTextDelta, nextSeq(), reasoningState.outputIndex,
+				reasoningState.itemID, ev.Delta.Text, &idx0,
+			)
+			writeSSE(sseconsts.ReasoningTextDelta, data)
 
 		case ir.EventToolCallStart:
 			// Bug B/D fix: reserve a unique outputIndex at Start time.
@@ -744,6 +888,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 				fcItemID:    fcItemID,
 			}
 			fcStates[callID] = state
+			fcOrder = append(fcOrder, callID)
 
 			item := &respOutputItem{
 				Type:      "function_call",
@@ -771,57 +916,16 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 				continue // defensive: no Start seen
 			}
 			state.accumulated.WriteString(ev.ToolCall.Arguments)
-			data, _ := json.Marshal(respStreamEvent{
-				Type:           sseconsts.FunctionCallArgumentsDelta,
-				SequenceNumber: nextSeq(),
-				OutputIndex:    &state.outputIndex,
-				ItemID:         state.fcItemID,
-				Delta:          &respDelta{Type: "text_delta", Text: ev.ToolCall.Arguments},
-			})
+			data := marshalStringDeltaEvent(
+				sseconsts.FunctionCallArgumentsDelta, nextSeq(), state.outputIndex,
+				state.fcItemID, ev.ToolCall.Arguments, nil,
+			)
 			writeSSE(sseconsts.FunctionCallArgumentsDelta, data)
 
 		case ir.EventToolCallEnd:
-			if ev.ToolCall == nil {
-				continue
+			if ev.ToolCall != nil {
+				finishToolCall(ev.ToolCall.CallID, ev.ToolCall.Arguments)
 			}
-			state, ok := fcStates[ev.ToolCall.CallID]
-			if !ok {
-				continue
-			}
-			fullArgs := ev.ToolCall.Arguments
-			if fullArgs == "" {
-				fullArgs = state.accumulated.String()
-			}
-
-			// emit function_call_arguments.done
-			doneData, _ := json.Marshal(respStreamEvent{
-				Type:           sseconsts.FunctionCallArgumentsDone,
-				SequenceNumber: nextSeq(),
-				OutputIndex:    &state.outputIndex,
-				ItemID:         state.fcItemID,
-				Arguments:      fullArgs,
-			})
-			writeSSE(sseconsts.FunctionCallArgumentsDone, doneData)
-
-			// emit output_item.done (function_call, completed)
-			item := &respOutputItem{
-				Type:      "function_call",
-				ID:        state.fcItemID,
-				Status:    "completed",
-				CallID:    ev.ToolCall.CallID,
-				Name:      state.name,
-				Namespace: state.namespace,
-				Arguments: fullArgs,
-			}
-			data, _ := json.Marshal(respStreamEvent{
-				Type:           sseconsts.OutputItemDone,
-				SequenceNumber: nextSeq(),
-				OutputIndex:    &state.outputIndex,
-				Item:           item,
-			})
-			writeSSE(sseconsts.OutputItemDone, data)
-
-			delete(fcStates, ev.ToolCall.CallID)
 
 		case ir.EventToolCallDelta:
 			// Deprecated. The chat decoder dual-emits this event alongside the new
@@ -858,18 +962,20 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			}
 			ensureReasoning(ev.Reasoning)
 			eventName := "response.reasoning_summary_text.delta"
-			deltaType := "summary_text_delta"
 			fragments := ev.Reasoning.Summary
 			if ev.Type == ir.EventReasoningContentDelta {
 				eventName = sseconsts.ReasoningTextDelta
-				deltaType = "text_delta"
 				fragments = ev.Reasoning.Content
 			}
 			for _, fragment := range fragments {
-				data, _ := json.Marshal(respStreamEvent{
-					Type: eventName, SequenceNumber: nextSeq(), OutputIndex: &reasoningState.outputIndex,
-					ItemID: reasoningState.itemID, Delta: &respDelta{Type: deltaType, Text: fragment},
-				})
+				if ev.Type == ir.EventReasoningContentDelta {
+					ensureReasoningContentPart(ev.Reasoning)
+					reasoningState.content.WriteString(fragment)
+				}
+				data := marshalStringDeltaEvent(
+					eventName, nextSeq(), reasoningState.outputIndex,
+					reasoningState.itemID, fragment, &idx0,
+				)
 				writeSSE(eventName, data)
 			}
 
@@ -882,24 +988,40 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 				status = "incomplete"
 			}
 			item := encodeReasoningDoneItem(raw, reasoningState.itemID, status)
+			closeReasoningContentPart()
 			data, _ := json.Marshal(map[string]any{
 				"type": sseconsts.OutputItemDone, "sequence_number": nextSeq(), "output_index": reasoningState.outputIndex, "item": item,
 			})
 			writeSSE(sseconsts.OutputItemDone, data)
+			setCompletedOutput(reasoningState.outputIndex, append(json.RawMessage(nil), item...))
 			reasoningState = reasoningEncodeState{}
 
 		case ir.EventDone:
+			for _, callID := range fcOrder {
+				finishToolCall(callID, "")
+			}
+			if reasoningState.started && !structuredReasoning {
+				closeReasoningContentPart()
+				reasoningItem := respOutputItem{
+					Type: "reasoning", ID: reasoningState.itemID, Status: "completed",
+					Content: []respContentBlock{{Type: "reasoning_text", Text: reasoningState.content.String()}},
+				}
+				data, _ := json.Marshal(respStreamEvent{
+					Type: sseconsts.OutputItemDone, SequenceNumber: nextSeq(),
+					OutputIndex: &reasoningState.outputIndex, Item: &reasoningItem,
+				})
+				writeSSE(sseconsts.OutputItemDone, data)
+				encodedItem, _ := json.Marshal(reasoningItem)
+				setCompletedOutput(reasoningState.outputIndex, encodedItem)
+			}
 			// Close message structure only if one was started AND the upstream
 			// did not already passthrough the closing events.
 			if messageStarted && !closingDoneByPassthrough {
-				// Emit response.output_text.done with accumulated text
-				data, _ := json.Marshal(respStreamEvent{
-					Type:           sseconsts.OutputTextDone,
-					SequenceNumber: nextSeq(),
-					OutputIndex:    &messageOutputIndex,
-					ContentIndex:   &idx0,
-					ItemID:         itemID,
-					Delta:          &respDelta{Type: "text_done", Text: accumulatedText.String()},
+				// Emit response.output_text.done with the official text field.
+				data, _ := json.Marshal(map[string]any{
+					"type": sseconsts.OutputTextDone, "sequence_number": nextSeq(),
+					"output_index": messageOutputIndex, "content_index": idx0,
+					"item_id": itemID, "text": accumulatedText.String(), "logprobs": []any{},
 				})
 				writeSSE(sseconsts.OutputTextDone, data)
 
@@ -909,37 +1031,41 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 					OutputIndex:    &messageOutputIndex,
 					ContentIndex:   &idx0,
 					ItemID:         itemID,
-					Part:           &respContentBlock{Type: "output_text", Text: accumulatedText.String()},
+					Part: &respContentBlock{
+						Type: "output_text", Text: accumulatedText.String(), Annotations: &emptyAnnotations,
+					},
 				})
 				writeSSE(sseconsts.ContentPartDone, data)
 
+				messageItem := &respOutputItem{
+					Type: "message", ID: itemID, Status: "completed", Role: "assistant",
+					Content: []respContentBlock{{
+						Type: "output_text", Text: accumulatedText.String(), Annotations: &emptyAnnotations,
+					}},
+				}
 				data, _ = json.Marshal(respStreamEvent{
-					Type:           sseconsts.OutputItemDone,
-					SequenceNumber: nextSeq(),
-					OutputIndex:    &messageOutputIndex,
-					Item: &respOutputItem{
-						Type:    "message",
-						ID:      itemID,
-						Status:  "completed",
-						Role:    "assistant",
-						Content: []respContentBlock{{Type: "output_text", Text: accumulatedText.String()}},
-					},
+					Type: sseconsts.OutputItemDone, SequenceNumber: nextSeq(),
+					OutputIndex: &messageOutputIndex, Item: messageItem,
 				})
 				writeSSE(sseconsts.OutputItemDone, data)
+				encodedItem, _ := json.Marshal(messageItem)
+				setCompletedOutput(messageOutputIndex, encodedItem)
 			}
 
 			// Send response.completed — prefer original upstream data when available
 			if ev.RawPassthrough != nil && ev.RawPassthrough.EventName == sseconsts.ResponseCompleted {
 				writeRawSSE(sseconsts.ResponseCompleted, ev.RawPassthrough.Data)
 			} else {
-				completedResp := &respResponse{ID: id, Status: "completed", Model: model}
-				if usage != nil {
-					completedResp.Usage = usage
+				completedResp := map[string]any{
+					"id": id, "object": "response", "status": "completed",
+					"model": model, "output": completedOutput,
 				}
-				data, _ := json.Marshal(respStreamEvent{
-					Type:           sseconsts.ResponseCompleted,
-					SequenceNumber: nextSeq(),
-					Response:       completedResp,
+				if usage != nil {
+					completedResp["usage"] = usage
+				}
+				data, _ := json.Marshal(map[string]any{
+					"type":            sseconsts.ResponseCompleted,
+					"sequence_number": nextSeq(), "response": completedResp,
 				})
 				writeSSE(sseconsts.ResponseCompleted, data)
 			}

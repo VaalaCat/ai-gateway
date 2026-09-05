@@ -1291,6 +1291,8 @@
     "debugDetails": "调试详情",
     "loadingTrace": "加载中...",
     "traceNotFound": "无追踪数据",
+    "downloadDebugFile": "下载调试文件",
+    "debugFileDownloadFailed": "调试文件下载失败",
     "traceRetention": {
       "full": { "label": "完整 Trace", "description": "Header 和 Body 已完整保留。" },
       "headers_only": { "label": "仅 Header", "description": "Token 配置为只记录 Header，因此未记录 Body。" },
@@ -2931,6 +2933,7 @@
       "trendMetric": {
         "ttft_avg_ms": "平均 TTFT",
         "tps_avg": "平均 TPS",
+        "cache_hit_rate": "缓存命中率",
         "success_rate": "成功率",
         "total": "Token 单位总量",
         "input": "输入 Token 单位",

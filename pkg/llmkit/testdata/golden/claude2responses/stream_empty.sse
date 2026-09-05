@@ -1,9 +1,9 @@
 event: response.created
-data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_d9d9a44691b955ada6e0e334","object":"","status":"in_progress","output":null}}
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_e142619683e6946ef74ca03a","object":"response","status":"in_progress","output":[]}}
 
 event: response.in_progress
-data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_d9d9a44691b955ada6e0e334","object":"","status":"in_progress","output":null}}
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_e142619683e6946ef74ca03a","object":"response","status":"in_progress","output":[]}}
 
 event: response.completed
-data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_d9d9a44691b955ada6e0e334","object":"","status":"completed","output":null,"usage":{"input_tokens":10,"output_tokens":0,"total_tokens":10}}}
+data: {"response":{"id":"resp_e142619683e6946ef74ca03a","model":"","object":"response","output":[],"status":"completed","usage":{"input_tokens":10,"output_tokens":0,"total_tokens":10}},"sequence_number":2,"type":"response.completed"}
 

@@ -1,26 +1,26 @@
 event: response.created
-data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_d9e2328d93d8c4d690b06672","object":"","status":"in_progress","output":null}}
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_542d11de218fdb2b7d3a1eeb","object":"response","status":"in_progress","output":[]}}
 
 event: response.in_progress
-data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_d9e2328d93d8c4d690b06672","object":"","status":"in_progress","output":null}}
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_542d11de218fdb2b7d3a1eeb","object":"response","status":"in_progress","output":[]}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"message","id":"item_d9e2328d93d8c4d690b06672","status":"in_progress","role":"assistant"},"output_index":0}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"message","id":"msg_542d11de218fdb2b7d3a1eeb","status":"in_progress","role":"assistant"},"output_index":0}
 
 event: response.content_part.added
-data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"output_text"},"output_index":0,"content_index":0,"item_id":"item_d9e2328d93d8c4d690b06672"}
+data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"output_text","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_542d11de218fdb2b7d3a1eeb"}
 
 event: response.output_text.delta
-data: {"type":"response.output_text.delta","sequence_number":4,"delta":{"type":"text_delta","text":"I'll check both."},"output_index":0,"content_index":0,"item_id":"item_d9e2328d93d8c4d690b06672"}
+data: {"content_index":0,"delta":"I'll check both.","item_id":"msg_542d11de218fdb2b7d3a1eeb","logprobs":[],"output_index":0,"sequence_number":4,"type":"response.output_text.delta"}
 
 event: response.output_item.added
 data: {"type":"response.output_item.added","sequence_number":5,"item":{"type":"function_call","id":"fc_toolu_01AAA","status":"in_progress","call_id":"toolu_01AAA","name":"get_weather"},"output_index":1}
 
 event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","sequence_number":6,"delta":{"type":"text_delta"},"output_index":1,"item_id":"fc_toolu_01AAA"}
+data: {"delta":"","item_id":"fc_toolu_01AAA","output_index":1,"sequence_number":6,"type":"response.function_call_arguments.delta"}
 
 event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","sequence_number":7,"delta":{"type":"text_delta","text":"{\"location\": \"SF\"}"},"output_index":1,"item_id":"fc_toolu_01AAA"}
+data: {"delta":"{\"location\": \"SF\"}","item_id":"fc_toolu_01AAA","output_index":1,"sequence_number":7,"type":"response.function_call_arguments.delta"}
 
 event: response.function_call_arguments.done
 data: {"type":"response.function_call_arguments.done","sequence_number":8,"output_index":1,"item_id":"fc_toolu_01AAA","arguments":"{\"location\": \"SF\"}"}
@@ -32,10 +32,10 @@ event: response.output_item.added
 data: {"type":"response.output_item.added","sequence_number":10,"item":{"type":"function_call","id":"fc_toolu_01BBB","status":"in_progress","call_id":"toolu_01BBB","name":"get_weather"},"output_index":2}
 
 event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","sequence_number":11,"delta":{"type":"text_delta"},"output_index":2,"item_id":"fc_toolu_01BBB"}
+data: {"delta":"","item_id":"fc_toolu_01BBB","output_index":2,"sequence_number":11,"type":"response.function_call_arguments.delta"}
 
 event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","sequence_number":12,"delta":{"type":"text_delta","text":"{\"location\": \"NYC\"}"},"output_index":2,"item_id":"fc_toolu_01BBB"}
+data: {"delta":"{\"location\": \"NYC\"}","item_id":"fc_toolu_01BBB","output_index":2,"sequence_number":12,"type":"response.function_call_arguments.delta"}
 
 event: response.function_call_arguments.done
 data: {"type":"response.function_call_arguments.done","sequence_number":13,"output_index":2,"item_id":"fc_toolu_01BBB","arguments":"{\"location\": \"NYC\"}"}
@@ -44,14 +44,14 @@ event: response.output_item.done
 data: {"type":"response.output_item.done","sequence_number":14,"item":{"type":"function_call","id":"fc_toolu_01BBB","status":"completed","call_id":"toolu_01BBB","name":"get_weather","arguments":"{\"location\": \"NYC\"}"},"output_index":2}
 
 event: response.output_text.done
-data: {"type":"response.output_text.done","sequence_number":15,"delta":{"type":"text_done","text":"I'll check both."},"output_index":0,"content_index":0,"item_id":"item_d9e2328d93d8c4d690b06672"}
+data: {"content_index":0,"item_id":"msg_542d11de218fdb2b7d3a1eeb","logprobs":[],"output_index":0,"sequence_number":15,"text":"I'll check both.","type":"response.output_text.done"}
 
 event: response.content_part.done
-data: {"type":"response.content_part.done","sequence_number":16,"part":{"type":"output_text","text":"I'll check both."},"output_index":0,"content_index":0,"item_id":"item_d9e2328d93d8c4d690b06672"}
+data: {"type":"response.content_part.done","sequence_number":16,"part":{"type":"output_text","text":"I'll check both.","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_542d11de218fdb2b7d3a1eeb"}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","sequence_number":17,"item":{"type":"message","id":"item_d9e2328d93d8c4d690b06672","status":"completed","role":"assistant","content":[{"type":"output_text","text":"I'll check both."}]},"output_index":0}
+data: {"type":"response.output_item.done","sequence_number":17,"item":{"type":"message","id":"msg_542d11de218fdb2b7d3a1eeb","status":"completed","role":"assistant","content":[{"type":"output_text","text":"I'll check both.","annotations":[]}]},"output_index":0}
 
 event: response.completed
-data: {"type":"response.completed","sequence_number":18,"response":{"id":"resp_d9e2328d93d8c4d690b06672","object":"","status":"completed","output":null,"usage":{"input_tokens":50,"output_tokens":80,"total_tokens":130}}}
+data: {"response":{"id":"resp_542d11de218fdb2b7d3a1eeb","model":"","object":"response","output":[{"type":"message","id":"msg_542d11de218fdb2b7d3a1eeb","status":"completed","role":"assistant","content":[{"type":"output_text","text":"I'll check both.","annotations":[]}]},{"type":"function_call","id":"fc_toolu_01AAA","status":"completed","call_id":"toolu_01AAA","name":"get_weather","arguments":"{\"location\": \"SF\"}"},{"type":"function_call","id":"fc_toolu_01BBB","status":"completed","call_id":"toolu_01BBB","name":"get_weather","arguments":"{\"location\": \"NYC\"}"}],"status":"completed","usage":{"input_tokens":50,"output_tokens":80,"total_tokens":130}},"sequence_number":18,"type":"response.completed"}
 

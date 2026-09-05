@@ -55,7 +55,13 @@ func (backend *Backend) Relay(relay *state.RelayContext, attempt state.Attempt) 
 	if callErr != nil {
 		return projectAttemptResult(relay.State.Recorder, target.Model, callErr)
 	}
-	return backend.writeClientResponse(ctx, cancel, relay, events, decoded.Protocol, target.Model)
+	gated, gateErr := gateResponsesPreamble(ctx, events, request.Stream, target.Protocol)
+	if gateErr != nil {
+		relay.State.Recorder.WithFail(trace.StageUpstreamDecode, gateErr)
+		return state.AttemptResult{UpstreamModel: target.Model, Err: gateErr}
+	}
+	writeEventErrorFrames := request.Stream && target.Protocol == llmkit.ProtocolOpenAIResponses
+	return backend.writeClientResponse(ctx, cancel, relay, gated, decoded.Protocol, target.Model, writeEventErrorFrames)
 }
 
 func (backend *Backend) decodeInboundRequest(relay *state.RelayContext) (llmkit.DecodedRequest, error) {
@@ -175,6 +181,7 @@ func (backend *Backend) writeClientResponse(
 	events <-chan llmkit.Event,
 	inbound llmkit.Protocol,
 	upstreamModel string,
+	writeEventErrorFrames bool,
 ) state.AttemptResult {
 	relay.State.Recorder.WithStage(trace.StageUpstreamDecode)
 	monitored, monitor := upstream.MonitorEvents(ctx, events, relay.Input.StartTime)
@@ -188,7 +195,7 @@ func (backend *Backend) writeClientResponse(
 		Protocol: inbound, Events: monitored, Stream: relay.Input.IsStream,
 	})
 	if err == nil {
-		err = writeEncodedChunks(relay.Context, chunks, monitor, relay.Input.IsStream)
+		err = writeEncodedChunks(relay.Context, chunks, monitor, relay.Input.IsStream, writeEventErrorFrames)
 	}
 	if err == nil {
 		err = monitor.FinalSnapshot().EventErr
@@ -208,7 +215,13 @@ func (backend *Backend) writeClientResponse(
 	return buildAttemptResult(monitor.FinalSnapshot(), upstreamModel, relay.Context.Writer.Written(), nil)
 }
 
-func writeEncodedChunks(context *gin.Context, chunks <-chan llmkit.EncodedChunk, monitor *upstream.EventMonitor, stream bool) error {
+func writeEncodedChunks(
+	context *gin.Context,
+	chunks <-chan llmkit.EncodedChunk,
+	monitor *upstream.EventMonitor,
+	stream bool,
+	writeEventErrorFrames bool,
+) error {
 	if stream {
 		context.Header(consts.HeaderContentType, consts.ContentTypeSSE)
 		context.Header(consts.HeaderCacheControl, consts.CacheControlNoCache)
@@ -220,8 +233,10 @@ func writeEncodedChunks(context *gin.Context, chunks <-chan llmkit.EncodedChunk,
 		if chunk.Err != nil {
 			return chunk.Err
 		}
-		if eventErr := monitor.EventError(); eventErr != nil && !context.Writer.Written() {
-			return eventErr
+		if !writeEventErrorFrames {
+			if eventErr := monitor.EventError(); eventErr != nil && !context.Writer.Written() {
+				return eventErr
+			}
 		}
 		if len(chunk.Data) == 0 {
 			continue

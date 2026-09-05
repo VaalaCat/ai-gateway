@@ -192,10 +192,29 @@ describe("marketplace offer trend workspace", () => {
     expect(JSON.parse(screen.getByTestId("line-chart").dataset.chartData!)[0].alpha).toBe(30);
   });
 
+  it("shows cache hit rate as a primary percentage trend with zero-safe buckets", () => {
+    render(<OfferTrendWorkspace offers={[makeOffer("alpha", [
+      makePoint(100, {
+        token_units: { total: 100, input: 10, cache_read: 30, output: 20, cache_write: 40 },
+      }),
+      makePoint(200, {
+        token_units: { total: 0, input: 0, cache_read: 0, output: 0, cache_write: 0 },
+      }),
+    ])]} />);
+
+    fireEvent.change(primaryMetricSelect(), { target: { value: "cache_hit_rate" } });
+
+    const rows = JSON.parse(screen.getByTestId("line-chart").dataset.chartData!);
+    expect(primaryMetricSelect()).toHaveValue("cache_hit_rate");
+    expect(rows.map((row: Record<string, unknown>) => row.alpha)).toEqual([75, null]);
+    expect(screen.getByTestId("y-axis")).toHaveAttribute("data-format-1000", "—");
+  });
+
   it("uses the complete shared formatter registry without changing metric units", () => {
     expect(Object.keys(TREND_METRIC_FORMATTERS)).toEqual([
       "ttft_avg_ms",
       "tps_avg",
+      "cache_hit_rate",
       "success_rate",
       "total",
       "input",
@@ -208,6 +227,8 @@ describe("marketplace offer trend workspace", () => {
     expect(TREND_METRIC_FORMATTERS.tps_avg.axis(40)).toBe("40");
     expect(TREND_METRIC_FORMATTERS.tps_avg.tooltip(40)).toBe("40.0 tok/s");
     expect(TREND_METRIC_FORMATTERS.success_rate.axis(99.98)).toBe("100%");
+    expect(TREND_METRIC_FORMATTERS.cache_hit_rate.axis(75)).toBe("75%");
+    expect(TREND_METRIC_FORMATTERS.cache_hit_rate.tooltip(75)).toBe("75.00%");
     expect(TREND_METRIC_FORMATTERS.success_rate.tooltip(99.98)).toBe("99.98%");
     for (const metric of ["total", "input", "cache_read", "output", "cache_write"] as const) {
       expect(TREND_METRIC_FORMATTERS[metric].axis(1_000)).toBe("1.00K");

@@ -31,10 +31,12 @@ func TestClassify_AuthNoRetryButBreaker(t *testing.T) {
 	}
 }
 
-func TestClassify_InvalidRequestAborts(t *testing.T) {
-	d := Classify(up(400, "invalid_request_error"))
-	if d.RetrySameChannel || d.CountToBreaker || !d.AbortAll {
-		t.Fatalf("400 invalid_request want abort-all, no breaker, got %+v", d)
+func TestClassify_HTTP400AdvancesWithoutRetryOrBreaker(t *testing.T) {
+	for _, errorType := range []string{"", "invalid_request_error", "unknown_parameter"} {
+		d := Classify(up(400, errorType))
+		if d.RetrySameChannel || d.CountToBreaker || d.AbortAll {
+			t.Fatalf("400 error type %q want cross-channel fallback only, got %+v", errorType, d)
+		}
 	}
 }
 

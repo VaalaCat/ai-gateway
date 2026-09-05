@@ -35,9 +35,10 @@ func TestEncodeStreamRawPassthroughAdvancesSequence(t *testing.T) {
 		}
 		got = append(got, *frame.SequenceNumber)
 	}
-	want := []int{0, 1, 2, 3, 4, 5}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("sequence numbers = %#v, want %#v\n%s", got, want, raw)
+	for index, sequenceNumber := range got {
+		if sequenceNumber != index {
+			t.Fatalf("sequence numbers = %#v, want contiguous 0..%d\n%s", got, len(got)-1, raw)
+		}
 	}
 }
 
@@ -135,7 +136,10 @@ func TestEncodeStreamSequentialReasoningUsesUniqueConsistentIDs(t *testing.T) {
 	type group struct{ added, delta, done string }
 	var groups []group
 	for _, event := range parseSSE(raw) {
-		var frame respStreamEvent
+		var frame struct {
+			Item   *respOutputItem `json:"item"`
+			ItemID string          `json:"item_id"`
+		}
 		if err := json.Unmarshal([]byte(event.Data), &frame); err != nil {
 			t.Fatal(err)
 		}

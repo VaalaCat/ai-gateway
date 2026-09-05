@@ -21,6 +21,33 @@ func TestResponses2Chat_SimpleText(t *testing.T) {
 	}
 }
 
+func TestResponses2Chat_ImagesUseChatContentShape(t *testing.T) {
+	body := `{
+		"model":"glm-5.2",
+		"input":[{"role":"user","content":[
+			{"type":"input_text","text":"compare"},
+			{"type":"input_image","image_url":"https://example.com/chart.png"},
+			{"type":"input_image","image_url":"data:image/png;base64,abc123"}
+		]}]
+	}`
+	result := roundTripRequest(t, codec.ProtocolOpenAIResponses, codec.ProtocolOpenAIChat, body)
+	messages := mustGetArray(t, result, "messages")
+	message := messages[0].(map[string]any)
+	content := message["content"].([]any)
+
+	wantURLs := []string{"https://example.com/chart.png", "data:image/png;base64,abc123"}
+	for index, wantURL := range wantURLs {
+		block := content[index+1].(map[string]any)
+		if block["type"] != "image_url" {
+			t.Errorf("content[%d].type = %#v, want image_url", index+1, block["type"])
+		}
+		imageURL, _ := block["image_url"].(map[string]any)
+		if imageURL["url"] != wantURL {
+			t.Errorf("content[%d].image_url.url = %#v, want %q", index+1, imageURL["url"], wantURL)
+		}
+	}
+}
+
 func TestResponses2Chat_Instructions(t *testing.T) {
 	body := `{"model":"gpt-4o","input":[{"role":"user","content":"Hi"}],"instructions":"Be helpful","stream":false}`
 	result := roundTripRequest(t, codec.ProtocolOpenAIResponses, codec.ProtocolOpenAIChat, body)

@@ -510,45 +510,53 @@ func TestExecutor_ContextCanceled_NoSleep(t *testing.T) {
 	}
 }
 
-// TestExecutor_InvalidRequest_NoSleep 验证例外 3：attempt 返回
-// *UpstreamError{Status:400, ProviderErrorType:"invalid_request_error"} 时
-// Executor 立即短路返回，不进入 sleep，不 retry 下一 attempt。
-func TestExecutor_InvalidRequest_NoSleep(t *testing.T) {
+// TestExecutor_HTTP400AdvancesPlan verifies that an upstream HTTP 400 is not
+// retried on the same channel and advances to the next planned channel.
+func TestExecutor_HTTP400AdvancesPlan(t *testing.T) {
 	invReqErr := &common.UpstreamError{
 		Status:            400,
-		Body:              []byte(`{"error":{"type":"invalid_request_error","message":"bad prompt"}}`),
+		Body:              []byte(`{"error":{"type":"invalid_request_error","message":"unsupported by this upstream"}}`),
 		ProviderErrorType: "invalid_request_error",
 	}
 	backend := &recordingDispatcher{results: []state.AttemptResult{
 		{Err: invReqErr, Written: false},
-		{PromptTokens: 99}, // 不应被调
+		{PromptTokens: 99},
 	}}
 	e := newLocalTestExecutor(backend, nil, nil)
-	e.Sleep = stubSleep{ms: 1000}
-
 	plan := state.AttemptPlan{Attempts: []state.Attempt{
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
 		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 2}}, RealModel: "gpt-4", Mode: state.ModeNative},
 	}}
 	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
-	rctx.Context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	start := time.Now()
 	e.Run(rctx)
-	elapsed := time.Since(start)
 
-	if elapsed >= 100*time.Millisecond {
-		t.Errorf("invalid_request_error 例外应立即返回，耗时 %v >= 100ms", elapsed)
+	if backend.callCount != 2 {
+		t.Fatalf("HTTP 400 should advance exactly once to the next channel, calls = %d, want 2", backend.callCount)
 	}
+	if rctx.State.Execution.Err != nil {
+		t.Fatalf("Execution.Err = %v, want success from second channel", rctx.State.Execution.Err)
+	}
+	if rctx.State.Execution.Used.Channel.ID != 2 {
+		t.Fatalf("used channel = %d, want 2", rctx.State.Execution.Used.Channel.ID)
+	}
+}
+
+func TestExecutor_HTTP400SingleCandidateReturnsError(t *testing.T) {
+	want := &common.UpstreamError{Status: 400, ProviderErrorType: "invalid_request_error"}
+	backend := &recordingDispatcher{results: []state.AttemptResult{{Err: want}}}
+	e := newLocalTestExecutor(backend, nil, nil)
+	rctx := newTestExecutorRctx(state.AttemptPlan{Attempts: []state.Attempt{
+		{Channel: &models.Channel{ChannelCore: models.ChannelCore{ID: 1}}, RealModel: "gpt-4", Mode: state.ModeNative},
+	}}, &stubExecAgent{})
+
+	e.Run(rctx)
+
 	if backend.callCount != 1 {
-		t.Errorf("invalid_request_error 短路后不应 retry，backend 调用次数 = %d, want 1", backend.callCount)
+		t.Fatalf("single candidate calls = %d, want 1", backend.callCount)
 	}
-	var gotErr *common.UpstreamError
-	if !errors.As(rctx.State.Execution.Err, &gotErr) {
-		t.Fatalf("Execution.Err 应为 *common.UpstreamError, got %T: %v", rctx.State.Execution.Err, rctx.State.Execution.Err)
-	}
-	if gotErr.ProviderErrorType != "invalid_request_error" {
-		t.Errorf("ProviderErrorType = %q, want invalid_request_error", gotErr.ProviderErrorType)
+	if !errors.Is(rctx.State.Execution.Err, want) {
+		t.Fatalf("Execution.Err = %v, want original HTTP 400", rctx.State.Execution.Err)
 	}
 }
 

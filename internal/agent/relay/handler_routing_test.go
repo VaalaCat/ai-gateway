@@ -170,6 +170,52 @@ func TestRelay_RoutingFallback_FirstMemberFailsAllChannels(t *testing.T) {
 	}
 }
 
+func TestRelay_SameNameRoutingHTTP400FallsBackAndKeepsRoutingName(t *testing.T) {
+	var primaryCalls int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"unsupported"}}`))
+	}))
+	defer primary.Close()
+	fallback := upstreamReturning200()
+	defer fallback.Close()
+
+	handler, store, bus := setupTestHandler([]*models.Channel{
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: primary.URL, Status: 1, Weight: 1}, Key: "k1", Models: "gpt-5.5"},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeOpenAI, BaseURL: fallback.URL, Status: 1, Weight: 1}, Key: "k2", Models: "gpt-4o"},
+	})
+	store.SetGlobalRouting("gpt-5.5", &protocol.SyncedRouting{
+		ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
+		Members: []protocol.RoutingMember{
+			{Ref: "gpt-5.5", Priority: 10, Weight: 1},
+			{Ref: "gpt-4o", Priority: 1, Weight: 1},
+		},
+	})
+
+	code, logs := doRoutingRequest(t, handler, &app.UserInfo{UserID: 1, TokenID: 1}, bus, "gpt-5.5")
+
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after same-name routing fallback", code)
+	}
+	if primaryCalls != 1 {
+		t.Fatalf("same-name primary calls = %d, want 1", primaryCalls)
+	}
+	var success *protocol.UsageLogEntry
+	for i := range logs {
+		if logs[i].Status == 1 {
+			success = &logs[i]
+		}
+	}
+	if success == nil {
+		t.Fatal("expected successful fallback usage log")
+	}
+	if success.ModelName != "gpt-4o" || success.RoutingName != "gpt-5.5" {
+		t.Fatalf("success model/routing = %q/%q, want gpt-4o/gpt-5.5", success.ModelName, success.RoutingName)
+	}
+}
+
 // TestRelay_RoutingExhausted_404: smart=[a, b]，a 和 b 的所有 channel 都 500 → 整体 502，
 // UsageLog.RoutingName=smart 仍记录
 func TestRelay_RoutingExhausted_404(t *testing.T) {

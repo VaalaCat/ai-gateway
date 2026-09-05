@@ -1,51 +1,60 @@
 event: response.created
-data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_127e33e67d459548556d8a81","object":"","status":"in_progress","output":null}}
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_d32dbfc5c970c86114b9a21f","object":"response","status":"in_progress","output":[]}}
 
 event: response.in_progress
-data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_127e33e67d459548556d8a81","object":"","status":"in_progress","output":null}}
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_d32dbfc5c970c86114b9a21f","object":"response","status":"in_progress","output":[]}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_127e33e67d459548556d8a810","status":"in_progress"},"output_index":0}
-
-event: response.reasoning_text.delta
-data: {"type":"response.reasoning_text.delta","sequence_number":3,"delta":{"type":"text_delta","text":"I need to call the weather API."},"output_index":0,"item_id":"rs_127e33e67d459548556d8a810"}
-
-event: response.output_item.done
-data: {"item":{"content":[{"text":"I need to call the weather API.","type":"reasoning_text"}],"encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6ImNsYXVkZSIsImRhdGEiOnsic2lnbmF0dXJlIjoic2lnX2RlZjQ1NiIsInRoaW5raW5nIjoiSSBuZWVkIHRvIGNhbGwgdGhlIHdlYXRoZXIgQVBJLiIsInR5cGUiOiJ0aGlua2luZyJ9fQ","id":"rs_127e33e67d459548556d8a810","status":"completed","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":4,"type":"response.output_item.done"}
-
-event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":5,"item":{"type":"message","id":"item_127e33e67d459548556d8a81","status":"in_progress","role":"assistant"},"output_index":1}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_d32dbfc5c970c86114b9a21f0","status":"in_progress"},"output_index":0}
 
 event: response.content_part.added
-data: {"type":"response.content_part.added","sequence_number":6,"part":{"type":"output_text"},"output_index":1,"content_index":0,"item_id":"item_127e33e67d459548556d8a81"}
+data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"reasoning_text"},"output_index":0,"content_index":0,"item_id":"rs_d32dbfc5c970c86114b9a21f0"}
 
-event: response.output_text.delta
-data: {"type":"response.output_text.delta","sequence_number":7,"delta":{"type":"text_delta","text":"Let me check the weather."},"output_index":1,"content_index":0,"item_id":"item_127e33e67d459548556d8a81"}
+event: response.reasoning_text.delta
+data: {"content_index":0,"delta":"I need to call the weather API.","item_id":"rs_d32dbfc5c970c86114b9a21f0","output_index":0,"sequence_number":4,"type":"response.reasoning_text.delta"}
 
-event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":8,"item":{"type":"function_call","id":"fc_toolu_01CCC","status":"in_progress","call_id":"toolu_01CCC","name":"get_weather"},"output_index":2}
-
-event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","sequence_number":9,"delta":{"type":"text_delta"},"output_index":2,"item_id":"fc_toolu_01CCC"}
-
-event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","sequence_number":10,"delta":{"type":"text_delta","text":"{\"location\": \"Paris\"}"},"output_index":2,"item_id":"fc_toolu_01CCC"}
-
-event: response.function_call_arguments.done
-data: {"type":"response.function_call_arguments.done","sequence_number":11,"output_index":2,"item_id":"fc_toolu_01CCC","arguments":"{\"location\": \"Paris\"}"}
-
-event: response.output_item.done
-data: {"type":"response.output_item.done","sequence_number":12,"item":{"type":"function_call","id":"fc_toolu_01CCC","status":"completed","call_id":"toolu_01CCC","name":"get_weather","arguments":"{\"location\": \"Paris\"}"},"output_index":2}
-
-event: response.output_text.done
-data: {"type":"response.output_text.done","sequence_number":13,"delta":{"type":"text_done","text":"Let me check the weather."},"output_index":1,"content_index":0,"item_id":"item_127e33e67d459548556d8a81"}
+event: response.reasoning_text.done
+data: {"content_index":0,"item_id":"rs_d32dbfc5c970c86114b9a21f0","output_index":0,"sequence_number":5,"text":"I need to call the weather API.","type":"response.reasoning_text.done"}
 
 event: response.content_part.done
-data: {"type":"response.content_part.done","sequence_number":14,"part":{"type":"output_text","text":"Let me check the weather."},"output_index":1,"content_index":0,"item_id":"item_127e33e67d459548556d8a81"}
+data: {"type":"response.content_part.done","sequence_number":6,"part":{"type":"reasoning_text","text":"I need to call the weather API."},"output_index":0,"content_index":0,"item_id":"rs_d32dbfc5c970c86114b9a21f0"}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","sequence_number":15,"item":{"type":"message","id":"item_127e33e67d459548556d8a81","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Let me check the weather."}]},"output_index":1}
+data: {"item":{"content":[{"text":"I need to call the weather API.","type":"reasoning_text"}],"encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6ImNsYXVkZSIsImRhdGEiOnsic2lnbmF0dXJlIjoic2lnX2RlZjQ1NiIsInRoaW5raW5nIjoiSSBuZWVkIHRvIGNhbGwgdGhlIHdlYXRoZXIgQVBJLiIsInR5cGUiOiJ0aGlua2luZyJ9fQ","id":"rs_d32dbfc5c970c86114b9a21f0","status":"completed","summary":[],"type":"reasoning"},"output_index":0,"sequence_number":7,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":8,"item":{"type":"message","id":"msg_d32dbfc5c970c86114b9a21f","status":"in_progress","role":"assistant"},"output_index":1}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":9,"part":{"type":"output_text","annotations":[]},"output_index":1,"content_index":0,"item_id":"msg_d32dbfc5c970c86114b9a21f"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"Let me check the weather.","item_id":"msg_d32dbfc5c970c86114b9a21f","logprobs":[],"output_index":1,"sequence_number":10,"type":"response.output_text.delta"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":11,"item":{"type":"function_call","id":"fc_toolu_01CCC","status":"in_progress","call_id":"toolu_01CCC","name":"get_weather"},"output_index":2}
+
+event: response.function_call_arguments.delta
+data: {"delta":"","item_id":"fc_toolu_01CCC","output_index":2,"sequence_number":12,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"location\": \"Paris\"}","item_id":"fc_toolu_01CCC","output_index":2,"sequence_number":13,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":14,"output_index":2,"item_id":"fc_toolu_01CCC","arguments":"{\"location\": \"Paris\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":15,"item":{"type":"function_call","id":"fc_toolu_01CCC","status":"completed","call_id":"toolu_01CCC","name":"get_weather","arguments":"{\"location\": \"Paris\"}"},"output_index":2}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"msg_d32dbfc5c970c86114b9a21f","logprobs":[],"output_index":1,"sequence_number":16,"text":"Let me check the weather.","type":"response.output_text.done"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":17,"part":{"type":"output_text","text":"Let me check the weather.","annotations":[]},"output_index":1,"content_index":0,"item_id":"msg_d32dbfc5c970c86114b9a21f"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":18,"item":{"type":"message","id":"msg_d32dbfc5c970c86114b9a21f","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Let me check the weather.","annotations":[]}]},"output_index":1}
 
 event: response.completed
-data: {"type":"response.completed","sequence_number":16,"response":{"id":"resp_127e33e67d459548556d8a81","object":"","status":"completed","output":null,"usage":{"input_tokens":30,"output_tokens":60,"total_tokens":90}}}
+data: {"response":{"id":"resp_d32dbfc5c970c86114b9a21f","model":"","object":"response","output":[{"content":[{"text":"I need to call the weather API.","type":"reasoning_text"}],"encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6ImNsYXVkZSIsImRhdGEiOnsic2lnbmF0dXJlIjoic2lnX2RlZjQ1NiIsInRoaW5raW5nIjoiSSBuZWVkIHRvIGNhbGwgdGhlIHdlYXRoZXIgQVBJLiIsInR5cGUiOiJ0aGlua2luZyJ9fQ","id":"rs_d32dbfc5c970c86114b9a21f0","status":"completed","summary":[],"type":"reasoning"},{"type":"message","id":"msg_d32dbfc5c970c86114b9a21f","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Let me check the weather.","annotations":[]}]},{"type":"function_call","id":"fc_toolu_01CCC","status":"completed","call_id":"toolu_01CCC","name":"get_weather","arguments":"{\"location\": \"Paris\"}"}],"status":"completed","usage":{"input_tokens":30,"output_tokens":60,"total_tokens":90}},"sequence_number":19,"type":"response.completed"}
 

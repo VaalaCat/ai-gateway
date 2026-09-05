@@ -14,11 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/resilience"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/internal/settings"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 )
@@ -493,6 +496,35 @@ func TestBackend_LLMKitScriptRejectionRestoresAttemptResult(t *testing.T) {
 	}
 }
 
+func TestBackend_MalformedChatHTTP200BeforeCommitRemainsRetryable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":`))
+	}))
+	defer upstream.Close()
+
+	rctx, response := newNativeTestCtx(
+		t,
+		[]byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
+		llmkit.ProtocolOpenAIChat,
+		false,
+	)
+	result := (&Backend{}).Relay(rctx, state.Attempt{
+		Channel: makeNativeChannel(upstream.URL), RealModel: "gpt-4",
+	})
+
+	if result.Err == nil {
+		t.Fatal("Relay() error = nil, want malformed upstream response error")
+	}
+	if result.Written {
+		t.Fatalf("malformed Chat response must remain retryable: %+v", result)
+	}
+	if got := response.Body.String(); got != "" {
+		t.Fatalf("client body = %q, want empty before commit", got)
+	}
+}
+
 func TestBackend_LLMKitEventErrorBeforeCommitRemainsRetryable(t *testing.T) {
 	fakeCodec := &recordingLLMKitCodec{
 		decoded: llmkit.DecodedRequest{
@@ -554,6 +586,513 @@ func TestBackend_LLMKitEventErrorAfterCommitTerminatesWrittenResponse(t *testing
 	if result.ResponseText != "first" {
 		t.Fatalf("response text = %q, want first", result.ResponseText)
 	}
+}
+
+func TestBackend_ResponsesPreambleOverloadRemainsRetryable(t *testing.T) {
+	client := &recordingLLMKitClient{events: []llmkit.Event{
+		{
+			Type: llmkit.EventStreamStart,
+			RawPassthrough: &llmkit.RawSSEEvent{
+				EventName: "response.created",
+				Data:      `{"type":"response.created","sequence_number":0,"response":{"id":"resp_overload","status":"in_progress","model":"provider-model"}}`,
+			},
+		},
+		{
+			Type: llmkit.EventRawPassthrough,
+			RawPassthrough: &llmkit.RawSSEEvent{
+				EventName: "response.in_progress",
+				Data:      `{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_overload","status":"in_progress","model":"provider-model"}}`,
+			},
+		},
+		{
+			Type: llmkit.EventError,
+			Error: &llmkit.ErrorPayload{
+				Code:    "server_is_overloaded",
+				Message: "The server is overloaded. Please try again later.",
+			},
+		},
+	}}
+	channel := makeNativeChannel("https://provider.example")
+	channel.SupportedAPITypes = `["responses"]`
+	rctx, response := newNativeTestCtx(
+		t,
+		[]byte(`{"model":"client-model","stream":true,"input":"hi"}`),
+		llmkit.ProtocolOpenAIResponses,
+		true,
+	)
+
+	result := (&Backend{Client: client}).Relay(rctx, state.Attempt{
+		Channel: channel, RealModel: "provider-model",
+	})
+
+	var overloaded *responsesOverloadedError
+	if !errors.As(result.Err, &overloaded) {
+		t.Fatalf("Relay() error = %v (%T), want *responsesOverloadedError", result.Err, result.Err)
+	}
+	if overloaded.code != "server_is_overloaded" || overloaded.message != "The server is overloaded. Please try again later." {
+		t.Fatalf("overload error = %#v, want exact upstream code and message", overloaded)
+	}
+	if result.Written {
+		t.Fatalf("Responses preamble overload must remain retryable: %+v", result)
+	}
+	if got := response.Body.String(); got != "" {
+		t.Fatalf("client SSE body = %q, want empty before commit", got)
+	}
+	if result.UpstreamModel != "provider-model" {
+		t.Fatalf("upstream model = %q, want provider-model", result.UpstreamModel)
+	}
+}
+
+func TestBackend_ResponsesPreambleOrdinaryFailureIsWritten(t *testing.T) {
+	client := &recordingLLMKitClient{events: []llmkit.Event{
+		{
+			Type: llmkit.EventStreamStart,
+			RawPassthrough: &llmkit.RawSSEEvent{
+				EventName: "response.created",
+				Data:      `{"type":"response.created","sequence_number":0,"response":{"id":"resp_failure","status":"in_progress","model":"provider-model"}}`,
+			},
+		},
+		{
+			Type: llmkit.EventRawPassthrough,
+			RawPassthrough: &llmkit.RawSSEEvent{
+				EventName: "response.in_progress",
+				Data:      `{"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_failure","status":"in_progress","model":"provider-model"}}`,
+			},
+		},
+		{
+			Type: llmkit.EventError,
+			Error: &llmkit.ErrorPayload{
+				Code:    "server_error",
+				Message: "ordinary upstream failure",
+			},
+		},
+	}}
+	channel := makeNativeChannel("https://provider.example")
+	channel.SupportedAPITypes = `["responses"]`
+	rctx, response := newNativeTestCtx(
+		t,
+		[]byte(`{"model":"client-model","stream":true,"input":"hi"}`),
+		llmkit.ProtocolOpenAIResponses,
+		true,
+	)
+
+	result := (&Backend{Client: client}).Relay(rctx, state.Attempt{
+		Channel: channel, RealModel: "provider-model",
+	})
+
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "ordinary upstream failure") {
+		t.Fatalf("Relay() error = %v, want ordinary upstream failure", result.Err)
+	}
+	if !result.Written {
+		t.Fatalf("ordinary Responses failure must remain client-visible: %+v", result)
+	}
+	wantSSE := "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_failure\",\"status\":\"in_progress\",\"model\":\"provider-model\"}}\n\n" +
+		"event: response.in_progress\n" +
+		"data: {\"type\":\"response.in_progress\",\"sequence_number\":1,\"response\":{\"id\":\"resp_failure\",\"status\":\"in_progress\",\"model\":\"provider-model\"}}\n\n" +
+		"event: error\n" +
+		"data: {\"code\":\"server_error\",\"message\":\"ordinary upstream failure\",\"type\":\"error\"}\n\n"
+	if got := response.Body.String(); got != wantSSE {
+		t.Fatalf("client SSE body = %q, want %q", got, wantSSE)
+	}
+}
+
+func TestBackend_ResponsesContentBeforeOverloadIsWritten(t *testing.T) {
+	client := &recordingLLMKitClient{events: []llmkit.Event{
+		{
+			Type: llmkit.EventStreamStart,
+			RawPassthrough: &llmkit.RawSSEEvent{
+				EventName: "response.created",
+				Data:      `{"type":"response.created","sequence_number":0,"response":{"id":"resp_partial","status":"in_progress","model":"provider-model"}}`,
+			},
+		},
+		{
+			Type: llmkit.EventContentDelta,
+			Delta: &llmkit.DeltaPayload{
+				Text: "partial",
+			},
+			RawPassthrough: &llmkit.RawSSEEvent{
+				EventName: "response.output_text.delta",
+				Data:      `{"type":"response.output_text.delta","sequence_number":3,"output_index":0,"content_index":0,"item_id":"item_partial","delta":"partial"}`,
+			},
+		},
+		{
+			Type: llmkit.EventError,
+			Error: &llmkit.ErrorPayload{
+				Code:    "server_is_overloaded",
+				Message: "overloaded after partial content",
+			},
+		},
+	}}
+	channel := makeNativeChannel("https://provider.example")
+	channel.SupportedAPITypes = `["responses"]`
+	rctx, response := newNativeTestCtx(
+		t,
+		[]byte(`{"model":"client-model","stream":true,"input":"hi"}`),
+		llmkit.ProtocolOpenAIResponses,
+		true,
+	)
+
+	result := (&Backend{Client: client}).Relay(rctx, state.Attempt{
+		Channel: channel, RealModel: "provider-model",
+	})
+
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "overloaded after partial content") {
+		t.Fatalf("Relay() error = %v, want post-content upstream error", result.Err)
+	}
+	if !result.Written {
+		t.Fatalf("Responses content must commit before later overload: %+v", result)
+	}
+	gotSSE := response.Body.String()
+	for _, want := range []string{
+		"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_partial\",\"status\":\"in_progress\",\"model\":\"provider-model\"}}\n\n",
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"output_index\":0,\"content_index\":0,\"item_id\":\"item_partial\",\"delta\":\"partial\"}\n\n",
+		"event: error\ndata: {\"code\":\"server_is_overloaded\",\"message\":\"overloaded after partial content\",\"type\":\"error\"}\n\n",
+	} {
+		if !strings.Contains(gotSSE, want) {
+			t.Fatalf("client SSE body = %q, want literal record %q", gotSSE, want)
+		}
+	}
+	if result.ResponseText != "partial" {
+		t.Fatalf("response text = %q, want partial", result.ResponseText)
+	}
+}
+
+type responsesRetrySettings struct {
+	value settings.AgentSettings
+}
+
+func (reader responsesRetrySettings) Settings() settings.AgentSettings { return reader.value }
+
+type responsesRetryClient struct {
+	scripts [][]llmkit.Event
+	calls   int
+}
+
+func (client *responsesRetryClient) Call(
+	_ context.Context,
+	_ llmkit.Request,
+	_ llmkit.Target,
+	_ llmkit.CallOptions,
+) (<-chan llmkit.Event, error) {
+	if client.calls >= len(client.scripts) {
+		return nil, errors.New("responses retry client exhausted")
+	}
+	events := make(chan llmkit.Event, len(client.scripts[client.calls]))
+	for _, event := range client.scripts[client.calls] {
+		events <- event
+	}
+	close(events)
+	client.calls++
+	return events, nil
+}
+
+type responsesRetryDispatcher struct {
+	backend *Backend
+	bodies  [][]byte
+}
+
+func (dispatcher *responsesRetryDispatcher) Dispatch(rctx *state.RelayContext, attempt state.Attempt) state.AttemptResult {
+	body, err := io.ReadAll(rctx.Context.Request.Body)
+	if err != nil {
+		return state.AttemptResult{Err: err}
+	}
+	dispatcher.bodies = append(dispatcher.bodies, body)
+	return dispatcher.backend.Relay(rctx, attempt)
+}
+
+type responsesRetryRun struct {
+	result     attemptexec.ProviderResult
+	response   *httptest.ResponseRecorder
+	client     *responsesRetryClient
+	dispatcher *responsesRetryDispatcher
+	body       []byte
+}
+
+func runResponsesRetryIntegration(t *testing.T, scripts ...[]llmkit.Event) responsesRetryRun {
+	t.Helper()
+	body := []byte(`{"model":"client-model","stream":true,"input":"retry me"}`)
+	rctx, response := newNativeTestCtx(t, body, llmkit.ProtocolOpenAIResponses, true)
+	client := &responsesRetryClient{scripts: scripts}
+	dispatcher := &responsesRetryDispatcher{backend: &Backend{Client: client}}
+	runner := &resilience.Runner{
+		Settings: responsesRetrySettings{value: settings.AgentSettings{
+			MaxRetriesPerChannel: 2,
+			RetryBackoffBaseMs:   1,
+			RetryBackoffMaxMs:    1,
+			BreakerEnabled:       0,
+		}},
+		Breakers: resilience.NewRegistry(),
+	}
+	channel := makeNativeChannel("https://provider.example")
+	channel.SupportedAPITypes = `["responses"]`
+	attempt := state.Attempt{
+		Channel: channel, RealModel: "provider-model", Mode: state.ModeNative,
+		Source: state.SourceAdmin, SourceID: channel.ID,
+	}
+	result := attemptexec.NewProviderExecutor(dispatcher, runner, nil).Execute(rctx, attempt)
+	return responsesRetryRun{
+		result: result, response: response, client: client, dispatcher: dispatcher, body: body,
+	}
+}
+
+func responsesCreatedEvent(id string) llmkit.Event {
+	return llmkit.Event{
+		Type: llmkit.EventStreamStart,
+		RawPassthrough: &llmkit.RawSSEEvent{
+			EventName: "response.created",
+			Data:      `{"type":"response.created","sequence_number":0,"response":{"id":"` + id + `","status":"in_progress","model":"provider-model"}}`,
+		},
+	}
+}
+
+func responsesInProgressEvent(id string) llmkit.Event {
+	return llmkit.Event{
+		Type: llmkit.EventRawPassthrough,
+		RawPassthrough: &llmkit.RawSSEEvent{
+			EventName: "response.in_progress",
+			Data:      `{"type":"response.in_progress","sequence_number":1,"response":{"id":"` + id + `","status":"in_progress","model":"provider-model"}}`,
+		},
+	}
+}
+
+func responsesOverloadEvent(message string) llmkit.Event {
+	return llmkit.Event{
+		Type: llmkit.EventError,
+		Error: &llmkit.ErrorPayload{
+			Code: "server_is_overloaded", Message: message,
+		},
+	}
+}
+
+func responsesOverloadScript(id, message string) []llmkit.Event {
+	return []llmkit.Event{
+		responsesCreatedEvent(id),
+		responsesInProgressEvent(id),
+		responsesOverloadEvent(message),
+	}
+}
+
+func assertResponsesReplayedBodies(t *testing.T, run responsesRetryRun, want int) {
+	t.Helper()
+	if len(run.dispatcher.bodies) != want {
+		t.Fatalf("replayed request bodies = %d, want %d", len(run.dispatcher.bodies), want)
+	}
+	for dispatch, body := range run.dispatcher.bodies {
+		if string(body) != string(run.body) {
+			t.Fatalf("dispatch %d request body = %q, want %q", dispatch+1, body, run.body)
+		}
+	}
+}
+
+func TestBackend_ResponsesOverloadRetries(t *testing.T) {
+	const overloadMessage = "The server is overloaded. Please try again later."
+	successDelta := `{"type":"response.output_text.delta","sequence_number":2,"output_index":0,"content_index":0,"item_id":"item_success","delta":"retry answer"}`
+	run := runResponsesRetryIntegration(t,
+		responsesOverloadScript("resp_first_overload", overloadMessage),
+		[]llmkit.Event{
+			responsesCreatedEvent("resp_success"),
+			responsesInProgressEvent("resp_success"),
+			{
+				Type:  llmkit.EventContentDelta,
+				Delta: &llmkit.DeltaPayload{Text: "retry answer"},
+				RawPassthrough: &llmkit.RawSSEEvent{
+					EventName: "response.output_text.delta", Data: successDelta,
+				},
+			},
+			{
+				Type: llmkit.EventDone,
+				RawPassthrough: &llmkit.RawSSEEvent{
+					EventName: "response.completed",
+					Data:      `{"type":"response.completed","sequence_number":3,"response":{"id":"resp_success","status":"completed","model":"provider-model"}}`,
+				},
+			},
+		},
+	)
+
+	if run.result.Dispatches != 2 || run.client.calls != 2 {
+		t.Fatalf("dispatches = %d, upstream calls = %d, want 2 and 2", run.result.Dispatches, run.client.calls)
+	}
+	if run.result.Outcome.Err != nil || !run.result.Outcome.Written {
+		t.Fatalf("final outcome = %+v, want successful written response", run.result.Outcome)
+	}
+	clientSSE := run.response.Body.String()
+	if strings.Count(clientSSE, "event: response.created\n") != 1 {
+		t.Fatalf("client SSE response.created count = %d, want 1: %q", strings.Count(clientSSE, "event: response.created\n"), clientSSE)
+	}
+	if !strings.Contains(clientSSE, "resp_success") {
+		t.Fatalf("client SSE = %q, want successful response ID", clientSSE)
+	}
+	if got := strings.Count(clientSSE, "event: response.output_text.delta\n"); got != 1 {
+		t.Fatalf("client SSE output_text.delta event count = %d, want 1: %q", got, clientSSE)
+	}
+	if got := strings.Count(clientSSE, `"delta":"retry answer"`); got != 1 {
+		t.Fatalf("client SSE answer delta count = %d, want 1: %q", got, clientSSE)
+	}
+	if !strings.Contains(clientSSE, `"item_id":"item_success"`) {
+		t.Fatalf("client SSE = %q, want successful item ID", clientSSE)
+	}
+	for _, leaked := range []string{"resp_first_overload", "server_is_overloaded", overloadMessage} {
+		if strings.Contains(clientSSE, leaked) {
+			t.Fatalf("client SSE = %q, must not contain first-attempt literal %q", clientSSE, leaked)
+		}
+	}
+	assertResponsesReplayedBodies(t, run, 2)
+}
+
+func TestBackend_ResponsesNestedErrorSSEOverloadRetries(t *testing.T) {
+	var mu sync.Mutex
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		upstreamCalls++
+		call := upstreamCalls
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if call == 1 {
+			_, _ = io.WriteString(w, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_first_overload","status":"in_progress","model":"provider-model"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_first_overload","status":"in_progress","model":"provider-model"}}
+
+
+event: keepalive
+data: {"type":"keepalive","sequence_number":2,"marker":"first-attempt-keepalive"}
+
+event: error
+data: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":3}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_first_overload","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}
+
+`)
+			return
+		}
+		_, _ = io.WriteString(w, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_retry_success","status":"in_progress","model":"provider-model"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_retry_success","status":"in_progress","model":"provider-model"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":2,"output_index":0,"content_index":0,"item_id":"item_success","delta":"retry answer"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_retry_success","status":"completed","model":"provider-model"}}
+
+`)
+	}))
+	defer upstream.Close()
+
+	body := []byte(`{"model":"client-model","stream":true,"input":"retry me"}`)
+	rctx, response := newNativeTestCtx(t, body, llmkit.ProtocolOpenAIResponses, true)
+	dispatcher := &responsesRetryDispatcher{backend: &Backend{}}
+	runner := &resilience.Runner{
+		Settings: responsesRetrySettings{value: settings.AgentSettings{
+			MaxRetriesPerChannel: 2,
+			RetryBackoffBaseMs:   1,
+			RetryBackoffMaxMs:    1,
+			BreakerEnabled:       0,
+		}},
+		Breakers: resilience.NewRegistry(),
+	}
+	channel := makeNativeChannel(upstream.URL)
+	channel.SupportedAPITypes = `["responses"]`
+	attempt := state.Attempt{
+		Channel: channel, RealModel: "provider-model", Mode: state.ModeNative,
+		Source: state.SourceAdmin, SourceID: channel.ID,
+	}
+
+	result := attemptexec.NewProviderExecutor(dispatcher, runner, nil).Execute(rctx, attempt)
+
+	mu.Lock()
+	calls := upstreamCalls
+	mu.Unlock()
+	if result.Dispatches != 2 || calls != 2 {
+		t.Fatalf("dispatches = %d, upstream calls = %d, want 2 and 2", result.Dispatches, calls)
+	}
+	if result.Outcome.Err != nil || !result.Outcome.Written {
+		t.Fatalf("final outcome = %+v, want successful written response", result.Outcome)
+	}
+	clientSSE := response.Body.String()
+	if strings.Count(clientSSE, "event: response.created\n") != 1 || !strings.Contains(clientSSE, "resp_retry_success") {
+		t.Fatalf("client SSE = %q, want only retry success preamble", clientSSE)
+	}
+	for _, leaked := range []string{"resp_first_overload", "first-attempt-keepalive", "server_is_overloaded", "Our servers are currently overloaded"} {
+		if strings.Contains(clientSSE, leaked) {
+			t.Fatalf("client SSE = %q, must not contain first attempt literal %q", clientSSE, leaked)
+		}
+	}
+}
+
+func TestBackend_ResponsesOverloadExhausts(t *testing.T) {
+	const overloadMessage = "The server is overloaded. Please try again later."
+	run := runResponsesRetryIntegration(t,
+		responsesOverloadScript("resp_overload_1", overloadMessage),
+		responsesOverloadScript("resp_overload_2", overloadMessage),
+		responsesOverloadScript("resp_overload_3", overloadMessage),
+	)
+
+	if run.result.Dispatches != 3 || run.client.calls != 3 {
+		t.Fatalf("dispatches = %d, upstream calls = %d, want 3 and 3", run.result.Dispatches, run.client.calls)
+	}
+	if run.result.Outcome.Written {
+		t.Fatalf("final outcome = %+v, want unwritten exhausted overload", run.result.Outcome)
+	}
+	var overloaded *responsesOverloadedError
+	if !errors.As(run.result.Outcome.Err, &overloaded) {
+		t.Fatalf("final error = %v (%T), want *responsesOverloadedError", run.result.Outcome.Err, run.result.Outcome.Err)
+	}
+	if overloaded.code != "server_is_overloaded" || overloaded.message != overloadMessage {
+		t.Fatalf("overload error = %#v, want exact final code and message", overloaded)
+	}
+	if run.response.Body.Len() != 0 {
+		t.Fatalf("client SSE body = %q, want empty after exhausted preamble overloads", run.response.Body.String())
+	}
+	assertResponsesReplayedBodies(t, run, 3)
+}
+
+func TestBackend_ResponsesPartialDoesNotRetry(t *testing.T) {
+	const partialDelta = `{"type":"response.output_text.delta","sequence_number":2,"output_index":0,"content_index":0,"item_id":"item_partial_retry","delta":"partial once"}`
+	run := runResponsesRetryIntegration(t, []llmkit.Event{
+		responsesCreatedEvent("resp_partial_retry"),
+		responsesInProgressEvent("resp_partial_retry"),
+		{
+			Type:  llmkit.EventContentDelta,
+			Delta: &llmkit.DeltaPayload{Text: "partial once"},
+			RawPassthrough: &llmkit.RawSSEEvent{
+				EventName: "response.output_text.delta", Data: partialDelta,
+			},
+		},
+		responsesOverloadEvent("overloaded after partial content"),
+	})
+
+	if run.result.Dispatches != 1 || run.client.calls != 1 {
+		t.Fatalf("dispatches = %d, upstream calls = %d, want 1 and 1", run.result.Dispatches, run.client.calls)
+	}
+	if !run.result.Outcome.Written || run.result.Outcome.Err == nil {
+		t.Fatalf("final outcome = %+v, want written partial failure", run.result.Outcome)
+	}
+	if !strings.Contains(run.result.Outcome.Err.Error(), "overloaded after partial content") {
+		t.Fatalf("final error = %v, want post-content overload", run.result.Outcome.Err)
+	}
+	clientSSE := run.response.Body.String()
+	if got := strings.Count(clientSSE, "event: response.output_text.delta\n"); got != 1 {
+		t.Fatalf("client SSE output_text.delta event count = %d, want 1: %q", got, clientSSE)
+	}
+	if got := strings.Count(clientSSE, `"delta":"partial once"`); got != 1 {
+		t.Fatalf("client SSE partial delta count = %d, want 1: %q", got, clientSSE)
+	}
+	if !strings.Contains(clientSSE, `"item_id":"item_partial_retry"`) {
+		t.Fatalf("client SSE = %q, want partial item ID", clientSSE)
+	}
+	if strings.Count(clientSSE, "event: response.created\n") != 1 {
+		t.Fatalf("client SSE response.created count = %d, want 1: %q", strings.Count(clientSSE, "event: response.created\n"), clientSSE)
+	}
+	assertResponsesReplayedBodies(t, run, 1)
 }
 
 // TestBackend_BodyClosedOnEncodeFailure 守护 a699e7c 的 `defer resp.Body.Close()`

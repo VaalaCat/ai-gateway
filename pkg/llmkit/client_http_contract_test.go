@@ -423,3 +423,60 @@ func TestExplicitHTTPClientKeepsCallerRedirectPolicy(t *testing.T) {
 		t.Fatalf("caller redirect policy calls = %d, want 1", got)
 	}
 }
+
+// behavior change: the target base path is joined with the endpoint exactly once.
+func TestClientCallJoinsBasePathOnce(t *testing.T) {
+	tests := []struct {
+		name         string
+		protocol     Protocol
+		baseURL      string
+		endpointPath string
+		wantPath     string
+	}{
+		{
+			name:         "OpenAI Responses",
+			protocol:     ProtocolOpenAIResponses,
+			baseURL:      "https://provider.example/api",
+			endpointPath: "/v1/responses?trace=responses",
+			wantPath:     "/api/v1/responses?trace=responses",
+		},
+		{
+			name:         "OpenAI Chat with trailing base slash",
+			protocol:     ProtocolOpenAIChat,
+			baseURL:      "https://provider.example/api/",
+			endpointPath: "/v1/chat/completions?trace=chat",
+			wantPath:     "/api/v1/chat/completions?trace=chat",
+		},
+		{
+			name:         "Claude keeps explicit repeated endpoint segment",
+			protocol:     ProtocolClaude,
+			baseURL:      "https://provider.example/api",
+			endpointPath: "/api/v1/messages?trace=claude",
+			wantPath:     "/api/api/v1/messages?trace=claude",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var gotRequestURI string
+			stop := errors.New("request captured")
+			client := NewClient(ClientOptions{HTTPClient: doerFunc(func(request *http.Request) (*http.Response, error) {
+				gotRequestURI = request.URL.RequestURI()
+				return nil, stop
+			})})
+
+			_, err := client.Call(t.Context(), Request{MaxTokens: 1}, Target{
+				Protocol:     test.protocol,
+				BaseURL:      test.baseURL,
+				EndpointPath: test.endpointPath,
+				Model:        "provider-model",
+			}, CallOptions{})
+			if !errors.Is(err, stop) {
+				t.Fatalf("Call() error = %v, want captured request error", err)
+			}
+			if gotRequestURI != test.wantPath {
+				t.Fatalf("request URI = %q, want %q", gotRequestURI, test.wantPath)
+			}
+		})
+	}
+}

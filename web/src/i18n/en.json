@@ -1291,6 +1291,8 @@
     "debugDetails": "Debug Details",
     "loadingTrace": "Loading...",
     "traceNotFound": "No trace data",
+    "downloadDebugFile": "Download debug file",
+    "debugFileDownloadFailed": "Could not download debug file",
     "traceRetention": {
       "full": { "label": "Full trace", "description": "Headers and bodies were retained in full." },
       "headers_only": { "label": "Headers only", "description": "This token records headers only, so bodies were not captured." },
@@ -2931,6 +2933,7 @@
       "trendMetric": {
         "ttft_avg_ms": "Average TTFT",
         "tps_avg": "Average TPS",
+        "cache_hit_rate": "Cache hit rate",
         "success_rate": "Success rate",
         "total": "Total token units",
         "input": "Input token units",

@@ -42,6 +42,7 @@ import { DurationCell } from "@/components/business/duration-cell";
 import { StreamBadge } from "@/components/business/status-badge";
 import { ModelName } from "@/components/business/model-name";
 import { TraceDetail } from "@/components/business/trace-detail";
+import { LogDebugFileButton } from "@/components/business/log-debug-file-button";
 import { TraceRetentionNotice } from "@/components/business/trace-retention-notice";
 import { FallbackChain } from "@/components/business/fallback-chain";
 import { RateLimitSection } from "@/components/business/rate-limit-section";
@@ -570,6 +571,11 @@ function LogsPageContent() {
           />
         )}
         <TraceRetentionNotice status={log.trace_retention_status} />
+        {log.has_trace && (
+          <div className="flex justify-start">
+            <LogDebugFileButton log={log} />
+          </div>
+        )}
         {(log.fallback_chain?.length ?? 0) > 1 && (
           <FallbackChain chain={log.fallback_chain!} requestId={log.request_id} />
         )}

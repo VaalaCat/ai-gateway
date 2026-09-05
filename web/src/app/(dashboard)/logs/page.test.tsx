@@ -197,6 +197,29 @@ it("keeps log-only filters, auto refresh, and column visibility inside the table
   expect(screen.getByTestId("column-visibility")).toHaveTextContent("logs-table");
 });
 
+it("shows one debug-file download action only for a trace-bearing expanded log", () => {
+  render(<LogsPage />);
+  const renderExpandedRow = state.dataTableProps?.renderExpandedRow as
+    | ((row: { original: Record<string, unknown> }) => React.ReactNode)
+    | undefined;
+  const traceLog = {
+    id: 7,
+    request_id: "req-debug",
+    status: 0,
+    has_trace: true,
+    fallback_chain: [
+      { seq: 1, channel_name: "provider", source: "admin", retries: 2, status: "fail", duration_ms: 10 },
+      { seq: 2, channel_name: "fallback", source: "admin", retries: 0, status: "fail", duration_ms: 10 },
+    ],
+  };
+  const expanded = render(renderExpandedRow?.({ original: traceLog }) ?? null);
+
+  expect(screen.getAllByRole("button", { name: "downloadDebugFile" })).toHaveLength(1);
+
+  expanded.rerender(renderExpandedRow?.({ original: { ...traceLog, has_trace: false } }) ?? null);
+  expect(screen.queryByRole("button", { name: "downloadDebugFile" })).not.toBeInTheDocument();
+});
+
 it("keeps non-date filters out of insights and uses the header as the sole manual refresh", () => {
   state.filterValues = { model_name: "gpt-5", request_id: "req-1", status: "0" };
   render(<LogsPage />);

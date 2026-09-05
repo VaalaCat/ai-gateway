@@ -14,14 +14,14 @@ event: response.output_text.delta
 data: {"type":"response.output_text.delta","item_id":"msg_01","output_index":0,"content_index":0,"delta":"Partial output","sequence_number":4}
 
 event: response.output_text.done
-data: {"type":"response.output_text.done","sequence_number":5,"delta":{"type":"text_done","text":"Partial output"},"output_index":0,"content_index":0,"item_id":"item_inc"}
+data: {"content_index":0,"item_id":"msg_inc","logprobs":[],"output_index":0,"sequence_number":5,"text":"Partial output","type":"response.output_text.done"}
 
 event: response.content_part.done
-data: {"type":"response.content_part.done","sequence_number":6,"part":{"type":"output_text","text":"Partial output"},"output_index":0,"content_index":0,"item_id":"item_inc"}
+data: {"type":"response.content_part.done","sequence_number":6,"part":{"type":"output_text","text":"Partial output","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_inc"}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","sequence_number":7,"item":{"type":"message","id":"item_inc","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Partial output"}]},"output_index":0}
+data: {"type":"response.output_item.done","sequence_number":7,"item":{"type":"message","id":"msg_inc","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Partial output","annotations":[]}]},"output_index":0}
 
 event: response.completed
-data: {"type":"response.completed","sequence_number":8,"response":{"id":"resp_inc","object":"","model":"gpt-4o","status":"completed","output":null,"usage":{"input_tokens":50,"output_tokens":4096,"total_tokens":4146}}}
+data: {"response":{"id":"resp_inc","model":"gpt-4o","object":"response","output":[{"type":"message","id":"msg_inc","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Partial output","annotations":[]}]}],"status":"completed","usage":{"input_tokens":50,"output_tokens":4096,"total_tokens":4146}},"sequence_number":8,"type":"response.completed"}
 

@@ -45,10 +45,7 @@ func (handler *handler) DecodeRequest(input protocol.DecodeRequestInput) (*ir.Re
 
 func (handler *handler) EncodeRequest(input protocol.EncodeRequestInput) (protocol.EncodedRequest, any, error) {
 	convert.FilterOptionalRequestFields(input.Request, input.Options.RequestFields)
-	baseURL := input.Target.BaseURL
-	if baseURL == "" {
-		baseURL = defaultBaseURL
-	}
+	baseURL := defaultBaseURL
 	request, err := handler.encodeHTTPRequest(input.Request, &channelConfig{
 		BaseURL:             baseURL,
 		APIKey:              input.Target.APIKey,

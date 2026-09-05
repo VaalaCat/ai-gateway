@@ -114,14 +114,20 @@ function realModel(
   };
 }
 
-function routingModel(warnings: string[], reachable: string[] = []): MarketplaceModel {
+function routingModel(
+  warnings: string[],
+  reachable: string[] = [],
+  hasDestination = false,
+): MarketplaceModel {
   return {
     kind: "routing",
     routing: {
       model_name: "route-a",
       display_name: "Route A",
       reachable_real_models: reachable,
-      flattened_destinations: [],
+      flattened_destinations: hasDestination
+        ? [{ model_name: reachable[0] ?? "model-a", offers: [] }]
+        : [],
       routing_warnings: warnings,
       guidance: "view_reachable_real_models",
     },
@@ -406,6 +412,20 @@ describe("routing model marketplace card", () => {
       expect(alert).toHaveTextContent(`routingWarning.code.${warning}`);
     },
   );
+
+  it("renders partial routing warnings without destructive severity when a destination remains reachable", () => {
+    render(<ModelCard model={routingModel(["model_not_found"], ["gpt-4o"], true)} />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("routingWarning.code.model_not_found");
+    expect(alert).not.toHaveClass("text-destructive");
+  });
+
+  it("keeps destructive severity when routing warnings leave no reachable destination", () => {
+    render(<ModelCard model={routingModel(["model_not_found"])} />);
+
+    expect(screen.getByRole("alert")).toHaveClass("text-destructive");
+  });
 
   it("maps an unknown server warning to generic copy without exposing the raw value", () => {
     render(<ModelCard model={routingModel(["backend secret diagnostics"]) } />);

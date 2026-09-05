@@ -93,8 +93,8 @@ func projectBase(rctx *state.RelayContext) protocol.UsageLogEntry {
 	return e
 }
 
-// projectByPhase 按失败阶段决定填哪些字段。CtxBuild 只填 base+error；Plan 额外补 routing_name；
-// Execute/None 走完整的 channel + token 拼装。
+// projectByPhase 按失败阶段决定填哪些字段。CtxBuild 只填 base+error；Plan 额外补 routing_name，
+// 路由解析失败时还补 routing_trace；Execute/None 走完整的 channel + token 拼装。
 //
 // CtxBuild / Plan 的 ErrorMessage 走 state.UserFacingErrorMessage —— 老 handler.go 每个 publishUsage
 // 调用点写入的是带 model 名的完整文案（"no channel available for model gpt-4" 而非 "no channel
@@ -113,6 +113,12 @@ func projectByPhase(e *protocol.UsageLogEntry, rctx *state.RelayContext) {
 		// ErrRoutingFallback 时跳过 RoutingName 写入，其它 Plan 阶段失败照写。
 		if !errors.Is(rctx.State.Err, state.ErrRoutingFallback) {
 			e.RoutingName = rctx.State.Plan.RoutingName
+		}
+		if errors.Is(rctx.State.Err, state.ErrNoRoutableModel) && len(rctx.State.Plan.Trace) > 0 {
+			data, _ := json.Marshal(map[string]string{
+				"routing_trace": strings.Join(rctx.State.Plan.Trace, " > "),
+			})
+			e.Other = string(data)
 		}
 		e.Status = 0
 		if rctx.State.Err != nil {

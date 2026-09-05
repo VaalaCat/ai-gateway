@@ -174,6 +174,136 @@ func collectResponsesStreamEvents(t *testing.T, sseData string) []ir.Event {
 	return events
 }
 
+func requireResponsesFailedEvent(t *testing.T, events []ir.Event) ir.Event {
+	t.Helper()
+	require.Len(t, events, 3)
+	require.Equal(t, []ir.EventType{
+		ir.EventStreamStart,
+		ir.EventRawPassthrough,
+		ir.EventError,
+	}, []ir.EventType{events[0].Type, events[1].Type, events[2].Type})
+	require.NotNil(t, events[2].Error)
+	return events[2]
+}
+
+func TestResponsesDecodeStreamFailedPreservesOverloadCode(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}
+`)
+
+	failed := requireResponsesFailedEvent(t, events)
+	require.Equal(t, "server_is_overloaded", failed.Error.Code)
+	require.Equal(t, "Our servers are currently overloaded. Please try again later.", failed.Error.Message)
+}
+
+func TestResponsesDecodeStreamNestedErrorPrecedesAndDeduplicatesFailed(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}
+
+event: error
+data: {"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later.","param":null},"sequence_number":2}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}
+`)
+
+	require.Len(t, events, 3)
+	require.Equal(t, []ir.EventType{
+		ir.EventStreamStart,
+		ir.EventRawPassthrough,
+		ir.EventError,
+	}, []ir.EventType{events[0].Type, events[1].Type, events[2].Type})
+	require.Equal(t, "server_is_overloaded", events[2].Error.Code)
+	require.Equal(t, "Our servers are currently overloaded. Please try again later.", events[2].Error.Message)
+}
+
+func TestResponsesDecodeStreamFlatErrorBecomesTypedError(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}
+
+event: error
+data: {"type":"error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}
+`)
+
+	require.Len(t, events, 3)
+	require.Equal(t, ir.EventError, events[2].Type)
+	require.NotNil(t, events[2].Error)
+	require.Equal(t, "server_is_overloaded", events[2].Error.Code)
+	require.Equal(t, "Our servers are currently overloaded. Please try again later.", events[2].Error.Message)
+}
+
+func TestResponsesDecodeStreamErrorWithoutPayloadRemainsRaw(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: error
+data: {"type":"error","sequence_number":2}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}
+`)
+
+	require.Len(t, events, 2)
+	require.Equal(t, ir.EventRawPassthrough, events[0].Type)
+	require.Equal(t, ir.EventDone, events[1].Type)
+}
+
+func TestResponsesDecodeStreamDifferentFailedErrorIsNotDeduplicated(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: error
+data: {"type":"error","code":"server_error","message":"transient stream error"}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"invalid_request_error","message":"terminal request error"}}}
+`)
+
+	require.Len(t, events, 2)
+	require.Equal(t, ir.EventError, events[0].Type)
+	require.Equal(t, "server_error", events[0].Error.Code)
+	require.Equal(t, ir.EventError, events[1].Type)
+	require.Equal(t, "invalid_request_error", events[1].Error.Code)
+}
+
+func TestResponsesDecodeStreamFailedPreservesServerErrorCode(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_error","message":"The server encountered an error."}}}
+`)
+
+	failed := requireResponsesFailedEvent(t, events)
+	require.Equal(t, "server_error", failed.Error.Code)
+	require.Equal(t, "The server encountered an error.", failed.Error.Message)
+}
+
+func TestResponsesDecodeStreamFailedWithoutError(t *testing.T) {
+	events := collectResponsesStreamEvents(t, `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_1","status":"in_progress"}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_1","status":"failed"}}
+`)
+
+	failed := requireResponsesFailedEvent(t, events)
+	require.Empty(t, failed.Error.Code)
+	require.Equal(t, "response failed", failed.Error.Message)
+}
+
 // ---------------------------------------------------------------------------
 // TestResponsesDecodeRequest_Simple — basic parsing from fixture
 // ---------------------------------------------------------------------------

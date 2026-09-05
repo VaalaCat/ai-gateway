@@ -35,6 +35,12 @@ type ResolveCtx struct {
 	// converges on the same real model as the previous path. Online Relay keeps
 	// the historical stop-on-repeat behavior.
 	exhaustRepeatedModels bool
+	topLevelRouting       bool
+}
+
+type modelResolution struct {
+	model           string
+	topLevelRouting bool
 }
 
 func NewResolveCtx() *ResolveCtx {
@@ -79,8 +85,14 @@ func (c *ResolveCtx) MarkMemberExhausted(realModel string) {
 // ResolveToRealModel 把入参 ref 解析为真实 model 名；空串表示该次解析整链失败。
 // 见 spec §3.2-3.4。
 func ResolveToRealModel(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx) string {
+	return resolveModel(requestCtx, store, ref, owner, walk).model
+}
+
+func resolveModel(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx) modelResolution {
 	walk.lastChain = walk.lastChain[:0] // 清空上轮路径，保留 cap
-	return resolveStep(requestCtx, store, ref, owner, walk, true /* topLevel */)
+	walk.topLevelRouting = false
+	model := resolveStep(requestCtx, store, ref, owner, walk, true /* topLevel */)
+	return modelResolution{model: model, topLevelRouting: walk.topLevelRouting}
 }
 
 func resolveStep(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx, topLevel bool) string {
@@ -92,6 +104,7 @@ func resolveStep(requestCtx context.Context, store RoutingStore, ref string, own
 	var r *protocol.SyncedRouting
 	if topLevel {
 		r = store.ResolveRouting(requestCtx, ref, owner)
+		walk.topLevelRouting = r != nil
 	} else {
 		// 递归：成员只能引用全局 routing
 		r = store.GetGlobalRouting(requestCtx, ref)

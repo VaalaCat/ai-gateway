@@ -50,6 +50,31 @@ func TestBuildChainFromStore_WithMembers(t *testing.T) {
 	}
 }
 
+func TestBuildChainFromStore_SameNameRoutingKeepsRoutingIdentity(t *testing.T) {
+	rs := &stubRoutingStore{
+		global: map[string]*protocol.SyncedRouting{
+			"gpt-5.5": {
+				ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
+				Members: []protocol.RoutingMember{
+					{Ref: "gpt-5.5", Priority: 10, Weight: 1},
+					{Ref: "gpt-4o", Priority: 1, Weight: 1},
+				},
+			},
+		},
+		realModels: map[string]bool{"gpt-5.5": true, "gpt-4o": true},
+	}
+	rctx := newTestRelayContext(nil, "gpt-5.5", &app.UserInfo{UserID: 1}, 0)
+
+	chain := buildChainFromStore(rs, rctx)
+
+	if !reflect.DeepEqual(chain.Models, []string{"gpt-5.5", "gpt-4o"}) {
+		t.Fatalf("Models = %v, want [gpt-5.5 gpt-4o]", chain.Models)
+	}
+	if chain.RoutingName != "gpt-5.5" {
+		t.Fatalf("RoutingName = %q, want gpt-5.5", chain.RoutingName)
+	}
+}
+
 // TestBuildChainFromStore_EmptyInput: boundary — Input.Model = "" → chain 退化为 [""] 或空。
 // 当前 ResolveToRealModel("") 返回 ""（因为 routing 查不到 + 当真实 model 名直接返回 ref）。
 // 实际：空串走 store.ResolveRouting("", 0) → nil → 返回 ref 即 ""。

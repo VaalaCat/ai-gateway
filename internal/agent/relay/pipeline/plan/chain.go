@@ -106,15 +106,16 @@ func buildChainFromInput(
 		owner.TokenID = ui.TokenID
 	}
 
-	first := ResolveToRealModel(requestCtx, rs, model, owner, walk)
+	firstResolution := resolveModel(requestCtx, rs, model, owner, walk)
+	first := firstResolution.model
 	// 首次 Resolve 完成后立刻拍照 trace——这是 Plan.Trace 的最终值。
 	// 后续 Mark+Resolve 仍累积 ctx.trace，但不传出（否则
 	// UsageLog.Other.routing_trace 被几何级数放大，违反 main parity）。
 	firstTrace := walk.Trace()
 
 	if first == "" {
-		// 整链 cycle / depth_exceeded：返回空 Models，Trace 仍保留供 UsageLog 写。
-		return ModelChain{Trace: firstTrace}
+		// 整链 cycle / depth_exceeded：返回空 Models，Trace 和 routing 身份仍保留供 UsageLog 写。
+		return ModelChain{RoutingName: routingName(model, firstResolution.topLevelRouting), Trace: firstTrace}
 	}
 
 	models := []string{first}
@@ -138,15 +139,18 @@ func buildChainFromInput(
 		models = append(models, next)
 	}
 
-	// RoutingName 只在第一个 realModel 与入参不同时填。
-	routingName := ""
-	if models[0] != model {
-		routingName = model
-	}
+	routingName := routingName(model, firstResolution.topLevelRouting)
 
 	return ModelChain{
 		Models:      models,
 		RoutingName: routingName,
 		Trace:       firstTrace, // 不是 ctx.Trace()，否则 trace 会被 N+1 放大
 	}
+}
+
+func routingName(model string, topLevelRouting bool) string {
+	if topLevelRouting {
+		return model
+	}
+	return ""
 }

@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -62,14 +63,20 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 
 					if peek.Type == "function_call_output" {
 						var fco respFunctionCallOutputInput
-						if err := json.Unmarshal(rawItem, &fco); err == nil {
-							req.Messages = append(req.Messages, ir.Message{
+						decoder := json.NewDecoder(bytes.NewReader(rawItem))
+						decoder.UseNumber()
+						if err := decoder.Decode(&fco); err == nil {
+							message := ir.Message{
 								Role:       ir.RoleTool,
 								ToolCallID: fco.CallID,
 								Content: []ir.ContentBlock{
-									{Type: ir.ContentTypeText, Text: fco.Output},
+									{Type: ir.ContentTypeText, Text: normalizeFunctionCallOutput(fco.Output)},
 								},
-							})
+							}
+							if hasStructuredFunctionCallOutputContent(fco.Output) {
+								message.RawJSON = append(json.RawMessage(nil), rawItem...)
+							}
+							req.Messages = append(req.Messages, message)
 						}
 						continue
 					}
@@ -147,18 +154,37 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 									}
 									json.Unmarshal(rawBlock, &bPeek)
 
-									if bPeek.Type == string(ir.ContentTypeInputText) || bPeek.Type == string(ir.ContentTypeText) || bPeek.Type == string(ir.ContentTypeOutputText) {
-										var b respInputContentBlock
-										json.Unmarshal(rawBlock, &b)
+									switch bPeek.Type {
+									case string(ir.ContentTypeInputText), string(ir.ContentTypeText), string(ir.ContentTypeOutputText):
+										var block respInputContentBlock
+										_ = json.Unmarshal(rawBlock, &block)
 										msg.Content = append(msg.Content, ir.ContentBlock{
 											Type: ir.ContentTypeText,
-											Text: b.Text,
+											Text: block.Text,
 										})
-									} else {
-										// Unknown content block type: preserve raw JSON
-										msg.Content = append(msg.Content, ir.ContentBlock{
-											RawJSON: rawBlock,
-										})
+									case "input_image":
+										var block respInputContentBlock
+										_ = json.Unmarshal(rawBlock, &block)
+										image := ir.ContentBlock{
+											Type: ir.ContentTypeImage, MediaURL: block.ImageURL,
+											RawJSON: append(json.RawMessage(nil), rawBlock...),
+										}
+										if strings.HasPrefix(block.ImageURL, "data:") {
+											if commaIndex := strings.Index(block.ImageURL, ","); commaIndex > len("data:") {
+												metadata := block.ImageURL[len("data:"):commaIndex]
+												payload := block.ImageURL[commaIndex+1:]
+												mimeType := strings.TrimSuffix(metadata, ";base64")
+												if strings.HasSuffix(metadata, ";base64") && mimeType != "" && payload != "" {
+													image.MimeType = mimeType
+													image.MediaB64 = payload
+													image.MediaURL = ""
+												}
+											}
+										}
+										msg.Content = append(msg.Content, image)
+									default:
+										// Unknown content block type: preserve raw JSON.
+										msg.Content = append(msg.Content, ir.ContentBlock{RawJSON: rawBlock})
 									}
 								}
 							}
@@ -511,6 +537,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var currentEvent string
 	var sentDone bool
+	var emittedError *ir.ErrorPayload
 	// R4: track whether we've seen a function_call item during the stream
 	var seenFunctionCall bool
 	// itemStates maps itemID (e.g. "fc_x") → aggregation state for streaming tool calls.
@@ -574,6 +601,9 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		var raw struct {
 			Type        string            `json:"type"`
 			Response    *respResponse     `json:"response,omitempty"`
+			Error       *respError        `json:"error,omitempty"`
+			Code        string            `json:"code,omitempty"`
+			Message     string            `json:"message,omitempty"`
 			Item        *respOutputItem   `json:"item,omitempty"`
 			Part        *respContentBlock `json:"part,omitempty"`
 			Delta       json.RawMessage   `json:"delta,omitempty"`
@@ -888,6 +918,32 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 				}
 			}
 
+		case "error":
+			code := raw.Code
+			message := raw.Message
+			if raw.Error != nil {
+				if raw.Error.Code != "" {
+					code = raw.Error.Code
+				}
+				if raw.Error.Message != "" {
+					message = raw.Error.Message
+				}
+			}
+			if code == "" && message == "" {
+				ch <- ir.Event{
+					Type: ir.EventRawPassthrough,
+					RawPassthrough: &ir.RawSSEEvent{
+						EventName: currentEvent,
+						Data:      data,
+					},
+				}
+				break
+			}
+			finalizeInterruptedReasoning()
+			emittedError = &ir.ErrorPayload{Code: code, Message: message}
+			ch <- ir.Event{Type: ir.EventError, Error: emittedError}
+			sentDone = true
+
 		case sseconsts.ResponseCompleted:
 			finalizeInterruptedReasoning()
 			if evt.Response != nil && evt.Response.Usage != nil {
@@ -931,14 +987,14 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			sentDone = true
 
 		case sseconsts.ResponseFailed:
-			finalizeInterruptedReasoning()
-			msg := "response failed"
+			payload := &ir.ErrorPayload{Message: "response failed"}
 			if evt.Response != nil && evt.Response.Error != nil {
-				msg = evt.Response.Error.Message
+				payload.Code = evt.Response.Error.Code
+				payload.Message = evt.Response.Error.Message
 			}
-			ch <- ir.Event{
-				Type:  ir.EventError,
-				Error: &ir.ErrorPayload{Message: msg},
+			if emittedError == nil || emittedError.Code != payload.Code || emittedError.Message != payload.Message {
+				finalizeInterruptedReasoning()
+				ch <- ir.Event{Type: ir.EventError, Error: payload}
 			}
 			sentDone = true
 

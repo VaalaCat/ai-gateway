@@ -30,8 +30,6 @@ func Classify(res state.AttemptResult) Decision {
 		return Decision{RetrySameChannel: true, CountToBreaker: true}
 	}
 	switch {
-	case upErr.Status == 400 && upErr.ProviderErrorType == "invalid_request_error":
-		return Decision{AbortAll: true} // 用户的错,绝不开熔断
 	case upErr.Status == 0 || upErr.Status >= 500 || upErr.Status == 429:
 		return Decision{RetrySameChannel: true, CountToBreaker: true}
 	case upErr.Status == 401 || upErr.Status == 403:

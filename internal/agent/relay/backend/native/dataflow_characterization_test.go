@@ -388,6 +388,47 @@ func TestChar_ResponsesFunctionToolFallback(t *testing.T) {
 	}
 }
 
+func TestChar_ResponsesFunctionFallbackFlattensCustomToolOutputContent(t *testing.T) {
+	ch := &models.Channel{
+		ChannelCore: models.ChannelCore{
+			ID: 1, Type: consts.ChannelTypeOpenAI, Status: 1, Weight: 1,
+			SupportedAPITypes: `["responses"]`,
+			Endpoints:         `{"responses":"/api/v1/responses"}`,
+			OtherSettings:     `{"builtin_tool_fallback":"function"}`,
+		},
+		Key:    "k",
+		Models: "glm-5.2",
+	}
+	body := `{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"custom_tool_call","call_id":"call_array_output","name":"exec","input":"run"},
+			{"type":"custom_tool_call_output","call_id":"call_array_output","output":[{"type":"input_text","text":"Script completed\noutput"}]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+
+	cap := runRelayCapture(t, ch, body, llmkit.ProtocolOpenAIResponses, "glm-5.2")
+	input, ok := cap.Body["input"].([]any)
+	if !ok || len(input) != 3 {
+		t.Fatalf("upstream input = %#v, want converted call/output pair plus user message", cap.Body["input"])
+	}
+	for i, wantType := range []string{"function_call", "function_call_output", "message"} {
+		item, ok := input[i].(map[string]any)
+		if !ok || item["type"] != wantType {
+			t.Fatalf("input[%d] = %#v, want type %q", i, input[i], wantType)
+		}
+	}
+	call := input[0].(map[string]any)
+	output := input[1].(map[string]any)
+	if call["call_id"] != "call_array_output" || output["call_id"] != "call_array_output" {
+		t.Fatalf("converted pair call IDs differ: call=%#v output=%#v", call, output)
+	}
+	if output["output"] != "Script completed\noutput" {
+		t.Fatalf("function fallback output = %#v, want flattened text", output["output"])
+	}
+}
+
 func TestChar_ResponsesFunctionFallbackRestoresCustomToolCall(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
@@ -479,6 +520,39 @@ func TestChar_ResponsesInbound(t *testing.T) {
 	msgs, _ := cap.Body["messages"].([]any)
 	if len(msgs) == 0 {
 		t.Fatalf("upstream body missing messages array, got keys: %v", cap.Body)
+	}
+}
+
+func TestChar_ResponsesPreservesFunctionCallOutputContent(t *testing.T) {
+	ch := &models.Channel{
+		ChannelCore: models.ChannelCore{
+			ID: 1, Type: consts.ChannelTypeOpenAI, Status: 1, Weight: 1,
+			SupportedAPITypes: `["responses"]`,
+		},
+		Key:    "k",
+		Models: "real-model",
+	}
+	body := `{
+		"model":"req-model",
+		"input":[
+			{"type":"function_call","call_id":"call_wait","name":"wait","arguments":"{\"cell_id\":\"14\"}"},
+			{"type":"function_call_output","call_id":"call_wait","output":[{"type":"input_text","text":"Script completed\noutput"}]},
+			{"type":"message","role":"user","content":"继续"}
+		]
+	}`
+
+	cap := runRelayCapture(t, ch, body, llmkit.ProtocolOpenAIResponses, "real-model")
+	input, ok := cap.Body["input"].([]any)
+	if !ok || len(input) != 3 {
+		t.Fatalf("upstream input = %#v, want function call, output, and user message", cap.Body["input"])
+	}
+	call := input[0].(map[string]any)
+	output := input[1].(map[string]any)
+	if call["type"] != "function_call" || call["call_id"] != "call_wait" {
+		t.Fatalf("input[0] = %#v, want function_call call_wait", call)
+	}
+	if output["type"] != "function_call_output" || output["call_id"] != "call_wait" || output["output"] != "Script completed\noutput" {
+		t.Fatalf("input[1] = %#v, want preserved function_call_output", output)
 	}
 }
 

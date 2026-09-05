@@ -230,6 +230,166 @@ func runEncodeStream(t *testing.T, events []ir.Event) []byte {
 	return rec.Body.Bytes()
 }
 
+func TestResponsesEncodeStream_CodexWireSchema(t *testing.T) {
+	raw := runEncodeStream(t, []ir.Event{
+		{Type: ir.EventStreamStart, Model: "glm-5.2"},
+		{Type: ir.EventThinkingDelta, Delta: &ir.DeltaPayload{ContentType: ir.ContentTypeThinking, Text: "think"}},
+		{Type: ir.EventContentDelta, Delta: &ir.DeltaPayload{ContentType: ir.ContentTypeText, Text: "answer"}},
+		{Type: ir.EventToolCallStart, ToolCall: &ir.StreamingToolCall{CallID: "call_1", Name: "exec"}},
+		{Type: ir.EventToolCallArgumentsDelta, ToolCall: &ir.StreamingToolCall{CallID: "call_1", Arguments: `{"cmd":"pwd"}`}},
+		{Type: ir.EventToolCallEnd, ToolCall: &ir.StreamingToolCall{CallID: "call_1", Arguments: `{"cmd":"pwd"}`}},
+		{Type: ir.EventDone},
+	})
+
+	events := parseSSE(raw)
+	find := func(eventName string) map[string]any {
+		t.Helper()
+		for _, event := range events {
+			if event.Event != eventName {
+				continue
+			}
+			var data map[string]any
+			if err := json.Unmarshal([]byte(event.Data), &data); err != nil {
+				t.Fatalf("decode %s: %v", eventName, err)
+			}
+			return data
+		}
+		t.Fatalf("missing %s", eventName)
+		return nil
+	}
+
+	for _, eventName := range []string{
+		"response.reasoning_text.delta",
+		"response.output_text.delta",
+		"response.function_call_arguments.delta",
+	} {
+		data := find(eventName)
+		if _, ok := data["delta"].(string); !ok {
+			t.Errorf("%s delta type = %T, want string", eventName, data["delta"])
+		}
+	}
+	summaryRaw := runEncodeStream(t, []ir.Event{
+		{Type: ir.EventStreamStart},
+		{Type: ir.EventReasoningSummaryDelta, Reasoning: &ir.ReasoningContent{Summary: []string{"summary"}}},
+		{Type: ir.EventReasoningDone, ReasoningStatus: ir.ReasoningCompleted, Reasoning: &ir.ReasoningContent{Summary: []string{"summary"}}},
+		{Type: ir.EventDone},
+	})
+	for _, event := range parseSSE(summaryRaw) {
+		if event.Event != "response.reasoning_summary_text.delta" {
+			continue
+		}
+		var data map[string]any
+		_ = json.Unmarshal([]byte(event.Data), &data)
+		if data["summary_index"] != float64(0) {
+			t.Errorf("reasoning summary delta summary_index = %#v, want 0", data["summary_index"])
+		}
+		if _, exists := data["content_index"]; exists {
+			t.Errorf("reasoning summary delta must not contain content_index: %#v", data)
+		}
+	}
+	for _, eventName := range []string{"response.created", "response.in_progress", "response.completed"} {
+		data := find(eventName)
+		response, _ := data["response"].(map[string]any)
+		if response["object"] != "response" {
+			t.Errorf("%s response.object = %#v, want response", eventName, response["object"])
+		}
+	}
+	textDone := find("response.output_text.done")
+	var messageID string
+	for _, event := range events {
+		if event.Event != "response.output_item.added" {
+			continue
+		}
+		var data struct {
+			Item respOutputItem `json:"item"`
+		}
+		_ = json.Unmarshal([]byte(event.Data), &data)
+		if data.Item.Type == "message" {
+			messageID = data.Item.ID
+			break
+		}
+	}
+	if !strings.HasPrefix(messageID, "msg_") {
+		t.Errorf("message item id = %q, want msg_ prefix", messageID)
+	}
+	if textDone["text"] != "answer" {
+		t.Errorf("output_text.done text = %#v, want answer", textDone["text"])
+	}
+	if _, exists := textDone["delta"]; exists {
+		t.Errorf("output_text.done must not contain delta: %#v", textDone)
+	}
+
+	wantReasoningLifecycle := []string{
+		"response.content_part.added",
+		"response.reasoning_text.delta",
+		"response.reasoning_text.done",
+		"response.content_part.done",
+		"response.output_item.done",
+	}
+	var reasoningLifecycle []string
+	for _, event := range events {
+		var data map[string]any
+		_ = json.Unmarshal([]byte(event.Data), &data)
+		if data["item_id"] == find("response.reasoning_text.delta")["item_id"] || event.Event == "response.output_item.done" {
+			if event.Event == "response.output_item.done" {
+				item, _ := data["item"].(map[string]any)
+				if item["type"] != "reasoning" {
+					continue
+				}
+			}
+			reasoningLifecycle = append(reasoningLifecycle, event.Event)
+		}
+	}
+	if !reflect.DeepEqual(reasoningLifecycle, wantReasoningLifecycle) {
+		t.Errorf("reasoning lifecycle = %#v, want %#v", reasoningLifecycle, wantReasoningLifecycle)
+	}
+
+	completed := find("response.completed")
+	response, _ := completed["response"].(map[string]any)
+	output, _ := response["output"].([]any)
+	if len(output) != 3 {
+		t.Fatalf("response.completed output = %#v, want reasoning + message + function_call", response["output"])
+	}
+	message, _ := output[1].(map[string]any)
+	content, _ := message["content"].([]any)
+	outputText, _ := content[0].(map[string]any)
+	if annotations, ok := outputText["annotations"].([]any); !ok || len(annotations) != 0 {
+		t.Errorf("completed output_text annotations = %#v, want []", outputText["annotations"])
+	}
+	wantTypes := []string{"reasoning", "message", "function_call"}
+	for index, wantType := range wantTypes {
+		item, _ := output[index].(map[string]any)
+		if item["type"] != wantType {
+			t.Errorf("response.completed output[%d].type = %#v, want %s", index, item["type"], wantType)
+		}
+	}
+}
+
+func TestResponsesEncodeStream_DoneClosesOpenToolCall(t *testing.T) {
+	raw := runEncodeStream(t, []ir.Event{
+		{Type: ir.EventStreamStart},
+		{Type: ir.EventToolCallStart, ToolCall: &ir.StreamingToolCall{CallID: "call_open", Name: "exec"}},
+		{Type: ir.EventToolCallArgumentsDelta, ToolCall: &ir.StreamingToolCall{CallID: "call_open", Arguments: `{"cmd":"pwd"}`}},
+		{Type: ir.EventDone},
+	})
+	events := parseSSE(raw)
+	var completed map[string]any
+	for _, event := range events {
+		if event.Event == "response.completed" {
+			_ = json.Unmarshal([]byte(event.Data), &completed)
+		}
+	}
+	response, _ := completed["response"].(map[string]any)
+	output, _ := response["output"].([]any)
+	if len(output) != 1 || output[0] == nil {
+		t.Fatalf("response.completed output = %#v, want completed function_call", response["output"])
+	}
+	item, _ := output[0].(map[string]any)
+	if item["type"] != "function_call" || item["status"] != "completed" || item["arguments"] != `{"cmd":"pwd"}` {
+		t.Errorf("completed function_call = %#v", item)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // New Task 4 tests — must be RED before encodeStream refactor
 // ---------------------------------------------------------------------------
@@ -263,30 +423,26 @@ func TestResponsesEncodeStream_ToolCallCorrectShape(t *testing.T) {
 				if !strings.Contains(e.Data, `"status":"in_progress"`) {
 					t.Errorf("output_item.added missing status=in_progress: %s", e.Data)
 				}
-				// Bug B guard: id must not be the bare "fc_" with empty suffix
+				// Bug B guard: id must not be the bare "fc_" with empty suffix.
 				var p struct {
 					Item struct {
 						ID string `json:"id"`
 					} `json:"item"`
 				}
-				if err := json.Unmarshal([]byte(e.Data), &p); err == nil {
-					if p.Item.ID == "fc_" {
-						t.Errorf("output_item.added id must not be bare 'fc_', got: %s", e.Data)
-					}
+				if err := json.Unmarshal([]byte(e.Data), &p); err == nil && p.Item.ID == "fc_" {
+					t.Errorf("output_item.added id must not be bare 'fc_', got: %s", e.Data)
 				}
 			}
 		case "response.function_call_arguments.delta":
 			var p struct {
 				Arguments string `json:"arguments"`
-				Delta     struct {
-					Text string `json:"text"`
-				} `json:"delta"`
+				Delta     string `json:"delta"`
 			}
 			if err := json.Unmarshal([]byte(e.Data), &p); err != nil {
 				t.Fatalf("unmarshal args.delta: %v", err)
 			}
-			if p.Delta.Text != "" {
-				argDeltas = append(argDeltas, p.Delta.Text)
+			if p.Delta != "" {
+				argDeltas = append(argDeltas, p.Delta)
 			} else {
 				argDeltas = append(argDeltas, p.Arguments)
 			}
@@ -661,6 +817,45 @@ func TestEncodeFunctionFallbackInputItem(t *testing.T) {
 		}
 		if !reflect.DeepEqual(item, want) {
 			t.Fatalf("converted item = %#v, want %#v", item, want)
+		}
+	})
+
+	t.Run("custom tool call output text content", func(t *testing.T) {
+		got := encodeFunctionFallbackInputItem(json.RawMessage(
+			`{"type":"custom_tool_call_output","call_id":"call_patch","output":[{"type":"input_text","text":"first"},{"type":"input_text","text":" second"}]}`,
+		))
+		var item map[string]any
+		if err := json.Unmarshal(got, &item); err != nil {
+			t.Fatalf("decode converted item: %v", err)
+		}
+		if item["output"] != "first second" {
+			t.Fatalf("converted output = %#v, want concatenated text", item["output"])
+		}
+	})
+
+	t.Run("custom tool call output structured content", func(t *testing.T) {
+		got := encodeFunctionFallbackInputItem(json.RawMessage(
+			`{"type":"custom_tool_call_output","call_id":"call_patch","output":{"ok":true,"count":2}}`,
+		))
+		var item map[string]any
+		if err := json.Unmarshal(got, &item); err != nil {
+			t.Fatalf("decode converted item: %v", err)
+		}
+		if item["output"] != `{"count":2,"ok":true}` {
+			t.Fatalf("converted output = %#v, want JSON string", item["output"])
+		}
+	})
+
+	t.Run("custom tool call output preserves large integer", func(t *testing.T) {
+		got := encodeFunctionFallbackInputItem(json.RawMessage(
+			`{"type":"custom_tool_call_output","call_id":"call_patch","output":{"id":9007199254740993}}`,
+		))
+		var item map[string]any
+		if err := json.Unmarshal(got, &item); err != nil {
+			t.Fatalf("decode converted item: %v", err)
+		}
+		if item["output"] != `{"id":9007199254740993}` {
+			t.Fatalf("converted output = %#v, want exact large integer", item["output"])
 		}
 	})
 

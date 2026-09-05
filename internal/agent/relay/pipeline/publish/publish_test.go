@@ -251,6 +251,29 @@ func TestPublishPlanFailFillsRoutingName(t *testing.T) {
 	}
 }
 
+// behavior change: routing resolution failures retain their routing trace even
+// though no executable channel exists.
+func TestPublishPlanFailFillsRoutingTrace(t *testing.T) {
+	rctx := newPublishTestRctx()
+	rctx.State.FailPhase = state.PhasePlan
+	rctx.State.Err = state.ErrNoRoutableModel
+	rctx.State.Plan.RoutingName = "smart"
+	rctx.State.Plan.Trace = []string{"global:smart", "cycle:global:smart"}
+
+	cb := newCaptureBus(t)
+	NewPublisher(cb.bus, zap.NewNop(), nil).Publish(rctx)
+	cb.wait()
+
+	got := cb.last()
+	var other map[string]any
+	if err := json.Unmarshal([]byte(got.Other), &other); err != nil {
+		t.Fatalf("Other = %q, want valid JSON: %v", got.Other, err)
+	}
+	if other["routing_trace"] != "global:smart > cycle:global:smart" {
+		t.Errorf("routing_trace = %v, want preserved route trace", other["routing_trace"])
+	}
+}
+
 // TestPublishPlanFail_RoutingFallback_SkipsRoutingName:
 // main:handler.go 502 fallback (lastErr==nil) 分支 502 fallback 路径走 buildBaseUsageLogEntry，
 // 不带 RoutingName → UsageLog.RoutingName 应保持空。strict parity 钉死。

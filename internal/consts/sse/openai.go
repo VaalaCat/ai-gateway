@@ -15,6 +15,7 @@ const (
 	OutputTextDelta            = "response.output_text.delta"
 	OutputTextDone             = "response.output_text.done"
 	ReasoningTextDelta         = "response.reasoning_text.delta"
+	ReasoningTextDone          = "response.reasoning_text.done"
 	FunctionCallArgumentsDelta = "response.function_call_arguments.delta"
 	FunctionCallArgumentsDone  = "response.function_call_arguments.done"
 	RefusalDelta               = "response.refusal.delta"

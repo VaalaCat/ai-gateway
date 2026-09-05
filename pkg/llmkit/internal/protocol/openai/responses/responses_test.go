@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -767,11 +768,11 @@ func TestResponsesEncodeResponse_Stream(t *testing.T) {
 		}
 	}
 
-	// Verify text_delta content (output_text.delta uses structured delta format)
-	if !strings.Contains(output, `"text":"Hi"`) {
+	// Verify official string deltas.
+	if !strings.Contains(output, `"delta":"Hi"`) {
 		t.Errorf("missing text delta 'Hi' in output:\n%s", output)
 	}
-	if !strings.Contains(output, `"text":" there"`) {
+	if !strings.Contains(output, `"delta":" there"`) {
 		t.Errorf("missing text delta ' there' in output:\n%s", output)
 	}
 }
@@ -844,6 +845,156 @@ func TestResponsesDecodeRequest_FunctionCallOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesEncodeRequest_FunctionCallOutputContentRoundTrip(t *testing.T) {
+	body := `{
+		"model": "gpt-5.4",
+		"input": [
+			{"type": "function_call", "call_id": "call_wait", "name": "wait", "arguments": "{\"cell_id\":\"14\"}"},
+			{"type": "function_call_output", "call_id": "call_wait", "output": [{"type": "input_text", "text": "Script completed\noutput"}]},
+			{"type": "message", "role": "user", "content": "继续"}
+		]
+	}`
+	inbound := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+
+	handler := &handler{}
+	request, err := handler.decodeHTTPRequest(inbound)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	outbound, err := handler.encodeHTTPRequest(request, &channelConfig{
+		BaseURL: "https://api.example.com",
+		APIKey:  "test-key",
+		Model:   request.Model,
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+
+	encoded, err := io.ReadAll(outbound.Body)
+	if err != nil {
+		t.Fatalf("read encoded request: %v", err)
+	}
+	var payload struct {
+		Input []struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+			Output string `json:"output"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("unmarshal encoded request: %v", err)
+	}
+	if len(payload.Input) != 3 {
+		t.Fatalf("input len = %d, want 3", len(payload.Input))
+	}
+	if output := payload.Input[1]; output.Type != "function_call_output" || output.CallID != "call_wait" || output.Output != "Script completed\noutput" {
+		t.Fatalf("input[1] = %#v, want preserved function_call_output", output)
+	}
+}
+
+func TestResponsesEncodeRequest_FunctionCallOutputPreservesLargeInteger(t *testing.T) {
+	body := `{
+		"model": "gpt-5.4",
+		"input": [
+			{"type": "function_call_output", "call_id": "call_data", "output": {"id": 9007199254740993}}
+		]
+	}`
+	inbound := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	handler := &handler{}
+	request, err := handler.decodeHTTPRequest(inbound)
+	if err != nil {
+		t.Fatalf("DecodeRequest: %v", err)
+	}
+	outbound, err := handler.encodeHTTPRequest(request, &channelConfig{
+		BaseURL: "https://api.example.com",
+		APIKey:  "test-key",
+		Model:   request.Model,
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	encoded, err := io.ReadAll(outbound.Body)
+	if err != nil {
+		t.Fatalf("read encoded request: %v", err)
+	}
+	var payload struct {
+		Input []struct {
+			Output string `json:"output"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("unmarshal encoded request: %v", err)
+	}
+	if len(payload.Input) != 1 || payload.Input[0].Output != `{"id":9007199254740993}` {
+		t.Fatalf("input = %#v, want exact large integer output", payload.Input)
+	}
+}
+
+func TestResponsesEncodeRequest_FunctionCallOutputContentShapes(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		wantOutput any
+	}{
+		{
+			name:       "text and image",
+			output:     `[{"type":"input_text","text":"chart:"},{"type":"input_image","image_url":"https://example.com/chart.png"}]`,
+			wantOutput: []any{map[string]any{"type": "input_text", "text": "chart:"}, map[string]any{"type": "input_image", "image_url": "https://example.com/chart.png"}},
+		},
+		{
+			name:       "file",
+			output:     `[{"type":"input_file","file_id":"file_123"}]`,
+			wantOutput: []any{map[string]any{"type": "input_file", "file_id": "file_123"}},
+		},
+		{
+			name:       "empty content",
+			output:     `[]`,
+			wantOutput: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"model":"gpt-5.4","input":[{"type":"function_call_output","call_id":"call_result","output":` + tt.output + `}]}`
+			inbound := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+			handler := &handler{}
+			request, err := handler.decodeHTTPRequest(inbound)
+			if err != nil {
+				t.Fatalf("DecodeRequest: %v", err)
+			}
+			outbound, err := handler.encodeHTTPRequest(request, &channelConfig{
+				BaseURL: "https://api.example.com",
+				APIKey:  "test-key",
+				Model:   request.Model,
+			})
+			if err != nil {
+				t.Fatalf("EncodeRequest: %v", err)
+			}
+			encoded, err := io.ReadAll(outbound.Body)
+			if err != nil {
+				t.Fatalf("read encoded request: %v", err)
+			}
+			var payload struct {
+				Input []struct {
+					Type   string `json:"type"`
+					CallID string `json:"call_id"`
+					Output any    `json:"output"`
+				} `json:"input"`
+			}
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatalf("unmarshal encoded request: %v", err)
+			}
+			if len(payload.Input) != 1 {
+				t.Fatalf("input len = %d, want 1", len(payload.Input))
+			}
+			output := payload.Input[0]
+			if output.Type != "function_call_output" || output.CallID != "call_result" || !reflect.DeepEqual(output.Output, tt.wantOutput) {
+				t.Fatalf("input[0] = %#v, want output %#v", output, tt.wantOutput)
+			}
+		})
+	}
+}
+
 func TestResponsesDecodeRequest_ContentArray(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",
@@ -876,6 +1027,66 @@ func TestResponsesDecodeRequest_ContentArray(t *testing.T) {
 	}
 	if req.Messages[0].Content[1].Text != " World" {
 		t.Errorf("msg[0].content[1].text = %q, want ' World'", req.Messages[0].Content[1].Text)
+	}
+}
+
+func TestResponsesDecodeRequest_ImagesBecomeTypedIRAndKeepRawJSON(t *testing.T) {
+	body := `{
+		"model":"gpt-5",
+		"input":[{"role":"user","content":[
+			{"type":"input_image","image_url":"https://example.com/chart.png","detail":"high"},
+			{"type":"input_image","image_url":"data:image/png;base64,abc123"},
+			{"type":"input_image","image_url":"data:malformed"},
+			{"type":"input_image","image_url":"data:image/png,abc"},
+			{"type":"input_image","image_url":"data:image/png;base64,"}
+		]}]
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	decoded, err := (&handler{}).decodeHTTPRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := decoded.Messages[0].Content
+	if len(blocks) != 5 {
+		t.Fatalf("content = %#v, want 5 image blocks", blocks)
+	}
+	if blocks[0].Type != ir.ContentTypeImage || blocks[0].MediaURL != "https://example.com/chart.png" || !strings.Contains(string(blocks[0].RawJSON), `"detail":"high"`) {
+		t.Errorf("URL image = %#v", blocks[0])
+	}
+	if blocks[1].Type != ir.ContentTypeImage || blocks[1].MimeType != "image/png" || blocks[1].MediaB64 != "abc123" || blocks[1].MediaURL != "" {
+		t.Errorf("data URI image = %#v", blocks[1])
+	}
+	if blocks[2].Type != ir.ContentTypeImage || blocks[2].MediaURL != "data:malformed" {
+		t.Errorf("malformed data URI image = %#v", blocks[2])
+	}
+	if blocks[3].Type != ir.ContentTypeImage || blocks[3].MediaURL != "data:image/png,abc" {
+		t.Errorf("non-base64 data URI image = %#v", blocks[3])
+	}
+	if blocks[4].Type != ir.ContentTypeImage || blocks[4].MediaURL != "data:image/png;base64," {
+		t.Errorf("empty base64 data URI image = %#v", blocks[4])
+	}
+}
+
+func TestResponsesImageRoundTripPreservesExtendedFields(t *testing.T) {
+	body := `{"model":"gpt-5","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/chart.png","detail":"high"}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	decoded, err := (&handler{}).decodeHTTPRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := (&handler{}).encodeHTTPRequest(decoded, &channelConfig{BaseURL: "https://example.com", Model: "gpt-5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(encoded.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	input := payload["input"].([]any)
+	content := input[0].(map[string]any)["content"].([]any)
+	image := content[0].(map[string]any)
+	if image["detail"] != "high" {
+		t.Errorf("image detail = %#v, want high", image["detail"])
 	}
 }
 
@@ -3597,8 +3808,8 @@ func TestResponsesStream_RealWorldCodexResponse_Roundtrip(t *testing.T) {
 		t.Error("roundtrip lost content delta ' can help.'")
 	}
 
-	// Verify reasoning summary text survived
-	if !strings.Contains(output, `"text":"The user"`) {
+	// Verify reasoning summary text survived in the official string delta field.
+	if !strings.Contains(output, `"delta":"The user"`) {
 		t.Error("roundtrip lost reasoning summary delta 'The user'")
 	}
 
