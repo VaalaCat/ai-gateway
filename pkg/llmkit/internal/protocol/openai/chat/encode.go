@@ -15,6 +15,32 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
+// oaiUsageFromIR projects IR usage onto Chat Completions wire semantics:
+// prompt_tokens includes cached tokens, the cached subset is reported in
+// prompt_tokens_details. IR keeps cache in disjoint buckets (Claude style), so
+// they must be folded back in here.
+func oaiUsageFromIR(u *ir.Usage) *oaiUsage {
+	p := convert.ProjectUsageOpenAI(u)
+	usage := &oaiUsage{
+		PromptTokens:     p.PromptTokens,
+		CompletionTokens: p.CompletionTokens,
+		TotalTokens:      p.TotalTokens,
+	}
+	if u.ReasoningTokens != 0 || u.AcceptedPredictionTokens != 0 || u.RejectedPredictionTokens != 0 {
+		usage.CompletionTokensDetails = &oaiTokenDetails{
+			ReasoningTokens:          u.ReasoningTokens,
+			AcceptedPredictionTokens: u.AcceptedPredictionTokens,
+			RejectedPredictionTokens: u.RejectedPredictionTokens,
+		}
+	}
+	if p.CachedTokens != 0 {
+		usage.PromptTokensDetails = &oaiPromptTokenDetails{
+			CachedTokens: p.CachedTokens,
+		}
+	}
+	return usage
+}
+
 // ---------------------------------------------------------------------------
 // EncodeRequest
 // ---------------------------------------------------------------------------
@@ -297,23 +323,7 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 			}
 		case ir.EventUsage:
 			if ev.Usage != nil {
-				usage = &oaiUsage{
-					PromptTokens:     ev.Usage.PromptTokens,
-					CompletionTokens: ev.Usage.CompletionTokens,
-					TotalTokens:      ev.Usage.TotalTokens,
-				}
-				if ev.Usage.ReasoningTokens != 0 || ev.Usage.AcceptedPredictionTokens != 0 || ev.Usage.RejectedPredictionTokens != 0 {
-					usage.CompletionTokensDetails = &oaiTokenDetails{
-						ReasoningTokens:          ev.Usage.ReasoningTokens,
-						AcceptedPredictionTokens: ev.Usage.AcceptedPredictionTokens,
-						RejectedPredictionTokens: ev.Usage.RejectedPredictionTokens,
-					}
-				}
-				if ev.Usage.CachedTokens != 0 {
-					usage.PromptTokensDetails = &oaiPromptTokenDetails{
-						CachedTokens: ev.Usage.CachedTokens,
-					}
-				}
+				usage = oaiUsageFromIR(ev.Usage)
 			}
 		case ir.EventRawPassthrough:
 			// Responses-native SSE frames have no chat.completion representation;
@@ -542,24 +552,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 			// Buffer usage — will be emitted after the finish_reason chunk
 			// to match real OpenAI API ordering.
 			if ev.Usage != nil {
-				u := &oaiUsage{
-					PromptTokens:     ev.Usage.PromptTokens,
-					CompletionTokens: ev.Usage.CompletionTokens,
-					TotalTokens:      ev.Usage.TotalTokens,
-				}
-				if ev.Usage.ReasoningTokens != 0 || ev.Usage.AcceptedPredictionTokens != 0 || ev.Usage.RejectedPredictionTokens != 0 {
-					u.CompletionTokensDetails = &oaiTokenDetails{
-						ReasoningTokens:          ev.Usage.ReasoningTokens,
-						AcceptedPredictionTokens: ev.Usage.AcceptedPredictionTokens,
-						RejectedPredictionTokens: ev.Usage.RejectedPredictionTokens,
-					}
-				}
-				if ev.Usage.CachedTokens != 0 {
-					u.PromptTokensDetails = &oaiPromptTokenDetails{
-						CachedTokens: ev.Usage.CachedTokens,
-					}
-				}
-				pendingUsage = u
+				pendingUsage = oaiUsageFromIR(ev.Usage)
 			}
 		case ir.EventDone:
 			// O5: Use tracked finishReason instead of hardcoded "stop"

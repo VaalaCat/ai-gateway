@@ -15,6 +15,30 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
+// claudeUsageFromIR projects IR usage onto Claude wire semantics: input_tokens
+// EXCLUDES cache, cache hits/writes are separate buckets. OpenAI decoders set
+// CachedTokens (cached subset already inside PromptTokens), which must be split
+// out here; Claude-style IR usage already matches and is passed through.
+func claudeUsageFromIR(u *ir.Usage) *claudeUsage {
+	prompt, cacheRead := u.PromptTokens, u.CacheReadTokens
+	if u.CachedTokens > 0 && cacheRead == 0 {
+		cacheRead = u.CachedTokens
+		// OpenAI semantics keep cached tokens inside prompt_tokens (subtract
+		// them out); some Responses upstreams (e.g. Doubao) report them as a
+		// disjoint bucket where prompt already excludes cache — when prompt is
+		// not larger than the cached count, keep it as-is.
+		if prompt > cacheRead {
+			prompt -= cacheRead
+		}
+	}
+	return &claudeUsage{
+		InputTokens:              prompt,
+		OutputTokens:             u.CompletionTokens,
+		CacheReadInputTokens:     cacheRead,
+		CacheCreationInputTokens: u.CacheWriteTokens,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // EncodeRequest
 // ---------------------------------------------------------------------------
@@ -315,25 +339,7 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 			}
 		case ir.EventUsage:
 			if ev.Usage != nil {
-				inputTokens := ev.Usage.PromptTokens
-				cacheRead := ev.Usage.CacheReadTokens
-
-				// Bridge OpenAI CachedTokens → Claude CacheReadInputTokens
-				if ev.Usage.CachedTokens > 0 && cacheRead == 0 {
-					cacheRead = ev.Usage.CachedTokens
-				}
-
-				// Subtract cached tokens from input_tokens (Claude convention: excludes cache)
-				if cacheRead > 0 && inputTokens > cacheRead {
-					inputTokens -= cacheRead
-				}
-
-				usage = &claudeUsage{
-					InputTokens:              inputTokens,
-					OutputTokens:             ev.Usage.CompletionTokens,
-					CacheReadInputTokens:     cacheRead,
-					CacheCreationInputTokens: ev.Usage.CacheWriteTokens,
-				}
+				usage = claudeUsageFromIR(ev.Usage)
 			}
 		case ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta:
 			structuredReasoning = true
@@ -751,25 +757,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 
 		case ir.EventUsage:
 			if ev.Usage != nil {
-				inputTokens := ev.Usage.PromptTokens
-				cacheRead := ev.Usage.CacheReadTokens
-
-				// Bridge OpenAI CachedTokens → Claude CacheReadInputTokens
-				if ev.Usage.CachedTokens > 0 && cacheRead == 0 {
-					cacheRead = ev.Usage.CachedTokens
-				}
-
-				// Subtract cached tokens from input_tokens (Claude convention: excludes cache)
-				if cacheRead > 0 && inputTokens > cacheRead {
-					inputTokens -= cacheRead
-				}
-
-				usage = &claudeUsage{
-					InputTokens:              inputTokens,
-					OutputTokens:             ev.Usage.CompletionTokens,
-					CacheReadInputTokens:     cacheRead,
-					CacheCreationInputTokens: ev.Usage.CacheWriteTokens,
-				}
+				usage = claudeUsageFromIR(ev.Usage)
 			}
 
 		case ir.EventDone:

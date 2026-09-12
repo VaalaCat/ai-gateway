@@ -391,6 +391,23 @@ func marshalFunctionCallOutput(output any) string {
 	return string(encoded)
 }
 
+// respUsageFromIR projects IR usage onto the Responses API wire semantics:
+// input_tokens includes cached tokens, the cached subset is reported in
+// input_tokens_details. IR keeps cache in disjoint buckets (Claude style), so
+// they must be folded back in here.
+func respUsageFromIR(u *ir.Usage) *respUsage {
+	p := convert.ProjectUsageOpenAI(u)
+	usage := &respUsage{
+		InputTokens:  p.PromptTokens,
+		OutputTokens: p.CompletionTokens,
+		TotalTokens:  p.TotalTokens,
+	}
+	if p.CachedTokens != 0 {
+		usage.InputTokensDetails = &respTokenDetail{CachedTokens: p.CachedTokens}
+	}
+	return usage
+}
+
 // ---------------------------------------------------------------------------
 // EncodeResponse
 // ---------------------------------------------------------------------------
@@ -462,15 +479,7 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 			}
 		case ir.EventUsage:
 			if ev.Usage != nil {
-				usage = &respUsage{
-					InputTokens:  ev.Usage.PromptTokens,
-					OutputTokens: ev.Usage.CompletionTokens,
-					TotalTokens:  ev.Usage.TotalTokens,
-				}
-				// R3: emit cached tokens when present
-				if ev.Usage.CachedTokens != 0 {
-					usage.InputTokensDetails = &respTokenDetail{CachedTokens: ev.Usage.CachedTokens}
-				}
+				usage = respUsageFromIR(ev.Usage)
 			}
 		case ir.EventDone:
 			if ev.Extras != nil {
@@ -944,15 +953,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 
 		case ir.EventUsage:
 			if ev.Usage != nil {
-				usage = &respUsage{
-					InputTokens:  ev.Usage.PromptTokens,
-					OutputTokens: ev.Usage.CompletionTokens,
-					TotalTokens:  ev.Usage.TotalTokens,
-				}
-				// R3: emit cached tokens when present
-				if ev.Usage.CachedTokens != 0 {
-					usage.InputTokensDetails = &respTokenDetail{CachedTokens: ev.Usage.CachedTokens}
-				}
+				usage = respUsageFromIR(ev.Usage)
 			}
 
 		case ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta:
