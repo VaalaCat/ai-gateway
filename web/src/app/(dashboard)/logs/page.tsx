@@ -545,9 +545,11 @@ function LogsPageContent() {
       <div className="space-y-3 text-body">
         <div className="grid grid-cols-2 gap-x-8 gap-y-2 md:grid-cols-3">
           {details.map(([label, value]) => (
-            <div key={String(label)}>
-              <span className="text-muted-foreground">{String(label)}: </span>
-              <span className="font-medium">{String(value)}</span>
+            <div key={String(label)} className="flex min-w-0">
+              <span className="shrink-0 text-muted-foreground">{String(label)}: </span>
+              <span className="min-w-0 truncate font-medium" title={String(value)}>
+                {String(value)}
+              </span>
             </div>
           ))}
         </div>
@@ -693,6 +695,7 @@ function LogsPageContent() {
         storageKey="logs"
         getRowId={(row) => String(row.id)}
         renderExpandedRow={renderExpandedRow}
+        expandedRowWidth="viewport"
         toolbar={(table) => (
           <FilterableToolbar
             spec={filterSpec}

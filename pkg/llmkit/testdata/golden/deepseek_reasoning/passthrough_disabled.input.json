@@ -1,0 +1,13 @@
+{
+  "model":"deepseek-reasoner",
+  "input":[
+    {"type":"reasoning","content":[{"type":"reasoning_text","text":"drop shell"}]},
+    {"type":"message","role":"user","content":"next"},
+    {"type":"reasoning","content":[{"type":"reasoning_text","text":"drop but keep answer"}]},
+    {"type":"message","role":"assistant","content":"visible answer"},
+    {"type":"message","role":"user","content":"run tool"},
+    {"type":"reasoning","content":[{"type":"reasoning_text","text":"drop but keep tool"}]},
+    {"type":"function_call","call_id":"call_a","name":"lookup","arguments":"{}"},
+    {"type":"function_call_output","call_id":"call_a","output":"ok"}
+  ]
+}

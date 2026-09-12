@@ -1,0 +1,11 @@
+{
+  "model":"deepseek-reasoner",
+  "input":[
+    {
+      "type":"reasoning",
+      "summary":[{"type":"summary_text","text":"readable fallback"}],
+      "encrypted_content":"llmkit:v1:%%%"
+    },
+    {"type":"message","role":"assistant","content":"answer"}
+  ]
+}

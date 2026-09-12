@@ -1,0 +1,10 @@
+{
+  "model":"deepseek-reasoner",
+  "input":[
+    {"type":"reasoning","summary":[{"type":"summary_text","text":"summary one"}],"content":[{"type":"reasoning_text","text":"content one"}]},
+    {"type":"message","role":"assistant","content":"answer one"},
+    {"type":"message","role":"user","content":"continue"},
+    {"type":"reasoning","summary":[{"type":"summary_text","text":"summary two"}]},
+    {"type":"message","role":"assistant","content":"answer two"}
+  ]
+}

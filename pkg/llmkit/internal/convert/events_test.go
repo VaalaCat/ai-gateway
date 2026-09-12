@@ -9,7 +9,114 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
+	"github.com/stretchr/testify/require"
 )
+
+func TestEncodeReasoningBlockOpenAIChatRoundTripThroughResponses(t *testing.T) {
+	source := &ir.ReasoningContent{
+		Summary: []string{"Need inspect files."},
+		Content: []string{"Need inspect files."},
+		RawJSON: json.RawMessage(`{"reasoning_content":"Need inspect files."}`),
+	}
+
+	responsesRaw := EncodeReasoningBlock(source, ReasoningProtocolResponses)
+	var responsesItem struct {
+		Type             string `json:"type"`
+		EncryptedContent string `json:"encrypted_content"`
+		Summary          []struct {
+			Text string `json:"text"`
+		} `json:"summary"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(responsesRaw, &responsesItem))
+	require.Equal(t, "reasoning", responsesItem.Type)
+	require.Equal(t, "Need inspect files.", responsesItem.Summary[0].Text)
+	require.Equal(t, "Need inspect files.", responsesItem.Content[0].Text)
+	require.True(t, strings.HasPrefix(responsesItem.EncryptedContent, reasoningEnvelopePrefix))
+
+	returned := &ir.ReasoningContent{
+		Summary:   []string{"Need inspect files."},
+		Content:   []string{"Need inspect files."},
+		Encrypted: responsesItem.EncryptedContent,
+		RawJSON:   responsesRaw,
+	}
+	chatRaw := EncodeReasoningBlock(returned, ReasoningProtocolOpenAIChat)
+	var chatBlock map[string]any
+	require.NoError(t, json.Unmarshal(chatRaw, &chatBlock))
+	require.Equal(t, "Need inspect files.", chatBlock["reasoning_content"])
+}
+
+func TestEncodeReasoningBlockOpenAIChatStructuredTextPresence(t *testing.T) {
+	source := &ir.ReasoningContent{
+		Content: []string{"old"},
+		RawJSON: json.RawMessage(`{"reasoning_content":"old","future":"kept"}`),
+	}
+	responsesRaw := EncodeReasoningBlock(source, ReasoningProtocolResponses)
+	var responsesItem map[string]any
+	require.NoError(t, json.Unmarshal(responsesRaw, &responsesItem))
+
+	tests := []struct {
+		name    string
+		content []string
+		summary []string
+		want    string
+	}{
+		{name: "absent readable fields preserve original", want: "old"},
+		{name: "empty arrays have no readable representation", content: []string{}, summary: []string{}, want: "old"},
+		{name: "content overrides original", content: []string{"new"}, summary: []string{"summary"}, want: "new"},
+		{name: "summary overrides original", summary: []string{"summary"}, want: "summary"},
+		{name: "explicit empty content overrides original and summary", content: []string{""}, summary: []string{"summary"}, want: ""},
+		{name: "explicit empty summary overrides original", summary: []string{""}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, sourceKind := range []string{"envelope", "raw"} {
+				t.Run(sourceKind, func(t *testing.T) {
+					returned := &ir.ReasoningContent{Content: test.content, Summary: test.summary}
+					if sourceKind == "envelope" {
+						returned.Encrypted = responsesItem["encrypted_content"].(string)
+					} else {
+						returned.RawJSON = source.RawJSON
+					}
+					chatRaw := EncodeReasoningBlock(returned, ReasoningProtocolOpenAIChat)
+					var chatBlock map[string]any
+					require.NoError(t, json.Unmarshal(chatRaw, &chatBlock))
+					require.Equal(t, test.want, chatBlock["reasoning_content"])
+					require.Equal(t, "kept", chatBlock["future"])
+				})
+			}
+		})
+	}
+}
+
+func TestEncodeReasoningBlockOpenAIChatKeepsEmptyReasoningContent(t *testing.T) {
+	raw := EncodeReasoningBlock(&ir.ReasoningContent{
+		Content: []string{""},
+		RawJSON: json.RawMessage(`{"reasoning_content":""}`),
+	}, ReasoningProtocolOpenAIChat)
+	var chatBlock map[string]any
+	require.NoError(t, json.Unmarshal(raw, &chatBlock))
+	value, exists := chatBlock["reasoning_content"]
+	require.True(t, exists)
+	require.Equal(t, "", value)
+}
+
+func TestEncodeReasoningBlockOpenAIChatBadEnvelopeFallsBackToReadable(t *testing.T) {
+	for _, encrypted := range []string{"llmkit:v1:%%%", "llmkit:v2:opaque"} {
+		t.Run(encrypted, func(t *testing.T) {
+			raw := EncodeReasoningBlock(&ir.ReasoningContent{
+				Summary:   []string{"readable"},
+				Encrypted: encrypted,
+			}, ReasoningProtocolOpenAIChat)
+			var chatBlock map[string]any
+			require.NoError(t, json.Unmarshal(raw, &chatBlock))
+			require.Equal(t, "readable", chatBlock["reasoning_content"])
+			require.NotContains(t, string(raw), "llmkit:")
+		})
+	}
+}
 
 func TestEncodeReasoningBlockSameProtocolKeepsCrossProtocolEnvelopeStable(t *testing.T) {
 	source := json.RawMessage(`{"protocol":"responses","data":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"short"}],"content":[{"type":"reasoning_text","text":"deep"}],"encrypted_content":"enc-native"}}`)

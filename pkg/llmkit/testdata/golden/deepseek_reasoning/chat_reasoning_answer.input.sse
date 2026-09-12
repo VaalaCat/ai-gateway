@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-deepseek-answer","object":"chat.completion.chunk","created":1789000000,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Need inspect "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-deepseek-answer","object":"chat.completion.chunk","created":1789000000,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"reasoning_content":"files."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-deepseek-answer","object":"chat.completion.chunk","created":1789000000,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"content":"Inspection complete."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-deepseek-answer","object":"chat.completion.chunk","created":1789000000,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8,"total_tokens":28,"completion_tokens_details":{"reasoning_tokens":5}}}
+
+data: [DONE]

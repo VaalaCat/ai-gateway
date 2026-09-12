@@ -1,0 +1,11 @@
+{
+  "messages": [
+    {
+      "content": "answer",
+      "reasoning_content": "readable fallback",
+      "role": "assistant"
+    }
+  ],
+  "model": "deepseek-reasoner",
+  "stream": false
+}

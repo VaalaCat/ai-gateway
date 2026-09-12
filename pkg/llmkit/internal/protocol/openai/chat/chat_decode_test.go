@@ -35,6 +35,222 @@ func collectStreamEvents(t *testing.T, sseData string) []ir.Event {
 	return events
 }
 
+func reasoningEvents(events []ir.Event) []ir.Event {
+	result := make([]ir.Event, 0)
+	for _, event := range events {
+		switch event.Type {
+		case ir.EventReasoningSummaryDelta,
+			ir.EventReasoningContentDelta,
+			ir.EventThinkingDelta,
+			ir.EventReasoningDone,
+			ir.EventContentDelta,
+			ir.EventToolCallStart:
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
+func eventTypesOf(events []ir.Event) []ir.EventType {
+	types := make([]ir.EventType, 0, len(events))
+	for _, event := range events {
+		types = append(types, event.Type)
+	}
+	return types
+}
+
+func indexEvent(events []ir.Event, eventType ir.EventType) int {
+	for index, event := range events {
+		if event.Type == eventType {
+			return index
+		}
+	}
+	return -1
+}
+
+func countEvents(events []ir.Event, eventType ir.EventType) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType {
+			count++
+		}
+	}
+	return count
+}
+
+func findEvent(t *testing.T, events []ir.Event, eventType ir.EventType) ir.Event {
+	t.Helper()
+	index := indexEvent(events, eventType)
+	require.NotEqual(t, -1, index)
+	return events[index]
+}
+
+func collectEventChannel(events <-chan ir.Event) []ir.Event {
+	var result []ir.Event
+	for event := range events {
+		result = append(result, event)
+	}
+	return result
+}
+
+func TestChatDecodeStreamReasoningLifecycleCompletesBeforeContent(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Need \"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"inspect.\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"Done\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	got := reasoningEvents(collectStreamEvents(t, sse))
+
+	require.Equal(t, []ir.EventType{
+		ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta, ir.EventThinkingDelta,
+		ir.EventReasoningSummaryDelta, ir.EventReasoningContentDelta, ir.EventThinkingDelta,
+		ir.EventReasoningDone, ir.EventContentDelta,
+	}, eventTypesOf(got))
+	done := got[6]
+	require.Equal(t, ir.ReasoningCompleted, done.ReasoningStatus)
+	require.Equal(t, []string{"Need inspect."}, done.Reasoning.Summary)
+	require.Equal(t, []string{"Need inspect."}, done.Reasoning.Content)
+	require.JSONEq(t, `{"reasoning_content":"Need inspect."}`, string(done.Reasoning.RawJSON))
+}
+
+func TestChatDecodeStreamReasoningCompletesBeforeToolCall(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Use tool.\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	got := reasoningEvents(collectStreamEvents(t, sse))
+	require.Less(t, indexEvent(got, ir.EventReasoningDone), indexEvent(got, ir.EventToolCallStart))
+}
+
+func TestChatDecodeStreamReasoningAbruptEOFFinalizesInterrupted(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"partial\"}}]}\n\n"
+	got := reasoningEvents(collectStreamEvents(t, sse))
+	done := findEvent(t, got, ir.EventReasoningDone)
+	require.Equal(t, ir.ReasoningInterrupted, done.ReasoningStatus)
+	require.Equal(t, []string{"partial"}, done.Reasoning.Content)
+}
+
+func TestChatDecodeStreamReasoningOnlyCompletesWithFinishReason(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Think.\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	events := collectStreamEvents(t, sse)
+	reasoningDone := findEvent(t, events, ir.EventReasoningDone)
+	require.Equal(t, ir.ReasoningCompleted, reasoningDone.ReasoningStatus)
+	require.Equal(t, 1, countEvents(events, ir.EventReasoningDone))
+	require.Less(t, indexEvent(events, ir.EventReasoningDone), indexEvent(events, ir.EventDone))
+}
+
+func TestChatDecodeStreamReasoningOnlyCompletesWithDoneMarker(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Think.\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+	events := collectStreamEvents(t, sse)
+	reasoningDone := findEvent(t, events, ir.EventReasoningDone)
+	require.Equal(t, ir.ReasoningCompleted, reasoningDone.ReasoningStatus)
+	require.Equal(t, 1, countEvents(events, ir.EventReasoningDone))
+	require.Less(t, indexEvent(events, ir.EventReasoningDone), indexEvent(events, ir.EventDone))
+}
+
+func TestChatDecodeStreamWithoutReasoningDoesNotEmitReasoningLifecycle(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"Answer.\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	events := collectStreamEvents(t, sse)
+	for _, eventType := range []ir.EventType{
+		ir.EventReasoningSummaryDelta,
+		ir.EventReasoningContentDelta,
+		ir.EventThinkingDelta,
+		ir.EventReasoningDone,
+	} {
+		require.Equal(t, -1, indexEvent(events, eventType))
+	}
+	require.NotEqual(t, -1, indexEvent(events, ir.EventContentDelta))
+	require.NotEqual(t, -1, indexEvent(events, ir.EventDone))
+}
+
+func TestChatDecodeNonStreamReasoningCompletesBeforeContent(t *testing.T) {
+	body := `{"choices":[{"message":{"role":"assistant","reasoning_content":"Think.","content":"Answer."},"finish_reason":"stop"}]}`
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
+	events, err := (&handler{}).decodeHTTPResponse(resp, false)
+	require.NoError(t, err)
+	got := reasoningEvents(collectEventChannel(events))
+	require.Equal(t, []ir.EventType{
+		ir.EventReasoningSummaryDelta,
+		ir.EventReasoningContentDelta,
+		ir.EventThinkingDelta,
+		ir.EventReasoningDone,
+		ir.EventContentDelta,
+	}, eventTypesOf(got))
+}
+
+func TestChatDecodeNonStreamEmitsSingleLifecycleWithFinishReasonOnDone(t *testing.T) {
+	tests := []struct {
+		name              string
+		choices           string
+		wantFinish        string
+		wantEncodedFinish string
+	}{
+		{
+			name:              "reasoning and answer",
+			choices:           `[{"message":{"role":"assistant","reasoning_content":"Think.","content":"Answer."},"finish_reason":"stop"}]`,
+			wantFinish:        "stop",
+			wantEncodedFinish: "stop",
+		},
+		{
+			name:              "token limit",
+			choices:           `[{"message":{"content":"Partial"},"finish_reason":"length"}]`,
+			wantFinish:        "length",
+			wantEncodedFinish: "length",
+		},
+		{
+			name:              "tool calls normalize stop",
+			choices:           `[{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"stop"}]`,
+			wantFinish:        "tool_calls",
+			wantEncodedFinish: "tool_calls",
+		},
+		{
+			name:              "missing finish reason",
+			choices:           `[{"message":{"content":"Answer."}}]`,
+			wantEncodedFinish: "stop",
+		},
+		{
+			name:              "empty choices",
+			choices:           `[]`,
+			wantEncodedFinish: "stop",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"choices":` + test.choices + `,"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`
+			resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
+			events, err := (&handler{}).decodeHTTPResponse(resp, false)
+			require.NoError(t, err)
+			got := collectEventChannel(events)
+			require.Equal(t, 1, countEvents(got, ir.EventStreamStart))
+			require.Equal(t, ir.EventStreamStart, got[0].Type)
+			require.Equal(t, 1, countEvents(got, ir.EventDone))
+			require.Equal(t, ir.EventDone, got[len(got)-1].Type)
+			require.Equal(t, test.wantFinish, got[len(got)-1].FinishReason)
+			require.Equal(t, 1, countEvents(got, ir.EventUsage))
+			require.Equal(t, ir.EventUsage, got[len(got)-2].Type)
+			require.Equal(t, 3, got[len(got)-2].Usage.TotalTokens)
+			for _, event := range got[:len(got)-1] {
+				require.Empty(t, event.FinishReason)
+			}
+
+			chunks := parseChatSSE(runChatEncodeStream(t, got))
+			var finishes []string
+			for _, chunk := range chunks {
+				for _, choice := range chunk.Choices {
+					if choice.FinishReason != "" {
+						finishes = append(finishes, choice.FinishReason)
+					}
+				}
+			}
+			require.Equal(t, []string{test.wantEncodedFinish}, finishes)
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // llama.cpp `timings` usage fallback (no standard `usage` object)
 // ---------------------------------------------------------------------------
@@ -409,7 +625,7 @@ func TestChatDecodeResponse_Text(t *testing.T) {
 		events = append(events, ev)
 	}
 
-	// Should have StreamStart, ContentDelta, FinishReason, Usage, Done
+	// Should have StreamStart, ContentDelta, Usage, Done (with FinishReason).
 	if events[0].Type != ir.EventStreamStart {
 		t.Errorf("first event type = %v, want StreamStart", events[0].Type)
 	}

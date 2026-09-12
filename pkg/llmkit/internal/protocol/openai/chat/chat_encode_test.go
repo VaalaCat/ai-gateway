@@ -85,6 +85,26 @@ func parseChatSSE(raw []byte) []chatChunk {
 	return out
 }
 
+func encodeFirstAssistant(t *testing.T, req *ir.Request) map[string]any {
+	t.Helper()
+	httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{
+		BaseURL: "https://x", APIKey: "k", Model: "deepseek-reasoner",
+	})
+	require.NoError(t, err)
+
+	var raw struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	require.NoError(t, json.NewDecoder(httpReq.Body).Decode(&raw))
+	for _, message := range raw.Messages {
+		if message["role"] == string(ir.RoleAssistant) {
+			return message
+		}
+	}
+	t.Fatal("encoded request has no assistant message")
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // O3: EncodeRequest must build data: URI from MediaB64 + MimeType
 // ---------------------------------------------------------------------------
@@ -727,6 +747,124 @@ func TestChatEncode_AssistantWithEmptyThinkingEmitsEmptyString(t *testing.T) {
 	if rc.(string) != "" {
 		t.Fatalf("reasoning_content = %q, want empty string", rc)
 	}
+	require.Equal(t, "", asst["content"])
+}
+
+func TestChatEncodeRestoresReasoningContentFromEnvelope(t *testing.T) {
+	source := &ir.ReasoningContent{
+		Summary: []string{"Need inspect files."},
+		Content: []string{"Need inspect files."},
+		RawJSON: json.RawMessage(`{"reasoning_content":"Need inspect files."}`),
+	}
+	responsesRaw := convert.EncodeReasoningBlock(source, convert.ReasoningProtocolResponses)
+	var item struct {
+		EncryptedContent string `json:"encrypted_content"`
+	}
+	require.NoError(t, json.Unmarshal(responsesRaw, &item))
+
+	for _, readable := range []bool{true, false} {
+		name := "envelope only"
+		if readable {
+			name = "envelope with readable fields"
+		}
+		t.Run(name, func(t *testing.T) {
+			reasoning := &ir.ReasoningContent{Encrypted: item.EncryptedContent}
+			if readable {
+				reasoning.Summary = []string{"Need inspect files."}
+				reasoning.Content = []string{"Need inspect files."}
+				reasoning.RawJSON = responsesRaw
+			}
+			req := &ir.Request{Messages: []ir.Message{{
+				Role: ir.RoleAssistant,
+				Content: []ir.ContentBlock{{
+					Type:      ir.ContentTypeThinking,
+					Reasoning: reasoning,
+				}},
+				ToolCalls: []ir.ToolCall{{ID: "call_1", Name: "lookup", Arguments: "{}"}},
+			}}}
+			assistant := encodeFirstAssistant(t, req)
+			require.Equal(t, "Need inspect files.", assistant["reasoning_content"])
+			require.Equal(t, "", assistant["content"])
+			require.Len(t, assistant["tool_calls"], 1)
+		})
+	}
+}
+
+func TestChatEncodeReasoningFallbackPrefersContentThenSummaryThenText(t *testing.T) {
+	tests := []struct {
+		name      string
+		block     ir.ContentBlock
+		wantValue string
+	}{
+		{"content", ir.ContentBlock{Type: ir.ContentTypeThinking, Text: "text", Reasoning: &ir.ReasoningContent{Summary: []string{"summary"}, Content: []string{"content"}}}, "content"},
+		{"summary", ir.ContentBlock{Type: ir.ContentTypeThinking, Text: "text", Reasoning: &ir.ReasoningContent{Summary: []string{"summary"}}}, "summary"},
+		{"legacy text", ir.ContentBlock{Type: ir.ContentTypeThinking, Text: "text"}, "text"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{test.block}}}}
+			assistant := encodeFirstAssistant(t, request)
+			require.Equal(t, test.wantValue, assistant["reasoning_content"])
+			require.Equal(t, "", assistant["content"])
+		})
+	}
+
+	t.Run("multiple blocks preserve order", func(t *testing.T) {
+		request := &ir.Request{Messages: []ir.Message{{
+			Role: ir.RoleAssistant,
+			Content: []ir.ContentBlock{
+				{Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{Content: []string{"first"}}},
+				{Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{Summary: []string{" second"}}},
+			},
+		}}}
+		assistant := encodeFirstAssistant(t, request)
+		require.Equal(t, "first second", assistant["reasoning_content"])
+	})
+}
+
+func TestChatEncodeReasoningFallbackKeepsTextForInvalidEncryptedData(t *testing.T) {
+	tests := []struct {
+		name      string
+		encrypted string
+	}{
+		{name: "malformed llmkit envelope", encrypted: "llmkit:v1:%%%"},
+		{name: "unknown llmkit envelope version", encrypted: "llmkit:v2:not-supported"},
+		{name: "opaque non llmkit encrypted data", encrypted: "vendor-secret"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := &ir.Request{Messages: []ir.Message{{
+				Role: ir.RoleAssistant,
+				Content: []ir.ContentBlock{{
+					Type:      ir.ContentTypeThinking,
+					Text:      "readable fallback",
+					Reasoning: &ir.ReasoningContent{Encrypted: test.encrypted},
+				}},
+			}}}
+			assistant := encodeFirstAssistant(t, request)
+			require.Equal(t, "readable fallback", assistant["reasoning_content"])
+			require.Equal(t, "", assistant["content"])
+		})
+	}
+}
+
+func TestChatEncodeToolCallOnlyEmitsEmptyContent(t *testing.T) {
+	request := &ir.Request{Messages: []ir.Message{{
+		Role:      ir.RoleAssistant,
+		ToolCalls: []ir.ToolCall{{ID: "call_1", Name: "lookup", Arguments: "{}"}},
+	}}}
+	assistant := encodeFirstAssistant(t, request)
+	value, exists := assistant["content"]
+	require.True(t, exists)
+	require.Equal(t, "", value)
+	require.NotContains(t, assistant, "reasoning_content")
+}
+
+func TestChatEncodeNativeEmptyAssistantOmitsContent(t *testing.T) {
+	request := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant}}}
+	assistant := encodeFirstAssistant(t, request)
+	require.NotContains(t, assistant, "content")
+	require.NotContains(t, assistant, "reasoning_content")
 }
 
 func TestChatEncode_NoThinkingNoReasoningContentField(t *testing.T) {

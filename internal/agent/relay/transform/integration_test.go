@@ -27,7 +27,7 @@ func runClaudeToOpenAIChat(t *testing.T, claudeReqBody string, sendBackThinking 
 	if sendBackThinking {
 		ApplyThinkingPassthrough(request.Messages)
 	} else {
-		ApplyThinkingStrip(request.Messages)
+		request.Messages = ApplyThinkingStrip(request.Messages)
 	}
 	encoded, err := codec.EncodeRequest(llmkit.EncodeRequestInput{
 		Request: request,

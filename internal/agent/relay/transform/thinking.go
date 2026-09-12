@@ -21,22 +21,31 @@ func ApplyThinkingPassthrough(messages []llmkit.Message) {
 	}
 }
 
-// ApplyThinkingStrip 剥离 assistant 消息上的所有 thinking block。
-// 逻辑从 ThinkingStripTransformer 抽出，行为不变。
-func ApplyThinkingStrip(messages []llmkit.Message) {
-	for i := range messages {
-		m := &messages[i]
-		if m.Role != llmkit.RoleAssistant {
-			continue
-		}
-		filtered := m.Content[:0]
-		for _, b := range m.Content {
-			if b.Type != llmkit.ContentTypeThinking {
-				filtered = append(filtered, b)
+// ApplyThinkingStrip 剥离 assistant 消息上的所有 thinking block，并删除仅因本次
+// 剥离而变空的 assistant shell。
+func ApplyThinkingStrip(messages []llmkit.Message) []llmkit.Message {
+	result := messages[:0]
+	for _, message := range messages {
+		hadThinking := false
+		if message.Role == llmkit.RoleAssistant {
+			filtered := message.Content[:0]
+			for _, block := range message.Content {
+				if block.Type == llmkit.ContentTypeThinking {
+					hadThinking = true
+					continue
+				}
+				filtered = append(filtered, block)
 			}
+			message.Content = filtered
 		}
-		m.Content = filtered
+
+		strippedShell := hadThinking && len(message.Content) == 0 && len(message.ToolCalls) == 0 &&
+			message.ToolCallID == "" && len(message.RawJSON) == 0
+		if !strippedShell {
+			result = append(result, message)
+		}
 	}
+	return result
 }
 
 func hasThinkingBlock(blocks []llmkit.ContentBlock) bool {

@@ -271,7 +271,7 @@ describe("API request Trace dialog", () => {
     expect(source.textContent).not.toContain("0 / 0");
   });
 
-  it("escapes captured header and body text inside pre elements", () => {
+  it("escapes captured header and body text inside trace blocks", () => {
     const unsafe = '</pre><script data-unsafe="yes">alert(1)</script>';
     state.trace = {
       data: trace({
@@ -285,16 +285,17 @@ describe("API request Trace dialog", () => {
     renderDialog();
 
     const source = screen.getByText("sourceRequestCapture").closest("section")!;
-    const headerBlock = source.querySelector('[data-slot="trace-capture-json"] pre');
+    const headerBlock = source.querySelector(
+      '[data-slot="trace-capture-json"] [data-slot="trace-json-tree"]',
+    );
     const bodyBlock = source.querySelector('[data-slot="trace-capture-body"] pre');
     expect(headerBlock).toHaveTextContent("</pre><script");
     expect(bodyBlock).toHaveTextContent(unsafe);
     expect(document.querySelector('script[data-unsafe="yes"]')).toBeNull();
-    expect(headerBlock?.closest("pre")).toBe(headerBlock);
     expect(bodyBlock?.closest("pre")).toBe(bodyBlock);
   });
 
-  it("pretty-prints JSON and scrolls long captures without wrapping", () => {
+  it("renders JSON trees and contains long captures inside their own scrollers", () => {
     state.trace = {
       data: trace({
         source_request_headers: { long: ["x".repeat(2_000)] },
@@ -312,14 +313,29 @@ describe("API request Trace dialog", () => {
 
     const source = screen.getByText("sourceRequestCapture").closest("section")!;
     for (const block of [
-      source.querySelector('[data-slot="trace-capture-json"] pre'),
-      source.querySelector('[data-slot="trace-capture-body"] pre'),
+      source.querySelector(
+        '[data-slot="trace-capture-json"] [data-slot="trace-json-tree"]',
+      ),
+      source.querySelector(
+        '[data-slot="trace-capture-body"] [data-slot="trace-json-tree"]',
+      ),
     ]) {
-      expect(block).toHaveClass("max-h-60", "overflow-auto", "whitespace-pre");
+      expect(block).toHaveClass(
+        "max-h-60",
+        "w-full",
+        "min-w-0",
+        "max-w-full",
+        "overflow-auto",
+      );
       expect(block).not.toHaveClass("whitespace-pre-wrap", "break-all");
+      expect(block?.firstElementChild).toHaveClass("whitespace-pre");
     }
-    expect(source.querySelector('[data-slot="trace-capture-body"] pre')).toHaveTextContent(
-      /^\{\s+"payload": "y+/,
+    expect(
+      source.querySelector(
+        '[data-slot="trace-capture-body"] [data-slot="trace-json-tree"]',
+      ),
+    ).toHaveTextContent(
+      /^\{"payload":"y+/,
     );
   });
 

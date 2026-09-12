@@ -34,7 +34,7 @@ func (s *StepThinkingStrip) Key() string { return "thinking_strip" }
 
 func (s *StepThinkingStrip) Apply(_ context.Context, p *Pass) error {
 	if !s.rules.SendBack(p.Working.Model) {
-		transform.ApplyThinkingStrip(p.Working.Messages)
+		p.Working.Messages = transform.ApplyThinkingStrip(p.Working.Messages)
 	}
 	return nil
 }

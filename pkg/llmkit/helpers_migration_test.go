@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	codec "github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/stretchr/testify/require"
 )
 
 type testChannelConfig struct {
@@ -560,6 +561,25 @@ func assertGoldenSSE(t *testing.T, got string, goldenPath string) {
 		t.Errorf("output differs from golden file %s\n--- got (first 500 chars) ---\n%s\n--- want (first 500 chars) ---\n%s",
 			goldenPath, truncate(got, 500), truncate(string(expected), 500))
 	}
+}
+
+func assertGoldenJSON(t *testing.T, got any, goldenPath string) {
+	t.Helper()
+	fullPath := filepath.Join("testdata", "golden", goldenPath)
+	actual, err := json.MarshalIndent(got, "", "  ")
+	require.NoError(t, err)
+	actual = append(actual, '\n')
+
+	if *updateGolden {
+		require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0o755))
+		require.NoError(t, os.WriteFile(fullPath, actual, 0o644))
+		t.Logf("updated golden file: %s", fullPath)
+		return
+	}
+
+	expected, err := os.ReadFile(fullPath)
+	require.NoErrorf(t, err, "read golden file %s; run with -update to create", fullPath)
+	require.JSONEq(t, string(expected), string(actual), "golden file: %s", fullPath)
 }
 
 func truncate(s string, n int) string {

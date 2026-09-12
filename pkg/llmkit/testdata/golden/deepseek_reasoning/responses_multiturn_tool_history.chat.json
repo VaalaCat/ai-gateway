@@ -1,0 +1,56 @@
+{
+  "messages": [
+    {
+      "content": "Inspect the project.",
+      "role": "user"
+    },
+    {
+      "content": "I will inspect the project.",
+      "reasoning_content": "Need inspect files.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"cmd\":\"ls\"}",
+            "name": "exec_command"
+          },
+          "id": "call_a",
+          "index": 0,
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "README.md\nsrc",
+      "role": "tool",
+      "tool_call_id": "call_a"
+    },
+    {
+      "content": "The project contains README.md and src.",
+      "reasoning_content": "Tool returned files.",
+      "role": "assistant"
+    }
+  ],
+  "model": "deepseek-reasoner",
+  "stream": false,
+  "tools": [
+    {
+      "function": {
+        "description": "",
+        "name": "exec_command",
+        "parameters": {
+          "properties": {
+            "cmd": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cmd"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

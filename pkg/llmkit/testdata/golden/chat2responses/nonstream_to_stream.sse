@@ -13,21 +13,15 @@ data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"
 event: response.output_text.delta
 data: {"content_index":0,"delta":"Hello! How can I help?","item_id":"msg_be3fbb7a93b5f563b03762ba","logprobs":[],"output_index":0,"sequence_number":4,"type":"response.output_text.delta"}
 
-event: response.created
-data: {"type":"response.created","sequence_number":5,"response":{"id":"resp_be3fbb7a93b5f563b03762ba","object":"response","model":"gpt-4o","status":"in_progress","output":[]}}
-
-event: response.in_progress
-data: {"type":"response.in_progress","sequence_number":6,"response":{"id":"resp_be3fbb7a93b5f563b03762ba","object":"response","model":"gpt-4o","status":"in_progress","output":[]}}
-
 event: response.output_text.done
-data: {"content_index":0,"item_id":"msg_be3fbb7a93b5f563b03762ba","logprobs":[],"output_index":0,"sequence_number":7,"text":"Hello! How can I help?","type":"response.output_text.done"}
+data: {"content_index":0,"item_id":"msg_be3fbb7a93b5f563b03762ba","logprobs":[],"output_index":0,"sequence_number":5,"text":"Hello! How can I help?","type":"response.output_text.done"}
 
 event: response.content_part.done
-data: {"type":"response.content_part.done","sequence_number":8,"part":{"type":"output_text","text":"Hello! How can I help?","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_be3fbb7a93b5f563b03762ba"}
+data: {"type":"response.content_part.done","sequence_number":6,"part":{"type":"output_text","text":"Hello! How can I help?","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_be3fbb7a93b5f563b03762ba"}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","sequence_number":9,"item":{"type":"message","id":"msg_be3fbb7a93b5f563b03762ba","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help?","annotations":[]}]},"output_index":0}
+data: {"type":"response.output_item.done","sequence_number":7,"item":{"type":"message","id":"msg_be3fbb7a93b5f563b03762ba","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help?","annotations":[]}]},"output_index":0}
 
 event: response.completed
-data: {"response":{"id":"resp_be3fbb7a93b5f563b03762ba","model":"gpt-4o","object":"response","output":[{"type":"message","id":"msg_be3fbb7a93b5f563b03762ba","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help?","annotations":[]}]}],"status":"completed","usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30,"input_tokens_details":{"cached_tokens":5}}},"sequence_number":10,"type":"response.completed"}
+data: {"response":{"id":"resp_be3fbb7a93b5f563b03762ba","model":"gpt-4o","object":"response","output":[{"type":"message","id":"msg_be3fbb7a93b5f563b03762ba","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help?","annotations":[]}]}],"status":"completed","usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30,"input_tokens_details":{"cached_tokens":5}}},"sequence_number":8,"type":"response.completed"}
 

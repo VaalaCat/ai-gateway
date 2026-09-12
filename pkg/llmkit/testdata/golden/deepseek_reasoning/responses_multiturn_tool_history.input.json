@@ -1,0 +1,23 @@
+{
+  "model": "deepseek-reasoner",
+  "input": [
+    {"type":"message","role":"user","content":"Inspect the project."},
+    {
+      "type":"reasoning",
+      "summary":[{"type":"summary_text","text":"Need inspect files."}],
+      "content":[{"type":"reasoning_text","text":"Need inspect files."}],
+      "encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6Im9wZW5haV9jaGF0IiwiZGF0YSI6eyJyZWFzb25pbmdfY29udGVudCI6Ik5lZWQgaW5zcGVjdCBmaWxlcy4ifX0"
+    },
+    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect the project."}]},
+    {"type":"function_call","call_id":"call_a","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+    {"type":"function_call_output","call_id":"call_a","output":"README.md\nsrc"},
+    {
+      "type":"reasoning",
+      "summary":[{"type":"summary_text","text":"Tool returned files."}],
+      "content":[{"type":"reasoning_text","text":"Tool returned files."}],
+      "encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6Im9wZW5haV9jaGF0IiwiZGF0YSI6eyJyZWFzb25pbmdfY29udGVudCI6IlRvb2wgcmV0dXJuZWQgZmlsZXMuIn19"
+    },
+    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"The project contains README.md and src."}]}
+  ],
+  "tools":[{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}]
+}

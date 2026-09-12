@@ -287,19 +287,14 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 		Created: oaiResp.Created,
 	}
 
+	var finishReason string
 	if len(oaiResp.Choices) > 0 {
 		choice := oaiResp.Choices[0]
 		toolCallCount := 0
 		if choice.Message != nil {
-			if choice.Message.ReasoningContent != "" {
-				ch <- ir.Event{
-					Type: ir.EventThinkingDelta,
-					Delta: &ir.DeltaPayload{
-						ContentType: ir.ContentTypeThinking,
-						Text:        choice.Message.ReasoningContent,
-					},
-				}
-			}
+			var reasoning chatReasoningAccumulator
+			reasoning.append(ch, choice.Message.ReasoningContent)
+			reasoning.finish(ch, ir.ReasoningCompleted)
 			if choice.Message.Content != "" {
 				ch <- ir.Event{
 					Type: ir.EventContentDelta,
@@ -332,7 +327,7 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 			}
 		}
 		if choice.FinishReason != nil {
-			ch <- ir.Event{FinishReason: canonicalChatFinishReason(*choice.FinishReason, toolCallCount)}
+			finishReason = canonicalChatFinishReason(*choice.FinishReason, toolCallCount)
 		}
 	}
 
@@ -340,7 +335,8 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 		ch <- ir.Event{Type: ir.EventUsage, Usage: u}
 	}
 
-	ch <- ir.Event{Type: ir.EventDone}
+	// behavior change: finish metadata belongs to Done, not a zero-Type start event.
+	ch <- ir.Event{Type: ir.EventDone, FinishReason: finishReason}
 }
 
 // usageFromWire 从上游响应的 usage / timings 提取 IR 用量。
@@ -388,6 +384,9 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	firstChunk := true
 	var finishReason string // accumulated from stream chunks, attached to EventDone
+	var reasoning chatReasoningAccumulator
+	sawDone := false
+	sawFinishReason := false
 	// toolStates tracks per-index aggregation for new Start/ArgsDelta/End events.
 	toolStates := map[int]*chatToolCallAggState{} // key: tool_calls[].index
 	for scanner.Scan() {
@@ -402,6 +401,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		data = strings.TrimLeft(data, " ")
 
 		if data == sseconsts.ChatStreamDone {
+			sawDone = true
 			break
 		}
 
@@ -426,14 +426,9 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		if len(chunk.Choices) > 0 {
 			choice := chunk.Choices[0]
 			if choice.Delta != nil {
-				if choice.Delta.ReasoningContent != "" {
-					ch <- ir.Event{
-						Type: ir.EventThinkingDelta,
-						Delta: &ir.DeltaPayload{
-							ContentType: ir.ContentTypeThinking,
-							Text:        choice.Delta.ReasoningContent,
-						},
-					}
+				reasoning.append(ch, choice.Delta.ReasoningContent)
+				if choice.Delta.Content != "" || choice.Delta.Refusal != "" || len(choice.Delta.ToolCalls) > 0 {
+					reasoning.finish(ch, ir.ReasoningCompleted)
 				}
 				if choice.Delta.Content != "" {
 					ch <- ir.Event{
@@ -485,6 +480,8 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			// states regardless of whether the provider calls the reason "stop" or
 			// "tool_calls"; forced named tools commonly use the former.
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
+				sawFinishReason = true
+				reasoning.finish(ch, ir.ReasoningCompleted)
 				completed := completeOpenChatToolCalls(ch, toolStates)
 				finishReason = canonicalChatFinishReason(*choice.FinishReason, completed)
 			}
@@ -496,7 +493,12 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	}
 
 	if err := scanner.Err(); err != nil {
+		reasoning.finish(ch, ir.ReasoningInterrupted)
 		ch <- ir.Event{Type: ir.EventError, Error: &ir.ErrorPayload{Message: "stream read error: " + err.Error()}}
+	} else if sawDone || sawFinishReason {
+		reasoning.finish(ch, ir.ReasoningCompleted)
+	} else {
+		reasoning.finish(ch, ir.ReasoningInterrupted)
 	}
 	completed := completeOpenChatToolCalls(ch, toolStates)
 	finishReason = canonicalChatFinishReason(finishReason, completed)

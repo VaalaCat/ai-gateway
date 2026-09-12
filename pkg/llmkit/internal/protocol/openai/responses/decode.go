@@ -54,6 +54,13 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 			// Try array of input items (messages or function_call_output)
 			var rawItems []json.RawMessage
 			if err := json.Unmarshal(raw.Input, &rawItems); err == nil {
+				var assistantTurn responsesAssistantTurn
+				flushAssistantTurn := func() {
+					if message, ok := assistantTurn.flush(); ok {
+						req.Messages = append(req.Messages, message)
+					}
+				}
+
 				for _, rawItem := range rawItems {
 					// Peek at the "type" field to determine the item kind
 					var peek struct {
@@ -62,6 +69,7 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 					json.Unmarshal(rawItem, &peek)
 
 					if peek.Type == "function_call_output" {
+						flushAssistantTurn()
 						var fco respFunctionCallOutputInput
 						decoder := json.NewDecoder(bytes.NewReader(rawItem))
 						decoder.UseNumber()
@@ -86,16 +94,11 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 					if peek.Type == "function_call" {
 						var fc respFunctionCallInput
 						if err := json.Unmarshal(rawItem, &fc); err == nil {
-							req.Messages = append(req.Messages, ir.Message{
-								Role: ir.RoleAssistant,
-								ToolCalls: []ir.ToolCall{
-									{
-										ID:        fc.CallID,
-										Name:      fc.Name,
-										Namespace: fc.Namespace,
-										Arguments: fc.Arguments,
-									},
-								},
+							assistantTurn.addToolCall(ir.ToolCall{
+								ID:        fc.CallID,
+								Name:      fc.Name,
+								Namespace: fc.Namespace,
+								Arguments: fc.Arguments,
 							})
 						}
 						continue
@@ -109,20 +112,22 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 							if len(readable) == 0 {
 								readable = reasoning.Summary
 							}
-							req.Messages = append(req.Messages, ir.Message{
-								Role: ir.RoleAssistant,
-								Content: []ir.ContentBlock{{
-									Type:      ir.ContentTypeThinking,
-									Text:      strings.Join(readable, ""),
-									Reasoning: reasoning,
-								}},
-							})
+							block := ir.ContentBlock{
+								Type:      ir.ContentTypeThinking,
+								Text:      strings.Join(readable, ""),
+								Reasoning: reasoning,
+							}
+							if !assistantTurn.addReasoning(block) {
+								flushAssistantTurn()
+								assistantTurn.addReasoning(block)
+							}
 						}
 						continue
 					}
 
 					// Unknown input item types: preserve as RawJSON for passthrough
 					if peek.Type != "" && peek.Type != "message" {
+						flushAssistantTurn()
 						req.Messages = append(req.Messages, ir.Message{
 							RawJSON: rawItem,
 						})
@@ -190,8 +195,17 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 							}
 						}
 					}
-					req.Messages = append(req.Messages, msg)
+					if msg.Role == ir.RoleAssistant {
+						if !assistantTurn.addMessage(msg.Content) {
+							flushAssistantTurn()
+							assistantTurn.addMessage(msg.Content)
+						}
+					} else {
+						flushAssistantTurn()
+						req.Messages = append(req.Messages, msg)
+					}
 				}
+				flushAssistantTurn()
 			}
 		}
 	}

@@ -1,0 +1,12 @@
+{
+  "id":"chatcmpl-deepseek-answer-nonstream",
+  "object":"chat.completion",
+  "created":1789000002,
+  "model":"deepseek-reasoner",
+  "choices":[{
+    "index":0,
+    "message":{"role":"assistant","reasoning_content":"Need inspect files.","content":"Inspection complete."},
+    "finish_reason":"stop"
+  }],
+  "usage":{"prompt_tokens":20,"completion_tokens":8,"total_tokens":28,"completion_tokens_details":{"reasoning_tokens":5}}
+}

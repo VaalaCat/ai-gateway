@@ -88,8 +88,8 @@ func TestClientCallNonStreamSuccess(t *testing.T) {
 	for event := range events {
 		got = append(got, event)
 	}
-	if len(got) != 5 {
-		t.Fatalf("event count = %d, want 5: %#v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("event count = %d, want 4: %#v", len(got), got)
 	}
 	if got[0].Type != EventStreamStart || got[0].Model != "provider-model" {
 		t.Fatalf("first event = %#v, want stream start for provider-model", got[0])
@@ -97,8 +97,11 @@ func TestClientCallNonStreamSuccess(t *testing.T) {
 	if got[1].Type != EventContentDelta || got[1].Delta == nil || got[1].Delta.Text != "hello" {
 		t.Fatalf("content event = %#v, want hello delta", got[1])
 	}
-	if got[4].Type != EventDone {
-		t.Fatalf("last event type = %v, want EventDone", got[4].Type)
+	if got[2].Type != EventUsage || got[2].Usage == nil || got[2].Usage.TotalTokens != 3 {
+		t.Fatalf("usage event = %#v, want 3 total tokens before done", got[2])
+	}
+	if got[3].Type != EventDone || got[3].FinishReason != "stop" {
+		t.Fatalf("last event = %#v, want EventDone with stop finish reason", got[3])
 	}
 	select {
 	case <-body.closed:

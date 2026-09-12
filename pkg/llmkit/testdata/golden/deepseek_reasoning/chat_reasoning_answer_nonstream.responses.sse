@@ -1,0 +1,48 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_e01632042a93678e58be8b0d","object":"response","model":"deepseek-reasoner","status":"in_progress","output":[]}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_e01632042a93678e58be8b0d","object":"response","model":"deepseek-reasoner","status":"in_progress","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_e01632042a93678e58be8b0d0","status":"in_progress"},"output_index":0}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"Need inspect files.","item_id":"rs_e01632042a93678e58be8b0d0","output_index":0,"sequence_number":3,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":4,"part":{"type":"reasoning_text"},"output_index":0,"content_index":0,"item_id":"rs_e01632042a93678e58be8b0d0"}
+
+event: response.reasoning_text.delta
+data: {"content_index":0,"delta":"Need inspect files.","item_id":"rs_e01632042a93678e58be8b0d0","output_index":0,"sequence_number":5,"type":"response.reasoning_text.delta"}
+
+event: response.reasoning_text.done
+data: {"content_index":0,"item_id":"rs_e01632042a93678e58be8b0d0","output_index":0,"sequence_number":6,"text":"Need inspect files.","type":"response.reasoning_text.done"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":7,"part":{"type":"reasoning_text","text":"Need inspect files."},"output_index":0,"content_index":0,"item_id":"rs_e01632042a93678e58be8b0d0"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"text":"Need inspect files.","type":"reasoning_text"}],"encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6Im9wZW5haV9jaGF0IiwiZGF0YSI6eyJyZWFzb25pbmdfY29udGVudCI6Ik5lZWQgaW5zcGVjdCBmaWxlcy4ifX0","id":"rs_e01632042a93678e58be8b0d0","status":"completed","summary":[{"text":"Need inspect files.","type":"summary_text"}],"type":"reasoning"},"output_index":0,"sequence_number":8,"type":"response.output_item.done"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":9,"item":{"type":"message","id":"msg_e01632042a93678e58be8b0d","status":"in_progress","role":"assistant"},"output_index":1}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":10,"part":{"type":"output_text","annotations":[]},"output_index":1,"content_index":0,"item_id":"msg_e01632042a93678e58be8b0d"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"Inspection complete.","item_id":"msg_e01632042a93678e58be8b0d","logprobs":[],"output_index":1,"sequence_number":11,"type":"response.output_text.delta"}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"msg_e01632042a93678e58be8b0d","logprobs":[],"output_index":1,"sequence_number":12,"text":"Inspection complete.","type":"response.output_text.done"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":13,"part":{"type":"output_text","text":"Inspection complete.","annotations":[]},"output_index":1,"content_index":0,"item_id":"msg_e01632042a93678e58be8b0d"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":14,"item":{"type":"message","id":"msg_e01632042a93678e58be8b0d","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Inspection complete.","annotations":[]}]},"output_index":1}
+
+event: response.completed
+data: {"response":{"id":"resp_e01632042a93678e58be8b0d","model":"deepseek-reasoner","object":"response","output":[{"content":[{"text":"Need inspect files.","type":"reasoning_text"}],"encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6Im9wZW5haV9jaGF0IiwiZGF0YSI6eyJyZWFzb25pbmdfY29udGVudCI6Ik5lZWQgaW5zcGVjdCBmaWxlcy4ifX0","id":"rs_e01632042a93678e58be8b0d0","status":"completed","summary":[{"text":"Need inspect files.","type":"summary_text"}],"type":"reasoning"},{"type":"message","id":"msg_e01632042a93678e58be8b0d","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Inspection complete.","annotations":[]}]}],"status":"completed","usage":{"input_tokens":20,"output_tokens":8,"total_tokens":28}},"sequence_number":15,"type":"response.completed"}
+

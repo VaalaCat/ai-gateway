@@ -51,3 +51,16 @@ func TestStepThinkingStrip_StripsWhenSendBackFalse(t *testing.T) {
 		}
 	}
 }
+
+func TestStepThinkingStrip_RemovesReasoningOnlyAssistantShell(t *testing.T) {
+	s := &StepThinkingStrip{rules: mkThinkingRules(t, "", false)}
+	p := &Pass{Working: &llmkit.Request{Model: "upstream", Messages: []llmkit.Message{
+		{Role: llmkit.RoleAssistant, Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeThinking, Text: "secret"}}},
+	}}}
+	if err := s.Apply(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Working.Messages) != 0 {
+		t.Fatalf("message count = %d, want reasoning-only assistant shell removed", len(p.Working.Messages))
+	}
+}

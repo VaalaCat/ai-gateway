@@ -1,0 +1,20 @@
+{
+  "messages": [
+    {
+      "content": "answer one",
+      "reasoning_content": "content one",
+      "role": "assistant"
+    },
+    {
+      "content": "continue",
+      "role": "user"
+    },
+    {
+      "content": "answer two",
+      "reasoning_content": "summary two",
+      "role": "assistant"
+    }
+  ],
+  "model": "deepseek-reasoner",
+  "stream": false
+}

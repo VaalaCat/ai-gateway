@@ -80,14 +80,32 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		// codec 不感知 cfg.SendBackThinking 开关——transformer 已经决定了
 		// IR 里有没有 ContentTypeThinking blocks。
 		nonThinkingContent := m.Content
+		hasThinking := false
 		if m.Role == ir.RoleAssistant {
 			var thinkingText strings.Builder
-			var hasThinking bool
 			var rest []ir.ContentBlock
 			for _, cb := range m.Content {
 				if cb.Type == ir.ContentTypeThinking {
 					hasThinking = true
-					thinkingText.WriteString(cb.Text)
+					if cb.Reasoning == nil {
+						thinkingText.WriteString(cb.Text)
+						continue
+					}
+					raw := convert.EncodeReasoningBlock(cb.Reasoning, convert.ReasoningProtocolOpenAIChat)
+					var restored struct {
+						ReasoningContent *string `json:"reasoning_content"`
+					}
+					if json.Unmarshal(raw, &restored) == nil && restored.ReasoningContent != nil && *restored.ReasoningContent != "" {
+						thinkingText.WriteString(*restored.ReasoningContent)
+						continue
+					}
+					if len(cb.Reasoning.Content) > 0 {
+						thinkingText.WriteString(strings.Join(cb.Reasoning.Content, ""))
+					} else if len(cb.Reasoning.Summary) > 0 {
+						thinkingText.WriteString(strings.Join(cb.Reasoning.Summary, ""))
+					} else {
+						thinkingText.WriteString(cb.Text)
+					}
 				} else {
 					rest = append(rest, cb)
 				}
@@ -138,10 +156,10 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 			}
 			b, _ := json.Marshal(blocks)
 			om.Content = b
-		} else if len(nonThinkingContent) > 0 {
+		} else if len(nonThinkingContent) > 0 || hasThinking || len(m.ToolCalls) > 0 {
 			// The message carried only empty text blocks; emit a legal empty string
 			// rather than an illegal {"type":"text"} array or an omitted content field
-			// (preserves the previous single-empty-block behavior of content:"").
+			// (also keeps DeepSeek assistant reasoning/tool-call turns valid).
 			om.Content = json.RawMessage(`""`)
 		}
 

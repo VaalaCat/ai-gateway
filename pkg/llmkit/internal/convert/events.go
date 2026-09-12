@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	ReasoningProtocolClaude    = "claude"
-	ReasoningProtocolResponses = "responses"
-	reasoningEnvelopePrefix    = "llmkit:v1:"
+	ReasoningProtocolClaude     = "claude"
+	ReasoningProtocolResponses  = "responses"
+	ReasoningProtocolOpenAIChat = "openai_chat"
+	reasoningEnvelopePrefix     = "llmkit:v1:"
 )
 
 type reasoningEnvelope struct {
@@ -22,8 +23,9 @@ type reasoningEnvelope struct {
 }
 
 // EncodeReasoningBlock projects protocol-neutral reasoning into a complete
-// Claude thinking block or Responses reasoning item. Unknown source fields are
-// preserved, while structured fields remain authoritative.
+// Claude thinking block, Responses reasoning item, or OpenAI Chat
+// reasoning_content representation. Unknown source fields are preserved, while
+// structured fields remain authoritative.
 func EncodeReasoningBlock(reasoning *ir.ReasoningContent, targetProtocol string) json.RawMessage {
 	if reasoning == nil {
 		return nil
@@ -72,20 +74,25 @@ func EncodeReasoningBlock(reasoning *ir.ReasoningContent, targetProtocol string)
 }
 
 func reasoningProtocol(raw json.RawMessage) string {
-	var value struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(raw, &value) != nil {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
 		return ""
 	}
-	switch value.Type {
+	var typ string
+	_ = json.Unmarshal(object["type"], &typ)
+	switch typ {
 	case "thinking":
 		return ReasoningProtocolClaude
 	case "reasoning":
 		return ReasoningProtocolResponses
-	default:
-		return ""
 	}
+	if value, exists := object["reasoning_content"]; exists {
+		var text string
+		if json.Unmarshal(value, &text) == nil {
+			return ReasoningProtocolOpenAIChat
+		}
+	}
+	return ""
 }
 
 func encodeReasoningEnvelope(protocol string, raw json.RawMessage) string {
@@ -105,7 +112,7 @@ func decodeReasoningEnvelope(value string) (reasoningEnvelope, bool, bool) {
 		return reasoningEnvelope{}, false, true
 	}
 	var envelope reasoningEnvelope
-	if json.Unmarshal(decoded, &envelope) != nil || (envelope.Protocol != ReasoningProtocolClaude && envelope.Protocol != ReasoningProtocolResponses) || reasoningProtocol(envelope.Data) != envelope.Protocol {
+	if json.Unmarshal(decoded, &envelope) != nil || (envelope.Protocol != ReasoningProtocolClaude && envelope.Protocol != ReasoningProtocolResponses && envelope.Protocol != ReasoningProtocolOpenAIChat) || reasoningProtocol(envelope.Data) != envelope.Protocol {
 		return reasoningEnvelope{}, false, true
 	}
 	return envelope, true, false
@@ -116,9 +123,14 @@ func reasoningNativeEncrypted(raw json.RawMessage, protocol string) string {
 	if json.Unmarshal(raw, &object) != nil {
 		return ""
 	}
-	field := "signature"
-	if protocol == ReasoningProtocolResponses {
+	field := ""
+	switch protocol {
+	case ReasoningProtocolClaude:
+		field = "signature"
+	case ReasoningProtocolResponses:
 		field = "encrypted_content"
+	default:
+		return ""
 	}
 	var encrypted string
 	_ = json.Unmarshal(object[field], &encrypted)
@@ -130,7 +142,8 @@ func overlayReasoning(raw json.RawMessage, protocol string, reasoning *ir.Reason
 	if json.Unmarshal(raw, &object) != nil || object == nil {
 		object = make(map[string]json.RawMessage)
 	}
-	if protocol == ReasoningProtocolClaude {
+	switch protocol {
+	case ReasoningProtocolClaude:
 		object["type"] = json.RawMessage(`"thinking"`)
 		readable := reasoning.Content
 		if len(readable) == 0 {
@@ -138,11 +151,21 @@ func overlayReasoning(raw json.RawMessage, protocol string, reasoning *ir.Reason
 		}
 		object["thinking"], _ = json.Marshal(strings.Join(readable, ""))
 		setReasoningString(object, "signature", encrypted)
-	} else {
+	case ReasoningProtocolResponses:
 		object["type"] = json.RawMessage(`"reasoning"`)
 		object["summary"] = overlayReasoningParts(object["summary"], "summary_text", reasoning.Summary)
 		object["content"] = overlayReasoningParts(object["content"], "reasoning_text", reasoning.Content)
 		setReasoningString(object, "encrypted_content", encrypted)
+	case ReasoningProtocolOpenAIChat:
+		readable := reasoning.Content
+		if len(readable) == 0 {
+			readable = reasoning.Summary
+		}
+		// behavior change: absent readable parts preserve restored Chat text;
+		// an explicitly present empty part still overrides it.
+		if len(readable) > 0 || object["reasoning_content"] == nil {
+			object["reasoning_content"], _ = json.Marshal(strings.Join(readable, ""))
+		}
 	}
 	encoded, _ := json.Marshal(object)
 	return encoded

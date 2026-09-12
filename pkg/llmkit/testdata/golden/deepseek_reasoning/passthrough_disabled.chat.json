@@ -1,0 +1,38 @@
+{
+  "messages": [
+    {
+      "content": "next",
+      "role": "user"
+    },
+    {
+      "content": "visible answer",
+      "role": "assistant"
+    },
+    {
+      "content": "run tool",
+      "role": "user"
+    },
+    {
+      "content": "",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "lookup"
+          },
+          "id": "call_a",
+          "index": 0,
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "ok",
+      "role": "tool",
+      "tool_call_id": "call_a"
+    }
+  ],
+  "model": "deepseek-reasoner",
+  "stream": false
+}

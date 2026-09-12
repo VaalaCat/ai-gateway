@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-deepseek-tool","object":"chat.completion.chunk","created":1789000001,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Need run a command."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-deepseek-tool","object":"chat.completion.chunk","created":1789000001,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_deepseek_1","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-deepseek-tool","object":"chat.completion.chunk","created":1789000001,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"pwd\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-deepseek-tool","object":"chat.completion.chunk","created":1789000001,"model":"deepseek-reasoner","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":30,"completion_tokens":10,"total_tokens":40,"completion_tokens_details":{"reasoning_tokens":6}}}
+
+data: [DONE]

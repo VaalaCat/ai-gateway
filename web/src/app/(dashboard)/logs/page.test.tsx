@@ -170,6 +170,7 @@ it("writes a header date change as one atomic exclusive filter range", () => {
 it("keeps log-only filters, auto refresh, and column visibility inside the table toolbar", () => {
   render(<LogsPage />);
 
+  expect(state.dataTableProps?.expandedRowWidth).toBe("viewport");
   expect(state.dataTableProps?.toolbar).toEqual(expect.any(Function));
   expect(state.filterableToolbarProps?.spec).toMatchObject({
     model_name: expect.any(Object),
@@ -218,6 +219,41 @@ it("shows one debug-file download action only for a trace-bearing expanded log",
 
   expanded.rerender(renderExpandedRow?.({ original: { ...traceLog, has_trace: false } }) ?? null);
   expect(screen.queryByRole("button", { name: "downloadDebugFile" })).not.toBeInTheDocument();
+});
+
+it.each([
+  {
+    field: "request_id",
+    value: "req-88901425-102a-4276-ad5e-7389b59ba576",
+  },
+  {
+    field: "token_name",
+    value: "production-token-with-a-continuous-name-that-does-not-wrap",
+  },
+  {
+    field: "model_name",
+    value: "gpt-5",
+  },
+] as const)("keeps the expanded $field value inside its detail cell", ({ field, value }) => {
+  render(<LogsPage />);
+  const renderExpandedRow = state.dataTableProps?.renderExpandedRow as
+    | ((row: { original: Record<string, unknown> }) => React.ReactNode)
+    | undefined;
+  const log = {
+    id: 7,
+    request_id: "req-default",
+    token_name: "token-default",
+    model_name: "model-default",
+    [field]: value,
+  };
+
+  render(renderExpandedRow?.({ original: log }) ?? null);
+
+  const detailValue = screen.getByTitle(value);
+  expect(detailValue).toHaveClass("min-w-0", "truncate");
+  expect(detailValue.parentElement).toHaveClass("flex", "min-w-0");
+  expect(detailValue.previousElementSibling).toHaveClass("shrink-0");
+  expect(detailValue).toHaveTextContent(value);
 });
 
 it("keeps non-date filters out of insights and uses the header as the sole manual refresh", () => {
