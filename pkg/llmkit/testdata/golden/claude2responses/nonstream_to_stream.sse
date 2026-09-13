@@ -1,33 +1,33 @@
 event: response.created
-data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_d05d5378c6f0a0c6d15f541c","object":"response","status":"in_progress","output":[]}}
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_36f16444fa22e31ac51dede1","object":"response","status":"in_progress","output":[]}}
 
 event: response.in_progress
-data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_d05d5378c6f0a0c6d15f541c","object":"response","status":"in_progress","output":[]}}
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_36f16444fa22e31ac51dede1","object":"response","status":"in_progress","output":[]}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"message","id":"msg_d05d5378c6f0a0c6d15f541c","status":"in_progress","role":"assistant"},"output_index":0}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"message","id":"msg_36f16444fa22e31ac51dede1","status":"in_progress","role":"assistant"},"output_index":0}
 
 event: response.content_part.added
-data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"output_text","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_d05d5378c6f0a0c6d15f541c"}
+data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"output_text","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_36f16444fa22e31ac51dede1"}
 
 event: response.output_text.delta
-data: {"content_index":0,"delta":"Hello! How can I help you?","item_id":"msg_d05d5378c6f0a0c6d15f541c","logprobs":[],"output_index":0,"sequence_number":4,"type":"response.output_text.delta"}
+data: {"content_index":0,"delta":"Hello! How can I help you?","item_id":"msg_36f16444fa22e31ac51dede1","logprobs":[],"output_index":0,"sequence_number":4,"type":"response.output_text.delta"}
 
 event: response.created
-data: {"type":"response.created","sequence_number":5,"response":{"id":"resp_d05d5378c6f0a0c6d15f541c","object":"response","status":"in_progress","output":[]}}
+data: {"type":"response.created","sequence_number":5,"response":{"id":"resp_36f16444fa22e31ac51dede1","object":"response","status":"in_progress","output":[]}}
 
 event: response.in_progress
-data: {"type":"response.in_progress","sequence_number":6,"response":{"id":"resp_d05d5378c6f0a0c6d15f541c","object":"response","status":"in_progress","output":[]}}
+data: {"type":"response.in_progress","sequence_number":6,"response":{"id":"resp_36f16444fa22e31ac51dede1","object":"response","status":"in_progress","output":[]}}
 
 event: response.output_text.done
-data: {"content_index":0,"item_id":"msg_d05d5378c6f0a0c6d15f541c","logprobs":[],"output_index":0,"sequence_number":7,"text":"Hello! How can I help you?","type":"response.output_text.done"}
+data: {"content_index":0,"item_id":"msg_36f16444fa22e31ac51dede1","logprobs":[],"output_index":0,"sequence_number":7,"text":"Hello! How can I help you?","type":"response.output_text.done"}
 
 event: response.content_part.done
-data: {"type":"response.content_part.done","sequence_number":8,"part":{"type":"output_text","text":"Hello! How can I help you?","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_d05d5378c6f0a0c6d15f541c"}
+data: {"type":"response.content_part.done","sequence_number":8,"part":{"type":"output_text","text":"Hello! How can I help you?","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_36f16444fa22e31ac51dede1"}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","sequence_number":9,"item":{"type":"message","id":"msg_d05d5378c6f0a0c6d15f541c","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help you?","annotations":[]}]},"output_index":0}
+data: {"type":"response.output_item.done","sequence_number":9,"item":{"type":"message","id":"msg_36f16444fa22e31ac51dede1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help you?","annotations":[]}]},"output_index":0}
 
 event: response.completed
-data: {"response":{"id":"resp_d05d5378c6f0a0c6d15f541c","model":"","object":"response","output":[{"type":"message","id":"msg_d05d5378c6f0a0c6d15f541c","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help you?","annotations":[]}]}],"status":"completed","usage":{"input_tokens":10,"output_tokens":25,"total_tokens":35}},"sequence_number":10,"type":"response.completed"}
+data: {"response":{"id":"resp_36f16444fa22e31ac51dede1","model":"","object":"response","output":[{"type":"message","id":"msg_36f16444fa22e31ac51dede1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello! How can I help you?","annotations":[]}]}],"status":"completed","usage":{"input_tokens":15,"output_tokens":25,"total_tokens":40,"input_tokens_details":{"cached_tokens":5}}},"sequence_number":10,"type":"response.completed"}
 

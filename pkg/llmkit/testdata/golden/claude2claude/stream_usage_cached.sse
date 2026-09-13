@@ -1,5 +1,5 @@
 event: message_start
-data: {"message":{"content":[],"id":"msg_48f7b1f47c4b047cda9eebfc","model":"","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
+data: {"message":{"content":[],"id":"msg_106bbbcc1be690740103181d","model":"","role":"assistant","stop_reason":null,"stop_sequence":null,"type":"message","usage":{"input_tokens":0,"output_tokens":0}},"type":"message_start"}
 
 event: content_block_start
 data: {"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"}
@@ -11,7 +11,7 @@ event: content_block_stop
 data: {"index":0,"type":"content_block_stop"}
 
 event: message_delta
-data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"cache_creation_input_tokens":30,"cache_read_input_tokens":50,"input_tokens":50,"output_tokens":10}}
+data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"cache_creation_input_tokens":30,"cache_read_input_tokens":50,"input_tokens":100,"output_tokens":10}}
 
 event: message_stop
 data: {"type":"message_stop"}

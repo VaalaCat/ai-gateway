@@ -241,10 +241,10 @@ func TestChar_ProtocolOverride(t *testing.T) {
 	if cap.Path != "/v1/messages" {
 		t.Fatalf("upstream path = %q, want /v1/messages (claude outbound forced by protocol override)", cap.Path)
 	}
-	// claude /v1/messages body 必带 max_tokens 字段(openai_chat 入站没有,
-	// 由 claude outbound codec 注入默认值),进一步证明走的是 claude 出站 codec。
-	if _, ok := cap.Body["max_tokens"]; !ok {
-		t.Fatalf("claude outbound body should carry max_tokens, got body keys: %v", cap.Body)
+	// claude /v1/messages body should omit max_tokens when openai_chat 入站
+	// 没有提供 max token 限制，避免 Claude codec 注入过小的默认值。
+	if _, ok := cap.Body["max_tokens"]; ok {
+		t.Fatalf("claude outbound body should omit max_tokens when unset, got body: %v", cap.Body)
 	}
 }
 

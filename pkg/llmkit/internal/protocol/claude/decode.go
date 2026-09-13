@@ -603,6 +603,10 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 				},
 			}
 			ch <- ir.Event{Type: ir.EventDone, FinishReason: finishReason, StopSequence: stopSequence}
+			// message_stop is Claude's terminal protocol event. Do not wait for
+			// the HTTP body to reach EOF; some upstreams keep the connection open
+			// briefly after sending the complete response.
+			return
 
 		case "ping":
 			// Claude ping events are keepalives — ignore in IR
