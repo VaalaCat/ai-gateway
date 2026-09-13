@@ -9,7 +9,7 @@ import "encoding/json"
 // claudeRequest is the Claude Messages API request JSON structure.
 type claudeRequest struct {
 	Model        string            `json:"model"`
-	MaxTokens    int               `json:"max_tokens"`
+	MaxTokens    int               `json:"max_tokens,omitempty"`
 	System       json.RawMessage   `json:"system,omitempty"`
 	Messages     []claudeMessage   `json:"messages"`
 	Stream       bool              `json:"stream,omitempty"`

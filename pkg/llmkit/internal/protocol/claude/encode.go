@@ -26,8 +26,8 @@ func claudeUsageFromIR(u *ir.Usage) *claudeUsage {
 		// OpenAI semantics keep cached tokens inside prompt_tokens (subtract
 		// them out); some Responses upstreams (e.g. Doubao) report them as a
 		// disjoint bucket where prompt already excludes cache — when prompt is
-		// not larger than the cached count, keep it as-is.
-		if prompt > cacheRead {
+		// smaller than the cached count, keep it as-is.
+		if prompt >= cacheRead {
 			prompt -= cacheRead
 		}
 	}
@@ -54,10 +54,6 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		StopSeqs:     req.StopWords,
 		ServiceTier:  req.ServiceTier,
 		InferenceGeo: req.InferenceGeo,
-	}
-
-	if raw.MaxTokens == 0 {
-		raw.MaxTokens = 4096
 	}
 
 	// C2: tool_choice encode

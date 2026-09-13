@@ -194,6 +194,43 @@ func TestEncodeRequest_ThinkingConfig(t *testing.T) {
 	}
 }
 
+func TestEncodeRequest_OmitsMaxTokensWhenUnset(t *testing.T) {
+	req := &ir.Request{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []ir.Message{ir.TextMessage(ir.RoleUser, "hello")},
+	}
+	httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{
+		BaseURL: "https://api.anthropic.com",
+		APIKey:  "sk-test",
+		Model:   "claude-sonnet-4-20250514",
+	})
+	if err != nil {
+		t.Fatalf("EncodeRequest failed: %v", err)
+	}
+	body, err := io.ReadAll(httpReq.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if _, ok := raw["max_tokens"]; ok {
+		t.Fatalf("max_tokens should be omitted when unset: %s", body)
+	}
+}
+
+func TestClaudeUsageFromIRSplitsFullyCachedOpenAIInput(t *testing.T) {
+	usage := claudeUsageFromIR(&ir.Usage{
+		PromptTokens:     100,
+		CompletionTokens: 10,
+		CachedTokens:     100,
+	})
+	if usage.InputTokens != 0 || usage.CacheReadInputTokens != 100 {
+		t.Fatalf("usage = %+v, want input_tokens=0 and cache_read_input_tokens=100", usage)
+	}
+}
+
 func TestEncodeRequest_ReasoningUsesStructuredFieldsOverRawJSON(t *testing.T) {
 	req := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{
 		{Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{
