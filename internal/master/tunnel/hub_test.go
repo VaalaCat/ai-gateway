@@ -1372,15 +1372,21 @@ func TestHubConfirmedWriteSuccessPromotesCandidateAfterOldEnds(t *testing.T) {
 		snapshot, ok := f.hub.Snapshot("source")
 		return ok && snapshot.Generation == welcome.SessionGeneration
 	}, time.Second, time.Millisecond)
+	// commitConfirmedCandidate publishes the new generation before the
+	// handshake goroutine calls session.run, so running flips a moment later.
+	require.Eventually(t, func() bool {
+		f.hub.mu.RLock()
+		defer f.hub.mu.RUnlock()
+		set := f.hub.sessions["source"]
+		return set != nil && set.Active != nil && set.Active.running.Load()
+	}, time.Second, time.Millisecond)
 	f.hub.mu.RLock()
 	set = f.hub.sessions["source"]
 	candidateAfterConfirmed := set.Candidate
 	_, oldDraining := set.Draining[oldWelcome.SessionGeneration]
-	activeRunning := set.Active != nil && set.Active.running.Load()
 	f.hub.mu.RUnlock()
 	require.Nil(t, candidateAfterConfirmed)
 	require.False(t, oldDraining)
-	require.True(t, activeRunning)
 	require.NoError(t, candidate.Close())
 	requireClosed(t, candidateBeforeConfirmed.Done(), "successful candidate session close")
 	require.EqualValues(t, 1, candidateCloseCalls.Load())
