@@ -514,6 +514,7 @@
     "publicDisplayName": "Public display name",
     "publicDisplayNamePreview": "Public display: {name}",
     "publicDisplayNameAutoPreview": "Leave blank to restore the safe automatic name.",
+    "nameReadOnlyTip": "The internal name cannot be changed after creation; edit the public display name instead.",
     "batchEditTitle": "Batch edit channels",
     "batchEditDescription": "Only explicitly selected fields will be applied to {count} channels.",
     "batchEditApply": "Apply to {count} channels",

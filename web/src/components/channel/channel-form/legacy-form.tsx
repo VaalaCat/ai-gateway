@@ -39,6 +39,7 @@ export interface LegacyChannelFormProps {
   setForm: (next: ChannelForm) => void;
   channelTypes: { id: number; name: string; i18n_key: string }[];
   showStatus?: boolean;
+  nameReadOnlyInEdit?: boolean;
   agentId?: string;
   channelId?: number;
 }
@@ -48,6 +49,7 @@ export function LegacyChannelForm({
   setForm,
   channelTypes,
   showStatus,
+  nameReadOnlyInEdit,
   agentId,
   channelId,
 }: LegacyChannelFormProps) {
@@ -86,7 +88,14 @@ export function LegacyChannelForm({
     <div className="space-y-4">
       <div className="space-y-2">
         <Label>{tc("name")}</Label>
-        <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <Input
+          value={form.name}
+          disabled={nameReadOnlyInEdit}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+        />
+        {nameReadOnlyInEdit && (
+          <p className="text-xs text-muted-foreground">{t("nameReadOnlyTip")}</p>
+        )}
       </div>
       {form.use_legacy_adaptor && (
         <div className="space-y-2">
