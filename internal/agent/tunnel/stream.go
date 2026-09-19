@@ -607,7 +607,9 @@ func (st *Stream) copyResponseFrames(ctx context.Context, dst http.ResponseWrite
 			break
 		}
 		if err != nil {
-			if st.kind == streamKindAttempt && errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), context.Canceled) && st.ctx.Err() == nil {
+			// A successful finalize also cancels st.ctx (errStreamComplete), so
+			// a cancelled stream context must not be treated as stream failure.
+			if st.kind == streamKindAttempt && errors.Is(err, context.Canceled) && errors.Is(context.Cause(ctx), context.Canceled) && (st.ctx.Err() == nil || st.isTerminalSuccess()) {
 				return st.finishInterruptedAttemptResponse(context.Canceled, true, 0, nil)
 			}
 			st.Cancel(err)
