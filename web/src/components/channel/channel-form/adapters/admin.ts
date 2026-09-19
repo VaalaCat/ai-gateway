@@ -80,6 +80,7 @@ export function buildAdminUpdatePayload(
 export const adminChannelAdapter: ChannelFormAdapter<Channel> = {
   listPath: "/channels",
   scriptsHref: "/scripts",
+  nameReadOnlyInEdit: true,
   mapEntityToForm: mapChannelToForm,
   mapEntityToCopyForm: (c) => ({
     ...mapChannelToForm(c),

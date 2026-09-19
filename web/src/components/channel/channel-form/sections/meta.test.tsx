@@ -16,7 +16,7 @@ vi.mock("next-intl", () => ({
 
 function MetaSectionHarness() {
   const [form, setForm] = useState({ ...emptyForm, name: "private-internal-name" });
-  return <MetaSection form={form} setForm={setForm} channelTypes={[]} />;
+  return <MetaSection form={form} setForm={setForm} channelTypes={[]} nameReadOnlyInEdit />;
 }
 
 it("explains the safe automatic-name behavior without copying the internal name", () => {
@@ -25,6 +25,14 @@ it("explains the safe automatic-name behavior without copying the internal name"
   const explanation = screen.getByText("留空将恢复安全自动名称");
   expect(explanation).toBeVisible();
   expect(explanation).not.toHaveTextContent("private-internal-name");
+});
+
+it("disables the internal name input in edit mode and shows the read-only tip", () => {
+  render(<MetaSectionHarness />);
+
+  const input = screen.getByDisplayValue("private-internal-name");
+  expect(input).toBeDisabled();
+  expect(screen.getByText("nameReadOnlyTip")).toBeVisible();
 });
 
 it("accepts a public display name containing exactly 64 emoji", async () => {

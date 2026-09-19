@@ -30,6 +30,12 @@ export interface ChannelFormAdapter<Entity> {
   hiddenFields?: ReadonlySet<keyof ChannelForm>;
 
   /**
+    * 后端将 name 视为内部只读标识(日志快照/关联引用),编辑模式下 name 输入框
+    * 置灰并以 public_display_name 承担可修改的展示名。BYOK 渠道 name 可改。
+    */
+  nameReadOnlyInEdit?: boolean;
+
+  /**
    * 上游请求脚本配置页路径。为空时 processing 的 upstream_script 节点不渲染
    * (如 BYOK 无脚本权限)。
    */

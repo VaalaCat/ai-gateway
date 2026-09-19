@@ -20,11 +20,12 @@ export interface MetaSectionProps<Entity = unknown> {
   setForm: (next: ChannelForm) => void;
   channelTypes: ChannelTypeMeta[];
   hiddenFields?: ReadonlySet<keyof ChannelForm>;
+  nameReadOnlyInEdit?: boolean;
   keyFieldHelpText?: (entity: Entity | null) => string | undefined;
   entity?: Entity | null;
 }
 
-export function MetaSection<Entity>({ form, setForm, channelTypes, hiddenFields, keyFieldHelpText, entity = null }: MetaSectionProps<Entity>) {
+export function MetaSection<Entity>({ form, setForm, channelTypes, hiddenFields, nameReadOnlyInEdit, keyFieldHelpText, entity = null }: MetaSectionProps<Entity>) {
   const t = useTranslations("channels");
   const tc = useTranslations("common");
   const channelType = Number(form.type);
@@ -60,7 +61,14 @@ export function MetaSection<Entity>({ form, setForm, channelTypes, hiddenFields,
       )}
       <div className="space-y-2">
         <Label>{tc("name")}</Label>
-        <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <Input
+          value={form.name}
+          disabled={nameReadOnlyInEdit}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+        />
+        {nameReadOnlyInEdit && (
+          <p className="text-xs text-muted-foreground">{t("nameReadOnlyTip")}</p>
+        )}
       </div>
       {!hiddenFields?.has("public_display_name") && (
         <div className="space-y-2">

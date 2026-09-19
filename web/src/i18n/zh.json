@@ -514,6 +514,7 @@
     "publicDisplayName": "公开名称",
     "publicDisplayNamePreview": "公开显示：{name}",
     "publicDisplayNameAutoPreview": "留空将恢复安全的自动名称。",
+    "nameReadOnlyTip": "内部标识创建后不可修改；如需修改展示名，请编辑公开名称。",
     "batchEditTitle": "批量编辑渠道",
     "batchEditDescription": "只会应用已明确勾选的字段到 {count} 个渠道。",
     "batchEditApply": "应用到 {count} 个渠道",
