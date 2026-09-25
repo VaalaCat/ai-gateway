@@ -20,11 +20,13 @@ func TestListRequestFilterRejectsWindowOver365Days(t *testing.T) {
 func TestListRequestFilterMapsExactTokenStatusAndTime(t *testing.T) {
 	filter, err := listFilter(ListRequest{
 		TimeWindowQuery: listfilter.TimeWindowQuery{Start: 1_000, End: 2_000},
-		TokenID:         "12", StatusCode: "502",
+		UserID:          "7", TokenID: "12", StatusCode: "502",
 	})
 	require.NoError(t, err)
 	require.EqualValues(t, 1_000, filter.Start)
 	require.EqualValues(t, 2_000, filter.End)
+	require.NotNil(t, filter.UserID)
+	require.EqualValues(t, 7, *filter.UserID)
 	require.NotNil(t, filter.TokenID)
 	require.EqualValues(t, 12, *filter.TokenID)
 	require.NotNil(t, filter.StatusCode)
@@ -37,7 +39,13 @@ func TestListRequestFilterLeavesEmptyFiltersUnchanged(t *testing.T) {
 	require.Zero(t, filter.Start)
 	require.Zero(t, filter.End)
 	require.Nil(t, filter.TokenID)
+	require.Nil(t, filter.UserID)
 	require.Nil(t, filter.StatusCode)
+}
+
+func TestListRequestFilterRejectsInvalidUserID(t *testing.T) {
+	_, err := listFilter(ListRequest{UserID: "0"})
+	require.Error(t, err)
 }
 
 func TestListRequestFilterStatusCodeBoundaries(t *testing.T) {

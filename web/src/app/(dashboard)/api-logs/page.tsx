@@ -82,6 +82,7 @@ function logQuery(
   const apiRouteID = positiveInteger(values.api_route_id);
   const apiUpstreamID = positiveInteger(values.api_upstream_id);
   const tokenID = positiveInteger(values.token_id);
+  const userID = positiveInteger(values.user_id);
   const status = statusCode(values.status_code);
   const start = unixSeconds(values.start);
   const end = unixSeconds(values.end);
@@ -92,6 +93,7 @@ function logQuery(
     ...(apiRouteID !== undefined ? { api_route_id: apiRouteID } : {}),
     ...(apiUpstreamID !== undefined ? { api_upstream_id: apiUpstreamID } : {}),
     ...(tokenID !== undefined ? { token_id: tokenID } : {}),
+    ...(userID !== undefined ? { user_id: userID } : {}),
     ...(status !== undefined ? { status_code: status } : {}),
     ...(start !== undefined ? { start } : {}),
     ...(end !== undefined ? { end } : {}),
@@ -137,6 +139,7 @@ export default function APILogsPage() {
     request_id: { kind: "text", label: t("requestID"), debounceMs: 300 },
     status_code: { kind: "text", label: t("statusCode"), debounceMs: 300, controlWidth: "compact" },
     ...(isAdmin ? {
+      user_id: { kind: "picker", entity: "user", advanced: true },
       api_service_id: { kind: "picker", entity: "api-service" },
       api_route_id: {
       kind: "picker",
@@ -242,6 +245,7 @@ export default function APILogsPage() {
             defaultColumnVisibility={defaultLogColumnVisibility}
             getRowId={(row) => row.request_id}
             renderExpandedRow={(row) => <APIRequestDetails request={row.original} showInternal={isAdmin} />}
+            expandedRowWidth="viewport"
             storageKey="api-request-logs-columns"
             toolbar={(table) => (
               <FilterableToolbar

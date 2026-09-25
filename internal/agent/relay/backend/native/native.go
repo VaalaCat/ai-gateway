@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/dataflow"
@@ -184,10 +183,7 @@ func (backend *Backend) writeClientResponse(
 	writeEventErrorFrames bool,
 ) state.AttemptResult {
 	relay.State.Recorder.WithStage(trace.StageUpstreamDecode)
-	monitored, monitor := upstream.MonitorEvents(ctx, events, relay.Input.StartTime)
-	if !relay.Input.IsStream {
-		monitor.SetFirstResponseMs(int(time.Since(relay.Input.StartTime).Milliseconds()))
-	}
+	monitored, monitor := upstream.MonitorEvents(ctx, events)
 
 	relay.State.Recorder.WithStage(trace.StageClientEncode)
 	relay.Context.Writer = relay.State.Recorder.WrapClientWriter(relay.Context.Writer)
@@ -260,8 +256,8 @@ func buildAttemptResult(snapshot upstream.EventSnapshot, upstreamModel string, w
 	return state.AttemptResult{
 		PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens,
-		FirstResponseMs: snapshot.FirstResponseMs, UpstreamModel: upstreamModel,
-		Written: written, Err: err, ResponseText: snapshot.ResponseText,
+		UpstreamModel: upstreamModel, Written: written, Err: err,
+		ResponseText: snapshot.ResponseText,
 	}
 }
 

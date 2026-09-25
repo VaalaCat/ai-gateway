@@ -41,7 +41,7 @@ describe("AgentRelayConfigFields", () => {
   it("uses a single segmented Relay mode control and hides custom input for inherit", () => {
     render(<Harness />);
 
-    const group = screen.getByRole("group", { name: "Relay mode" });
+    const group = screen.getByLabelText("Relay mode");
     expect(group).toHaveAttribute("data-slot", "toggle-group");
     expect(screen.getByRole("radio", { name: "Inherit" })).toHaveAttribute("data-state", "on");
     expect(screen.queryByRole("textbox", { name: "Relay URI" })).not.toBeInTheDocument();

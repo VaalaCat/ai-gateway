@@ -64,9 +64,10 @@ type respTool struct {
 }
 
 type respNamespaceTool struct {
-	Type  string                      `json:"type"`
-	Name  string                      `json:"name"`
-	Tools []respNamespaceFunctionTool `json:"tools"`
+	Type        string                      `json:"type"`
+	Name        string                      `json:"name"`
+	Description *string                     `json:"description,omitempty"`
+	Tools       []respNamespaceFunctionTool `json:"tools"`
 }
 
 // respNamespaceFunctionTool keeps parameters as RawMessage so flattening a

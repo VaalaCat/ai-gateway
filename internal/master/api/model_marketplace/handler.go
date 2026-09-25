@@ -344,7 +344,6 @@ func pickRuntimeMarketplaceResources(
 		realNames[model.ModelName] = struct{}{}
 	}
 
-	hiddenRealNames := make(map[string]struct{})
 	pickedRouting := make([]RoutingModel, 0, len(routingModels))
 	for _, model := range routingModels {
 		if _, sameNameReal := realNames[model.ModelName]; !sameNameReal {
@@ -354,17 +353,9 @@ func pickRuntimeMarketplaceResources(
 		if !runtimeRoutings[model.ModelName] {
 			continue
 		}
-		hiddenRealNames[model.ModelName] = struct{}{}
 		pickedRouting = append(pickedRouting, model)
 	}
-
-	pickedReal := make([]MarketplaceModel, 0, len(realModels)-len(hiddenRealNames))
-	for _, model := range realModels {
-		if _, hidden := hiddenRealNames[model.ModelName]; !hidden {
-			pickedReal = append(pickedReal, model)
-		}
-	}
-	return pickedReal, pickedRouting
+	return realModels, pickedRouting
 }
 
 func (h *Handler) composeRealModel(

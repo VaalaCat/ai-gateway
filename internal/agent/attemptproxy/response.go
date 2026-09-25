@@ -345,7 +345,7 @@ func resultFromProvider(
 		CompletionTokens:    outcome.CompletionTokens,
 		CacheReadTokens:     outcome.CacheReadTokens,
 		CacheWriteTokens:    outcome.CacheWriteTokens,
-		FirstResponseMs:     outcome.FirstResponseMs,
+		FirstResponseMs:     firstResponseMilliseconds(rctx),
 		UpstreamModel:       outcome.UpstreamModel,
 		TokenSource:         outcome.TokenSource,
 		Dispatches:          provider.Dispatches,
@@ -368,6 +368,13 @@ func resultFromProvider(
 		result.Trace.FailureFallback = traceBodyFallbackToWire(rctx.State.Recorder.BuildRemoteFailureBodyFallback())
 	}
 	return result
+}
+
+func firstResponseMilliseconds(rctx *state.RelayContext) int {
+	if rctx == nil || rctx.State == nil || rctx.State.FirstResponse == nil {
+		return 0
+	}
+	return rctx.State.FirstResponse.Milliseconds()
 }
 
 func traceBodyFallbackToWire(record *trace.TraceRecord) *attemptwire.AttemptTraceBodyWire {

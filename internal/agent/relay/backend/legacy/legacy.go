@@ -47,7 +47,6 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 		CompletionTokens: lr.CompletionTokens,
 		CacheReadTokens:  lr.CacheReadTokens,
 		CacheWriteTokens: lr.CacheWriteTokens,
-		FirstResponseMs:  lr.FirstResponseMs,
 		UpstreamModel:    lr.UpstreamModel,
 		Written:          lr.Written,
 		Err:              lr.Err,

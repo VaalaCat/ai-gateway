@@ -281,6 +281,7 @@ describe("model marketplace detail API hooks", () => {
 
     const { result } = renderHook(() => useModelMarketplaceDetail({
       tokenId: 17,
+      kind: "real",
       model: "gpt-4o",
       window: "7d",
       offerRef: "offer-a",
@@ -288,7 +289,7 @@ describe("model marketplace detail API hooks", () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiGet).toHaveBeenCalledWith(
-      "/model-marketplace/detail?token_id=17&model=gpt-4o&window=7d&offer_ref=offer-a",
+      "/model-marketplace/detail?token_id=17&kind=real&model=gpt-4o&window=7d&offer_ref=offer-a",
     );
     expect(queryClient.getQueryData([
       "model-marketplace",
@@ -297,6 +298,7 @@ describe("model marketplace detail API hooks", () => {
         role: "user",
         viewerId: 7,
         tokenId: 17,
+        kind: "real",
         model: "gpt-4o",
         window: "7d",
         offerRef: "offer-a",
@@ -318,13 +320,14 @@ describe("model marketplace detail API hooks", () => {
     );
 
     const { result } = renderHook(() => useAdminModelMarketplaceDetail({
+      kind: "routing",
       model: "gpt-4o",
       window: "30d",
     }, 9), { wrapper: localWrapper });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(apiGet).toHaveBeenCalledWith(
-      "/admin/model-marketplace/detail?model=gpt-4o&window=30d",
+      "/admin/model-marketplace/detail?kind=routing&model=gpt-4o&window=30d",
     );
     expect(queryClient.getQueryData([
       "model-marketplace",
@@ -333,6 +336,7 @@ describe("model marketplace detail API hooks", () => {
         role: "admin",
         viewerId: 9,
         tokenId: null,
+        kind: "routing",
         model: "gpt-4o",
         window: "30d",
         offerRef: null,
@@ -345,6 +349,7 @@ describe("model marketplace detail API hooks", () => {
         role: "user",
         viewerId: 9,
         tokenId: null,
+        kind: "routing",
         model: "gpt-4o",
         window: "30d",
         offerRef: null,

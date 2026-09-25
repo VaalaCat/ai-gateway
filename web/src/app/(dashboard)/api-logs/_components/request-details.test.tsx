@@ -74,6 +74,7 @@ function request(overrides: Partial<APIRequestLog> = {}): APIRequestLog {
     rate_limit_hits: [],
     unit_price: 100,
     total_cost: 100,
+    has_trace: true,
     created_at: 1_000,
     ...overrides,
   };
@@ -114,7 +115,7 @@ describe("APIRequestDetails", () => {
 
     for (const value of [
       "req-1", "production", "203.0.113.8", "Weather", "Forecast", "Primary", "/daily",
-      "agent-source", "agent-exec", "/egress/weather", "201", "42ms", "12ms",
+      "agent-source", "agent-exec", "/egress/weather", "statusSuccess 201", "42ms", "12ms",
       "128 B", "512 B", "allow", "unitPrice", "totalCost",
     ]) {
       expect(screen.getAllByText(value).length).toBeGreaterThan(0);
@@ -223,6 +224,14 @@ describe("APIRequestDetails", () => {
     expect(state.traceRequestIDs.at(-1)).toBe("req-1");
     expect(screen.getByText("sourceRequestCapture")).toBeInTheDocument();
     expect(screen.getByText("source-body")).toBeInTheDocument();
+  });
+
+  it("offers a debug download only when the list reports a persisted Trace", () => {
+    const view = render(<APIRequestDetails request={request({ has_trace: true })} />);
+    expect(screen.getByRole("button", { name: "downloadDebugFile" })).toBeInTheDocument();
+
+    view.rerender(<APIRequestDetails request={request({ has_trace: false })} />);
+    expect(screen.queryByRole("button", { name: "downloadDebugFile" })).not.toBeInTheDocument();
   });
 
   it("lets loaded Trace captures fill the expanded row", () => {

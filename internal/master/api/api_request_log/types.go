@@ -11,12 +11,18 @@ const maxListDays = 365
 type ListRequest struct {
 	api.PaginationQuery
 	listfilter.TimeWindowQuery
+	UserID        string `form:"user_id"`
 	APIServiceID  *uint  `form:"api_service_id"`
 	APIRouteID    *uint  `form:"api_route_id"`
 	APIUpstreamID *uint  `form:"api_upstream_id"`
 	TokenID       string `form:"token_id"`
 	StatusCode    string `form:"status_code"`
 	RequestID     string `form:"request_id"`
+}
+
+type LogResponse struct {
+	models.APIRequestLog
+	HasTrace bool `json:"has_trace"`
 }
 
 // PortalListRequest only exposes filters that cannot select internal routing
@@ -60,10 +66,11 @@ type PortalLogResponse struct {
 	RateLimitWaitMs   int    `json:"rate_limit_wait_ms"`
 	UnitPrice         int64  `json:"unit_price"`
 	TotalCost         int64  `json:"total_cost"`
+	HasTrace          bool   `json:"has_trace"`
 	CreatedAt         int64  `json:"created_at"`
 }
 
-func newPortalLogResponse(entry models.APIRequestLog) PortalLogResponse {
+func newPortalLogResponse(entry models.APIRequestLog, hasTrace bool) PortalLogResponse {
 	return PortalLogResponse{
 		ID: entry.ID, RequestID: entry.RequestID, TokenID: entry.TokenID, TokenName: entry.TokenName,
 		APIServiceID: entry.APIServiceID, APIServiceName: entry.APIServiceName,
@@ -73,6 +80,6 @@ func newPortalLogResponse(entry models.APIRequestLog) PortalLogResponse {
 		RequestBytes: entry.RequestBytes, ResponseBytes: entry.ResponseBytes, WebSocketCloseCode: entry.WebSocketCloseCode,
 		QuotaGateDecision: entry.QuotaGateDecision, ErrorStage: entry.ErrorStage, ErrorCode: entry.ErrorCode,
 		RateLimitDecision: entry.RateLimitDecision, RateLimitWaitMs: entry.RateLimitWaitMs,
-		UnitPrice: entry.UnitPrice, TotalCost: entry.TotalCost, CreatedAt: entry.CreatedAt,
+		UnitPrice: entry.UnitPrice, TotalCost: entry.TotalCost, HasTrace: hasTrace, CreatedAt: entry.CreatedAt,
 	}
 }

@@ -254,6 +254,7 @@ function RealModelCard({
   detailTokenId,
 }: ModelCardRendererProps<Extract<MarketplaceModel, { kind: "real" }>>) {
   const detailHref = marketplaceDetailHref({
+    kind: "real",
     model: model.real.model_name,
     tokenId: detailTokenId,
     window: "24h",
@@ -294,7 +295,8 @@ function RoutingModelCard({
   detailTokenId,
 }: ModelCardRendererProps<Extract<MarketplaceModel, { kind: "routing" }>>) {
   const t = useTranslations("modelMarketplace");
-  const detailHrefFor = (modelName: string) => marketplaceDetailHref({
+  const detailHrefFor = (kind: "real" | "routing", modelName: string) => marketplaceDetailHref({
+    kind,
     model: modelName,
     tokenId: detailTokenId,
     window: "24h",
@@ -317,7 +319,7 @@ function RoutingModelCard({
       <MarketplaceModelIdentity
         modelName={model.routing.model_name}
         displayName={model.routing.display_name || model.routing.model_name}
-        detailHref={detailHrefFor(model.routing.model_name)}
+        detailHref={detailHrefFor("routing", model.routing.model_name)}
         routing
       />
       <div className="flex min-w-0 flex-col gap-2">
@@ -330,7 +332,7 @@ function RoutingModelCard({
         <div className="flex flex-wrap gap-1.5">
           {model.routing.reachable_real_models.map((name) => (
             <Badge key={name} variant="outline" asChild>
-              <Link className="relative z-10" href={detailHrefFor(name)}>{name}</Link>
+              <Link className="relative z-10" href={detailHrefFor("real", name)}>{name}</Link>
             </Badge>
           ))}
           {model.routing.reachable_real_models.length === 0 &&

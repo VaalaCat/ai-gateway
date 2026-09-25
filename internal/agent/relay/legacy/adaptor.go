@@ -48,7 +48,6 @@ type RelayResult struct {
 	CompletionTokens int
 	CacheReadTokens  int
 	CacheWriteTokens int
-	FirstResponseMs  int
 	UpstreamModel    string
 	Written          bool // whether response was partially written
 	Err              error
@@ -241,9 +240,7 @@ func relayPreparedRequest(
 	}
 
 	// DoRequest
-	requestStart := time.Now()
 	respAny, doErr := adaptor.DoRequest(c, info, requestBody)
-	firstResponseMs := int(time.Since(requestStart).Milliseconds())
 	if doErr != nil {
 		return RelayResult{Err: doErr, Trace: tc.build()}
 	}
@@ -290,7 +287,6 @@ func relayPreparedRequest(
 		CompletionTokens: usage.CompletionTokens,
 		CacheReadTokens:  usage.CacheReadTokens,
 		CacheWriteTokens: usage.CacheWriteTokens,
-		FirstResponseMs:  firstResponseMs,
 		UpstreamModel:    upstreamModel,
 		Written:          true,
 		Trace:            tc.build(),

@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -257,11 +258,12 @@ func (r *RequestResources) Close() error {
 
 // RelayState 是 stage 沿途累加的可变状态。
 type RelayState struct {
-	Recorder  *trace.Recorder
-	Plan      AttemptPlan
-	Execution ExecutionResult
-	FailPhase Phase
-	Err       error
+	Recorder      *trace.Recorder
+	FirstResponse *firstresponse.Tracker
+	Plan          AttemptPlan
+	Execution     ExecutionResult
+	FailPhase     Phase
+	Err           error
 	// StreamOpened：限流 wait 期间已为 stream 写出 SSE 头+保活帧（但未必写过真实内容）。
 	// 与 Execution.Outcome.Written（已写真实内容）区分：仅保活时仍可 fallback，
 	// 最终失败要走 SSE error event 而非 JSON。

@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -36,8 +37,14 @@ func TestAPIRequestLogPortalScopesAndProjectsCurrentUserData(t *testing.T) {
 		DurationMs: 15, FirstByteMs: 4, RequestBytes: 12, ResponseBytes: 34, UnitPrice: 2, TotalCost: 2,
 		ErrorMessage: "dial tcp: secret connection refused",
 	}
+	mineWithoutTrace := models.APIRequestLog{
+		RequestID: "portal-mine-no-trace", UserID: viewer.ID, TokenID: 32, TokenName: "my-token-no-trace",
+		APIServiceID: 7, APIServiceName: "Weather", APIRouteID: 8, APIRouteName: "Forecast",
+		Protocol: models.APIProtocolHTTP, Method: http.MethodGet, StatusCode: http.StatusBadGateway,
+	}
 	theirs := models.APIRequestLog{RequestID: "portal-theirs", UserID: other.ID, APIUpstreamName: "other-secret"}
 	require.NoError(t, srv.DB.Create(&mine).Error)
+	require.NoError(t, srv.DB.Create(&mineWithoutTrace).Error)
 	require.NoError(t, srv.DB.Create(&theirs).Error)
 	require.NoError(t, srv.DB.Create(&models.APIRequestTrace{
 		RequestID:            mine.RequestID,
@@ -46,23 +53,28 @@ func TestAPIRequestLogPortalScopesAndProjectsCurrentUserData(t *testing.T) {
 	require.NoError(t, srv.DB.Create(&models.APIRequestTrace{RequestID: theirs.RequestID}).Error)
 
 	t.Run("list is forced to the authenticated user and omits internal fields", func(t *testing.T) {
-		response := reqHelper(srv, viewerJWT, http.MethodGet, "/api/api-request-logs?api_upstream_id=9&page=1&page_size=20", nil)
+		response := reqHelper(srv, viewerJWT, http.MethodGet, "/api/api-request-logs?user_id="+strconv.FormatUint(uint64(other.ID), 10)+"&api_upstream_id=9&page=1&page_size=20", nil)
 		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 		var body struct {
 			Data  []map[string]any `json:"data"`
 			Total int64            `json:"total"`
 		}
 		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
-		require.Equal(t, int64(1), body.Total)
-		require.Len(t, body.Data, 1)
-		require.Equal(t, mine.RequestID, body.Data[0]["request_id"])
-		for _, key := range []string{
-			"user_id", "client_ip", "api_upstream_id", "api_upstream_name", "source_agent_id",
-			"execution_agent_id", "agent_route_id", "agent_route_path", "provider_dispatch_known", "error_message",
-			"provider_dispatched", "service_missing_at_settlement", "rate_limit_reason", "rate_limit_hits",
-		} {
-			require.NotContains(t, body.Data[0], key)
+		require.Equal(t, int64(2), body.Total)
+		require.Len(t, body.Data, 2)
+		byRequestID := map[string]map[string]any{}
+		for _, row := range body.Data {
+			byRequestID[row["request_id"].(string)] = row
+			for _, key := range []string{
+				"user_id", "client_ip", "api_upstream_id", "api_upstream_name", "source_agent_id",
+				"execution_agent_id", "agent_route_id", "agent_route_path", "provider_dispatch_known", "error_message",
+				"provider_dispatched", "service_missing_at_settlement", "rate_limit_reason", "rate_limit_hits",
+			} {
+				require.NotContains(t, row, key)
+			}
 		}
+		require.Equal(t, true, byRequestID[mine.RequestID]["has_trace"])
+		require.Equal(t, false, byRequestID[mineWithoutTrace.RequestID]["has_trace"])
 	})
 
 	t.Run("portal get also omits error message", func(t *testing.T) {
@@ -98,11 +110,33 @@ func TestAPIRequestLogPortalScopesAndProjectsCurrentUserData(t *testing.T) {
 			Data []map[string]any `json:"data"`
 		}
 		require.NoError(t, json.Unmarshal(list.Body.Bytes(), &listBody))
-		require.Len(t, listBody.Data, 2)
+		require.Len(t, listBody.Data, 3)
 		for _, row := range listBody.Data {
 			if row["request_id"] == mine.RequestID {
 				require.Equal(t, "dial tcp: secret connection refused", row["error_message"])
+				require.Equal(t, true, row["has_trace"])
 			}
+			if row["request_id"] == mineWithoutTrace.RequestID {
+				require.Equal(t, false, row["has_trace"])
+			}
+		}
+
+		filtered := reqHelper(
+			srv,
+			loginAsAdmin(t, srv, "admin", "admin123"),
+			http.MethodGet,
+			"/api/admin/api-request-logs?user_id="+strconv.FormatUint(uint64(viewer.ID), 10),
+			nil,
+		)
+		require.Equal(t, http.StatusOK, filtered.Code, filtered.Body.String())
+		var filteredBody struct {
+			Data  []map[string]any `json:"data"`
+			Total int64            `json:"total"`
+		}
+		require.NoError(t, json.Unmarshal(filtered.Body.Bytes(), &filteredBody))
+		require.Equal(t, int64(2), filteredBody.Total)
+		for _, row := range filteredBody.Data {
+			require.NotEqual(t, theirs.RequestID, row["request_id"])
 		}
 	})
 }

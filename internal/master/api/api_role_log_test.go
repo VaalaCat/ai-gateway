@@ -72,7 +72,7 @@ func TestAPIRequestLogsReturn503WhenLogDatabaseUnavailable(t *testing.T) {
 func TestAPIRequestLogsAreAdminOnlyAndUnscoped(t *testing.T) {
 	srv := setupTestMaster(t)
 	require.NoError(t, srv.InitAdminUser("admin", "admin123"))
-	require.NoError(t, srv.DB.AutoMigrate(&models.APIRequestLog{}))
+	require.NoError(t, srv.DB.AutoMigrate(&models.APIRequestLog{}, &models.APIRequestTrace{}))
 	srv.App.SetDatabaseLayoutMode(app.DatabaseLayoutSplit)
 	srv.App.SetLogDB(srv.DB)
 	visible := models.APIService{Slug: "visible", Name: "Visible", Status: consts.StatusEnabled}

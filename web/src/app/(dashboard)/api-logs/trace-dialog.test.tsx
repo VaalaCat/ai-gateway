@@ -90,6 +90,7 @@ function request(overrides: Partial<APIRequestLog> = {}): APIRequestLog {
     rate_limit_hits: [],
     unit_price: 0,
     total_cost: 0,
+    has_trace: true,
     created_at: 1_001,
     ...overrides,
   };

@@ -653,6 +653,12 @@ func TestPublishErrorMessage_ParityWithMain(t *testing.T) {
 // behavior parity with main
 func TestPublishExecuteFailWritten_NoCacheNoFirstResponseMs(t *testing.T) {
 	rctx := newPublishTestRctx()
+	attachObservedFirstResponse(
+		t,
+		rctx,
+		rctx.Input.StartTime.Add(-100*time.Millisecond),
+		"event: response.created\ndata: {}\n\n",
+	)
 	rctx.State.FailPhase = state.PhaseExecute
 	streamErr := errors.New("mid-stream upstream 502")
 	rctx.State.Err = streamErr
@@ -719,6 +725,12 @@ func TestPublishExecuteFailWritten_NoCacheNoFirstResponseMs(t *testing.T) {
 // 完全不列这五个字段。
 func TestPublish_ExecuteFail_NotWritten_AllTokenFieldsZero(t *testing.T) {
 	rctx := newPublishTestRctx()
+	attachObservedFirstResponse(
+		t,
+		rctx,
+		rctx.Input.StartTime.Add(-100*time.Millisecond),
+		"event: response.created\ndata: {}\n\n",
+	)
 	rctx.State.FailPhase = state.PhaseExecute
 	upstreamErr := errors.New("upstream 500 pre-stream")
 	rctx.State.Err = upstreamErr

@@ -23,9 +23,9 @@ describe("generic API log hooks", () => {
 
   it("sends selected entity, status, time, and server pagination filters to the log endpoint", async () => {
     apiGet.mockResolvedValueOnce({ data: [], total: 0, page: 1, page_size: 20 });
-    const { result } = renderHook(() => useAPIRequestLogs({ page: 3, page_size: 50, api_service_id: 7, api_route_id: 9, api_upstream_id: 11, token_id: 12, status_code: 502, request_id: "req-1", start: 1_000, end: 2_000 }), { wrapper });
+    const { result } = renderHook(() => useAPIRequestLogs({ page: 3, page_size: 50, user_id: 5, api_service_id: 7, api_route_id: 9, api_upstream_id: 11, token_id: 12, status_code: 502, request_id: "req-1", start: 1_000, end: 2_000 }), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(apiGet).toHaveBeenCalledWith("/admin/api-request-logs?page=3&page_size=50&api_service_id=7&api_route_id=9&api_upstream_id=11&token_id=12&status_code=502&request_id=req-1&start=1000&end=2000");
+    expect(apiGet).toHaveBeenCalledWith("/admin/api-request-logs?page=3&page_size=50&user_id=5&api_service_id=7&api_route_id=9&api_upstream_id=11&token_id=12&status_code=502&request_id=req-1&start=1000&end=2000");
   });
 
   it("preserves status zero and a zero start boundary in the log query", async () => {

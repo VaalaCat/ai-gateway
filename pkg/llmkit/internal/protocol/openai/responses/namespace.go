@@ -43,22 +43,24 @@ func decodeResponsesNamespaceFunctions(raw json.RawMessage, seen map[string]map[
 			inputSchema = child.Parameters
 		}
 		tools = append(tools, ir.Tool{
-			Type:             "function",
-			Namespace:        group.Name,
-			NamespaceGroupID: groupID,
-			Name:             child.Name,
-			Description:      child.Description,
-			InputSchema:      inputSchema,
-			Strict:           child.Strict,
+			Type:                 "function",
+			Namespace:            group.Name,
+			NamespaceGroupID:     groupID,
+			NamespaceDescription: group.Description,
+			Name:                 child.Name,
+			Description:          child.Description,
+			InputSchema:          inputSchema,
+			Strict:               child.Strict,
 		})
 	}
 	return tools, nil
 }
 
 type responsesNamespaceOutputGroup struct {
-	id       string
-	name     string
-	children []any
+	id          string
+	name        string
+	description *string
+	children    []any
 }
 
 type responsesEncodedTools struct {
@@ -115,7 +117,11 @@ func encodeResponsesTools(
 
 		group := previousNamespaceGroup
 		if !canAppendToResponsesNamespaceGroup(group, tool) {
-			group = &responsesNamespaceOutputGroup{id: tool.NamespaceGroupID, name: tool.Namespace}
+			group = &responsesNamespaceOutputGroup{
+				id:          tool.NamespaceGroupID,
+				name:        tool.Namespace,
+				description: tool.NamespaceDescription,
+			}
 			encoded.tools = append(encoded.tools, group)
 		}
 		group.children = append(group.children, resolved.Emit)
@@ -127,11 +133,15 @@ func encodeResponsesTools(
 		if !ok {
 			continue
 		}
-		encoded.tools[index] = map[string]any{
+		namespace := map[string]any{
 			"type":  "namespace",
 			"name":  group.name,
 			"tools": group.children,
 		}
+		if group.description != nil {
+			namespace["description"] = *group.description
+		}
+		encoded.tools[index] = namespace
 	}
 	return encoded, nil
 }

@@ -26,10 +26,11 @@ type AdminListRequest struct {
 }
 
 type AdminDetailRequest struct {
-	TokenID  *uint  `form:"token_id"`
-	Model    string `form:"model"`
-	Window   string `form:"window"`
-	OfferRef string `form:"offer_ref"`
+	TokenID  *uint                `form:"token_id"`
+	Kind     MarketplaceModelKind `form:"kind"`
+	Model    string               `form:"model"`
+	Window   string               `form:"window"`
+	OfferRef string               `form:"offer_ref"`
 }
 
 type AdminSelectedTokenDTO struct {
@@ -301,6 +302,9 @@ func (h *Handler) AdminDetail(c *app.Context, req AdminDetailRequest) (AdminMode
 	if err != nil {
 		return AdminModelDetailResponse{}, err
 	}
+	if err := validateListKind(req.Kind); err != nil {
+		return AdminModelDetailResponse{}, err
+	}
 	modelName := strings.TrimSpace(req.Model)
 	if modelName == "" {
 		return AdminModelDetailResponse{}, api.BadRequestError("marketplace model is required", nil)
@@ -308,6 +312,23 @@ func (h *Handler) AdminDetail(c *app.Context, req AdminDetailRequest) (AdminMode
 	composed, err := h.compose(c.RequestContext(), viewer, window, viewer.AdminGlobal)
 	if err != nil {
 		return AdminModelDetailResponse{}, err
+	}
+	if req.Kind != ModelKindReal {
+		for _, routingModel := range composed.routing {
+			if routingModel.ModelName != modelName {
+				continue
+			}
+			if strings.TrimSpace(req.OfferRef) != "" {
+				return AdminModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
+			}
+			return AdminModelDetailResponse{
+				View: adminMarketplaceView(viewer), Window: window, UsageStatus: UsageNotApplicable,
+				Model: mapAdminRoutingModel(routingModel),
+			}, nil
+		}
+		if req.Kind == ModelKindRouting {
+			return AdminModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
+		}
 	}
 	for index := range composed.real {
 		if composed.real[index].model.ModelName != modelName {
@@ -334,14 +355,6 @@ func (h *Handler) AdminDetail(c *app.Context, req AdminDetailRequest) (AdminMode
 	}
 	if strings.TrimSpace(req.OfferRef) != "" {
 		return AdminModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
-	}
-	for _, routingModel := range composed.routing {
-		if routingModel.ModelName == modelName {
-			return AdminModelDetailResponse{
-				View: adminMarketplaceView(viewer), Window: window, UsageStatus: UsageNotApplicable,
-				Model: mapAdminRoutingModel(routingModel),
-			}, nil
-		}
 	}
 	return AdminModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
 }

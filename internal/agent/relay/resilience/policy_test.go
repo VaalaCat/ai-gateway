@@ -2,6 +2,7 @@ package resilience
 
 import (
 	"errors"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -89,9 +90,37 @@ func TestRunner_ExhaustsRetries(t *testing.T) {
 	}
 }
 
+func TestRunner_BreakerOpeningDuringRetryPreservesLastRealResult(t *testing.T) {
+	cfg := Config{
+		MaxRetries: 2, BackoffBaseMs: 1, BackoffMaxMs: 2,
+		BreakerThreshold: 1, BreakerCooldownMs: 5000, BreakerEnabled: true,
+	}
+	runner := &Runner{Settings: settingsFromCfg(cfg), Breakers: NewRegistry()}
+	upstreamErr := &common.UpstreamError{
+		Status: http.StatusServiceUnavailable,
+		Body:   []byte(`{"error":{"message":"provider overloaded"}}`),
+	}
+	want := state.AttemptResult{
+		PromptTokens:  7,
+		UpstreamModel: "provider-model",
+		Err:           upstreamErr,
+	}
+	dispatches := 0
+
+	result := runner.Run(nil, chAttempt(24), realDispatch(func() state.AttemptResult {
+		dispatches++
+		return want
+	}))
+
+	require.Equal(t, 1, dispatches, "the opened breaker must prevent the retry dispatch")
+	require.Equal(t, want, result)
+	require.Same(t, upstreamErr, result.Err)
+	require.NotErrorIs(t, result.Err, ErrBreakerOpen)
+}
+
 func TestRunner_BreakerOpenSkipsDispatch(t *testing.T) {
 	r := &Runner{Settings: settingsFromCfg(testCfg()), Breakers: NewRegistry()} // BreakerThreshold=2
-	// 先打到 open：一次 Run 跑 3 次失败 dispatch(>=2)即触发 open。
+	// 先打到 open：真实失败达到 threshold 后，剩余 retry 被 breaker 拦截。
 	r.Run(nil, chAttempt(4), realDispatch(errRes))
 	n := 0
 	res := r.Run(nil, chAttempt(4), realDispatch(func() state.AttemptResult { n++; return errRes() }))

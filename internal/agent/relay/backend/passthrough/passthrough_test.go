@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -81,6 +82,9 @@ func newPassthroughTestCtx(t *testing.T, body []byte, isStream bool) (*state.Rel
 		strings.NewReader(string(body)))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	startedAt := time.Now().Add(-100 * time.Millisecond)
+	tracker := firstresponse.NewTracker(startedAt)
+	c.Writer = firstresponse.Wrap(c.Writer, tracker)
 	rctx := &state.RelayContext{
 		Context: c,
 		Input: state.RelayInput{
@@ -88,9 +92,12 @@ func newPassthroughTestCtx(t *testing.T, body []byte, isStream bool) (*state.Rel
 			Model:        "gpt-4o",
 			InboundProto: llmkit.ProtocolOpenAIChat,
 			IsStream:     isStream,
-			StartTime:    time.Now(),
+			StartTime:    startedAt,
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
+		State: &state.RelayState{
+			Recorder:      trace.NewRecorderAt(trace.CaptureOff, 0, startedAt),
+			FirstResponse: tracker,
+		},
 	}
 	return rctx, w
 }
@@ -389,6 +396,75 @@ func TestBackend_StreamResponse_PropagatesSSE(t *testing.T) {
 	// ResponseText 应包含 SSE 拼接出来的 content
 	if !strings.Contains(got.ResponseText, "hi") || !strings.Contains(got.ResponseText, " there") {
 		t.Errorf("ResponseText missing content delta, got %q", got.ResponseText)
+	}
+}
+
+func TestBackendStreamFirstResponseOwnedByClientWriter(t *testing.T) {
+	const sseBody = ": keepalive\n\nevent: response.created\ndata: {}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		flusher := writer.(http.Flusher)
+		_, _ = io.WriteString(writer, ": keepalive\n\n")
+		flusher.Flush()
+		time.Sleep(20 * time.Millisecond)
+		_, _ = io.WriteString(writer, "event: response.created\ndata: {}\n\n")
+	}))
+	defer upstream.Close()
+
+	rctx, response := newPassthroughTestCtx(
+		t,
+		[]byte(`{"model":"gpt-4o","stream":true,"messages":[]}`),
+		true,
+	)
+	result := (&Backend{}).Relay(rctx, state.Attempt{
+		Channel: makeChannel(upstream.URL), RealModel: "gpt-4o",
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Relay() error = %v", result.Err)
+	}
+	if result.FirstResponseMs != 0 {
+		t.Fatalf("backend first response = %dms, want writer-owned zero outcome", result.FirstResponseMs)
+	}
+	if rctx.State.FirstResponse.Milliseconds() <= 0 {
+		t.Fatal("client writer did not observe SSE response")
+	}
+	if response.Body.String() != sseBody {
+		t.Fatalf("client body = %q, want %q", response.Body.String(), sseBody)
+	}
+}
+
+func TestBackendNonStreamFirstResponseFallsBackToClientBody(t *testing.T) {
+	const responseBody = `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, responseBody)
+	}))
+	defer upstream.Close()
+
+	rctx, response := newPassthroughTestCtx(
+		t,
+		[]byte(`{"model":"gpt-4o","messages":[]}`),
+		false,
+	)
+	result := (&Backend{}).Relay(rctx, state.Attempt{
+		Channel: makeChannel(upstream.URL), RealModel: "gpt-4o",
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Relay() error = %v", result.Err)
+	}
+	if result.FirstResponseMs != 0 {
+		t.Fatalf("backend first response = %dms, want writer-owned zero outcome", result.FirstResponseMs)
+	}
+	if rctx.State.FirstResponse.Milliseconds() <= 0 {
+		t.Fatal("client writer did not observe JSON response")
+	}
+	if response.Body.String() != responseBody {
+		t.Fatalf("client body = %q, want %q", response.Body.String(), responseBody)
+	}
+	if result.PromptTokens != 3 || result.CompletionTokens != 1 || result.ResponseText != "ok" {
+		t.Fatalf("usage/text = (%d,%d,%q), want (3,1,ok)", result.PromptTokens, result.CompletionTokens, result.ResponseText)
 	}
 }
 

@@ -87,8 +87,12 @@ func (r *Runner) Run(rctx *state.RelayContext, a state.Attempt, dispatch func() 
 		// 返回最后一次失败结果（含 res.Err），而非 retrypolicy.ErrExceeded 包装器。
 		ReturnLastFailure().
 		Build()
+	var attemptResult state.AttemptResult
+	attemptResultObserved := false
 	dispatchAndObserve := func() (state.AttemptResult, error) {
 		dispatched := dispatch()
+		attemptResult = dispatched.Outcome
+		attemptResultObserved = true
 		if dispatched.ProviderDispatched {
 			r.observeAutoBan(rctx, a, cfg, dispatched.Outcome)
 		}
@@ -109,6 +113,10 @@ func (r *Runner) Run(rctx *state.RelayContext, a state.Attempt, dispatch func() 
 		Get(dispatchAndObserve)
 
 	if errors.Is(err, circuitbreaker.ErrOpen) {
+		if attemptResultObserved {
+			// 本轮已有真实结果时，breaker open 只负责停止后续 retry，不能覆盖失败原因。
+			return attemptResult
+		}
 		return state.AttemptResult{Err: fmt.Errorf("%w (channel %d)", ErrBreakerOpen, channelID)}
 	}
 	return res

@@ -379,6 +379,7 @@ export function useAdminModelMarketplaceList(
 
 export interface ModelMarketplaceDetailParams {
   tokenId?: number;
+  kind?: Exclude<ModelMarketplaceKind, "">;
   model: string;
   window: MarketplaceUsageWindow;
   offerRef?: string;
@@ -387,6 +388,7 @@ export interface ModelMarketplaceDetailParams {
 function normalizedDetailParams(params: ModelMarketplaceDetailParams) {
   return {
     tokenId: params.tokenId ?? null,
+    kind: params.kind ?? null,
     model: params.model.trim(),
     window: params.window,
     offerRef: params.offerRef?.trim() || null,
@@ -408,6 +410,7 @@ export function modelMarketplaceDetailQueryKey(
 function detailQuery(params: ModelMarketplaceDetailParams) {
   return buildQuery({
     token_id: params.tokenId,
+    kind: params.kind,
     model: params.model.trim(),
     window: params.window,
     offer_ref: params.offerRef?.trim() || undefined,

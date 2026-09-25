@@ -40,6 +40,19 @@ describe("TraceContentBlock", () => {
     expect(screen.queryByText(/careful coding assistant/)).not.toBeInTheDocument();
   });
 
+  it("collapses Responses input items while preserving their original preview field order", () => {
+    const input = [
+      { type: "message", content: "A long request. ".repeat(20), role: "user" },
+    ];
+    const { container } = render(<TraceContentBlock content={JSON.stringify({ input })} />);
+
+    expect(screen.getByRole("button", { name: "input" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "input item 1" })).toHaveAttribute("aria-expanded", "false");
+    expect(container.querySelector('[data-slot="json-preview"]')).toHaveTextContent(
+      '{"type":"message","content":',
+    );
+  });
+
   it("expands a long message item independently on click", async () => {
     const user = userEvent.setup();
     const messages = [

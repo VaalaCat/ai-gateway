@@ -70,11 +70,11 @@ function JsonLabel({ label, isIndex }: { label: string; isIndex: boolean }) {
 function JsonChildren({
   value,
   path,
-  isMessagesArray = false,
+  messageArrayLabel,
 }: {
   value: JsonValue[] | { [key: string]: JsonValue };
   path: string;
-  isMessagesArray?: boolean;
+  messageArrayLabel?: string;
 }) {
   const entries = Array.isArray(value)
     ? value.map((child, index) => [String(index), child] as const)
@@ -95,8 +95,10 @@ function JsonChildren({
           );
         }
 
-        const isMessageItem = isMessagesArray;
-        const childIsMessagesArray = !isIndex && label === "messages" && Array.isArray(child);
+        const isMessageItem = messageArrayLabel !== undefined;
+        const childMessageArrayLabel = !isIndex && (label === "messages" || label === "input") && Array.isArray(child)
+          ? label
+          : undefined;
         return (
           <JsonBranch
             key={childPath}
@@ -106,8 +108,8 @@ function JsonChildren({
             isIndex={isIndex}
             defaultOpen={!isMessageItem}
             showPreview={isMessageItem}
-            ariaLabel={isMessageItem ? `messages item ${Number(label) + 1}` : label}
-            isMessagesArray={childIsMessagesArray}
+            ariaLabel={isMessageItem ? `${messageArrayLabel} item ${Number(label) + 1}` : label}
+            messageArrayLabel={childMessageArrayLabel}
           />
         );
       })}
@@ -123,7 +125,7 @@ function JsonBranch({
   defaultOpen,
   showPreview,
   ariaLabel,
-  isMessagesArray,
+  messageArrayLabel,
 }: {
   value: JsonValue[] | { [key: string]: JsonValue };
   path: string;
@@ -132,7 +134,7 @@ function JsonBranch({
   defaultOpen: boolean;
   showPreview: boolean;
   ariaLabel: string;
-  isMessagesArray: boolean;
+  messageArrayLabel?: string;
 }) {
   const closingToken = Array.isArray(value) ? "]" : "}";
 
@@ -160,7 +162,7 @@ function JsonBranch({
         ) : null}
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <JsonChildren value={value} path={path} isMessagesArray={isMessagesArray} />
+        <JsonChildren value={value} path={path} messageArrayLabel={messageArrayLabel} />
         <div className="ml-4 leading-5 text-muted-foreground">{closingToken}</div>
       </CollapsibleContent>
     </Collapsible>

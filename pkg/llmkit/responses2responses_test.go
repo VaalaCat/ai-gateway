@@ -1,6 +1,7 @@
 package llmkit_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -32,6 +33,20 @@ func TestResponses2Responses_Instructions(t *testing.T) {
 	if instr != "Be helpful" {
 		t.Errorf("instructions = %v, want 'Be helpful'", instr)
 	}
+}
+
+func TestResponses2Responses_NamespaceDescriptionGolden(t *testing.T) {
+	body, err := os.ReadFile("testdata/golden/responses2responses/namespace_description.input.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	result := roundTripRequest(t, codec.ProtocolOpenAIResponses, codec.ProtocolOpenAIResponses, string(body))
+	assertGoldenJSON(
+		t,
+		mustGetArray(t, result, "tools"),
+		"responses2responses/namespace_description.tools.json",
+	)
 }
 
 func TestResponses2Responses_StreamText(t *testing.T) {

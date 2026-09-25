@@ -55,6 +55,7 @@ export interface APIRequestLog {
   rate_limit_hits?: RateLimitHit[];
   unit_price: number;
   total_cost: number;
+  has_trace: boolean;
   created_at: number;
 }
 
@@ -82,6 +83,7 @@ export interface APIRequestTrace {
 export interface APIRequestLogParams {
   page?: number;
   page_size?: number;
+  user_id?: number;
   api_service_id?: number;
   api_route_id?: number;
   api_upstream_id?: number;
@@ -109,6 +111,10 @@ function traceEndpoint(scope: APIRequestLogScope) {
   return scope === "admin" ? "/admin/api-request-traces" : "/api-request-traces";
 }
 
+export function getAPIRequestTrace(requestID: string, scope: APIRequestLogScope = "admin") {
+  return api.get<APIRequestTrace>(`${traceEndpoint(scope)}${buildQuery({ request_id: requestID })}`);
+}
+
 export function useAPIRequestLogs(
   params: APIRequestLogParams = {},
   scope: APIRequestLogScope = "admin",
@@ -124,7 +130,7 @@ export function useAPIRequestLogs(
 export function useAPIRequestTrace(requestID: string | null, scope: APIRequestLogScope = "admin") {
   return useQuery({
     queryKey: ["api-request-trace", scope, requestID],
-    queryFn: () => api.get<APIRequestTrace>(`${traceEndpoint(scope)}${buildQuery({ request_id: requestID })}`),
+    queryFn: () => getAPIRequestTrace(requestID!, scope),
     enabled: Boolean(requestID),
   });
 }

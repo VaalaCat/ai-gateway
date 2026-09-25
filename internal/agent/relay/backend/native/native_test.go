@@ -16,6 +16,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/resilience"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -52,6 +53,9 @@ func newNativeTestCtx(t *testing.T, body []byte, inbound llmkit.Protocol, isStre
 		strings.NewReader(string(body)))
 	c.Request.Header.Set("Content-Type", "application/json")
 
+	startedAt := time.Now().Add(-100 * time.Millisecond)
+	tracker := firstresponse.NewTracker(startedAt)
+	c.Writer = firstresponse.Wrap(c.Writer, tracker)
 	rctx := &state.RelayContext{
 		Context: c,
 		Input: state.RelayInput{
@@ -59,9 +63,12 @@ func newNativeTestCtx(t *testing.T, body []byte, inbound llmkit.Protocol, isStre
 			Model:        "gpt-4",
 			InboundProto: inbound,
 			IsStream:     isStream,
-			StartTime:    time.Now(),
+			StartTime:    startedAt,
 		},
-		State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 0)},
+		State: &state.RelayState{
+			Recorder:      trace.NewRecorderAt(trace.CaptureOff, 0, startedAt),
+			FirstResponse: tracker,
+		},
 	}
 	return rctx, w
 }
@@ -442,6 +449,85 @@ func TestBackend_LLMKitCallsClientOnceWithChannelTarget(t *testing.T) {
 	}
 	if got := recorder.Body.String(); got != `{"ok":true}` {
 		t.Fatalf("client body = %q, want encoded llmkit response", got)
+	}
+}
+
+func TestBackendFirstResponseOwnedByClientWriter(t *testing.T) {
+	fakeCodec := &recordingLLMKitCodec{
+		decoded: llmkit.DecodedRequest{
+			Protocol: llmkit.ProtocolOpenAIChat,
+			Request:  llmkit.Request{Model: "client-model", Stream: true},
+		},
+		encodeResponse: encodeContentEvents,
+	}
+	client := &recordingLLMKitClient{events: []llmkit.Event{
+		{Type: llmkit.EventStreamStart},
+		{Type: llmkit.EventContentDelta, Delta: &llmkit.DeltaPayload{Text: "hello"}},
+		{Type: llmkit.EventDone, FinishReason: "stop"},
+	}}
+	rctx, response := newNativeTestCtx(
+		t,
+		[]byte(`{"model":"client-model","stream":true}`),
+		llmkit.ProtocolOpenAIChat,
+		true,
+	)
+
+	result := (&Backend{Codec: fakeCodec, Client: client}).Relay(rctx, state.Attempt{
+		Channel: makeNativeChannel("https://provider.example"), RealModel: "provider-model",
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Relay() error = %v", result.Err)
+	}
+	if result.FirstResponseMs != 0 {
+		t.Fatalf("backend first response = %dms, want writer-owned zero outcome", result.FirstResponseMs)
+	}
+	if rctx.State.FirstResponse.Milliseconds() <= 0 {
+		t.Fatal("client writer did not observe the response")
+	}
+	if response.Body.String() != "hello" {
+		t.Fatalf("client body = %q, want hello", response.Body.String())
+	}
+}
+
+func TestBackendResponsesToolCallOnlyRecordsFirstResponse(t *testing.T) {
+	client := &recordingLLMKitClient{events: []llmkit.Event{
+		responsesCreatedEvent("resp_tool"),
+		{Type: llmkit.EventToolCallStart, ToolCall: &llmkit.StreamingToolCall{
+			CallID: "call_1", Name: "search", Index: 0,
+		}},
+		{Type: llmkit.EventToolCallArgumentsDelta, ToolCall: &llmkit.StreamingToolCall{
+			CallID: "call_1", Arguments: `{"q":"hello"}`,
+		}},
+		{Type: llmkit.EventToolCallEnd, ToolCall: &llmkit.StreamingToolCall{
+			CallID: "call_1", Arguments: `{"q":"hello"}`,
+		}},
+		{Type: llmkit.EventDone, FinishReason: "tool_calls"},
+	}}
+	channel := makeNativeChannel("https://provider.example")
+	channel.SupportedAPITypes = `["responses"]`
+	rctx, response := newNativeTestCtx(
+		t,
+		[]byte(`{"model":"client-model","stream":true,"input":"find it"}`),
+		llmkit.ProtocolOpenAIResponses,
+		true,
+	)
+
+	result := (&Backend{Client: client}).Relay(rctx, state.Attempt{
+		Channel: channel, RealModel: "provider-model",
+	})
+
+	if result.Err != nil {
+		t.Fatalf("Relay() error = %v", result.Err)
+	}
+	if result.FirstResponseMs != 0 {
+		t.Fatalf("backend first response = %dms, want writer-owned zero outcome", result.FirstResponseMs)
+	}
+	if rctx.State.FirstResponse.Milliseconds() <= 0 {
+		t.Fatal("client writer did not observe tool-call response")
+	}
+	if body := response.Body.String(); !strings.Contains(body, "response.output_item.added") || !strings.Contains(body, "function_call") {
+		t.Fatalf("client body = %q, want encoded function call", body)
 	}
 }
 

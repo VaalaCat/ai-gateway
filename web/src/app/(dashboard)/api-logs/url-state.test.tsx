@@ -112,12 +112,13 @@ describe("API Logs URL state", () => {
   afterEach(() => vi.useRealTimers());
 
   it("maps a copied URL to typed list filters, including deleted entity IDs and status zero", () => {
-    state.query = "request_id=req-old&api_service_id=7&api_route_id=9&api_upstream_id=11&token_id=12&status_code=0&start=1000&end=2000&page=3&page_size=50";
+    state.query = "request_id=req-old&user_id=5&api_service_id=7&api_route_id=9&api_upstream_id=11&token_id=12&status_code=0&start=1000&end=2000&page=3&page_size=50";
 
     render(<APILogsPage />);
 
     expect(state.logQueries.at(-1)).toEqual({
       request_id: "req-old",
+      user_id: 5,
       api_service_id: 7,
       api_route_id: 9,
       api_upstream_id: 11,

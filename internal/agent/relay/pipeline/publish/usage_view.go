@@ -193,7 +193,9 @@ func projectExecution(e *protocol.UsageLogEntry, rctx *state.RelayContext) {
 		e.CacheReadTokens = out.CacheReadTokens
 		e.CacheWriteTokens = out.CacheWriteTokens
 		e.TokenSource = out.TokenSource
-		e.FirstResponseMs = out.FirstResponseMs
+		if rctx.State.FirstResponse != nil {
+			e.FirstResponseMs = rctx.State.FirstResponse.Milliseconds()
+		}
 	case out.Written:
 		// 老 handler.go mid-stream fail 分支只写 prompt / completion / token_source。
 		e.PromptTokens = out.PromptTokens

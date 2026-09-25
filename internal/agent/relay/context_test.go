@@ -15,6 +15,7 @@ func TestNewContextUsesRecordedStartForInputAndRecorder(t *testing.T) {
 	router := gin.New()
 	want := time.Now().Add(-time.Second)
 	var inputStart, recorderStart time.Time
+	var firstResponseInstalled bool
 	router.Use(func(c *gin.Context) {
 		ginutil.SetRequestStart(c, want)
 		c.Next()
@@ -23,12 +24,14 @@ func TestNewContextUsesRecordedStartForInputAndRecorder(t *testing.T) {
 		rctx := NewContext(c, nil)
 		inputStart = rctx.Input.StartTime
 		recorderStart = rctx.State.Recorder.StartedAt()
+		firstResponseInstalled = rctx.State.FirstResponse != nil
 	})
 
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", nil))
 
 	require.Equal(t, want, inputStart)
 	require.Equal(t, want, recorderStart)
+	require.True(t, firstResponseInstalled)
 }
 
 func TestNewContextFallsBackToCurrentTime(t *testing.T) {
@@ -40,4 +43,21 @@ func TestNewContextFallsBackToCurrentTime(t *testing.T) {
 
 	require.False(t, rctx.Input.StartTime.Before(before))
 	require.Equal(t, rctx.Input.StartTime, rctx.State.Recorder.StartedAt())
+	require.NotNil(t, rctx.State.FirstResponse)
+}
+
+func TestNewContextInstallsFirstResponseWriterWithRecordedStart(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	response := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(response)
+	startedAt := time.Now().Add(-100 * time.Millisecond)
+	ginutil.SetRequestStart(context, startedAt)
+
+	relayContext := NewContext(context, nil)
+	_, err := relayContext.Writer.WriteString("event: response.created\ndata: {}\n\n")
+
+	require.NoError(t, err)
+	require.NotNil(t, relayContext.State.FirstResponse)
+	require.GreaterOrEqual(t, relayContext.State.FirstResponse.Milliseconds(), 90)
+	require.Equal(t, "event: response.created\ndata: {}\n\n", response.Body.String())
 }

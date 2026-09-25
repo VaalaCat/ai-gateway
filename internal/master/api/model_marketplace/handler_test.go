@@ -1011,9 +1011,9 @@ func TestDetailRoutingRootContainsOnlyRoutingGuidance(t *testing.T) {
 	}
 }
 
-// Break caught: retaining both a real model and an enabled same-name routing
-// makes list return two resources while model-only detail silently picks real.
-func TestUserListAndDetailUseRuntimePriorityForSameNameEnabledRouting(t *testing.T) {
+// Break caught: resolving a name collision by hiding the real model prevents
+// users from opening its offers and performance while a same-name route exists.
+func TestUserListAndDetailDistinguishSameNameRealAndRouting(t *testing.T) {
 	handler, usageCalls := runtimePriorityMarketplaceHandler(
 		t,
 		&fakeHandlerGate{user: scopedMarketplaceViewer(7, 23)},
@@ -1022,13 +1022,28 @@ func TestUserListAndDetailUseRuntimePriorityForSameNameEnabledRouting(t *testing
 
 	list, err := handler.List(userMarketplaceContext(t, 7), ListRequest{TokenID: 23})
 	require.NoError(t, err)
-	require.Len(t, list.Models, 2)
+	require.Len(t, list.Models, 3)
 	require.Equal(t, ModelKindReal, list.Models[0].Kind)
 	require.Equal(t, "other", list.Models[0].Real.ModelName)
-	require.Equal(t, ModelKindRouting, list.Models[1].Kind)
-	require.Equal(t, "same", list.Models[1].Routing.ModelName)
+	require.Equal(t, ModelKindReal, list.Models[1].Kind)
+	require.Equal(t, "same", list.Models[1].Real.ModelName)
+	require.Equal(t, ModelKindRouting, list.Models[2].Kind)
+	require.Equal(t, "same", list.Models[2].Routing.ModelName)
 
-	routingDetail, err := handler.Detail(userMarketplaceContext(t, 7), DetailRequest{TokenID: 23, Model: "same"})
+	realDetail, err := handler.Detail(userMarketplaceContext(t, 7), DetailRequest{
+		TokenID: 23, Model: "same", Kind: ModelKindReal,
+	})
+	require.NoError(t, err)
+	require.Equal(t, ModelKindReal, realDetail.Model.Kind)
+	require.Equal(t, "same", realDetail.Model.Real.ModelName)
+	require.Nil(t, realDetail.Model.Routing)
+	require.Equal(t, UsageAvailable, realDetail.UsageStatus)
+	require.Equal(t, []string{"usage"}, *usageCalls)
+
+	*usageCalls = nil
+	routingDetail, err := handler.Detail(userMarketplaceContext(t, 7), DetailRequest{
+		TokenID: 23, Model: "same", Kind: ModelKindRouting,
+	})
 	require.NoError(t, err)
 	require.Equal(t, ModelKindRouting, routingDetail.Model.Kind)
 	require.Nil(t, routingDetail.Model.Real)
@@ -1036,17 +1051,15 @@ func TestUserListAndDetailUseRuntimePriorityForSameNameEnabledRouting(t *testing
 	require.Equal(t, UsageNotApplicable, routingDetail.UsageStatus)
 	require.Empty(t, *usageCalls, "routing detail must not query usage")
 
-	realDetail, err := handler.Detail(userMarketplaceContext(t, 7), DetailRequest{TokenID: 23, Model: "other"})
+	legacyDetail, err := handler.Detail(userMarketplaceContext(t, 7), DetailRequest{TokenID: 23, Model: "same"})
 	require.NoError(t, err)
-	require.Equal(t, ModelKindReal, realDetail.Model.Kind)
-	require.Equal(t, "other", realDetail.Model.Real.ModelName)
-	require.Equal(t, UsageAvailable, realDetail.UsageStatus)
-	require.Equal(t, []string{"usage"}, *usageCalls)
+	require.Equal(t, ModelKindRouting, legacyDetail.Model.Kind)
+	require.Empty(t, *usageCalls, "legacy same-name detail keeps runtime routing priority")
 }
 
 // Break caught: applying collision rules only to the ordinary mapper leaves
 // admin global/token-preview list and detail with a different resource arm.
-func TestAdminListAndDetailUseRuntimePriorityForSameNameEnabledRouting(t *testing.T) {
+func TestAdminListAndDetailDistinguishSameNameRealAndRouting(t *testing.T) {
 	preview := scopedMarketplaceViewer(7, 23)
 	for _, test := range []struct {
 		name    string
@@ -1061,21 +1074,37 @@ func TestAdminListAndDetailUseRuntimePriorityForSameNameEnabledRouting(t *testin
 
 			list, err := handler.AdminList(adminMarketplaceContext(t, 1), AdminListRequest{TokenID: test.tokenID})
 			require.NoError(t, err)
-			require.Len(t, list.Models, 2)
+			require.Len(t, list.Models, 3)
 			require.Equal(t, ModelKindReal, list.Models[0].Kind)
 			require.Equal(t, "other", list.Models[0].Real.ModelName)
-			require.Equal(t, ModelKindRouting, list.Models[1].Kind)
-			require.Equal(t, "same", list.Models[1].Routing.ModelName)
+			require.Equal(t, ModelKindReal, list.Models[1].Kind)
+			require.Equal(t, "same", list.Models[1].Real.ModelName)
+			require.Equal(t, ModelKindRouting, list.Models[2].Kind)
+			require.Equal(t, "same", list.Models[2].Routing.ModelName)
 
-			detail, err := handler.AdminDetail(adminMarketplaceContext(t, 1), AdminDetailRequest{
+			realDetail, err := handler.AdminDetail(adminMarketplaceContext(t, 1), AdminDetailRequest{
 				TokenID: test.tokenID,
 				Model:   "same",
+				Kind:    ModelKindReal,
 			})
 			require.NoError(t, err)
-			require.Equal(t, ModelKindRouting, detail.Model.Kind)
-			require.Nil(t, detail.Model.Real)
-			require.Equal(t, "same", detail.Model.Routing.ModelName)
-			require.Equal(t, UsageNotApplicable, detail.UsageStatus)
+			require.Equal(t, ModelKindReal, realDetail.Model.Kind)
+			require.Equal(t, "same", realDetail.Model.Real.ModelName)
+			require.Nil(t, realDetail.Model.Routing)
+			require.Equal(t, UsageAvailable, realDetail.UsageStatus)
+			require.Equal(t, []string{"usage"}, *usageCalls)
+
+			*usageCalls = nil
+			routingDetail, err := handler.AdminDetail(adminMarketplaceContext(t, 1), AdminDetailRequest{
+				TokenID: test.tokenID,
+				Model:   "same",
+				Kind:    ModelKindRouting,
+			})
+			require.NoError(t, err)
+			require.Equal(t, ModelKindRouting, routingDetail.Model.Kind)
+			require.Nil(t, routingDetail.Model.Real)
+			require.Equal(t, "same", routingDetail.Model.Routing.ModelName)
+			require.Equal(t, UsageNotApplicable, routingDetail.UsageStatus)
 			require.Empty(t, *usageCalls, "routing detail must not query usage")
 		})
 	}

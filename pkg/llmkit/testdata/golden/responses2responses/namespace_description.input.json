@@ -1,0 +1,53 @@
+{
+  "model": "gpt-6-sol",
+  "input": "Delegate the repository inspection.",
+  "tools": [
+    {
+      "type": "namespace",
+      "name": "multi_agent_v1",
+      "description": "Tools for spawning and managing sub-agents.",
+      "tools": [
+        {
+          "type": "function",
+          "name": "spawn_agent",
+          "description": "Spawn a sub-agent.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "additionalProperties": false
+          },
+          "strict": false
+        },
+        {
+          "type": "function",
+          "name": "wait_agent",
+          "description": "Wait for an agent result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "additionalProperties": false
+          },
+          "strict": false
+        }
+      ]
+    },
+    {
+      "type": "web_search",
+      "external_web_access": true
+    }
+  ]
+}

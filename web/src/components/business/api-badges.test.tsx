@@ -27,20 +27,18 @@ describe("ProtocolBadge", () => {
 
 describe("HTTPStatusBadge", () => {
   it.each([
-    [200, "success"],
-    [299, "success"],
-    [300, "redirect"],
-    [399, "redirect"],
-    [400, "client-error"],
-    [499, "client-error"],
-    [500, "server-error"],
-    [599, "server-error"],
-    [0, "unavailable"],
-  ])("classifies HTTP status %i as %s", (statusCode, state) => {
+    [200, "success", "statusSuccess 200", "default"],
+    [399, "success", "statusSuccess 399", "default"],
+    [400, "failed", "statusFailed 400", "destructive"],
+    [599, "failed", "statusFailed 599", "destructive"],
+    [0, "failed", "noResponse", "destructive"],
+  ])("presents HTTP status %i with the usage-log %s treatment", (statusCode, state, label, variant) => {
     render(<HTTPStatusBadge statusCode={statusCode} />);
 
-    expect(screen.getByText(String(statusCode))).toHaveAttribute("data-slot", "api-http-status-badge");
-    expect(screen.getByText(String(statusCode))).toHaveAttribute("data-state", state);
+    const badge = screen.getByText(label);
+    expect(badge).toHaveAttribute("data-slot", "api-http-status-badge");
+    expect(badge).toHaveAttribute("data-state", state);
+    expect(badge).toHaveAttribute("data-variant", variant);
   });
 });
 

@@ -2,16 +2,75 @@ package publish
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func newSuccessfulUsageContext() *state.RelayContext {
+	gin.SetMode(gin.TestMode)
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	context.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	return &state.RelayContext{
+		Context: context,
+		Input: state.RelayInput{
+			StartTime: time.Now(),
+			Model:     "gpt-4o",
+		},
+		State: &state.RelayState{
+			FailPhase: state.PhaseNone,
+			Execution: state.ExecutionResult{
+				Used: state.Attempt{
+					Channel:   &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI}},
+					RealModel: "gpt-4o",
+				},
+			},
+		},
+	}
+}
+
+func attachObservedFirstResponse(t *testing.T, rctx *state.RelayContext, startedAt time.Time, payload string) {
+	t.Helper()
+	tracker := firstresponse.NewTracker(startedAt)
+	rctx.State.FirstResponse = tracker
+	rctx.Writer = firstresponse.Wrap(rctx.Writer, tracker)
+	_, err := rctx.Writer.WriteString(payload)
+	require.NoError(t, err)
+}
+
+func TestProjectUsageEntrySuccessUsesSourceTrackerInsteadOfAttemptResult(t *testing.T) {
+	rctx := newSuccessfulUsageContext()
+	rctx.Input.StartTime = time.Now().Add(-150 * time.Millisecond)
+	rctx.State.Execution.Outcome.FirstResponseMs = 9999
+	attachObservedFirstResponse(
+		t,
+		rctx,
+		rctx.Input.StartTime,
+		": keepalive\n\nevent: response.created\ndata: {}\n\n",
+	)
+
+	got := ProjectUsageEntry(rctx)
+
+	require.Greater(t, got.FirstResponseMs, 0)
+	require.Less(t, got.FirstResponseMs, 9999)
+}
+
+func TestProjectUsageEntrySuccessWithoutTrackerDoesNotTrustAttemptResult(t *testing.T) {
+	rctx := newSuccessfulUsageContext()
+	rctx.State.Execution.Outcome.FirstResponseMs = 9999
+
+	require.Zero(t, ProjectUsageEntry(rctx).FirstResponseMs)
+}
 
 func TestProjectInflightEntryOmitsAutoDisableTriggersFromSnapshotJSON(t *testing.T) {
 	trigger := attemptproxy.ChannelAutoDisableTrigger{

@@ -24,18 +24,6 @@ func NormalizeUsage(u llmkit.Usage) llmkit.Usage {
 	return u
 }
 
-// isContentEvent returns true for event types that carry actual response
-// content (text, tool calls, thinking). Control events like StreamStart,
-// Usage, Done, and Error are excluded.
-func isContentEvent(t llmkit.EventType) bool {
-	switch t {
-	case llmkit.EventContentDelta, llmkit.EventToolCallDelta, llmkit.EventThinkingDelta:
-		return true
-	default:
-		return false
-	}
-}
-
 // EmitDroppedToolsLog 检查 codec 写入的 dropped_tools metadata，若非空则输出一条
 // warn 日志。与编码路径解耦，便于单元测试。
 func EmitDroppedToolsLog(

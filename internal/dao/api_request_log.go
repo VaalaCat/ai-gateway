@@ -21,6 +21,7 @@ type APIRequestLogQuery interface {
 	GetByRequestID(requestID string) (*models.APIRequestLog, error)
 	GetByRequestIDAndUserID(requestID string, userID uint) (*models.APIRequestLog, error)
 	GetTraceByRequestID(requestID string) (*models.APIRequestTrace, error)
+	ExistingTraceRequestIDs(requestIDs []string) (map[string]struct{}, error)
 	List(opts ListOptions, filter APIRequestLogFilter) ([]models.APIRequestLog, int64, error)
 }
 
@@ -48,6 +49,27 @@ func (q *apiRequestLogQuery) GetTraceByRequestID(requestID string) (*models.APIR
 		return nil, WrapLogDatabaseError(err)
 	}
 	return &trace, nil
+}
+
+func (q *apiRequestLogQuery) ExistingTraceRequestIDs(requestIDs []string) (map[string]struct{}, error) {
+	existing := make(map[string]struct{})
+	if len(requestIDs) == 0 {
+		return existing, nil
+	}
+	db, err := q.ctx.LogDB()
+	if err != nil {
+		return nil, WrapLogDatabaseError(err)
+	}
+	var matches []string
+	if err := db.Model(&models.APIRequestTrace{}).
+		Where("request_id IN ?", requestIDs).
+		Pluck("request_id", &matches).Error; err != nil {
+		return nil, WrapLogDatabaseError(err)
+	}
+	for _, requestID := range matches {
+		existing[requestID] = struct{}{}
+	}
+	return existing, nil
 }
 
 type apiRequestLogQuery struct{ ctx *baseContext }

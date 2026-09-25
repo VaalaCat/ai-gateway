@@ -137,11 +137,11 @@ describe("InvocationWorkbench", () => {
 
   it("uses ToggleGroup only for a dual-protocol Route", () => {
     const dual = renderWorkbench();
-    expect(screen.getByRole("group", { name: "invocationProtocol" })).toBeInTheDocument();
+    expect(screen.getByLabelText("invocationProtocol")).toBeInTheDocument();
     dual.unmount();
 
     renderWorkbench({ route: { ...route, protocols: ["http"] } });
-    expect(screen.queryByRole("group", { name: "invocationProtocol" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("invocationProtocol")).not.toBeInTheDocument();
   });
 
   it("builds a websocat preview with a subprotocol and no body", () => {

@@ -447,7 +447,7 @@ describe("offer comparison", () => {
     }
     expect(screen.getAllByRole("button", { pressed: true })).toHaveLength(3);
 
-    const mobileOffers = screen.getByRole("group", { name: "mobileOfferSelectionLabel" });
+    const mobileOffers = screen.getByLabelText("mobileOfferSelectionLabel");
     fireEvent.click(within(mobileOffers).getByRole("radio", { name: "BYOK" }));
 
     expect(screen.getByTestId("mobile-offer-fact-sheet")).toHaveTextContent("BYOK");
@@ -465,7 +465,7 @@ describe("offer comparison", () => {
         usageStatus="available"
       />,
     );
-    const mobileOffers = screen.getByRole("group", { name: "mobileOfferSelectionLabel" });
+    const mobileOffers = screen.getByLabelText("mobileOfferSelectionLabel");
     fireEvent.click(within(mobileOffers).getByRole("radio", { name: "UNAVAILABLE" }));
     expect(screen.getByTestId("mobile-offer-fact-sheet")).toHaveTextContent("UNAVAILABLE");
 
@@ -478,7 +478,7 @@ describe("offer comparison", () => {
     );
 
     expect(screen.getByTestId("mobile-offer-fact-sheet")).toHaveTextContent("UNAVAILABLE");
-    expect(within(screen.getByRole("group", { name: "mobileOfferSelectionLabel" }))
+    expect(within(screen.getByLabelText("mobileOfferSelectionLabel"))
       .getByRole("radio", { name: "UNAVAILABLE" })).toHaveAttribute("aria-checked", "true");
   });
 
@@ -490,7 +490,7 @@ describe("offer comparison", () => {
     const { rerender } = render(
       <OfferComparison offers={[first, second]} window="24h" usageStatus="available" />,
     );
-    fireEvent.click(within(screen.getByRole("group", { name: "mobileOfferSelectionLabel" }))
+    fireEvent.click(within(screen.getByLabelText("mobileOfferSelectionLabel"))
       .getByRole("radio", { name: "SECOND" }));
 
     rerender(
@@ -537,14 +537,14 @@ describe("offer comparison", () => {
         usageStatus="available"
       />,
     );
-    const selectedOffers = screen.getByRole("group", { name: "offerSelectionLabel" });
+    const selectedOffers = screen.getByLabelText("offerSelectionLabel");
     const byokSelection = within(selectedOffers).getByRole("button", {
       name: "BYOK OUTSIDE DEFAULT",
     });
     expect(byokSelection).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByText("byokBillingNotice")).not.toBeInTheDocument();
 
-    fireEvent.click(within(screen.getByRole("group", { name: "mobileOfferSelectionLabel" }))
+    fireEvent.click(within(screen.getByLabelText("mobileOfferSelectionLabel"))
       .getByRole("radio", { name: "BYOK OUTSIDE DEFAULT" }));
 
     const factSheet = screen.getByTestId("mobile-offer-fact-sheet");

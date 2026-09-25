@@ -7,17 +7,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/attemptexec"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 )
+
+func TestResultFromProviderUsesTargetTrackerForLegacySourceCompatibility(t *testing.T) {
+	rctx, _ := newResponseRelayContext(trace.CaptureOff)
+	rctx.Input.StartTime = time.Now().Add(-100 * time.Millisecond)
+	tracker := firstresponse.NewTracker(rctx.Input.StartTime)
+	rctx.State.FirstResponse = tracker
+	rctx.Writer = firstresponse.Wrap(rctx.Writer, tracker)
+	writer := newAttemptResponseWriter(rctx.Writer)
+	_, err := writer.WriteString("event: response.created\ndata: {}\n\n")
+	require.NoError(t, err)
+
+	got := resultFromProvider(rctx, attemptexec.ProviderResult{
+		Outcome: state.AttemptResult{FirstResponseMs: 9999},
+	}, writer)
+
+	require.Greater(t, got.FirstResponseMs, 0)
+	require.Less(t, got.FirstResponseMs, 9999)
+}
 
 func TestResultFromProviderClassifiesSuccessFailureAndCancellation(t *testing.T) {
 	tests := []struct {

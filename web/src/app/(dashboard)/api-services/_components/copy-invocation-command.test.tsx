@@ -163,7 +163,7 @@ describe("CopyInvocationCommand", () => {
 
     await user.click(screen.getByRole("button", { name: "copyCommand" }));
 
-    expect(screen.getByRole("group", { name: "invocationProtocol" })).toBeInTheDocument();
+    expect(screen.getByLabelText("invocationProtocol")).toBeInTheDocument();
     await user.click(screen.getByRole("radio", { name: "websocketProtocol" }));
     await user.click(screen.getByRole("button", { name: "copyTemplateCommand" }));
     expect(clipboard.copy).toHaveBeenCalledWith(expect.stringMatching(/^websocat .*wss:\/\/gateway\.example/), expect.anything());
@@ -175,7 +175,7 @@ describe("CopyInvocationCommand", () => {
 
     await user.click(screen.getByRole("button", { name: "copyCommand" }));
 
-    expect(screen.queryByRole("group", { name: "invocationProtocol" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("invocationProtocol")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "copyTemplateCommand" }));
     expect(clipboard.copy).toHaveBeenCalledWith(expect.stringMatching(/^websocat .*wss:\/\/gateway\.example/), expect.anything());
   });

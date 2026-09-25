@@ -12,21 +12,33 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 )
 
-func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[models.APIRequestLog], error) {
+func (h *Handler) List(c *app.Context, req ListRequest) (api.PaginatedResponse[LogResponse], error) {
 	page, pageSize := api.NormalizePagination(req.Page, req.PageSize)
 	filter, err := listFilter(req)
 	if err != nil {
-		return api.PaginatedResponse[models.APIRequestLog]{}, err
+		return api.PaginatedResponse[LogResponse]{}, err
 	}
 	query := dao.NewAdminQuery(dao.NewContextWithContext(h.App, c.RequestContext())).APIRequestLog()
 	rows, total, err := query.List(dao.ListOptions{Page: page, PageSize: pageSize}, filter)
 	if err != nil {
 		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
-			return api.PaginatedResponse[models.APIRequestLog]{}, logDatabaseUnavailableError()
+			return api.PaginatedResponse[LogResponse]{}, logDatabaseUnavailableError()
 		}
-		return api.PaginatedResponse[models.APIRequestLog]{}, api.InternalError("list API request logs failed", err)
+		return api.PaginatedResponse[LogResponse]{}, api.InternalError("list API request logs failed", err)
 	}
-	return api.PaginatedResponse[models.APIRequestLog]{Data: rows, Total: total, Page: page, PageSize: pageSize}, nil
+	traceRequestIDs, err := query.ExistingTraceRequestIDs(requestIDs(rows))
+	if err != nil {
+		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+			return api.PaginatedResponse[LogResponse]{}, logDatabaseUnavailableError()
+		}
+		return api.PaginatedResponse[LogResponse]{}, api.InternalError("list API request log traces failed", err)
+	}
+	data := make([]LogResponse, len(rows))
+	for i, row := range rows {
+		_, hasTrace := traceRequestIDs[row.RequestID]
+		data[i] = LogResponse{APIRequestLog: row, HasTrace: hasTrace}
+	}
+	return api.PaginatedResponse[LogResponse]{Data: data, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
 func (h *Handler) PortalList(c *app.Context, req PortalListRequest) (api.PaginatedResponse[PortalLogResponse], error) {
@@ -47,11 +59,27 @@ func (h *Handler) PortalList(c *app.Context, req PortalListRequest) (api.Paginat
 		}
 		return api.PaginatedResponse[PortalLogResponse]{}, api.InternalError("list API request logs failed", err)
 	}
+	traceRequestIDs, err := query.ExistingTraceRequestIDs(requestIDs(rows))
+	if err != nil {
+		if errors.Is(err, dao.ErrLogDatabaseUnavailable) {
+			return api.PaginatedResponse[PortalLogResponse]{}, logDatabaseUnavailableError()
+		}
+		return api.PaginatedResponse[PortalLogResponse]{}, api.InternalError("list API request log traces failed", err)
+	}
 	data := make([]PortalLogResponse, len(rows))
 	for i := range rows {
-		data[i] = newPortalLogResponse(rows[i])
+		_, hasTrace := traceRequestIDs[rows[i].RequestID]
+		data[i] = newPortalLogResponse(rows[i], hasTrace)
 	}
 	return api.PaginatedResponse[PortalLogResponse]{Data: data, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func requestIDs(rows []models.APIRequestLog) []string {
+	requestIDs := make([]string, len(rows))
+	for i := range rows {
+		requestIDs[i] = rows[i].RequestID
+	}
+	return requestIDs
 }
 
 func portalListFilter(req PortalListRequest, userID uint) (dao.APIRequestLogFilter, error) {
@@ -74,6 +102,13 @@ func listFilter(req ListRequest) (dao.APIRequestLogFilter, error) {
 	filter := dao.APIRequestLogFilter{
 		TimeWindow: window, APIServiceID: req.APIServiceID, APIRouteID: req.APIRouteID,
 		APIUpstreamID: req.APIUpstreamID, RequestID: req.RequestID,
+	}
+	if req.UserID != "" {
+		value, err := parsePositiveUint(req.UserID, "user_id")
+		if err != nil {
+			return dao.APIRequestLogFilter{}, err
+		}
+		filter.UserID = &value
 	}
 	if req.TokenID != "" {
 		value, err := parsePositiveUint(req.TokenID, "token_id")

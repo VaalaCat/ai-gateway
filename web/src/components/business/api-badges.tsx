@@ -33,19 +33,6 @@ const UNKNOWN_PROTOCOL: ProtocolPresentation<"unknown"> = {
   variant: "outline",
 };
 
-type HTTPStatusState = "server-error" | "client-error" | "redirect" | "success" | "unavailable";
-type HTTPStatusPresentation = BadgePresentation<HTTPStatusState> & {
-  test: (code: number) => boolean;
-};
-
-const HTTP_STATE: readonly HTTPStatusPresentation[] = [
-  { test: (code: number) => code >= 500, state: "server-error", variant: "destructive" },
-  { test: (code: number) => code >= 400, state: "client-error", variant: "outline", className: "bg-warning text-warning-foreground" },
-  { test: (code: number) => code >= 300, state: "redirect", variant: "outline", className: "bg-info text-info-foreground" },
-  { test: (code: number) => code >= 200, state: "success", variant: "outline", className: "bg-success text-success-foreground" },
-  { test: () => true, state: "unavailable", variant: "outline" },
-];
-
 type PermissionScopeState = "global" | "scoped";
 type PermissionScopePresentation<State extends PermissionScopeState> = LocalizedBadgePresentation<State, "permission">;
 type PermissionScopeRegistry = { [State in PermissionScopeState]: PermissionScopePresentation<State> };
@@ -96,16 +83,20 @@ interface HTTPStatusBadgeProps {
 }
 
 export function HTTPStatusBadge({ statusCode }: HTTPStatusBadgeProps) {
-  const presentation = HTTP_STATE.find(({ test }) => test(statusCode)) ?? HTTP_STATE[HTTP_STATE.length - 1];
+  const t = useTranslations("apiLogs");
+  const success = statusCode > 0 && statusCode < 400;
+  const label = statusCode === 0
+    ? t("noResponse")
+    : `${t(success ? "statusSuccess" : "statusFailed")} ${statusCode}`;
 
   return (
     <Badge
       data-slot="api-http-status-badge"
-      data-state={presentation.state}
-      variant={presentation.variant}
-      className={presentation.className}
+      data-state={success ? "success" : "failed"}
+      variant={success ? "default" : "destructive"}
+      className={success ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200" : undefined}
     >
-      {statusCode}
+      {label}
     </Badge>
   );
 }

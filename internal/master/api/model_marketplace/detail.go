@@ -17,10 +17,11 @@ const (
 )
 
 type DetailRequest struct {
-	TokenID  uint   `form:"token_id"`
-	Model    string `form:"model"`
-	Window   string `form:"window"`
-	OfferRef string `form:"offer_ref"`
+	TokenID  uint                 `form:"token_id"`
+	Kind     MarketplaceModelKind `form:"kind"`
+	Model    string               `form:"model"`
+	Window   string               `form:"window"`
+	OfferRef string               `form:"offer_ref"`
 }
 
 type UserModelDetailResponse struct {
@@ -39,6 +40,9 @@ func (h *Handler) Detail(c *app.Context, req DetailRequest) (UserModelDetailResp
 	if err != nil {
 		return UserModelDetailResponse{}, err
 	}
+	if err := validateListKind(req.Kind); err != nil {
+		return UserModelDetailResponse{}, err
+	}
 	modelName := strings.TrimSpace(req.Model)
 	if modelName == "" {
 		return UserModelDetailResponse{}, api.BadRequestError("marketplace model is required", nil)
@@ -46,6 +50,23 @@ func (h *Handler) Detail(c *app.Context, req DetailRequest) (UserModelDetailResp
 	composed, err := h.compose(c.RequestContext(), viewer, window, false)
 	if err != nil {
 		return UserModelDetailResponse{}, err
+	}
+	if req.Kind != ModelKindReal {
+		for _, routingModel := range composed.routing {
+			if routingModel.ModelName != modelName {
+				continue
+			}
+			if strings.TrimSpace(req.OfferRef) != "" {
+				return UserModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
+			}
+			return UserModelDetailResponse{
+				SelectedToken: mapUserSelectedToken(viewer), Window: window, UsageStatus: UsageNotApplicable,
+				Model: mapUserRoutingModel(routingModel),
+			}, nil
+		}
+		if req.Kind == ModelKindRouting {
+			return UserModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
+		}
 	}
 	for index := range composed.real {
 		if composed.real[index].model.ModelName != modelName {
@@ -72,14 +93,6 @@ func (h *Handler) Detail(c *app.Context, req DetailRequest) (UserModelDetailResp
 	}
 	if strings.TrimSpace(req.OfferRef) != "" {
 		return UserModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
-	}
-	for _, routingModel := range composed.routing {
-		if routingModel.ModelName == modelName {
-			return UserModelDetailResponse{
-				SelectedToken: mapUserSelectedToken(viewer), Window: window, UsageStatus: UsageNotApplicable,
-				Model: mapUserRoutingModel(routingModel),
-			}, nil
-		}
 	}
 	return UserModelDetailResponse{}, api.NotFoundError(consts.ErrNotFound)
 }

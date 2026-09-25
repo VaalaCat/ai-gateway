@@ -9,10 +9,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/publish"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
@@ -492,6 +495,51 @@ func TestRemoteAttemptDirectSuccess(t *testing.T) {
 	require.Equal(t, attemptwire.AttemptProxyMeta{Attempt: validRemoteBoundAttempt(), RequestPath: "/v1/responses"}, direct.request.Attempt)
 	require.Equal(t, []string{"target-a"}, targets.calls)
 	require.Equal(t, []models.AgentPathKind{models.AgentPathDirect}, agentPathKinds(outcome.AgentPaths))
+}
+
+func TestRemoteAttemptUsageUsesSourceWriterInsteadOfWireFirstResponse(t *testing.T) {
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 0)
+	rctx.Input.StartTime = time.Now().Add(-150 * time.Millisecond)
+	tracker := firstresponse.NewTracker(rctx.Input.StartTime)
+	rctx.State.FirstResponse = tracker
+	rctx.Writer = firstresponse.Wrap(rctx.Writer, tracker)
+	direct := &remoteDirectStub{forward: func(
+		_ context.Context,
+		_ agentproxy.DirectRequest,
+		dst http.ResponseWriter,
+	) agentproxy.AttemptTransportOutcome {
+		writeRemoteResponse(
+			t,
+			dst,
+			http.StatusOK,
+			[]byte("event: response.created\ndata: {}\n\n"),
+			attemptwire.AttemptProxyResult{
+				Kind: attemptwire.ResultSucceeded, ProviderDispatched: true,
+				ProviderResultKnown: true, ResponseStarted: true, FirstResponseMs: 1,
+			},
+		)
+		return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true}
+	}}
+	executor := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, &remoteRelayLinkStub{})
+
+	outcome := executor.Execute(
+		rctx,
+		AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote},
+		0,
+		validRemoteBoundAttempt(),
+	)
+	require.Equal(t, 1, outcome.Result.FirstResponseMs)
+	rctx.State.Execution = state.ExecutionResult{
+		Used: state.Attempt{
+			Channel:   &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI}},
+			RealModel: "gpt-4o",
+		},
+		Outcome: outcome.Result,
+	}
+
+	usage := publish.ProjectUsageEntry(rctx)
+
+	require.Greater(t, usage.FirstResponseMs, 1)
 }
 
 func TestRemoteAttemptDirectedTransportPolicyMatrix(t *testing.T) {

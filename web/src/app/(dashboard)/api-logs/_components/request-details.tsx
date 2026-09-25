@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import { ChevronRight, ScanSearch } from "lucide-react";
 
 import { DateCell } from "@/components/business/date-cell";
+import { APILogDebugFileButton } from "@/components/business/api-log-debug-file-button";
 import { DurationCell } from "@/components/business/duration-cell";
 import { EntityLabel } from "@/components/business/entity-label";
 import { HTTPStatusBadge, ProtocolBadge } from "@/components/business/api-badges";
@@ -145,6 +146,7 @@ export function APIRequestDetails({
     : request.provider_dispatched
       ? t("yes")
       : t("no");
+  const scope: APIRequestLogScope = showInternal ? "admin" : "portal";
 
   return (
     <div className="flex min-w-0 flex-col gap-4 p-1 text-body">
@@ -244,8 +246,11 @@ export function APIRequestDetails({
       ) : null}
 
       <section className="flex min-w-0 flex-col gap-3 border-t border-border/60 pt-4">
-        <h3 className="text-sm font-semibold">{t("trace")}</h3>
-        <APIRequestTraceDetails requestID={request.request_id} scope={showInternal ? "admin" : "portal"} />
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">{t("trace")}</h3>
+          {request.has_trace ? <APILogDebugFileButton log={request} scope={scope} /> : null}
+        </div>
+        <APIRequestTraceDetails requestID={request.request_id} scope={scope} />
       </section>
     </div>
   );

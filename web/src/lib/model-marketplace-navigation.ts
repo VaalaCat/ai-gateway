@@ -1,6 +1,7 @@
 import type { MarketplaceUsageWindow } from "@/lib/api/model-marketplace";
 
 interface MarketplaceDetailHrefParams {
+  kind: "real" | "routing";
   model: string;
   tokenId?: number;
   window: MarketplaceUsageWindow;
@@ -8,12 +9,14 @@ interface MarketplaceDetailHrefParams {
 }
 
 export function marketplaceDetailHref({
+  kind,
   model,
   tokenId,
   window,
   offerRef,
 }: MarketplaceDetailHrefParams) {
   const query = new URLSearchParams();
+  query.set("kind", kind);
   query.set("model", model);
   if (Number.isInteger(tokenId) && (tokenId ?? 0) > 0) {
     query.set("token_id", String(tokenId));

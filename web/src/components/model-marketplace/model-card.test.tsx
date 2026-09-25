@@ -144,7 +144,7 @@ describe("real model marketplace card", () => {
     expect(rowLink).toHaveClass("after:absolute", "after:inset-0");
     expect(rowLink).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=model-a&token_id=17&window=24h",
+      "/model-marketplace/detail?kind=real&model=model-a&token_id=17&window=24h",
     );
     expect(row.querySelector("a a")).not.toBeInTheDocument();
   });
@@ -154,7 +154,7 @@ describe("real model marketplace card", () => {
 
     expect(screen.getByRole("link", { name: "Model A" })).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=model-a&window=24h",
+      "/model-marketplace/detail?kind=real&model=model-a&window=24h",
     );
   });
 
@@ -346,7 +346,7 @@ describe("real model marketplace card", () => {
       .toHaveTextContent("Channel 6");
     expect(within(row).getByTestId("marketplace-row-link")).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=model-a&window=24h",
+      "/model-marketplace/detail?kind=real&model=model-a&window=24h",
     );
   });
 
@@ -380,12 +380,12 @@ describe("routing model marketplace card", () => {
     expect(rowLink).toHaveClass("after:absolute", "after:inset-0");
     expect(rowLink).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=route-a&window=24h",
+      "/model-marketplace/detail?kind=routing&model=route-a&window=24h",
     );
     const reachableLink = within(row).getByRole("link", { name: "gpt-4o" });
     expect(reachableLink).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=gpt-4o&window=24h",
+      "/model-marketplace/detail?kind=real&model=gpt-4o&window=24h",
     );
     expect(reachableLink).toHaveClass("relative", "z-10");
     expect(row.querySelector("a a")).not.toBeInTheDocument();
@@ -396,11 +396,11 @@ describe("routing model marketplace card", () => {
 
     expect(screen.getByRole("link", { name: "gpt-4o" })).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=gpt-4o&token_id=17&window=24h",
+      "/model-marketplace/detail?kind=real&model=gpt-4o&token_id=17&window=24h",
     );
     expect(screen.getByRole("link", { name: "claude-3-7" })).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=claude-3-7&token_id=17&window=24h",
+      "/model-marketplace/detail?kind=real&model=claude-3-7&token_id=17&window=24h",
     );
   });
 

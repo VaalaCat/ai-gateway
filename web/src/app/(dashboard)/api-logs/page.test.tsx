@@ -46,6 +46,9 @@ vi.mock("@/components/business/entity-picker/entity-picker", () => ({
     <button id={id} type="button" disabled={disabled}>{entity}</button>
   ),
 }));
+vi.mock("@/components/business/entity-label", () => ({
+  EntityLabel: ({ id }: { id: number }) => <span>#{id}</span>,
+}));
 vi.mock("@/components/business/date-picker/date-range-picker", () => ({
   DateRangePicker: (props: DateRangePickerProps) => {
     return (
@@ -71,7 +74,9 @@ vi.mock("./_components/request-details", () => ({
 }));
 
 const log = {
+  id: 1,
   request_id: "req-abcdefghijklmnopqrstuvwxyz-0123456789",
+  user_id: 2,
   api_service_id: 7,
   api_service_name: "Deleted weather service snapshot with a very long name",
   api_route_id: 9,
@@ -84,6 +89,11 @@ const log = {
   method: "POST",
   status_code: 200,
   duration_ms: 42,
+  first_byte_ms: 12,
+  request_bytes: 128,
+  response_bytes: 512,
+  total_cost: 100,
+  has_trace: true,
   created_at: 1_000,
 };
 
@@ -274,14 +284,26 @@ describe("APILogsPage list explorer", () => {
     expect(state.replace).toHaveBeenLastCalledWith("/api-logs");
   });
 
-  it("shows snapshot identity and zero status without replacing names from management entities", () => {
+  it("shows snapshot identity and a failed no-response badge without replacing names from management entities", () => {
     state.logs = page([{ ...log, status_code: 0 }]);
 
     render(<APILogsPage />);
 
     expect(screen.getByText(log.api_service_name)).toBeInTheDocument();
     expect(screen.getByText("noResponse")).toBeInTheDocument();
-    expect(document.querySelector('[data-slot="api-http-status-badge"]')).toHaveAttribute("data-state", "unavailable");
+    expect(document.querySelector('[data-slot="api-http-status-badge"]')).toHaveAttribute("data-state", "failed");
+    expect(document.querySelector('[data-slot="api-http-status-badge"]')).toHaveAttribute("data-variant", "destructive");
+  });
+
+  it("shows the operator identity and response essentials in the default table", () => {
+    render(<APILogsPage />);
+
+    expect(screen.getByText("#2")).toBeInTheDocument();
+    expect(screen.getByText(log.token_name)).toBeInTheDocument();
+    expect(screen.getByText("statusSuccess 200")).toBeInTheDocument();
+    expect(screen.getByText("42ms")).toBeInTheDocument();
+    expect(screen.getByText("12ms")).toBeInTheDocument();
+    expect(screen.getByText("$ 0.0010")).toBeInTheDocument();
   });
 
   it("keeps secondary log fields available through column visibility", async () => {
@@ -290,7 +312,7 @@ describe("APILogsPage list explorer", () => {
 
     await user.click(screen.getByRole("button", { name: "columns" }));
 
-    for (const label of ["route", "upstream", "token", "protocol", "method", "duration", "createdAt"]) {
+    for (const label of ["route", "upstream", "tokenName", "protocol", "method", "duration", "firstByte", "requestBytes", "responseBytes", "totalCost", "createdAt"]) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
   });
@@ -309,6 +331,8 @@ describe("APILogsPage list explorer", () => {
     fireEvent.click(screen.getByRole("button", { name: "expandDetails" }));
 
     expect(screen.getByText(`details:${log.request_id}`)).toBeInTheDocument();
+    expect(document.querySelector('[data-expanded-row-width="viewport"]')).not.toBeNull();
+    expect(document.querySelector('[data-slot="data-table-expanded-content"]')).not.toBeNull();
   });
 
   it("opens the complete raw log JSON without changing the filter URL", () => {

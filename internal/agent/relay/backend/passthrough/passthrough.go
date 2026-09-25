@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/scripthook"
@@ -41,7 +40,6 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	bodyBytes := rctx.Input.Body
 	modelName := a.RealModel
 	isStream := rctx.Input.IsStream
-	startTime := rctx.Input.StartTime
 	inboundProto := rctx.Input.InboundProto
 	rec := rctx.State.Recorder
 
@@ -98,14 +96,13 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 		return result
 	}
 
-	firstResponseMs := streamPassthroughResponse(c, rec, resp, startTime)
+	streamPassthroughResponse(c, rec, resp)
 
 	promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, responseText := extractPassthroughUsage(rec.UpstreamBodyBytes(), isStream)
 
 	return state.AttemptResult{
 		Written:          true,
 		UpstreamModel:    upstreamModel,
-		FirstResponseMs:  firstResponseMs,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		CacheReadTokens:  cacheReadTokens,
@@ -142,13 +139,11 @@ func extractPassthroughUsage(body []byte, isStream bool) (promptTokens, completi
 
 // streamPassthroughResponse 把 2xx 上行响应原样写回客户端，
 // 同时通过 Recorder.WrapUpstreamBody / WrapClientWriter 捕获 body 给 trace / usage 抽取。
-// 返回首字节到达的耗时（毫秒）。调用方仍然负责把这个值放进 state.AttemptResult.FirstResponseMs。
-//
 // 副作用：
 //   - 修改 resp.Body（wrap 成 TeeReader），并 defer 关闭它。
 //   - 修改 c.Writer（wrap 成 Recorder-tracked writer）。
 //   - 写出 response header + status code，触发 client 端连接的 commit。
-func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.Response, startTime time.Time) int {
+func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.Response) {
 	rec.WithUpstreamStatus(resp)
 	resp.Body = rec.WrapUpstreamBody(resp)
 	defer resp.Body.Close()
@@ -162,15 +157,9 @@ func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.R
 
 	flusher, canFlush := c.Writer.(http.Flusher)
 	buf := make([]byte, 32*1024)
-	firstByte := true
-	var firstResponseMs int
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			if firstByte {
-				firstResponseMs = int(time.Since(startTime).Milliseconds())
-				firstByte = false
-			}
 			c.Writer.Write(buf[:n])
 			if canFlush {
 				flusher.Flush()
@@ -180,7 +169,6 @@ func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.R
 			break
 		}
 	}
-	return firstResponseMs
 }
 
 // handlePassthroughErrorStatus 处理非 2xx/3xx 上行响应。

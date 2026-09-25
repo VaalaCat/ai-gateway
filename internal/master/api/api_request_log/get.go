@@ -27,5 +27,10 @@ func (h *Handler) PortalGet(c *app.Context, req RequestIDRequest) (PortalLogResp
 	if err != nil {
 		return PortalLogResponse{}, mapLogReadError(err)
 	}
-	return newPortalLogResponse(*entry), nil
+	traceRequestIDs, err := query.ExistingTraceRequestIDs([]string{entry.RequestID})
+	if err != nil {
+		return PortalLogResponse{}, mapLogReadError(err)
+	}
+	_, hasTrace := traceRequestIDs[entry.RequestID]
+	return newPortalLogResponse(*entry, hasTrace), nil
 }

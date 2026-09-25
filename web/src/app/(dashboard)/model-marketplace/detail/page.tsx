@@ -435,6 +435,7 @@ function RoutingModelDetail({
               {model.reachable_real_models.map((realModel) => (
                 <Button key={realModel} asChild variant="outline" size="sm">
                   <Link href={marketplaceDetailHref({
+                    kind: "real",
                     model: realModel,
                     tokenId: params.tokenId,
                     window: response.window,
@@ -523,11 +524,14 @@ function MarketplaceDetailContent({ viewerId, isAdmin }: {
 }) {
   const searchParams = useSearchParams();
   const currentSearch = searchParams.toString();
+  const kind = searchParams.get("kind");
+  if (kind !== null && kind !== "real" && kind !== "routing") return notFound();
   const model = searchParams.get("model")?.trim() ?? "";
   if (!model) return notFound();
   const tokenId = parsePositiveTokenId(searchParams.get("token_id"));
   if (!isAdmin && tokenId === undefined) return <TokenRequiredState />;
   const params: ModelMarketplaceDetailParams = {
+    kind: kind ?? undefined,
     model,
     tokenId,
     window: parseWindow(searchParams.get("window")),

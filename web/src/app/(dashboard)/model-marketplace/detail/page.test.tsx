@@ -334,8 +334,8 @@ function adminRoutingResponse(): AdminModelMarketplaceDetailResponse {
 }
 
 beforeEach(() => {
-  window.history.replaceState(null, "", "/model-marketplace/detail?model=gpt-4o&token_id=17&window=24h");
-  state.query = "model=gpt-4o&token_id=17&window=24h";
+  window.history.replaceState(null, "", "/model-marketplace/detail?kind=real&model=gpt-4o&token_id=17&window=24h");
+  state.query = "kind=real&model=gpt-4o&token_id=17&window=24h";
   state.isAdmin = false;
   state.userId = 7;
   state.capability = true;
@@ -397,10 +397,11 @@ describe("model marketplace detail access and query boundary", () => {
   });
 
   it("loads the ordinary detail with model, Token, window, and optional offer identity", () => {
-    state.query = "model=gpt-4o&token_id=17&window=7d&offer_ref=offer-a";
+    state.query = "kind=real&model=gpt-4o&token_id=17&window=7d&offer_ref=offer-a";
     render(<ModelMarketplaceDetailPage />);
 
     expect(state.userDetail).toHaveBeenCalledWith({
+      kind: "real",
       model: "gpt-4o",
       tokenId: 17,
       window: "7d",
@@ -412,7 +413,7 @@ describe("model marketplace detail access and query boundary", () => {
 
   it("lets an administrator query the independent global detail without a Token", () => {
     state.isAdmin = true;
-    state.query = "model=gpt-4o&window=30d";
+    state.query = "kind=routing&model=gpt-4o&window=30d";
     state.adminResponse = adminRealResponse();
 
     render(<ModelMarketplaceDetailPage />);
@@ -420,6 +421,7 @@ describe("model marketplace detail access and query boundary", () => {
     expect(state.capabilityHook).not.toHaveBeenCalled();
     expect(state.userDetail).not.toHaveBeenCalled();
     expect(state.adminDetail).toHaveBeenCalledWith({
+      kind: "routing",
       model: "gpt-4o",
       tokenId: undefined,
       window: "30d",
@@ -629,7 +631,7 @@ describe("model marketplace detail access and query boundary", () => {
 
   it("updates only the window through native history state", () => {
     const historySpy = vi.spyOn(window.history, "replaceState");
-    state.query = "model=gpt-4o&token_id=17&window=24h&offer_ref=offer-a";
+    state.query = "kind=real&model=gpt-4o&token_id=17&window=24h&offer_ref=offer-a";
     render(<ModelMarketplaceDetailPage />);
 
     fireEvent.click(screen.getByRole("radio", { name: "window.30d" }));
@@ -637,7 +639,7 @@ describe("model marketplace detail access and query boundary", () => {
     expect(historySpy).toHaveBeenLastCalledWith(
       null,
       "",
-      "/model-marketplace/detail?model=gpt-4o&token_id=17&window=30d&offer_ref=offer-a",
+      "/model-marketplace/detail?kind=real&model=gpt-4o&token_id=17&window=30d&offer_ref=offer-a",
     );
     historySpy.mockRestore();
   });
@@ -650,7 +652,7 @@ describe("model marketplace detail access and query boundary", () => {
     expect(screen.getByText("routingDetailGuidance")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "gpt-4o" })).toHaveAttribute(
       "href",
-      "/model-marketplace/detail?model=gpt-4o&token_id=17&window=7d",
+      "/model-marketplace/detail?kind=real&model=gpt-4o&token_id=17&window=7d",
     );
     expect(screen.queryByText("comparisonTitle")).not.toBeInTheDocument();
     expect(screen.queryByText("trendTitle")).not.toBeInTheDocument();
