@@ -1117,3 +1117,44 @@ func TestResponsesEncodeRequest_TextOnlyUnchanged(t *testing.T) {
 		t.Errorf("text block type wrong: %#v", content[0])
 	}
 }
+
+func TestResponsesEncodeRequest_AssistantMultiTextPartsUseOutputText(t *testing.T) {
+	// Assistant history turns are prior model output: OpenAI-compatible upstreams
+	// (new-api relays included) reject assistant message items whose text parts
+	// are encoded as input_text. Multi-block assistant content must use
+	// output_text, while user content keeps input_text.
+	req := &ir.Request{
+		Model: "gpt-5",
+		Messages: []ir.Message{
+			{Role: ir.RoleUser, Content: []ir.ContentBlock{{Type: ir.ContentTypeText, Text: "hi"}}},
+			{Role: ir.RoleAssistant, Content: []ir.ContentBlock{
+				{Type: ir.ContentTypeText, Text: "first"},
+				{Type: ir.ContentTypeText, Text: "second"},
+			}},
+			{Role: ir.RoleUser, Content: []ir.ContentBlock{
+				{Type: ir.ContentTypeText, Text: "a"},
+				{Type: ir.ContentTypeText, Text: "b"},
+			}},
+		},
+	}
+	body := encodeResponsesRequestBody(t, req)
+	input := body["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input = %#v", input)
+	}
+	assistantParts := input[1].(map[string]any)["content"].([]any)
+	if len(assistantParts) != 2 {
+		t.Fatalf("assistant parts = %#v", assistantParts)
+	}
+	for i, p := range assistantParts {
+		if p.(map[string]any)["type"] != "output_text" || p.(map[string]any)["text"] == "" {
+			t.Errorf("assistant part %d = %#v, want output_text", i, p)
+		}
+	}
+	userParts := input[2].(map[string]any)["content"].([]any)
+	for i, p := range userParts {
+		if p.(map[string]any)["type"] != "input_text" {
+			t.Errorf("user part %d = %#v, want input_text", i, p)
+		}
+	}
+}
