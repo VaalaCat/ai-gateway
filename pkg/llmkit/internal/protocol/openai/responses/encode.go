@@ -139,12 +139,21 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		if len(filtered) == 1 && filtered[0].Type == ir.ContentTypeText && filtered[0].RawJSON == nil {
 			item["content"] = filtered[0].Text
 		} else if len(filtered) > 0 {
+			// Text part type is role-dependent: user turns carry input_text, while
+			// assistant history turns are prior model output and must be encoded as
+			// output_text. OpenAI-compatible upstreams (new-api relays included)
+			// fail the whole request when an assistant message item carries
+			// input_text parts, which surfaces downstream as an opaque 5xx.
+			textPartType := "input_text"
+			if m.Role == ir.RoleAssistant {
+				textPartType = "output_text"
+			}
 			var blocks []json.RawMessage
 			for _, cb := range filtered {
 				if cb.RawJSON != nil {
 					blocks = append(blocks, cb.RawJSON)
 				} else if cb.Type == ir.ContentTypeText {
-					b, _ := json.Marshal(respInputContentBlock{Type: "input_text", Text: cb.Text})
+					b, _ := json.Marshal(respInputContentBlock{Type: textPartType, Text: cb.Text})
 					blocks = append(blocks, b)
 				} else if cb.Type == ir.ContentTypeImage {
 					var imgURL string

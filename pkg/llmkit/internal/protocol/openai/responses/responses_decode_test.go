@@ -46,6 +46,39 @@ func TestResponsesDecodeNonStreamAggregatesReasoning(t *testing.T) {
 	}
 }
 
+func TestResponsesDecodeStreamDataBeforeEventOrderingStillCompletes(t *testing.T) {
+	// Some upstreams (new-api relays included) emit the `data:` line before the
+	// `event:` line inside a block. The line-oriented decoder must not dispatch
+	// under a stale event name from the previous block: response.completed has to
+	// be recognized instead of failing with "ended before a terminal event".
+	sse := `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","model":"m"}}
+event: response.created
+
+data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"ok"}
+event: response.output_text.delta
+
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":9,"output_tokens":2,"total_tokens":11}}}
+event: response.completed
+`
+	events := collectResponsesStreamEvents(t, sse)
+	var text string
+	for _, event := range events {
+		if event.Type == ir.EventError {
+			t.Fatalf("unexpected error event: %#v", event)
+		}
+		if event.Type == ir.EventContentDelta && event.Delta != nil {
+			text += event.Delta.Text
+		}
+	}
+	if text != "ok" {
+		t.Fatalf("text = %q, want ok", text)
+	}
+	last := events[len(events)-1]
+	if last.Type != ir.EventDone {
+		t.Fatalf("last event = %#v, want Done", last)
+	}
+}
+
 func TestResponsesDecodeStreamForwardsChannelsAndCompletesFromFullItem(t *testing.T) {
 	sse := `event: response.output_item.added
 data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning","status":"in_progress","future":"start"}}

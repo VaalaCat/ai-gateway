@@ -658,9 +658,14 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		}
 
 		// Responses streams may carry an event name only in the JSON payload's
-		// `type` field. Normalize the parsed SSE event name once so dispatch and
-		// any later raw passthrough use the same protocol event name.
-		if currentEvent == "" {
+		// `type` field. Some upstreams (new-api relays included) also emit the
+		// `data:` line before the `event:` line inside a block; this line-oriented
+		// loop would then dispatch the block under the stale event name left over
+		// from the previous block, shifting every event by one so that
+		// response.completed is never recognized. Prefer the JSON `type` whenever
+		// present so dispatch is field-order independent; the `event:` line remains
+		// the fallback for frames whose payload carries no type.
+		if raw.Type != "" {
 			currentEvent = raw.Type
 		}
 
