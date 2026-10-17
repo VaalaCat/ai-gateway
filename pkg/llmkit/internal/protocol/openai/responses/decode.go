@@ -12,6 +12,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	sseconsts "github.com/VaalaCat/ai-gateway/internal/consts/sse"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
@@ -121,6 +122,12 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 								flushAssistantTurn()
 								assistantTurn.addReasoning(block)
 							}
+							// 跨协议凭据属于 assistant 消息，独立于随后可能剥离的思考文本。
+							var chatReasoning struct {
+								Signature string `json:"signature"`
+							}
+							_ = json.Unmarshal(convert.EncodeReasoningBlock(reasoning, convert.ReasoningProtocolOpenAIChat), &chatReasoning)
+							assistantTurn.signature = chatReasoning.Signature
 						}
 						continue
 					}

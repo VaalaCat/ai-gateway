@@ -8,20 +8,21 @@ import "encoding/json"
 
 // claudeRequest is the Claude Messages API request JSON structure.
 type claudeRequest struct {
-	Model        string            `json:"model"`
-	MaxTokens    int               `json:"max_tokens,omitempty"`
-	System       json.RawMessage   `json:"system,omitempty"`
-	Messages     []claudeMessage   `json:"messages"`
-	Stream       bool              `json:"stream,omitempty"`
-	Tools        []any             `json:"tools,omitempty"`
-	ToolChoice   *claudeToolChoice `json:"tool_choice,omitempty"`
-	Temperature  *float64          `json:"temperature,omitempty"`
-	TopP         *float64          `json:"top_p,omitempty"`
-	TopK         *int              `json:"top_k,omitempty"`
-	StopSeqs     []string          `json:"stop_sequences,omitempty"`
-	ServiceTier  string            `json:"service_tier,omitempty"`
-	InferenceGeo string            `json:"inference_geo,omitempty"`
-	Thinking     *claudeThinking   `json:"thinking,omitempty"`
+	Model        string              `json:"model"`
+	MaxTokens    int                 `json:"max_tokens,omitempty"`
+	System       json.RawMessage     `json:"system,omitempty"`
+	Messages     []claudeMessage     `json:"messages"`
+	Stream       bool                `json:"stream,omitempty"`
+	Tools        []any               `json:"tools,omitempty"`
+	ToolChoice   *claudeToolChoice   `json:"tool_choice,omitempty"`
+	Temperature  *float64            `json:"temperature,omitempty"`
+	TopP         *float64            `json:"top_p,omitempty"`
+	TopK         *int                `json:"top_k,omitempty"`
+	StopSeqs     []string            `json:"stop_sequences,omitempty"`
+	ServiceTier  string              `json:"service_tier,omitempty"`
+	InferenceGeo string              `json:"inference_geo,omitempty"`
+	Thinking     *claudeThinking     `json:"thinking,omitempty"`
+	OutputConfig *claudeOutputConfig `json:"output_config,omitempty"`
 }
 
 // claudeToolChoice represents the tool_choice field in Claude's API.
@@ -35,6 +36,11 @@ type claudeToolChoice struct {
 type claudeThinking struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
+// claudeOutputConfig represents the output_config field in Claude's API; Effort controls how many tokens the model spends.
+type claudeOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // claudeMessage represents a Claude message. Content can be a string or array.

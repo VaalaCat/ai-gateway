@@ -37,6 +37,23 @@ func TestResponsesEncodeRequestReasoningPreservesUnknownPartOrderAndOverridesStr
 	}
 }
 
+func TestResponsesEncodeRequestReasoningDropsOutputStatus(t *testing.T) {
+	req := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{{
+		Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{
+			Summary: []string{"plan"}, Encrypted: "enc",
+			RawJSON: json.RawMessage(`{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"plan"}],"encrypted_content":"enc","future":"kept"}`),
+		},
+	}}}}}
+	body := encodeResponsesRequestBody(t, req)
+	reasoning := body["input"].([]any)[0].(map[string]any)
+	if _, exists := reasoning["status"]; exists {
+		t.Fatalf("output-only status leaked into input: %#v", reasoning)
+	}
+	if reasoning["id"] != "rs_1" || reasoning["encrypted_content"] != "enc" || reasoning["future"] != "kept" {
+		t.Fatalf("reasoning fields lost: %#v", reasoning)
+	}
+}
+
 func TestResponsesEncodeRequestBadEnvelopeDropsOnlyEncrypted(t *testing.T) {
 	req := &ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{{
 		Type: ir.ContentTypeThinking, Reasoning: &ir.ReasoningContent{Summary: []string{"readable"}, Encrypted: "llmkit:v1:%%%"},

@@ -607,3 +607,31 @@ func TestHandlerSetsInboundProtocol(t *testing.T) {
 		t.Errorf("want %q, got %q", ir.ProtocolClaude, req.InboundProtocol)
 	}
 }
+
+func TestDecodeRequest_ReasoningControls(t *testing.T) {
+	tests := []struct {
+		name         string
+		controls     string
+		wantThinking bool
+		wantBudget   int
+		wantEffort   string
+	}{
+		{name: "adaptive_with_effort", controls: `"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},`, wantThinking: true, wantEffort: "high"},
+		{name: "enabled_with_budget", controls: `"thinking":{"type":"enabled","budget_tokens":2048},`, wantThinking: true, wantBudget: 2048},
+		{name: "disabled", controls: `"thinking":{"type":"disabled"},`},
+		{name: "effort_without_thinking", controls: `"output_config":{"effort":"low"},`, wantEffort: "low"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"model":"claude-opus","max_tokens":10,` + tt.controls + `"messages":[{"role":"user","content":"hi"}]}`
+			req, err := (&handler{}).decodeHTTPRequest(makeHTTPRequest([]byte(body)))
+			if err != nil {
+				t.Fatalf("decodeHTTPRequest: %v", err)
+			}
+			if req.ThinkingEnabled != tt.wantThinking || req.ThinkingBudget != tt.wantBudget || req.ReasoningEffort != tt.wantEffort {
+				t.Fatalf("thinking=%v budget=%d effort=%q, want %v %d %q",
+					req.ThinkingEnabled, req.ThinkingBudget, req.ReasoningEffort, tt.wantThinking, tt.wantBudget, tt.wantEffort)
+			}
+		})
+	}
+}

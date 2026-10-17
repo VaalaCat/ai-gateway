@@ -7,6 +7,7 @@ type responsesAssistantTurn struct {
 	content    []ir.ContentBlock
 	toolCalls  []ir.ToolCall
 	hasMessage bool
+	signature  string
 }
 
 func (turn *responsesAssistantTurn) addReasoning(block ir.ContentBlock) bool {
@@ -35,7 +36,11 @@ func (turn *responsesAssistantTurn) flush() (ir.Message, bool) {
 	if turn.reasoning == nil && !turn.hasMessage && len(turn.toolCalls) == 0 {
 		return ir.Message{}, false
 	}
-	message := ir.Message{Role: ir.RoleAssistant, ToolCalls: turn.toolCalls}
+	message := ir.Message{
+		Role:      ir.RoleAssistant,
+		ToolCalls: turn.toolCalls,
+		Signature: turn.signature,
+	}
 	if turn.reasoning != nil {
 		message.Content = append(message.Content, *turn.reasoning)
 	}

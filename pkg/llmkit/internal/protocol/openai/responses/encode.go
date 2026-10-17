@@ -102,7 +102,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 			if content.Type == ir.ContentTypeThinking && content.Reasoning != nil {
 				hadReasoning = true
 				if item := convert.EncodeReasoningBlock(content.Reasoning, convert.ReasoningProtocolResponses); len(item) > 0 {
-					inputItems = append(inputItems, item)
+					inputItems = append(inputItems, dropReasoningInputStatus(item))
 				}
 				continue
 			}
@@ -1157,4 +1157,19 @@ func (c *handler) encodeError(w http.ResponseWriter, statusCode int, err error) 
 	w.Header().Set(consts.HeaderContentType, consts.ContentTypeJSON)
 	w.WriteHeader(statusCode)
 	w.Write(body)
+}
+
+// dropReasoningInputStatus removes the output-only status replayed from a
+// previous response; strict upstreams reject it on input reasoning items.
+func dropReasoningInputStatus(item json.RawMessage) json.RawMessage {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(item, &object) != nil || object["status"] == nil {
+		return item
+	}
+	delete(object, "status")
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return item
+	}
+	return encoded
 }

@@ -778,3 +778,129 @@ func responseDoer(statusCode int, body io.ReadCloser) doerFunc {
 		return &http.Response{StatusCode: statusCode, Header: make(http.Header), Body: body}, nil
 	}
 }
+
+func mergeTestText(role Role, value string) Message {
+	return Message{Role: role, Content: []ContentBlock{{Type: ContentTypeText, Text: value}}}
+}
+
+func mergeTestCall(ids ...string) Message {
+	message := Message{Role: RoleAssistant}
+	for _, id := range ids {
+		message.ToolCalls = append(message.ToolCalls, ToolCall{ID: id, Name: "lookup", Arguments: "{}"})
+	}
+	return message
+}
+
+func mergeTestResult(id string) Message {
+	return Message{Role: RoleTool, ToolCallID: id, Content: []ContentBlock{{Type: ContentTypeText, Text: "ok"}}}
+}
+
+func TestMergeMessageRoles(t *testing.T) {
+	raw := func(role Role, value string) Message {
+		message := mergeTestText(role, value)
+		message.RawJSON = json.RawMessage(`{"type":"unknown"}`)
+		return message
+	}
+	assistantTextAndCall := Message{
+		Role:      RoleAssistant,
+		Content:   []ContentBlock{{Type: ContentTypeText, Text: "a"}},
+		ToolCalls: []ToolCall{{ID: "c1", Name: "lookup", Arguments: "{}"}},
+	}
+	tests := []struct {
+		name  string
+		roles []Role
+		input []Message
+		want  []Message
+	}{
+		{name: "nil_roles_unchanged",
+			input: []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleUser, "b")},
+			want:  []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleUser, "b")}},
+		{name: "empty_roles_unchanged", roles: []Role{},
+			input: []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleUser, "b")},
+			want:  []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleUser, "b")}},
+		{name: "empty_messages", roles: []Role{RoleUser}, input: nil, want: nil},
+		{name: "adjacent_users_concatenate_content_in_order", roles: []Role{RoleUser},
+			input: []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleUser, "b"), mergeTestText(RoleUser, "c")},
+			want: []Message{{Role: RoleUser, Content: []ContentBlock{
+				{Type: ContentTypeText, Text: "a"}, {Type: ContentTypeText, Text: "b"}, {Type: ContentTypeText, Text: "c"},
+			}}}},
+		{name: "assistant_text_then_calls_become_one_message", roles: []Role{RoleAssistant},
+			input: []Message{mergeTestText(RoleUser, "q"), mergeTestText(RoleAssistant, "a"), mergeTestCall("c1"), mergeTestResult("c1")},
+			want:  []Message{mergeTestText(RoleUser, "q"), assistantTextAndCall, mergeTestResult("c1")}},
+		{name: "call_only_messages_concatenate_calls_in_order", roles: []Role{RoleAssistant},
+			input: []Message{mergeTestCall("c1"), mergeTestCall("c2", "c3")},
+			want:  []Message{mergeTestCall("c1", "c2", "c3")}},
+		{name: "unlisted_role_not_merged", roles: []Role{RoleAssistant},
+			input: []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleUser, "b")},
+			want:  []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleUser, "b")}},
+		{name: "non_adjacent_not_merged", roles: []Role{RoleUser},
+			input: []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleAssistant, "b"), mergeTestText(RoleUser, "c")},
+			want:  []Message{mergeTestText(RoleUser, "a"), mergeTestText(RoleAssistant, "b"), mergeTestText(RoleUser, "c")}},
+		{name: "tool_call_id_is_a_barrier", roles: []Role{RoleTool, RoleUser},
+			input: []Message{mergeTestResult("c1"), mergeTestResult("c2")},
+			want:  []Message{mergeTestResult("c1"), mergeTestResult("c2")}},
+		{name: "raw_json_is_a_barrier", roles: []Role{RoleUser},
+			input: []Message{mergeTestText(RoleUser, "a"), raw(RoleUser, "b"), mergeTestText(RoleUser, "c")},
+			want:  []Message{mergeTestText(RoleUser, "a"), raw(RoleUser, "b"), mergeTestText(RoleUser, "c")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeMessageRoles(tt.input, tt.roles)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("mergeMessageRoles() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClientCallMergesMessageRoles(t *testing.T) {
+	text, call, result := mergeTestText, mergeTestCall, mergeTestResult
+	tests := []struct {
+		name      string
+		roles     []Role
+		messages  []Message
+		wantRoles []string
+	}{
+		{name: "no_roles_keeps_messages", messages: []Message{text(RoleUser, "a"), text(RoleUser, "b")}, wantRoles: []string{"user", "user"}},
+		{name: "merges_adjacent_user", roles: []Role{RoleUser},
+			messages:  []Message{text(RoleUser, "a"), text(RoleUser, "b"), text(RoleAssistant, "c"), text(RoleUser, "d")},
+			wantRoles: []string{"user", "assistant", "user"}},
+		{name: "merges_assistant_text_and_tool_calls", roles: []Role{RoleAssistant},
+			messages:  []Message{text(RoleUser, "q"), text(RoleAssistant, "a"), call("c1"), result("c1")},
+			wantRoles: []string{"user", "assistant", "tool"}},
+		{name: "tool_results_never_merge", roles: []Role{RoleTool, RoleUser},
+			messages:  []Message{text(RoleUser, "q"), call("c1", "c2"), result("c1"), result("c2")},
+			wantRoles: []string{"user", "assistant", "tool", "tool"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := Request{Model: "logical", Messages: tt.messages}
+			before, _ := json.Marshal(request)
+			var body []byte
+			client := NewClient(ClientOptions{HTTPClient: doerFunc(func(r *http.Request) (*http.Response, error) {
+				body, _ = io.ReadAll(r.Body)
+				return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("fail"))}, nil
+			})})
+			_, _ = client.Call(t.Context(), request, Target{Protocol: ProtocolOpenAIChat, BaseURL: "https://provider.example", Model: "m"},
+				CallOptions{Conversion: ConversionOptions{MergeMessageRoles: tt.roles}})
+			var encoded struct {
+				Messages []struct {
+					Role string `json:"role"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(body, &encoded); err != nil {
+				t.Fatalf("decode body %s: %v", body, err)
+			}
+			var gotRoles []string
+			for _, message := range encoded.Messages {
+				gotRoles = append(gotRoles, message.Role)
+			}
+			if !reflect.DeepEqual(gotRoles, tt.wantRoles) {
+				t.Fatalf("roles = %v, want %v\nbody: %s", gotRoles, tt.wantRoles, body)
+			}
+			if after, _ := json.Marshal(request); string(after) != string(before) {
+				t.Fatal("Call mutated the caller's request")
+			}
+		})
+	}
+}

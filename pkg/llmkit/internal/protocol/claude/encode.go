@@ -70,12 +70,16 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		}
 	}
 
-	// C5: thinking config encode
+	// C5: thinking config encode. A positive budget keeps the legacy enabled+budget_tokens form for older
+	// models and compatible endpoints; otherwise thinking is adaptive. Effort is independent of thinking.
 	if req.ThinkingEnabled {
-		raw.Thinking = &claudeThinking{
-			Type:         "enabled",
-			BudgetTokens: req.ThinkingBudget,
+		raw.Thinking = &claudeThinking{Type: "adaptive"}
+		if req.ThinkingBudget > 0 {
+			raw.Thinking = &claudeThinking{Type: "enabled", BudgetTokens: req.ThinkingBudget}
 		}
+	}
+	if req.ReasoningEffort != "" {
+		raw.OutputConfig = &claudeOutputConfig{Effort: req.ReasoningEffort}
 	}
 
 	// Extract system messages → top-level system field

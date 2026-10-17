@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -49,6 +50,7 @@ func (client *clientImpl) Call(
 ) (<-chan Event, error) {
 	attempt := cloneRequest(request)
 	attempt.Model = target.Model
+	attempt.Messages = mergeMessageRoles(attempt.Messages, options.Conversion.MergeMessageRoles)
 	encoded, err := client.codec.EncodeRequest(EncodeRequestInput{
 		Request: attempt,
 		Target:  target,
@@ -304,6 +306,31 @@ func cloneRequest(request Request) Request {
 	cloned.Logprobs = clonePointer(request.Logprobs)
 	cloned.TopLogprobs = clonePointer(request.TopLogprobs)
 	return cloned
+}
+
+// mergeMessageRoles merges adjacent messages of the same listed role, concatenating Content and ToolCalls in order.
+// It mutates messages in place and returns a prefix of the same backing array, so callers must pass a clone
+// (Call passes the cloneRequest copy).
+func mergeMessageRoles(messages []Message, roles []Role) []Message {
+	if len(roles) == 0 {
+		return messages
+	}
+	merged := messages[:0]
+	for _, message := range messages {
+		if last := len(merged) - 1; last >= 0 && merged[last].Role == message.Role &&
+			isMergeableMessage(merged[last], roles) && isMergeableMessage(message, roles) {
+			merged[last].Content = append(merged[last].Content, message.Content...)
+			merged[last].ToolCalls = append(merged[last].ToolCalls, message.ToolCalls...)
+			continue
+		}
+		merged = append(merged, message)
+	}
+	return merged
+}
+
+// isMergeableMessage reports whether a message may be merged with an adjacent message of the same role.
+func isMergeableMessage(message Message, roles []Role) bool {
+	return message.ToolCallID == "" && len(message.RawJSON) == 0 && slices.Contains(roles, message.Role)
 }
 
 func cloneMessages(messages []Message) []Message {

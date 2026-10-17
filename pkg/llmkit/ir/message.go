@@ -42,6 +42,9 @@ type Message struct {
 	ToolCalls  []ToolCall     `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 
+	// Signature 是上游要求随 assistant 历史原样回传的凭据，与可剥离的思考文本独立。
+	Signature string `json:"signature,omitempty"`
+
 	// RawJSON preserves the original JSON for unknown input item types.
 	// When set with empty Role, the encoder should emit this JSON as-is.
 	RawJSON json.RawMessage `json:"raw_json,omitempty"`

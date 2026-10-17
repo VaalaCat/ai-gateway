@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1057,5 +1058,59 @@ func TestEncodeRequest_ThinkingOnlyMessageUnchanged(t *testing.T) {
 	msg := raw["messages"].([]any)[0].(map[string]any)
 	if v, present := msg["content"]; !present || v != nil {
 		t.Errorf("thinking-only content should stay null, got present=%v val=%#v", present, v)
+	}
+}
+
+func TestEncodeRequest_ReasoningControls(t *testing.T) {
+	tests := []struct {
+		name         string
+		thinking     bool
+		budget       int
+		effort       string
+		wantThinking map[string]any // nil means no thinking field
+		wantEffort   string         // empty means no output_config field
+	}{
+		{name: "adaptive_without_budget", thinking: true, wantThinking: map[string]any{"type": "adaptive"}},
+		{name: "enabled_with_budget", thinking: true, budget: 10000, wantThinking: map[string]any{"type": "enabled", "budget_tokens": float64(10000)}},
+		{name: "adaptive_with_effort", thinking: true, effort: "high", wantThinking: map[string]any{"type": "adaptive"}, wantEffort: "high"},
+		{name: "effort_without_thinking", effort: "low", wantEffort: "low"},
+		{name: "no_controls"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &ir.Request{
+				Model:           "claude-opus",
+				MaxTokens:       32000,
+				Messages:        []ir.Message{ir.TextMessage(ir.RoleUser, "hi")},
+				ThinkingEnabled: tt.thinking,
+				ThinkingBudget:  tt.budget,
+				ReasoningEffort: tt.effort,
+			}
+			httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{BaseURL: "https://api.anthropic.com", APIKey: "sk-test", Model: "claude-opus"})
+			if err != nil {
+				t.Fatalf("encodeHTTPRequest: %v", err)
+			}
+			body, _ := io.ReadAll(httpReq.Body)
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				t.Fatal(err)
+			}
+			thinking, hasThinking := raw["thinking"]
+			if tt.wantThinking == nil {
+				if hasThinking {
+					t.Fatalf("thinking = %v, want absent", thinking)
+				}
+			} else if !reflect.DeepEqual(thinking, tt.wantThinking) {
+				t.Fatalf("thinking = %v, want %v", thinking, tt.wantThinking)
+			}
+			outputConfig, hasOutputConfig := raw["output_config"]
+			if tt.wantEffort == "" {
+				if hasOutputConfig {
+					t.Fatalf("output_config = %v, want absent", outputConfig)
+				}
+			} else if !reflect.DeepEqual(outputConfig, map[string]any{"effort": tt.wantEffort}) {
+				t.Fatalf("output_config = %v, want effort %q", outputConfig, tt.wantEffort)
+			}
+		})
 	}
 }

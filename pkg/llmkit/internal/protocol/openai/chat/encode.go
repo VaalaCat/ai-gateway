@@ -98,7 +98,8 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 
 		om := oaiMessage{
 			Role:       string(m.Role),
-			ToolCallID: m.ToolCallID,
+			ToolCallID: decodeToolCallID(m.ToolCallID).ID,
+			Signature:  m.Signature,
 		}
 
 		// 拆分 thinking blocks（仅 assistant 消息）。
@@ -120,8 +121,13 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 					raw := convert.EncodeReasoningBlock(cb.Reasoning, convert.ReasoningProtocolOpenAIChat)
 					var restored struct {
 						ReasoningContent *string `json:"reasoning_content"`
+						Signature        string  `json:"signature"`
 					}
-					if json.Unmarshal(raw, &restored) == nil && restored.ReasoningContent != nil && *restored.ReasoningContent != "" {
+					_ = json.Unmarshal(raw, &restored)
+					if restored.Signature != "" {
+						om.Signature = restored.Signature
+					}
+					if restored.ReasoningContent != nil && *restored.ReasoningContent != "" {
 						thinkingText.WriteString(*restored.ReasoningContent)
 						continue
 					}
@@ -191,9 +197,14 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 
 		// Tool calls
 		for _, tc := range m.ToolCalls {
+			identity := decodeToolCallID(tc.ID)
+			if identity.MessageSignature != "" {
+				om.Signature = identity.MessageSignature
+			}
 			om.ToolCalls = append(om.ToolCalls, oaiToolCall{
-				ID:   tc.ID,
-				Type: string(ir.ContentTypeFunction),
+				ID:        identity.ID,
+				Signature: identity.Signature,
+				Type:      string(ir.ContentTypeFunction),
 				Function: oaiToolFunction{
 					Name:      tc.Name,
 					Arguments: tc.Arguments,
@@ -280,6 +291,7 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 	id := generateID()
 	var content strings.Builder
 	var reasoning strings.Builder
+	var signature string
 	var refusal strings.Builder
 	var toolCalls []oaiToolCall
 	var usage *oaiUsage
@@ -298,6 +310,14 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 			finishReason = ev.FinishReason
 		}
 		switch ev.Type {
+		case ir.EventReasoningDone:
+			var restored struct {
+				Signature string `json:"signature"`
+			}
+			_ = json.Unmarshal(convert.EncodeReasoningBlock(ev.Reasoning, convert.ReasoningProtocolOpenAIChat), &restored)
+			if restored.Signature != "" {
+				signature = restored.Signature
+			}
 		case ir.EventThinkingDelta:
 			if ev.Delta != nil {
 				reasoning.WriteString(ev.Delta.Text)
@@ -353,6 +373,7 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 					Role:             "assistant",
 					Content:          content.String(),
 					ReasoningContent: reasoning.String(),
+					Signature:        signature,
 					Refusal:          refusal.String(),
 					ToolCalls:        toolCalls,
 				},
@@ -410,6 +431,22 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 		var chunk *oaiResponse
 
 		switch ev.Type {
+		case ir.EventReasoningDone:
+			var restored struct {
+				Signature string `json:"signature"`
+			}
+			_ = json.Unmarshal(convert.EncodeReasoningBlock(ev.Reasoning, convert.ReasoningProtocolOpenAIChat), &restored)
+			if restored.Signature != "" {
+				chunk = &oaiResponse{
+					ID:      id,
+					Object:  "chat.completion.chunk",
+					Model:   model,
+					Created: created,
+					Choices: []oaiChoice{
+						{Index: 0, Delta: &oaiRespDelta{Signature: restored.Signature}},
+					},
+				}
+			}
 		case ir.EventStreamStart:
 			// Send an initial chunk with role
 			chunk = &oaiResponse{

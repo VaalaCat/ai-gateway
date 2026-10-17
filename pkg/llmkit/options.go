@@ -35,6 +35,10 @@ type ConversionOptions struct {
 	BuiltinToolFallback BuiltinToolFallbackPolicy
 	RequestFields       RequestFieldPermissions
 	OnDroppedTools      func([]DroppedTool)
+	// MergeMessageRoles lists the roles whose adjacent messages are merged into one before encoding:
+	// Content and ToolCalls are concatenated in order. Messages carrying ToolCallID or RawJSON never merge
+	// and break adjacency.
+	MergeMessageRoles []Role
 }
 
 type HTTPDoer interface {

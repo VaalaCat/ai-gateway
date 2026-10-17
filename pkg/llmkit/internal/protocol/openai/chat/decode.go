@@ -112,10 +112,15 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 	}
 
 	// Parse messages
+	toolCallIDs := make(map[string]string)
 	for _, m := range raw.Messages {
 		msg := ir.Message{
 			Role:       ir.Role(m.Role),
 			ToolCallID: m.ToolCallID,
+			Signature:  m.Signature,
+		}
+		if callID, ok := toolCallIDs[m.ToolCallID]; ok && msg.Role == ir.RoleTool {
+			msg.ToolCallID = callID
 		}
 
 		// Parse content
@@ -186,18 +191,16 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 
 		// Parse tool_calls on assistant messages
 		for _, tc := range m.ToolCalls {
+			callID := encodeToolCallID(tc.ID, tc.Signature, m.Signature)
+			toolCallIDs[tc.ID] = callID
 			msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{
-				ID:        tc.ID,
+				ID:        callID,
 				Name:      tc.Function.Name,
 				Arguments: tc.Function.Arguments,
 			})
 		}
 
-		// 入站 history 的 reasoning_content → IR ContentTypeThinking block。
-		// 与 Task 8 的 chat_encode 序列化对称：永远 round-trip，不依赖 cfg。
-		// thinking block prepend 到 msg.Content 首位，与 chat_encode 拆分顺序保持一致。
-		// 仅在字段存在且非空时插入：空字符串占位是出站方向的产物（DeepSeek tool_call
-		// 历史占位），保留为 IR 块没有信息价值。
+		// 思考文本与消息签名分别保存，关闭思考回传不会丢掉上游凭据。
 		if m.ReasoningContent != nil && *m.ReasoningContent != "" {
 			thinkingBlock := ir.ContentBlock{
 				Type: ir.ContentTypeThinking,
@@ -292,7 +295,7 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 		choice := oaiResp.Choices[0]
 		toolCallCount := 0
 		if choice.Message != nil {
-			var reasoning chatReasoningAccumulator
+			reasoning := chatReasoningAccumulator{signature: choice.Message.Signature}
 			reasoning.append(ch, choice.Message.ReasoningContent)
 			reasoning.finish(ch, ir.ReasoningCompleted)
 			if choice.Message.Content != "" {
@@ -318,7 +321,7 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 					Type: ir.EventToolCallDelta,
 					Delta: &ir.DeltaPayload{
 						ToolCall: &ir.ToolCallDelta{
-							ID:        tc.ID,
+							ID:        encodeToolCallID(tc.ID, tc.Signature, choice.Message.Signature),
 							Name:      tc.Function.Name,
 							Arguments: tc.Function.Arguments,
 						},
@@ -426,6 +429,9 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		if len(chunk.Choices) > 0 {
 			choice := chunk.Choices[0]
 			if choice.Delta != nil {
+				if choice.Delta.Signature != "" {
+					reasoning.signature = choice.Delta.Signature
+				}
 				reasoning.append(ch, choice.Delta.ReasoningContent)
 				if choice.Delta.Content != "" || choice.Delta.Refusal != "" || len(choice.Delta.ToolCalls) > 0 {
 					reasoning.finish(ch, ir.ReasoningCompleted)
@@ -452,12 +458,15 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 					state, exists := toolStates[tc.Index]
 					if !exists {
 						// First time we see this index — emit Start.
-						state = &chatToolCallAggState{callID: tc.ID, name: tc.Function.Name}
+						state = &chatToolCallAggState{
+							callID: encodeToolCallID(tc.ID, tc.Signature, reasoning.signature),
+							name:   tc.Function.Name,
+						}
 						toolStates[tc.Index] = state
 						ch <- ir.Event{
 							Type: ir.EventToolCallStart,
 							ToolCall: &ir.StreamingToolCall{
-								CallID: tc.ID,
+								CallID: state.callID,
 								Index:  tc.Index,
 								Name:   tc.Function.Name,
 							},

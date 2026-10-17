@@ -41,6 +41,7 @@ type oaiMessage struct {
 	ToolCalls        []oaiToolCall   `json:"tool_calls,omitempty"`
 	ToolCallID       string          `json:"tool_call_id,omitempty"`
 	ReasoningContent *string         `json:"reasoning_content,omitempty"` // 仅请求路径
+	Signature        string          `json:"signature,omitempty"`
 }
 
 type oaiContentBlock struct {
@@ -58,10 +59,11 @@ type oaiImageURL struct {
 // a delta belongs to. It uses `json:"index"` (not omitempty) so it always
 // appears in stream chunk JSON per the OpenAI spec.
 type oaiToolCall struct {
-	Index    int             `json:"index"`
-	ID       string          `json:"id,omitempty"`
-	Type     string          `json:"type,omitempty"`
-	Function oaiToolFunction `json:"function"`
+	Index     int             `json:"index"`
+	ID        string          `json:"id,omitempty"`
+	Signature string          `json:"signature,omitempty"`
+	Type      string          `json:"type,omitempty"`
+	Function  oaiToolFunction `json:"function"`
 }
 
 type oaiToolFunction struct {
@@ -115,6 +117,7 @@ type oaiRespMsg struct {
 	Role             string        `json:"role"`
 	Content          string        `json:"content,omitempty"`
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	Signature        string        `json:"signature,omitempty"`
 	Refusal          string        `json:"refusal,omitempty"`
 	ToolCalls        []oaiToolCall `json:"tool_calls,omitempty"`
 }
@@ -123,6 +126,7 @@ type oaiRespDelta struct {
 	Role             string        `json:"role,omitempty"`
 	Content          string        `json:"content,omitempty"`
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	Signature        string        `json:"signature,omitempty"`
 	Refusal          string        `json:"refusal,omitempty"`
 	ToolCalls        []oaiToolCall `json:"tool_calls,omitempty"`
 }

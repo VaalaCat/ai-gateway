@@ -8,9 +8,10 @@ import (
 )
 
 type chatReasoningAccumulator struct {
-	text     strings.Builder
-	active   bool
-	finished bool
+	text      strings.Builder
+	active    bool
+	finished  bool
+	signature string
 }
 
 func (state *chatReasoningAccumulator) append(ch chan<- ir.Event, fragment string) {
@@ -25,19 +26,27 @@ func (state *chatReasoningAccumulator) append(ch chan<- ir.Event, fragment strin
 }
 
 func (state *chatReasoningAccumulator) finish(ch chan<- ir.Event, status ir.ReasoningStatus) {
-	if !state.active || state.finished {
+	if (!state.active && state.signature == "") || state.finished {
 		return
 	}
 	state.finished = true
 	text := state.text.String()
-	raw, _ := json.Marshal(map[string]string{"reasoning_content": text})
 	ch <- ir.Event{
 		Type:            ir.EventReasoningDone,
 		ReasoningStatus: status,
-		Reasoning: &ir.ReasoningContent{
-			Summary: []string{text},
-			Content: []string{text},
-			RawJSON: raw,
-		},
+		Reasoning:       chatReasoningContent(text, state.signature),
+	}
+}
+
+func chatReasoningContent(text, signature string) *ir.ReasoningContent {
+	fields := map[string]string{"reasoning_content": text}
+	if signature != "" {
+		fields["signature"] = signature
+	}
+	raw, _ := json.Marshal(fields)
+	return &ir.ReasoningContent{
+		Summary: []string{text},
+		Content: []string{text},
+		RawJSON: raw,
 	}
 }
