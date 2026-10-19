@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,6 +12,7 @@ import {
   useDeleteLegacySource,
   useSettings,
   useUpdateSettings,
+  usePublicConfig,
 } from "./system";
 
 const { apiDelete, apiGet, apiPost, apiPut } = vi.hoisted(() => ({
@@ -146,5 +147,79 @@ describe("settings API hooks", () => {
     });
     expect(result.current.settings.data).toEqual(confirmedSettings);
     expect(settingsClient.getQueryData(key)).toEqual(confirmedSettings);
+  });
+
+  it("refreshes public branding after saving without publishing unrelated admin settings", async () => {
+    const settingsClient = createTestQueryClient();
+    let siteName = "Before";
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === "/system/public-config") return { site_name: siteName };
+      return { settings: { site_name: siteName, private_setting: "secret" } };
+    });
+    apiPut.mockImplementation(async () => {
+      siteName = "After";
+      return { settings: { site_name: siteName, private_setting: "secret" } };
+    });
+    const settingsWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={settingsClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => ({ config: usePublicConfig(), update: useUpdateSettings() }), { wrapper: settingsWrapper });
+    await waitFor(() => expect(result.current.config.data?.site_name).toBe("Before"));
+
+    await act(async () => {
+      await result.current.update.mutateAsync({ settings: { site_name: "After" } });
+    });
+
+    await waitFor(() => expect(result.current.config.data?.site_name).toBe("After"));
+    expect(settingsClient.getQueryData(["public-config"])).toEqual({ site_name: "After" });
+    expect(apiGet.mock.calls.filter(([path]) => path === "/system/public-config")).toHaveLength(2);
+  });
+
+  it("leaves public config untouched when saving fails", async () => {
+    const settingsClient = createTestQueryClient();
+    settingsClient.setQueryData(["public-config"], { site_name: "Before" });
+    const invalidate = vi.spyOn(settingsClient, "invalidateQueries");
+    apiPut.mockRejectedValueOnce(new Error("save failed"));
+    const settingsWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={settingsClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useUpdateSettings(), { wrapper: settingsWrapper });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync({ settings: { site_name: "After" } })).rejects.toThrow("save failed");
+    });
+
+    expect(settingsClient.getQueryData(["public-config"])).toEqual({ site_name: "Before" });
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("polls public config every thirty seconds and refreshes fresh data on window focus", async () => {
+    vi.useFakeTimers();
+    const publicClient = createTestQueryClient();
+    publicClient.setQueryDefaults(["public-config"], { staleTime: Infinity });
+    apiGet.mockResolvedValue({ site_name: "Site" });
+    const publicWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={publicClient}>{children}</QueryClientProvider>
+    );
+    focusManager.setFocused(true);
+    const hook = renderHook(() => usePublicConfig(), { wrapper: publicWrapper });
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(apiGet).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(apiGet).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(apiGet).toHaveBeenCalledTimes(3);
+      expect(apiGet).toHaveBeenLastCalledWith("/system/public-config");
+    } finally {
+      hook.unmount();
+      publicClient.clear();
+      focusManager.setFocused(undefined);
+      vi.useRealTimers();
+    }
   });
 });

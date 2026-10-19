@@ -8,9 +8,11 @@ import { usePublicConfig } from "@/lib/api/system";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import Link from "next/link";
+import { SiteIcon } from "@/components/site-branding";
+import { SITE_BRANDING_DEFAULTS } from "@/lib/site-branding";
 
 function RegisterForm() {
   const t = useTranslations("register");
@@ -63,7 +65,17 @@ function RegisterForm() {
   return (
     <div className="flex min-h-screen items-center justify-center">
       <Card className="w-full max-w-md">
-        <CardHeader><CardTitle>{t("title")}</CardTitle></CardHeader>
+        <CardHeader>
+          {(publicConfig?.site_icon_url || (publicConfig?.site_name && publicConfig.site_name !== SITE_BRANDING_DEFAULTS.site_name)) && (
+            <p className="flex items-center gap-2 font-semibold">
+              {publicConfig?.site_icon_url && <SiteIcon iconUrl={publicConfig.site_icon_url} className="size-8 shrink-0 object-contain" />}
+              {publicConfig?.site_name || SITE_BRANDING_DEFAULTS.site_name}
+            </p>
+          )}
+          <CardTitle>{t("title")}</CardTitle>
+          {publicConfig?.welcome_title && <p className="font-medium whitespace-pre-wrap break-words">{publicConfig.welcome_title}</p>}
+          {publicConfig?.welcome_message && <CardDescription className="whitespace-pre-wrap break-words">{publicConfig.welcome_message}</CardDescription>}
+        </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">

@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
+import type { SiteBranding } from "@/lib/site-branding";
 import type {
   SystemStatsResponse,
   CleanupBatchRequest,
@@ -123,6 +124,7 @@ export function useUpdateSettings() {
     onSuccess: (data) => {
       qc.setQueryData(["system-settings"], data);
       qc.invalidateQueries({ queryKey: ["system-settings"] });
+      qc.invalidateQueries({ queryKey: ["public-config"] });
     },
   });
 }
@@ -139,7 +141,7 @@ export function useUpdateAgentRelaySettings() {
   });
 }
 
-export interface PublicConfig {
+export interface PublicConfig extends SiteBranding {
   registration_enabled: boolean;
   invite_enabled: boolean;
   invite_user_max_codes: number;
@@ -149,5 +151,7 @@ export function usePublicConfig() {
   return useQuery({
     queryKey: ["public-config"],
     queryFn: () => api.get<PublicConfig>("/system/public-config"),
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: "always",
   });
 }

@@ -32,6 +32,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { usePublicConfig } from "@/lib/api/system";
+import { SiteIcon } from "@/components/site-branding";
+import { SITE_BRANDING_DEFAULTS } from "@/lib/site-branding";
 import {
   isGenericAPIVisible,
   isModelMarketplaceVisible,
@@ -214,8 +216,8 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
               <Link href="/dashboard">
-                <Bot className="size-5" />
-                <span className="font-semibold">AI Gateway</span>
+                <SiteIcon iconUrl={publicConfig?.site_icon_url} className="size-5 shrink-0 object-contain" />
+                <span className="font-semibold">{publicConfig?.site_name || SITE_BRANDING_DEFAULTS.site_name}</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
