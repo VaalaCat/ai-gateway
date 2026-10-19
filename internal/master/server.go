@@ -30,6 +30,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	apiagent "github.com/VaalaCat/ai-gateway/internal/master/api/agent"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/agent_route"
+	apiannouncement "github.com/VaalaCat/ai-gateway/internal/master/api/announcement"
 	apiaccessgrant "github.com/VaalaCat/ai-gateway/internal/master/api/api_access_grant"
 	apibackend "github.com/VaalaCat/ai-gateway/internal/master/api/api_backend"
 	apiCatalog "github.com/VaalaCat/ai-gateway/internal/master/api/api_catalog"
@@ -752,6 +753,8 @@ func (s *Server) setupRoutes() {
 	}
 
 	// Public endpoints
+	announcementH := &apiannouncement.Handler{}
+	s.Router.GET("/api/public/announcements", api.Adapt(adapter, api.BindNone, announcementH.PublicList))
 	s.Router.POST("/api/login", api.Adapt(adapter, api.BindJSON, userH.Login))
 	s.Router.POST("/api/register", api.Adapt(adapter, api.BindJSON, userH.Register))
 	s.Router.GET("/api/system/public-config", api.Adapt(adapter, api.BindNone, systemH.PublicConfig))
@@ -793,6 +796,8 @@ func (s *Server) setupRoutes() {
 	userAuth.Use(middleware.AuthMiddleware(s.Cfg.Master.JWTSecret))
 	userAuth.Use(middleware.ScopeMiddleware())
 	userAuth.GET("/profile", api.Adapt(adapter, api.BindNone, userH.GetProfile))
+	userAuth.GET("/announcements", api.Adapt(adapter, api.BindNone, announcementH.List))
+	userAuth.POST("/announcements/:id/seen", api.Adapt(adapter, api.BindURIAndJSON, announcementH.MarkSeen))
 	userAuth.GET("/capabilities", api.Adapt(adapter, api.BindNone, capabilityH.Get))
 	userAuth.GET("/api-catalog/services", api.Adapt(adapter, api.BindQuery, apiCatalogH.ListServices))
 	userAuth.GET("/api-catalog/services/detail", api.Adapt(adapter, api.BindQuery, apiCatalogH.ServiceDetail))
@@ -856,6 +861,10 @@ func (s *Server) setupRoutes() {
 	auth.Use(middleware.AuthMiddleware(s.Cfg.Master.JWTSecret))
 	auth.Use(middleware.AdminOnly())
 	auth.Use(middleware.ScopeMiddleware())
+	auth.GET("/announcements", api.Adapt(adapter, api.BindNone, announcementH.AdminList))
+	auth.POST("/announcements", api.Adapt(adapter, api.BindJSON, announcementH.Create))
+	auth.PUT("/announcements/:id", api.Adapt(adapter, api.BindURIAndJSON, announcementH.Update))
+	auth.DELETE("/announcements/:id", api.Adapt(adapter, api.BindURI, announcementH.Delete))
 	auth.GET("/model-marketplace", api.Adapt(adapter, api.BindQuery, marketplaceH.AdminList))
 	auth.GET("/model-marketplace/detail", api.Adapt(adapter, api.BindQuery, marketplaceH.AdminDetail))
 	auth.GET("/api-roles", api.Adapt(adapter, api.BindQuery, apiRoleH.List))

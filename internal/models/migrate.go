@@ -48,6 +48,9 @@ func AutoMigrate(db *gorm.DB) error {
 		&InviteCode{},
 		&InviteRedemption{},
 		&MasterSigningKey{},
+		&Announcement{},
+		&AnnouncementGroup{},
+		&AnnouncementSeen{},
 	); err != nil {
 		return err
 	}
@@ -226,6 +229,7 @@ func coreModels() []any {
 		&PrivateChannelShare{}, &AdminScript{}, &InviteCode{}, &InviteRedemption{},
 		&MasterSigningKey{}, &BillingLog{}, &HistoryMigration{}, &HistoryCursor{},
 		&APIService{}, &APIBackend{}, &APIRoute{}, &APIUpstream{}, &Role{}, &Permission{}, &RolePermission{}, &RoleBinding{},
+		&Announcement{}, &AnnouncementGroup{}, &AnnouncementSeen{},
 	}
 }
 

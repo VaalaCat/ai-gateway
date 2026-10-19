@@ -41,6 +41,7 @@ func TestCleanupTableRegistryIsExactAllowList(t *testing.T) {
 		"model_routings", "private_channels", "private_channel_shares", "admin_scripts", "invite_codes",
 		"invite_redemptions", "master_signing_keys", "billing_projection_baselines", "history_migrations",
 		"history_cursors", "log_history_aggregate_merges", "database_layouts",
+		"announcements", "announcement_groups", "announcement_seens",
 	} {
 		_, ok := FindCleanupTable("core", forbidden)
 		require.False(t, ok, forbidden)

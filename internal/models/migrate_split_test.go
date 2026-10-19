@@ -35,6 +35,7 @@ func TestMigrateCoreDBOwnsOnlyCoreTables(t *testing.T) {
 		"user_groups", "o_auth_providers", "o_auth_identities", "model_routings",
 		"private_channels", "private_channel_shares", "admin_scripts", "invite_codes",
 		"invite_redemptions", "master_signing_keys", "billing_logs", "database_layouts",
+		"announcements", "announcement_groups", "announcement_seens",
 	} {
 		require.Truef(t, db.Migrator().HasTable(table), "core table %s missing", table)
 	}
@@ -88,6 +89,7 @@ func TestMigrateLogDBOwnsOnlyLogTables(t *testing.T) {
 	for _, table := range []string{
 		"users", "tokens", "channels", "settings", "billing_logs", "billing_hourly_buckets",
 		"billing_projection_receipts", "billing_projection_baselines", "usage_logs", "usage_log_traces",
+		"announcements", "announcement_groups", "announcement_seens",
 	} {
 		require.Falsef(t, db.Migrator().HasTable(table), "core or legacy table %s leaked into log DB", table)
 	}

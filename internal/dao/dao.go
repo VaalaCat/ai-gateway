@@ -7,10 +7,12 @@ import "fmt"
 type Query interface {
 	User() UserQuery
 	UsageLog() UsageLogQuery
+	Announcement() UserAnnouncementQuery
 }
 
 type Mutation interface {
 	User() UserMutation
+	Announcement() UserAnnouncementMutation
 }
 
 func NewQuery(ctx UserContext) Query {
@@ -28,9 +30,17 @@ type compositeQuery struct{ ctx *userContextImpl }
 func (q *compositeQuery) User() UserQuery         { return &userQuery{ctx: q.ctx} }
 func (q *compositeQuery) UsageLog() UsageLogQuery { return &usageLogQuery{ctx: q.ctx} }
 
+func (q *compositeQuery) Announcement() UserAnnouncementQuery {
+	return &userAnnouncementQuery{ctx: q.ctx}
+}
+
 type compositeMutation struct{ ctx *userContextImpl }
 
 func (m *compositeMutation) User() UserMutation { return &userMutation{ctx: m.ctx} }
+
+func (m *compositeMutation) Announcement() UserAnnouncementMutation {
+	return &userAnnouncementMutation{ctx: m.ctx}
+}
 
 // --- admin-scoped composites ---
 
@@ -63,6 +73,7 @@ type AdminQuery interface {
 	APIUpstream() APIUpstreamQuery
 	APIRBAC() APIRBACQuery
 	APIRequestLog() APIRequestLogQuery
+	Announcement() AnnouncementQuery
 }
 
 type AdminMutation interface {
@@ -92,6 +103,7 @@ type AdminMutation interface {
 	APIRoute() APIRouteMutation
 	APIUpstream() APIUpstreamMutation
 	APIRBAC() APIRBACMutation
+	Announcement() AnnouncementMutation
 }
 
 // getBaseContext extracts *baseContext from any Context implementation.
@@ -175,6 +187,10 @@ func (q *compositeAdminQuery) APIRequestLog() APIRequestLogQuery {
 	return &apiRequestLogQuery{ctx: q.ctx}
 }
 
+func (q *compositeAdminQuery) Announcement() AnnouncementQuery {
+	return &announcementQuery{ctx: q.ctx}
+}
+
 type compositeAdminMutation struct{ ctx *baseContext }
 
 func (m *compositeAdminMutation) User() AdminUserMutation   { return &adminUserMutation{ctx: m.ctx} }
@@ -245,3 +261,7 @@ func (m *compositeAdminMutation) APIUpstream() APIUpstreamMutation {
 	return &apiUpstreamMutation{ctx: m.ctx}
 }
 func (m *compositeAdminMutation) APIRBAC() APIRBACMutation { return &apiRBACMutation{ctx: m.ctx} }
+
+func (m *compositeAdminMutation) Announcement() AnnouncementMutation {
+	return &announcementMutation{ctx: m.ctx}
+}

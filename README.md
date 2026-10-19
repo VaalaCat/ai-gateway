@@ -16,6 +16,7 @@ A distributed-by-design AI API gateway with a separated control-plane (master) /
 - **Model Routing** — Aggregate multiple upstream models under one name with priority/weight load balancing and error retries
 - **BYOK (Bring Your Own Key)** — End-users can self-serve upload their own provider API keys (AES-GCM encrypted at rest); private channels are merged into the candidate pool with priority over shared admin channels, with optional service-fee billing mode
 - **Single Binary** — Frontend static assets embedded; no separate web server needed
+- **Announcements** — Administrators publish plain-text announcements under **Operations & Monitoring → Announcements** (`/announcements`). Select multiple recipient groups; an empty selection reaches every signed-in user. The independent guest switch defaults to on and publishes the same announcement on public login/registration pages regardless of group selection. The top-right bell opens announcement history, with pinned announcements first and creation dates shown (including the year for older years). New announcements are checked every 30 seconds and on window focus; each version is automatically shown once per account (server-persisted), or once per browser for guests (local storage). Editing does not repeat the reminder unless **Show announcement again** is enabled, which creates a new reminder version for eligible users and guests. Clearing browser storage resets guest reminders.
 
 ## Screenshots
 

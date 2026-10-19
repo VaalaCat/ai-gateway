@@ -15,6 +15,7 @@ import {
   Key,
   KeyRound,
   LayoutDashboard,
+  Megaphone,
   MessageSquare,
   Network,
   Route,
@@ -196,6 +197,7 @@ export function AppSidebar() {
               href: "/monitoring",
             },
             { label: t("maintenance"), icon: Wrench, href: "/system" },
+            { label: t("announcements"), icon: Megaphone, href: "/announcements" },
           ],
         },
       ]
