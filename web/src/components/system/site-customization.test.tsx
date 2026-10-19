@@ -81,12 +81,30 @@ describe("SiteCustomization", () => {
   it("requires nonblank names and enforces welcome length limits", () => {
     render(<SiteCustomization />);
     change("siteName", "   ");
-    change("siteTitle", "x".repeat(201));
-    change("welcomeMessage", "x".repeat(2001));
+    change("siteTitle", "x".repeat(21));
+    change("welcomeMessage", "x".repeat(101));
     expect(screen.getByRole("textbox", { name: "siteName" })).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("textbox", { name: "siteTitle" })).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("textbox", { name: "welcomeMessage" })).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("button", { name: "save" })).toBeDisabled();
+  });
+
+  it.each([
+    ["siteName", 20], ["siteTitle", 20], ["welcomeTitle", 20], ["welcomeMessage", 100],
+  ] as const)("accepts the Unicode boundary and prevents saving one character over it: %s", async (name, maximum) => {
+    render(<SiteCustomization />);
+    const boundary = "界".repeat(maximum - 1) + "🚀";
+    change(name, boundary);
+    expect(screen.getByRole("textbox", { name })).toHaveAttribute("aria-invalid", "false");
+    expect(screen.getByRole("button", { name: "save" })).toBeEnabled();
+    change(name, boundary + "界");
+    expect(screen.getByRole("textbox", { name })).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: "save" })).toBeDisabled();
+    save();
+    expect(mocks.update.mutateAsync).not.toHaveBeenCalled();
+    change(name, boundary);
+    save();
+    await waitFor(() => expect(mocks.success).toHaveBeenCalledWith("saved"));
   });
 
   it("previews a valid URL and reports image failures with the fallback icon", () => {

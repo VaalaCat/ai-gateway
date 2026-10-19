@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { usePublicConfig } from "@/lib/api/system";
-import { SiteIcon } from "@/components/site-branding";
+import { BrandPlaceholder, SiteIcon } from "@/components/site-branding";
 import { SITE_BRANDING_DEFAULTS } from "@/lib/site-branding";
 import {
   isGenericAPIVisible,
@@ -216,8 +216,12 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
               <Link href="/dashboard">
-                <SiteIcon iconUrl={publicConfig?.site_icon_url} className="size-5 shrink-0 object-contain" />
-                <span className="font-semibold">{publicConfig?.site_name || SITE_BRANDING_DEFAULTS.site_name}</span>
+                {publicConfig ? (
+                  <>
+                    <SiteIcon iconUrl={publicConfig.site_icon_url} className="size-5 shrink-0 object-contain" />
+                    <span className="font-semibold">{publicConfig.site_name || SITE_BRANDING_DEFAULTS.site_name}</span>
+                  </>
+                ) : <BrandPlaceholder />}
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

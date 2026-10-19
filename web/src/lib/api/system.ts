@@ -1,6 +1,6 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "./client";
-import type { SiteBranding } from "@/lib/site-branding";
+import { isSafeSiteIconURL, SITE_BRANDING_DEFAULTS, type SiteBranding } from "@/lib/site-branding";
 import type {
   SystemStatsResponse,
   CleanupBatchRequest,
@@ -147,10 +147,39 @@ export interface PublicConfig extends SiteBranding {
   invite_user_max_codes: number;
 }
 
+const PUBLIC_CONFIG_STORAGE_KEY = "ai-gateway:public-config:v1";
+
+export function restorePublicConfig(queryClient: QueryClient) {
+  if (queryClient.getQueryData(["public-config"])) return;
+  try {
+    const cached: unknown = JSON.parse(localStorage.getItem(PUBLIC_CONFIG_STORAGE_KEY) || "null");
+    if (!cached || typeof cached !== "object") return;
+    const config = cached as PublicConfig;
+    if (!Object.keys(SITE_BRANDING_DEFAULTS).every((key) => typeof config[key as keyof SiteBranding] === "string")
+      || !isSafeSiteIconURL(config.site_icon_url)
+      || typeof config.registration_enabled !== "boolean"
+      || typeof config.invite_enabled !== "boolean"
+      || !Number.isFinite(config.invite_user_max_codes)) return;
+    // A persisted snapshot is only a visual bootstrap, never a fresh response.
+    queryClient.setQueryData(["public-config"], config, { updatedAt: 0 });
+  } catch {
+    // Storage can be disabled or contain an obsolete/corrupt snapshot.
+  }
+}
+
 export function usePublicConfig() {
   return useQuery({
     queryKey: ["public-config"],
-    queryFn: () => api.get<PublicConfig>("/system/public-config"),
+    queryFn: async () => {
+      const config = await api.get<PublicConfig>("/system/public-config");
+      try {
+        localStorage.setItem(PUBLIC_CONFIG_STORAGE_KEY, JSON.stringify(config));
+      } catch {
+        // The in-memory query remains usable when browser storage is unavailable.
+      }
+      return config;
+    },
+    refetchOnMount: "always",
     refetchInterval: 30_000,
     refetchOnWindowFocus: "always",
   });

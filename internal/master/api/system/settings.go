@@ -32,11 +32,11 @@ var settingDefs = map[string]struct {
 }{
 	"site_name": {
 		Default:  "AI Gateway",
-		Validate: func(v string) bool { return validBrandingText(strings.TrimSpace(v), 100, true) },
+		Validate: func(v string) bool { return validBrandingText(strings.TrimSpace(v), 20, true) },
 	},
 	"site_title": {
 		Default:  "AI Gateway",
-		Validate: func(v string) bool { return validBrandingText(strings.TrimSpace(v), 200, true) },
+		Validate: func(v string) bool { return validBrandingText(strings.TrimSpace(v), 20, true) },
 	},
 	"site_icon_url": {
 		Default:  "",
@@ -44,11 +44,11 @@ var settingDefs = map[string]struct {
 	},
 	"welcome_title": {
 		Default:  "",
-		Validate: func(v string) bool { return validBrandingText(v, 200, false) },
+		Validate: func(v string) bool { return validBrandingText(v, 20, false) },
 	},
 	"welcome_message": {
 		Default:  "",
-		Validate: func(v string) bool { return validBrandingText(v, 2000, false) },
+		Validate: func(v string) bool { return validBrandingText(v, 100, false) },
 	},
 	"registration_enabled": {
 		Default: "false",

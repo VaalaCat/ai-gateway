@@ -12,7 +12,6 @@ const datatype = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "AI Gateway",
   description: "Distributed AI Gateway Management",
 };
 

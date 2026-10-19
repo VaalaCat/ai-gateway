@@ -21,7 +21,7 @@ func TestSiteBrandingAdminWriteAndPublicProjection(t *testing.T) {
 		"site_name":       " Custom Gateway ",
 		"site_title":      "Custom Browser Title",
 		"site_icon_url":   "https://cdn.example.com/logo.svg?v=3#logo",
-		"welcome_title":   "Welcome <b>friend</b>",
+		"welcome_title":   "Welcome <b>user</b>",
 		"welcome_message": "Welcome\nto the gateway",
 	}}
 	for _, caller := range []struct {
@@ -57,7 +57,7 @@ func TestSiteBrandingAdminWriteAndPublicProjection(t *testing.T) {
 	require.Equal(t, "Custom Gateway", body["site_name"])
 	require.Equal(t, "Custom Browser Title", body["site_title"])
 	require.Equal(t, "https://cdn.example.com/logo.svg?v=3#logo", body["site_icon_url"])
-	require.Equal(t, "Welcome <b>friend</b>", body["welcome_title"])
+	require.Equal(t, "Welcome <b>user</b>", body["welcome_title"])
 	require.Equal(t, "Welcome\nto the gateway", body["welcome_message"])
 	require.Len(t, body, 8)
 	require.NotContains(t, public.Body.String(), "never-public-secret")

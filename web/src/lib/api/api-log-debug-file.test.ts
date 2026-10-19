@@ -42,7 +42,7 @@ describe("API request debug file download", () => {
       return "blob:api-log-debug";
     });
     const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function () {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
       filename = this.download;
     });
     get.mockResolvedValueOnce(trace);
@@ -65,7 +65,7 @@ describe("API request debug file download", () => {
     get.mockResolvedValueOnce({ ...trace, request_id: requestID });
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:opaque-api-id");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function () {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
       filename = this.download;
     });
 

@@ -105,11 +105,11 @@ func TestBrandingSettingsPersistAndImmediatelyUpdatePublicConfig(t *testing.T) {
 }
 
 func TestBrandingSettingsUnicodeCharacterLimits(t *testing.T) {
-	for key, maximum := range map[string]int{"site_name": 100, "site_title": 200, "welcome_title": 200, "welcome_message": 2000} {
+	for key, maximum := range map[string]int{"site_name": 20, "site_title": 20, "welcome_title": 20, "welcome_message": 100} {
 		t.Run(key, func(t *testing.T) {
 			c := newSettingsContext(t)
 			h := &Handler{}
-			boundary := strings.Repeat("界", maximum)
+			boundary := strings.Repeat("界", maximum-1) + "🚀"
 			_, err := h.UpdateSettings(c, UpdateSettingsRequest{Settings: map[string]string{key: boundary}})
 			require.NoError(t, err)
 			for _, invalid := range []string{boundary + "🚀", "invalid\xff"} {

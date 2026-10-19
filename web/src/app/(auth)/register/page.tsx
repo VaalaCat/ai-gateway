@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import Link from "next/link";
-import { SiteIcon } from "@/components/site-branding";
+import { BrandPlaceholder, SiteIcon } from "@/components/site-branding";
 import { SITE_BRANDING_DEFAULTS } from "@/lib/site-branding";
 
 function RegisterForm() {
@@ -66,6 +66,7 @@ function RegisterForm() {
     <div className="flex min-h-screen items-center justify-center">
       <Card className="w-full max-w-md">
         <CardHeader>
+          {!publicConfig && <BrandPlaceholder />}
           {(publicConfig?.site_icon_url || (publicConfig?.site_name && publicConfig.site_name !== SITE_BRANDING_DEFAULTS.site_name)) && (
             <p className="flex items-center gap-2 font-semibold">
               {publicConfig?.site_icon_url && <SiteIcon iconUrl={publicConfig.site_icon_url} className="size-8 shrink-0 object-contain" />}

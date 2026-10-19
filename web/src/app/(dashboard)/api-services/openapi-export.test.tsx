@@ -16,7 +16,7 @@ describe("OpenAPI service export", () => {
     const exported = { openapi: "3.1.0", info: { title: "Weather", version: "1" }, servers: [{ url: "https://gateway.example.test/v1/api/weather" }] };
     let blob: Blob | undefined;
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    vi.spyOn(URL, "createObjectURL").mockImplementation((value) => { blob = value; return "blob:openapi"; });
+    vi.spyOn(URL, "createObjectURL").mockImplementation((value) => { if (value instanceof Blob) blob = value; return "blob:openapi"; });
     const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     get.mockResolvedValueOnce({ export: exported, service: { id: 7 }, routes: [{ id: 9 }] });
 

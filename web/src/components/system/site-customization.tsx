@@ -15,11 +15,11 @@ import { useSettings, useUpdateSettings } from "@/lib/api/system";
 import { isSafeSiteIconURL, SITE_BRANDING_DEFAULTS, type SiteBranding } from "@/lib/site-branding";
 
 const fields = [
-  { key: "site_name", label: "siteName", help: "siteNameHelp", limit: 100, required: true },
-  { key: "site_title", label: "siteTitle", help: "siteTitleHelp", limit: 200, required: true },
+  { key: "site_name", label: "siteName", help: "siteNameHelp", limit: 20, required: true },
+  { key: "site_title", label: "siteTitle", help: "siteTitleHelp", limit: 20, required: true },
   { key: "site_icon_url", label: "siteIconUrl", help: "siteIconUrlHelp" },
-  { key: "welcome_title", label: "welcomeTitle", help: "welcomeTitleHelp", limit: 200 },
-  { key: "welcome_message", label: "welcomeMessage", help: "welcomeMessageHelp", limit: 2000 },
+  { key: "welcome_title", label: "welcomeTitle", help: "welcomeTitleHelp", limit: 20 },
+  { key: "welcome_message", label: "welcomeMessage", help: "welcomeMessageHelp", limit: 100 },
 ] as const;
 
 export function SiteCustomization() {
