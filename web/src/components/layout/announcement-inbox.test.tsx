@@ -206,7 +206,12 @@ describe("AnnouncementInbox", () => {
   it.each([true, false])("isolates a stale receipt completion when the new receipt succeeds: %s", async (newSucceeded) => {
     const id = newSucceeded ? 2101 : 2201;
     mocks.auth.user = { user_id: id };
-    const { promise: oldReceipt, resolve: resolveOld, reject: rejectOld } = Promise.withResolvers<{ status: string }>();
+    let resolveOld!: (value: { status: string }) => void;
+    let rejectOld!: (reason: Error) => void;
+    const oldReceipt = new Promise<{ status: string }>((resolve, reject) => {
+      resolveOld = resolve;
+      rejectOld = reject;
+    });
     mocks.mark.mockImplementation(({ revision }: { revision: number }) => revision === 1
       ? oldReceipt
       : newSucceeded ? Promise.resolve({ status: "ok" }) : Promise.reject(new Error("offline")));

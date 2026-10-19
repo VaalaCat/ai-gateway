@@ -51,7 +51,8 @@ describe("announcement API hooks", () => {
   it("does not mark a newer revision seen when an older request finishes", async () => {
     const qc = createTestQueryClient();
     qc.setQueryData(["announcements", "received", 1], [announcement]);
-    const { promise, resolve } = Promise.withResolvers<{ status: string }>();
+    let resolve!: (value: { status: string }) => void;
+    const promise = new Promise<{ status: string }>((done) => { resolve = done; });
     post.mockReturnValue(promise);
     const { result } = renderHook(() => useMarkAnnouncementSeen(1), { wrapper: queryClientWrapper(qc) });
     await act(async () => {
