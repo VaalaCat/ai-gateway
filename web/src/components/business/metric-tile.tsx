@@ -15,13 +15,15 @@ export type MetricTileViz =
   | { kind: "none" };
 
 export interface MetricTileThreshold {
-  warn: number;     // 0-100,高阈警示语义
-  critical: number; // 0-100,高阈警示语义
+  warn: number;     // 0-100
+  critical: number; // 0-100
+  semantic?: "high-bad" | "low-bad";
 }
 
 interface MetricTileProps {
   label: string;
   value: string | number | ReactNode;
+  valueClassName?: string;
   sublabel?: string;
   viz?: MetricTileViz;
   threshold?: MetricTileThreshold;
@@ -37,14 +39,18 @@ function formatValue(v: string | number | ReactNode): ReactNode {
 }
 
 /**
- * 高阈警示语义: percent >= critical 红, >= warn 黄。
- * 反向语义(如 success rate)调用方传 100-rate 即可。
+ * 默认高阈值告警；low-bad 表示剩余量降低时告警，充足时显示绿色。
  */
 function thresholdColor(
   percent: number | undefined,
   t: MetricTileThreshold | undefined,
 ): string {
   if (!t || percent === undefined || Number.isNaN(percent)) return "";
+  if (t.semantic === "low-bad") {
+    if (percent <= t.critical) return "text-destructive";
+    if (percent <= t.warn) return "text-amber-600 dark:text-amber-400";
+    return "text-emerald-600 dark:text-emerald-400";
+  }
   if (percent >= t.critical) return "text-destructive";
   if (percent >= t.warn) return "text-amber-600 dark:text-amber-400";
   return "";
@@ -53,6 +59,7 @@ function thresholdColor(
 export function MetricTile({
   label,
   value,
+  valueClassName,
   sublabel,
   viz,
   threshold,
@@ -108,7 +115,8 @@ export function MetricTile({
       <div className="px-3 text-label text-muted-foreground">{label}</div>
       <div
         className={cn(
-          "px-3 font-mono text-display tabular-nums",
+          "px-3 font-mono tabular-nums",
+          valueClassName ?? "text-display",
           valueColor,
         )}
       >
@@ -130,7 +138,19 @@ export function MetricTile({
           <DataGlyph kind="pie" value={viz.percent} title={label} />
         )}
         {viz?.kind === "progress" && (
-          <DataGlyph kind="bar" values={[viz.percent]} title={label} />
+          <div
+            role="progressbar"
+            aria-label={label}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.max(0, Math.min(100, viz.percent))}
+            className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
+          >
+            <div
+              className={cn("h-full rounded-full bg-current", valueColor || "text-primary")}
+              style={{ width: `${Math.max(0, Math.min(100, viz.percent))}%` }}
+            />
+          </div>
         )}
       </div>
     </Card>

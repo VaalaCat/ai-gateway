@@ -170,6 +170,31 @@ vi.mock("@/components/business/metric-trend-chart", () => ({
   },
 }));
 
+it.each([
+  [90, 10, "0.0009 / 0.0010", 90],
+  [50, 50, "0.0005 / 0.0010", 50],
+  [20, 80, "0.0002 / 0.0010", 20],
+  [5, 95, "0.0001 / 0.0010", 5],
+  [0, 100, "0.0000 / 0.0010", 0],
+  [0, 0, "0.0000 / 0.0000", 0],
+  [-10, 110, "-0.0001 / 0.0010", 0],
+])("shows remaining %s and used %s as remaining / total", (remaining, used, value, progress) => {
+  calls.isAdmin = false;
+  calls.dashboardResponse = {
+    ...dashboardFixture,
+    kpis: { ...dashboardFixture.kpis, quota: { quota: remaining, used_quota: used } },
+  };
+  render(<DashboardPage />);
+  expect(calls.kpi.mock.lastCall?.[0].items).toContainEqual({
+    key: "quota",
+    label: "kpi.quota",
+    valueClassName: "text-lg leading-8 font-bold",
+    value,
+    progress,
+    threshold: { warn: 20, critical: 5, semantic: "low-bad" },
+  });
+});
+
 beforeEach(() => {
   calls.query = "";
   calls.dashboard.mockReset();

@@ -8,6 +8,7 @@ export interface KpiItem {
   key: string;
   label: string;
   value: string | number;
+  valueClassName?: string;
   sublabel?: string;
   onClick?: () => void;
 
@@ -21,7 +22,7 @@ export interface KpiItem {
   threshold?: {
     warn: number;
     critical: number;
-    /** 默认 'high-bad';'low-bad' 时 KpiGrid 内部反向取 100-ratio 喂给底层 */
+    /** 默认 'high-bad';ratio 反向展示风险，progress 保留原值并按低阈值告警。 */
     semantic?: "high-bad" | "low-bad";
   };
 
@@ -81,7 +82,7 @@ function translateItem(item: KpiItem): {
     return {
       viz: { kind: "progress", percent: item.progress },
       threshold: item.threshold
-        ? { warn: item.threshold.warn, critical: item.threshold.critical }
+        ? { ...item.threshold }
         : undefined,
     };
   }
@@ -114,6 +115,7 @@ export function KpiGrid({ items, gap = 3, className }: KpiGridProps) {
             key={it.key}
             label={it.label}
             value={it.value}
+            valueClassName={it.valueClassName}
             sublabel={it.sublabel}
             viz={viz}
             threshold={threshold}
