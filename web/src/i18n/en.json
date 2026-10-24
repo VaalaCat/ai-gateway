@@ -129,7 +129,7 @@
       "tpsAvg": "TPS Avg",
       "users": "Users",
       "successRate": "Success rate",
-      "quota": "Quota"
+      "quota": "Quota (remaining / total)"
     },
     "leaderboard": {
       "byUsers": "Top users",

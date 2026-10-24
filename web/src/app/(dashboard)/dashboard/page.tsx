@@ -281,16 +281,18 @@ function DashboardPageContent() {
         }
 
         if (quota) {
-          const pct =
-            quota.quota > 0
-              ? Math.min(100, ((quota.used_quota || 0) / quota.quota) * 100)
-              : 0;
+          const remaining = quota.quota || 0;
+          const total = remaining + (quota.used_quota || 0);
+          const pct = total > 0
+            ? Math.max(0, Math.min(100, (remaining / total) * 100))
+            : 0;
           items.push({
             key: "quota",
             label: t("kpi.quota"),
-            value: `${((quota.used_quota || 0) / UNIT_QUOTA_SCALE).toFixed(4)} / ${((quota.quota || 0) / UNIT_QUOTA_SCALE).toFixed(4)}`,
+            valueClassName: "text-lg leading-8 font-bold",
+            value: `${(remaining / UNIT_QUOTA_SCALE).toFixed(4)} / ${(total / UNIT_QUOTA_SCALE).toFixed(4)}`,
             progress: pct,
-            threshold: { warn: 80, critical: 95 },
+            threshold: { warn: 20, critical: 5, semantic: "low-bad" },
           });
         }
 

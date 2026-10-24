@@ -129,7 +129,7 @@
       "tpsAvg": "TPS 均值",
       "users": "用户",
       "successRate": "成功率",
-      "quota": "额度"
+      "quota": "额度（剩余 / 总共）"
     },
     "leaderboard": {
       "byUsers": "用户排行",
