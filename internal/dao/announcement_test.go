@@ -10,6 +10,40 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestAnnouncementRejectsOuterTransactionWrites(t *testing.T) {
+	ctx, db := setupAdminContext(t)
+	announcement := models.Announcement{Title: "private", Content: "private body"}
+	require.NoError(t, NewAdminMutation(ctx).Announcement().Create(&announcement))
+	guest := NewQuery(NewUserContext(&testApp{db: db}, nil)).Announcement()
+	rollback := errors.New("outer rollback")
+	err := RunInCoreTx(ctx, func(txCtx Context) error {
+		mutation := NewAdminMutation(txCtx).Announcement()
+		created := models.Announcement{Title: "new", Content: "body", ShowForGuests: true}
+		require.Error(t, mutation.Create(&created))
+		require.Zero(t, created.ID)
+		changed := announcement
+		changed.ShowForGuests = true
+		require.Error(t, mutation.Update(&changed, false))
+		require.Error(t, mutation.Delete(announcement.ID))
+		var persisted []models.Announcement
+		require.NoError(t, txCtx.GetCoreDB().Find(&persisted).Error)
+		require.Len(t, persisted, 1)
+		require.Equal(t, announcement.ID, persisted[0].ID)
+		require.Equal(t, announcement.Content, persisted[0].Content)
+		require.False(t, persisted[0].ShowForGuests)
+		return rollback
+	})
+	require.ErrorIs(t, err, rollback)
+	page, err := guest.List(AnnouncementListOptions{})
+	require.NoError(t, err)
+	require.Zero(t, page.Total)
+	_, err = guest.Get(announcement.ID)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	persisted, err := NewAdminQuery(ctx).Announcement().Get(announcement.ID)
+	require.NoError(t, err)
+	require.Equal(t, announcement, persisted)
+}
+
 func TestAnnouncementTransactionsAndDeletedGroupIsolation(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	group := models.UserGroup{Name: "announcement-target"}
@@ -25,7 +59,7 @@ func TestAnnouncementTransactionsAndDeletedGroupIsolation(t *testing.T) {
 
 	// A vanished target stays private rather than becoming globally visible.
 	require.NoError(t, db.Delete(&group).Error)
-	rows, err := NewQuery(userCtx).Announcement().List()
+	rows, err := announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	require.Empty(t, rows)
 	require.ErrorIs(t, NewMutation(userCtx).Announcement().MarkSeen(announcement.ID, announcement.Revision), ErrAnnouncementNotVisible)
@@ -85,13 +119,13 @@ func TestAnnouncementSeenSurvivesMembershipAndTargetEdits(t *testing.T) {
 	announcement.GroupIDs = []uint{}
 	announcement.Content = "edited"
 	require.NoError(t, mutation.Update(&announcement, false))
-	rows, err := NewQuery(userCtx).Announcement().List()
+	rows, err := announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.True(t, rows[0].Seen)
 	require.Empty(t, rows[0].GroupIDs)
 	require.NoError(t, db.Delete(&user).Error)
-	rows, err = NewQuery(userCtx).Announcement().List()
+	rows, err = announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	require.Empty(t, rows)
 	require.ErrorIs(t, NewMutation(userCtx).Announcement().MarkSeen(announcement.ID, announcement.Revision), ErrAnnouncementNotVisible)
@@ -107,7 +141,7 @@ func TestAnnouncementMultiGroupRecipients(t *testing.T) {
 		user := models.User{Username: group.Name, GroupID: group.ID}
 		require.NoError(t, db.Create(&user).Error)
 		userCtx := NewUserContext(&testApp{db: db}, &app.UserInfo{UserID: user.ID})
-		rows, err := NewQuery(userCtx).Announcement().List()
+		rows, err := announcementUserRows(NewQuery(userCtx).Announcement())
 		require.NoError(t, err)
 		if i == 2 {
 			require.Empty(t, rows)
@@ -134,12 +168,15 @@ func TestAnnouncementsPinnedChronologicalOrdering(t *testing.T) {
 		require.NoError(t, mutation.Create(&announcements[i]))
 	}
 	want := []uint{announcements[3].ID, announcements[2].ID, announcements[1].ID, announcements[0].ID, announcements[4].ID}
-	for _, list := range []func() ([]models.Announcement, error){
+	for _, list := range []func(AnnouncementListOptions) (models.AnnouncementPage[models.AnnouncementSummary], error){
 		NewAdminQuery(ctx).Announcement().List,
-		NewAdminQuery(ctx).Announcement().ListPublic,
+		func(options AnnouncementListOptions) (models.AnnouncementPage[models.AnnouncementSummary], error) {
+			return announcementPublicPage(NewQuery(NewUserContext(&testApp{db: db}, nil)).Announcement(), options)
+		},
 	} {
-		rows, err := list()
+		page, err := list(AnnouncementListOptions{})
 		require.NoError(t, err)
+		rows := page.Items
 		ids := make([]uint, len(rows))
 		for i := range rows {
 			ids[i] = rows[i].ID
@@ -147,7 +184,7 @@ func TestAnnouncementsPinnedChronologicalOrdering(t *testing.T) {
 		require.Equal(t, want, ids)
 	}
 	userCtx := NewUserContext(&testApp{db: db}, &app.UserInfo{UserID: user.ID})
-	rows, err := NewQuery(userCtx).Announcement().List()
+	rows, err := announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	ids := make([]uint, len(rows))
 	for i := range rows {
@@ -157,12 +194,12 @@ func TestAnnouncementsPinnedChronologicalOrdering(t *testing.T) {
 
 	announcements[0].Pinned = true
 	require.NoError(t, mutation.Update(&announcements[0], false))
-	rows, err = NewQuery(userCtx).Announcement().List()
+	rows, err = announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	require.Equal(t, announcements[0].ID, rows[0].ID)
 	announcements[0].Pinned = false
 	require.NoError(t, mutation.Update(&announcements[0], false))
-	rows, err = NewQuery(userCtx).Announcement().List()
+	rows, err = announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	require.Equal(t, announcements[0].ID, rows[3].ID)
 }
@@ -217,14 +254,28 @@ func TestConcurrentAcknowledgementCannotConfirmReannouncement(t *testing.T) {
 	if err := <-ack; err != nil {
 		require.ErrorIs(t, err, ErrAnnouncementRevisionConflict)
 	}
-	rows, err := NewQuery(userCtx).Announcement().List()
+	rows, err := announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.EqualValues(t, 2, rows[0].Revision)
 	require.False(t, rows[0].Seen)
 	require.NoError(t, receipts.MarkSeen(announcement.ID, 2))
 	require.ErrorIs(t, receipts.MarkSeen(announcement.ID, 1), ErrAnnouncementRevisionConflict)
-	rows, err = NewQuery(userCtx).Announcement().List()
+	rows, err = announcementUserRows(NewQuery(userCtx).Announcement())
 	require.NoError(t, err)
 	require.True(t, rows[0].Seen)
+}
+
+func announcementUserRows(query UserAnnouncementQuery) ([]models.ReceivedAnnouncementSummary, error) {
+	page, err := query.List(AnnouncementListOptions{})
+	return page.Items, err
+}
+
+func announcementPublicPage(query UserAnnouncementQuery, options AnnouncementListOptions) (models.AnnouncementPage[models.AnnouncementSummary], error) {
+	page, err := query.List(options)
+	result := models.AnnouncementPage[models.AnnouncementSummary]{Items: make([]models.AnnouncementSummary, len(page.Items)), Total: page.Total, Page: page.Page, PageSize: page.PageSize}
+	for i := range page.Items {
+		result.Items[i] = page.Items[i].AnnouncementSummary
+	}
+	return result, err
 }

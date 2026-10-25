@@ -90,10 +90,10 @@ describe("SiteCustomization", () => {
   });
 
   it.each([
-    ["siteName", 20], ["siteTitle", 20], ["welcomeTitle", 20], ["welcomeMessage", 100],
+    ["siteName", 20], ["siteTitle", 20], ["welcomeTitle", 20], ["welcomeMessage", 100], ["siteIconUrl", 2048],
   ] as const)("accepts the Unicode boundary and prevents saving one character over it: %s", async (name, maximum) => {
     render(<SiteCustomization />);
-    const boundary = "界".repeat(maximum - 1) + "🚀";
+    const boundary = name === "siteIconUrl" ? "/" + "界".repeat(maximum - 1) : "界".repeat(maximum - 1) + "🚀";
     change(name, boundary);
     expect(screen.getByRole("textbox", { name })).toHaveAttribute("aria-invalid", "false");
     expect(screen.getByRole("button", { name: "save" })).toBeEnabled();

@@ -79,14 +79,17 @@ describe("announcement form", () => {
 
   it("counts Unicode characters consistently with the backend", async () => {
     const user = userEvent.setup();
-    render(<AnnouncementFormDialog open initial={{ ...initial, title: "🎉".repeat(200) }} onOpenChange={() => {}} />);
+    render(<AnnouncementFormDialog open initial={{ ...initial, title: "🎉".repeat(60), content: "界".repeat(1999) + "🚀" }} onOpenChange={() => {}} />);
     await user.click(screen.getByRole("button", { name: "save" }));
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ title: "🎉".repeat(200) }));
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ title: "🎉".repeat(60), content: "界".repeat(1999) + "🚀" }));
   });
 
-  it("rejects content exceeding the backend character limits", async () => {
+  it.each([
+    { title: "a".repeat(61) },
+    { content: "界".repeat(2000) + "🚀" },
+  ])("rejects content exceeding the backend character limits: %j", async (overlong) => {
     const user = userEvent.setup();
-    render(<AnnouncementFormDialog open initial={{ ...initial, title: "a".repeat(201) }} onOpenChange={() => {}} />);
+    render(<AnnouncementFormDialog open initial={{ ...initial, ...overlong }} onOpenChange={() => {}} />);
     await user.click(screen.getByRole("button", { name: "save" }));
     expect(screen.getByRole("alert")).toHaveTextContent("tooLong");
     expect(update).not.toHaveBeenCalled();

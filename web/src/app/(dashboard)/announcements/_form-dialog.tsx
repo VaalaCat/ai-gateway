@@ -44,7 +44,7 @@ export function AnnouncementFormDialog({ open, onOpenChange, initial }: Props) {
       setError(t("required"));
       return;
     }
-    if (Array.from(body.title).length > 200 || Array.from(body.content).length > 20000) {
+    if (Array.from(body.title).length > 60 || Array.from(body.content).length > 2000) {
       setError(t("tooLong"));
       return;
     }

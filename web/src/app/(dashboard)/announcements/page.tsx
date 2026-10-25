@@ -14,7 +14,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { type Announcement, useAdminAnnouncements, useDeleteAnnouncement } from "@/lib/api/announcements";
+import { type AnnouncementSummary, useAdminAnnouncements, useAnnouncementDetail, useDeleteAnnouncement } from "@/lib/api/announcements";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { useAuth } from "@/lib/auth";
 import { AnnouncementFormDialog } from "./_form-dialog";
@@ -22,11 +22,23 @@ import { AnnouncementFormDialog } from "./_form-dialog";
 function AnnouncementManagement() {
   const t = useTranslations("announcements");
   const tc = useTranslations("common");
-  const query = useAdminAnnouncements();
+  const { user } = useAuth();
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const query = useAdminAnnouncements(page, pageSize, user?.user_id);
+  const total = query.data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (!query.isPlaceholderData && query.data?.page === page && query.data.page_size === pageSize && page > totalPages) {
+    setPage(totalPages);
+  }
+  const handlePaginationChange = (nextPage: number, nextPageSize: number) => {
+    setPage(nextPageSize === pageSize ? nextPage : 1);
+    setPageSize(nextPageSize);
+  };
   const remove = useDeleteAnnouncement();
   const [createOpen, setCreateOpen] = useState(false);
-  const [editing, setEditing] = useState<Announcement | null>(null);
-  const [deleting, setDeleting] = useState<Announcement | null>(null);
+  const [editing, setEditing] = useState<number | null>(null);
+  const [deleting, setDeleting] = useState<AnnouncementSummary | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const handleDelete = async () => {
@@ -41,7 +53,7 @@ function AnnouncementManagement() {
     }
   };
 
-  const columns: ColumnDef<Announcement>[] = [
+  const columns: ColumnDef<AnnouncementSummary>[] = [
     {
       accessorKey: "title",
       header: t("announcementTitle"),
@@ -52,7 +64,6 @@ function AnnouncementManagement() {
         </div>
       ),
     },
-    { accessorKey: "content", header: t("content"), cell: ({ row }) => <p className="line-clamp-3 max-w-md whitespace-pre-wrap break-words">{row.original.content}</p> },
     {
       id: "groups",
       header: t("groups"),
@@ -70,7 +81,7 @@ function AnnouncementManagement() {
       header: tc("actions"),
       cell: ({ row }) => (
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => setEditing(row.original)}>{tc("edit")}</Button>
+          <Button variant="outline" size="sm" onClick={() => setEditing(row.original.id)}>{tc("edit")}</Button>
           <Button variant="destructive" size="sm" onClick={() => { setDeleteError(null); setDeleting(row.original); }}>{tc("delete")}</Button>
         </div>
       ),
@@ -84,14 +95,23 @@ function AnnouncementManagement() {
           <AlertTitle>{t("loadFailed")}</AlertTitle>
           <AlertDescription className="space-y-2">
             <p>{formatErrorToast(query.error, tc("error"))}</p>
-            <Button variant="outline" size="sm" disabled={query.isFetching} onClick={() => void query.refetch()}>{tc("retry")}</Button>
+            <Button variant="outline" size="sm" disabled={query.isFetching} onClick={() => { void query.refetch(); }}>{tc("retry")}</Button>
           </AlertDescription>
         </Alert>
-      ) : (
-        <DataTable columns={columns} data={query.data ?? []} loading={query.isLoading} showFooter={false} />
-      )}
+      ) : null}
+      <DataTable
+        columns={columns}
+        data={query.data?.items ?? []}
+        loading={query.isLoading && !query.data}
+        total={total}
+        page={page}
+        pageSize={pageSize}
+        pageCount={totalPages}
+        paginationDisabled={query.isFetching}
+        onPaginationChange={handlePaginationChange}
+      />
       {createOpen && <AnnouncementFormDialog open onOpenChange={setCreateOpen} />}
-      {editing && <AnnouncementFormDialog key={editing.id} open initial={editing} onOpenChange={(open) => { if (!open) setEditing(null); }} />}
+      {editing !== null && <AnnouncementEditDialog key={editing} id={editing} userId={user?.user_id} onClose={() => setEditing(null)} />}
       <Dialog open={deleting !== null} onOpenChange={(open) => { if (!open && !remove.isPending) setDeleting(null); }}>
         <DialogContent>
           <DialogHeader>
@@ -109,13 +129,38 @@ function AnnouncementManagement() {
   );
 }
 
+function AnnouncementEditDialog({ id, userId, onClose }: { id: number; userId?: number; onClose: () => void }) {
+  const t = useTranslations("announcements");
+  const tc = useTranslations("common");
+  const detail = useAnnouncementDetail(id, userId, true);
+  if (detail.data && !detail.isFetching && !detail.isError) {
+    return <AnnouncementFormDialog open initial={detail.data} onOpenChange={(open) => { if (!open) onClose(); }} />;
+  }
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>{t("edit")}</DialogTitle><DialogDescription>{t("editHint")}</DialogDescription></DialogHeader>
+        {detail.isError ? (
+          <Alert variant="destructive" role="alert">
+            <AlertDescription className="space-y-2">
+              <p>{formatErrorToast(detail.error, tc("error"))}</p>
+              <Button variant="outline" disabled={detail.isFetching} onClick={() => { void detail.refetch(); }}>{tc("retry")}</Button>
+            </AlertDescription>
+          </Alert>
+        ) : <p role="status">{tc("loading")}</p>}
+        <DialogFooter><Button variant="outline" onClick={onClose}>{tc("cancel")}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function AnnouncementsPage() {
   const t = useTranslations("announcements");
   const tc = useTranslations("common");
-  const { isAdmin, loading } = useAuth();
+  const { user, isAdmin, loading } = useAuth();
   if (loading) return <PageLayout title={t("title")}><p role="status">{tc("loading")}</p></PageLayout>;
   if (!isAdmin) {
     return <PageLayout title={t("title")}><Alert variant="destructive"><AlertTitle>{t("permissionDenied")}</AlertTitle></Alert></PageLayout>;
   }
-  return <AnnouncementManagement />;
+  return <AnnouncementManagement key={user?.user_id} />;
 }

@@ -48,9 +48,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&InviteCode{},
 		&InviteRedemption{},
 		&MasterSigningKey{},
-		&Announcement{},
-		&AnnouncementGroup{},
-		&AnnouncementSeen{},
+		&Announcement{}, &AnnouncementGroup{}, &AnnouncementSeen{},
 	); err != nil {
 		return err
 	}

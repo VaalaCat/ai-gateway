@@ -17,7 +17,7 @@ import { isSafeSiteIconURL, SITE_BRANDING_DEFAULTS, type SiteBranding } from "@/
 const fields = [
   { key: "site_name", label: "siteName", help: "siteNameHelp", limit: 20, required: true },
   { key: "site_title", label: "siteTitle", help: "siteTitleHelp", limit: 20, required: true },
-  { key: "site_icon_url", label: "siteIconUrl", help: "siteIconUrlHelp" },
+  { key: "site_icon_url", label: "siteIconUrl", help: "siteIconUrlHelp", limit: 2048 },
   { key: "welcome_title", label: "welcomeTitle", help: "welcomeTitleHelp", limit: 20 },
   { key: "welcome_message", label: "welcomeMessage", help: "welcomeMessageHelp", limit: 100 },
 ] as const;

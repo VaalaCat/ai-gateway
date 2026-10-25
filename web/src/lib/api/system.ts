@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useSyncExternalStore } from "react";
 import { api } from "./client";
 import { isSafeSiteIconURL, SITE_BRANDING_DEFAULTS, type SiteBranding } from "@/lib/site-branding";
 import type {
@@ -167,8 +168,11 @@ export function restorePublicConfig(queryClient: QueryClient) {
   }
 }
 
+const subscribeHydration = () => () => {};
+
 export function usePublicConfig() {
-  return useQuery({
+  const hydrated = useSyncExternalStore(subscribeHydration, () => true, () => false);
+  const query = useQuery({
     queryKey: ["public-config"],
     queryFn: async () => {
       const config = await api.get<PublicConfig>("/system/public-config");
@@ -183,4 +187,7 @@ export function usePublicConfig() {
     refetchInterval: 30_000,
     refetchOnWindowFocus: "always",
   });
+  // A parent effect may restore the cache before a nested Suspense boundary hydrates.
+  // That boundary must still see the same placeholder as its server snapshot.
+  return hydrated ? query : { ...query, data: undefined };
 }

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
@@ -49,11 +49,11 @@ describe("public branding bootstrap", () => {
     expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(savedConfig);
   });
 
-  it("hydrates static placeholders safely, then restores the cached brand while refreshing", async () => {
+  it("hydrates deferred static placeholders safely, then restores the cached brand while refreshing", async () => {
     localStorage.setItem(storageKey, JSON.stringify(savedConfig));
     let finish!: (config: PublicConfig) => void;
     apiGet.mockReturnValue(new Promise<PublicConfig>((resolve) => { finish = resolve; }));
-    const app = <Providers><PageBrand page="dashboard" /></Providers>;
+    const app = <Providers><Suspense fallback={null}><PageBrand page="dashboard" /></Suspense></Providers>;
     const markup = renderToString(app);
     expect(markup).toContain("data-brand-placeholder");
     expect(markup).not.toContain("Saved Gateway");

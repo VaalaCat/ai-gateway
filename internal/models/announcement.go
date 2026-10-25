@@ -32,3 +32,27 @@ type ReceivedAnnouncement struct {
 	Announcement
 	Seen bool `json:"seen"`
 }
+
+// AnnouncementSummary deliberately excludes the body from history pages.
+type AnnouncementSummary struct {
+	ID            uint   `json:"id"`
+	Title         string `json:"title"`
+	ShowForGuests bool   `json:"show_for_guests"`
+	Pinned        bool   `json:"pinned"`
+	Revision      uint   `json:"revision"`
+	GroupIDs      []uint `gorm:"-" json:"group_ids"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
+type ReceivedAnnouncementSummary struct {
+	AnnouncementSummary
+	Seen bool `json:"seen"`
+}
+
+type AnnouncementPage[T any] struct {
+	Items    []T   `json:"items"`
+	Total    int64 `json:"total"`
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
+}

@@ -37,6 +37,19 @@ func ScopeMiddleware() gin.HandlerFunc {
 	}
 }
 
+// OptionalScopeMiddleware keeps the normal authenticated scope derivation while
+// allowing explicitly public handlers to accept an unauthenticated request.
+func OptionalScopeMiddleware() gin.HandlerFunc {
+	derive := ScopeMiddleware()
+	return func(c *gin.Context) {
+		if _, exists := c.Get(consts.CtxKeyUserInfo); !exists {
+			c.Next()
+			return
+		}
+		derive(c)
+	}
+}
+
 // GetScope 从 gin context 读取 RequestScope，未设置时返回 nil。
 func GetScope(c *gin.Context) *RequestScope {
 	v, exists := c.Get(consts.CtxKeyRequestScope)

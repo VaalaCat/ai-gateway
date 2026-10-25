@@ -134,6 +134,7 @@ func TestBrandingSettingsIconURLValidation(t *testing.T) {
 		"", "/", "/favicon.ico", "/assets/图标.svg?v=2&label=hello%20world#brand",
 		"https://cdn.example.com/icon.svg?v=2#logo", "http://localhost:18140/icon.png",
 		"https://[::1]:18140/icon.png", "https://cdn.example.com/logo%20small.png",
+		"/" + strings.Repeat("界", 2047),
 	}
 	for _, icon := range valid {
 		t.Run("accept "+icon, func(t *testing.T) {
@@ -155,6 +156,7 @@ func TestBrandingSettingsIconURLValidation(t *testing.T) {
 		"https://example.com/icon.svg\n", "\thttps://example.com/icon.svg", "/icon.svg#\u0085",
 		" https://example.com/icon.png", "https://example.com/icon small.png",
 		"https://example.com/%zz", "https://example.com/icon?x=%zz", "https://example.com:bad/icon.png", "/invalid\xff",
+		"/" + strings.Repeat("界", 2048),
 	}
 	for _, icon := range invalid {
 		t.Run("reject "+icon, func(t *testing.T) {

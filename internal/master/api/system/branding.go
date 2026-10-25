@@ -18,7 +18,7 @@ func validSiteIconURL(value string) bool {
 	if value == "" {
 		return true
 	}
-	if !utf8.ValidString(value) || strings.ContainsAny(value, "\\") || strings.ContainsFunc(value, func(r rune) bool {
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > 2048 || strings.ContainsAny(value, "\\") || strings.ContainsFunc(value, func(r rune) bool {
 		return unicode.IsControl(r) || unicode.IsSpace(r)
 	}) {
 		return false

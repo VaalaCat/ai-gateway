@@ -754,7 +754,11 @@ func (s *Server) setupRoutes() {
 
 	// Public endpoints
 	announcementH := &apiannouncement.Handler{}
-	s.Router.GET("/api/public/announcements", api.Adapt(adapter, api.BindNone, announcementH.PublicList))
+	dao.InitializeAnnouncementCache(s.DB)
+	announcementAuth := s.Router.Group("/api/announcements")
+	announcementAuth.Use(middleware.OptionalAuthMiddleware(s.Cfg.Master.JWTSecret), middleware.OptionalScopeMiddleware())
+	announcementAuth.GET("", api.Adapt(adapter, api.BindQuery, announcementH.List))
+	announcementAuth.GET("/:id", api.Adapt(adapter, api.BindURI, announcementH.Detail))
 	s.Router.POST("/api/login", api.Adapt(adapter, api.BindJSON, userH.Login))
 	s.Router.POST("/api/register", api.Adapt(adapter, api.BindJSON, userH.Register))
 	s.Router.GET("/api/system/public-config", api.Adapt(adapter, api.BindNone, systemH.PublicConfig))
@@ -796,7 +800,6 @@ func (s *Server) setupRoutes() {
 	userAuth.Use(middleware.AuthMiddleware(s.Cfg.Master.JWTSecret))
 	userAuth.Use(middleware.ScopeMiddleware())
 	userAuth.GET("/profile", api.Adapt(adapter, api.BindNone, userH.GetProfile))
-	userAuth.GET("/announcements", api.Adapt(adapter, api.BindNone, announcementH.List))
 	userAuth.POST("/announcements/:id/seen", api.Adapt(adapter, api.BindURIAndJSON, announcementH.MarkSeen))
 	userAuth.GET("/capabilities", api.Adapt(adapter, api.BindNone, capabilityH.Get))
 	userAuth.GET("/api-catalog/services", api.Adapt(adapter, api.BindQuery, apiCatalogH.ListServices))
@@ -861,7 +864,8 @@ func (s *Server) setupRoutes() {
 	auth.Use(middleware.AuthMiddleware(s.Cfg.Master.JWTSecret))
 	auth.Use(middleware.AdminOnly())
 	auth.Use(middleware.ScopeMiddleware())
-	auth.GET("/announcements", api.Adapt(adapter, api.BindNone, announcementH.AdminList))
+	auth.GET("/announcements", api.Adapt(adapter, api.BindQuery, announcementH.AdminList))
+	auth.GET("/announcements/:id", api.Adapt(adapter, api.BindURI, announcementH.AdminDetail))
 	auth.POST("/announcements", api.Adapt(adapter, api.BindJSON, announcementH.Create))
 	auth.PUT("/announcements/:id", api.Adapt(adapter, api.BindURIAndJSON, announcementH.Update))
 	auth.DELETE("/announcements/:id", api.Adapt(adapter, api.BindURI, announcementH.Delete))

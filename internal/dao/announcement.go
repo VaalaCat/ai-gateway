@@ -16,8 +16,8 @@ var ErrAnnouncementNotVisible = errors.New("announcement is not visible")
 var ErrAnnouncementRevisionConflict = errors.New("announcement revision has changed")
 
 type AnnouncementQuery interface {
-	List() ([]models.Announcement, error)
-	ListPublic() ([]models.Announcement, error)
+	List(AnnouncementListOptions) (models.AnnouncementPage[models.AnnouncementSummary], error)
+	Get(id uint) (models.Announcement, error)
 }
 
 type AnnouncementMutation interface {
@@ -27,7 +27,8 @@ type AnnouncementMutation interface {
 }
 
 type UserAnnouncementQuery interface {
-	List() ([]models.ReceivedAnnouncement, error)
+	List(options AnnouncementListOptions) (models.AnnouncementPage[models.ReceivedAnnouncementSummary], error)
+	Get(id uint) (models.ReceivedAnnouncement, error)
 }
 
 type UserAnnouncementMutation interface {
@@ -48,81 +49,14 @@ func visibleAnnouncements(db *gorm.DB, userID uint) *gorm.DB {
 			OR EXISTS (SELECT 1 FROM announcement_groups AS targets WHERE targets.announcement_id = announcements.id AND targets.group_id = recipient.group_id))`)
 }
 
-func loadAnnouncementGroups(db *gorm.DB, rows []models.Announcement) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	byID := make(map[uint]int, len(rows))
-	ids := make([]uint, len(rows))
-	for i := range rows {
-		rows[i].GroupIDs = []uint{}
-		ids[i] = rows[i].ID
-		byID[rows[i].ID] = i
-	}
-	// Bound SQL parameters even for a large administrative history.
-	for start := 0; start < len(ids); start += 500 {
-		end := min(start+500, len(ids))
-		var targets []models.AnnouncementGroup
-		if err := db.Where("announcement_id IN ?", ids[start:end]).Order("group_id ASC").Find(&targets).Error; err != nil {
-			return err
-		}
-		for _, target := range targets {
-			i := byID[target.AnnouncementID]
-			rows[i].GroupIDs = append(rows[i].GroupIDs, target.GroupID)
-		}
-	}
-	return nil
-}
-
-func (q *announcementQuery) List() ([]models.Announcement, error) {
-	rows := []models.Announcement{}
-	db := q.ctx.GetCoreDB()
-	if err := db.Order("pinned DESC, created_at DESC, id DESC").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rows, loadAnnouncementGroups(db, rows)
-}
-
-func (q *announcementQuery) ListPublic() ([]models.Announcement, error) {
-	rows := []models.Announcement{}
-	err := q.ctx.GetCoreDB().Where("show_for_guests = ?", true).Order("pinned DESC, created_at DESC, id DESC").Find(&rows).Error
-	for i := range rows {
-		rows[i].GroupIDs = []uint{}
-	}
-	return rows, err
-}
-
-func (q *userAnnouncementQuery) List() ([]models.ReceivedAnnouncement, error) {
-	rows := []models.ReceivedAnnouncement{}
-	db := q.ctx.GetCoreDB()
-	err := visibleAnnouncements(db, q.ctx.UserInfo().UserID).
-		Select("announcements.*, CASE WHEN receipt.user_id IS NULL THEN 0 ELSE 1 END AS seen").
-		Joins("LEFT JOIN announcement_seens AS receipt ON receipt.announcement_id = announcements.id AND receipt.user_id = recipient.id AND receipt.revision = announcements.revision").
-		Order("announcements.pinned DESC, announcements.created_at DESC, announcements.id DESC").Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	announcements := make([]models.Announcement, len(rows))
-	for i := range rows {
-		announcements[i] = rows[i].Announcement
-	}
-	if err := loadAnnouncementGroups(db, announcements); err != nil {
-		return nil, err
-	}
-	for i := range rows {
-		rows[i].GroupIDs = announcements[i].GroupIDs
-	}
-	return rows, nil
-}
-
 func validateAnnouncement(db *gorm.DB, announcement *models.Announcement) error {
 	announcement.Title = strings.TrimSpace(announcement.Title)
 	announcement.Content = strings.TrimSpace(announcement.Content)
-	if n := utf8.RuneCountInString(announcement.Title); n == 0 || n > 200 {
-		return fmt.Errorf("%w: title must contain 1 to 200 characters", ErrInvalidAnnouncement)
+	if n := utf8.RuneCountInString(announcement.Title); n == 0 || n > 60 {
+		return fmt.Errorf("%w: title must contain 1 to 60 characters", ErrInvalidAnnouncement)
 	}
-	if n := utf8.RuneCountInString(announcement.Content); n == 0 || n > 20000 {
-		return fmt.Errorf("%w: content must contain 1 to 20000 characters", ErrInvalidAnnouncement)
+	if n := utf8.RuneCountInString(announcement.Content); n == 0 || n > 2000 {
+		return fmt.Errorf("%w: content must contain 1 to 2000 characters", ErrInvalidAnnouncement)
 	}
 	unique := make(map[uint]struct{}, len(announcement.GroupIDs))
 	for _, id := range announcement.GroupIDs {
@@ -159,7 +93,7 @@ func createAnnouncementTargets(db *gorm.DB, announcement *models.Announcement) e
 }
 
 func (m *announcementMutation) Create(announcement *models.Announcement) error {
-	return m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
+	return m.transaction(&announcement.ID, func(tx *gorm.DB) error {
 		if err := validateAnnouncement(tx, announcement); err != nil {
 			return err
 		}
@@ -172,7 +106,7 @@ func (m *announcementMutation) Create(announcement *models.Announcement) error {
 }
 
 func (m *announcementMutation) Update(announcement *models.Announcement, reannounce bool) error {
-	return m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
+	return m.transaction(&announcement.ID, func(tx *gorm.DB) error {
 		if err := validateAnnouncement(tx, announcement); err != nil {
 			return err
 		}
@@ -207,7 +141,7 @@ func (m *announcementMutation) Update(announcement *models.Announcement, reannou
 }
 
 func (m *announcementMutation) Delete(id uint) error {
-	return m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
+	return m.transaction(&id, func(tx *gorm.DB) error {
 		result := tx.Delete(&models.Announcement{}, id)
 		if result.Error != nil {
 			return result.Error

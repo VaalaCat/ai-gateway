@@ -43,22 +43,25 @@ func TestAnnouncementsVisibilitySeenAndAdminIsolation(t *testing.T) {
 	require.False(t, private.ShowForGuests)
 	require.True(t, public.ShowForGuests)
 
-	w := reqHelper(srv, "", http.MethodGet, "/api/public/announcements", nil)
+	w := reqHelper(srv, "", http.MethodGet, "/api/announcements", nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	var publicRows []models.Announcement
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &publicRows))
+	var publicPage models.AnnouncementPage[models.AnnouncementSummary]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &publicPage))
+	publicRows := publicPage.Items
+	require.NotContains(t, w.Body.String(), "\"content\"")
 	require.Len(t, publicRows, 1)
 	require.Equal(t, public.ID, publicRows[0].ID)
 	require.Empty(t, publicRows[0].GroupIDs)
 	require.NotContains(t, w.Body.String(), "team only")
 
-	list := func() []models.ReceivedAnnouncement {
+	list := func() []models.ReceivedAnnouncementSummary {
 		t.Helper()
 		w := reqHelper(srv, userToken, http.MethodGet, "/api/announcements", nil)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		var rows []models.ReceivedAnnouncement
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &rows))
-		return rows
+		var page models.AnnouncementPage[models.ReceivedAnnouncementSummary]
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+		require.NotContains(t, w.Body.String(), "\"content\"")
+		return page.Items
 	}
 	rows := list()
 	require.Len(t, rows, 2)
@@ -130,6 +133,7 @@ func TestAnnouncementsVisibilitySeenAndAdminIsolation(t *testing.T) {
 
 	for _, route := range []struct{ method, path string }{
 		{http.MethodGet, "/api/admin/announcements"},
+		{http.MethodGet, fmt.Sprintf("/api/admin/announcements/%d", private.ID)},
 		{http.MethodPost, "/api/admin/announcements"},
 		{http.MethodPut, fmt.Sprintf("/api/admin/announcements/%d", private.ID)},
 		{http.MethodDelete, fmt.Sprintf("/api/admin/announcements/%d", private.ID)},
@@ -140,7 +144,9 @@ func TestAnnouncementsVisibilitySeenAndAdminIsolation(t *testing.T) {
 		require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
 	}
 	w = reqHelper(srv, "", http.MethodGet, "/api/announcements", nil)
-	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotContains(t, w.Body.String(), "\"seen\"")
+	require.NotContains(t, w.Body.String(), "team only")
 
 	w = reqHelper(srv, admin, http.MethodDelete, fmt.Sprintf("/api/admin/announcements/%d", private.ID), nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -163,8 +169,8 @@ func TestAnnouncementsRejectInvalidTargetsAndContent(t *testing.T) {
 		{"title": "valid", "content": "body"},
 		{"title": "   ", "content": "body", "group_ids": []uint{}},
 		{"title": "valid", "content": "\n\t", "group_ids": []uint{}},
-		{"title": strings.Repeat("中", 201), "content": "body", "group_ids": []uint{}},
-		{"title": "valid", "content": strings.Repeat("中", 20001), "group_ids": []uint{}},
+		{"title": strings.Repeat("中", 61), "content": "body", "group_ids": []uint{}},
+		{"title": "valid", "content": strings.Repeat("中", 2001), "group_ids": []uint{}},
 	} {
 		w := reqHelper(srv, admin, http.MethodPost, "/api/admin/announcements", body)
 		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
@@ -172,6 +178,19 @@ func TestAnnouncementsRejectInvalidTargetsAndContent(t *testing.T) {
 	var count int64
 	require.NoError(t, srv.DB.Model(&models.Announcement{}).Count(&count).Error)
 	require.Zero(t, count, "invalid targets must not create a global announcement")
+
+	boundary := map[string]any{"title": strings.Repeat("中", 59) + "🚀", "content": strings.Repeat("中", 1999) + "🚀", "group_ids": []uint{}, "show_for_guests": false}
+	accepted := reqHelper(srv, admin, http.MethodPost, "/api/admin/announcements", boundary)
+	require.Equal(t, http.StatusCreated, accepted.Code, accepted.Body.String())
+	var atLimit models.Announcement
+	require.NoError(t, json.Unmarshal(accepted.Body.Bytes(), &atLimit))
+	boundary["pinned"], boundary["show_for_guests"] = false, false
+	boundary["content"] = strings.Repeat("中", 2000) + "🚀"
+	rejected := reqHelper(srv, admin, http.MethodPut, fmt.Sprintf("/api/admin/announcements/%d", atLimit.ID), boundary)
+	require.Equal(t, http.StatusBadRequest, rejected.Code, rejected.Body.String())
+	var unchanged models.Announcement
+	require.NoError(t, srv.DB.First(&unchanged, atLimit.ID).Error)
+	require.Equal(t, atLimit.Content, unchanged.Content)
 
 	w := reqHelper(srv, admin, http.MethodPost, "/api/admin/announcements", map[string]any{
 		"title": "targeted", "content": "body", "group_ids": []uint{1}, "show_for_guests": true,
@@ -195,7 +214,7 @@ func TestAnnouncementsRejectInvalidTargetsAndContent(t *testing.T) {
 	var persisted models.Announcement
 	require.NoError(t, srv.DB.First(&persisted, row.ID).Error)
 	require.False(t, persisted.ShowForGuests)
-	w = reqHelper(srv, "", http.MethodGet, "/api/public/announcements", nil)
+	w = reqHelper(srv, "", http.MethodGet, "/api/announcements", nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	require.JSONEq(t, "[]", w.Body.String())
+	require.JSONEq(t, `{"items":[],"total":0,"page":1,"page_size":10}`, w.Body.String())
 }
