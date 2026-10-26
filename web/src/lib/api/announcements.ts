@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useState } from "react";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "./client";
 
 export interface AnnouncementSummary {
@@ -58,10 +58,9 @@ const pagePrefetchLifetime = 5_000;
 // discard the fallback before it can be exposed to another identity or page size.
 function useRetainedAnnouncementPage(data: AnnouncementFeed | undefined, scope: string) {
   const [last, setLast] = useState<{ scope: string; data: AnnouncementFeed | undefined }>({ scope, data });
-  useEffect(() => {
-    setLast((previous) => previous.scope !== scope || (data && previous.data !== data)
-      ? { scope, data } : previous);
-  }, [data, scope]);
+  if (last.scope !== scope || (data && last.data !== data)) {
+    setLast({ scope, data });
+  }
   return data ?? (last.scope === scope ? last.data : undefined);
 }
 
@@ -143,31 +142,33 @@ export function useDeleteAnnouncement() {
   });
 }
 
+async function fetchAnnouncementPage(qc: QueryClient, prefix: readonly unknown[], page: number, pageSize: number) {
+  const prefetchKey = [...prefix, "page-prefetch", page, pageSize];
+  const prefetched = qc.getQueryCache().find<AnnouncementFeed>({ queryKey: prefetchKey, exact: true });
+  let data: AnnouncementFeed | undefined;
+  if (prefetched?.meta && !prefetched.meta.consumed) {
+    const pending = prefetched.state.fetchStatus === "fetching";
+    const timestamp = pending ? Number(prefetched.meta.startedAt) : prefetched.state.dataUpdatedAt;
+    if (Date.now() - timestamp < pagePrefetchLifetime && (pending || prefetched.state.status === "success")) {
+      prefetched.meta.consumed = true;
+      try {
+        data = pending ? await prefetched.promise : prefetched.state.data;
+      } catch {
+        // Navigation, not hover, retries a failed speculative request.
+      }
+    }
+    qc.removeQueries({ queryKey: prefetchKey, exact: true });
+  }
+  return data ?? api.get<AnnouncementFeed>(`/announcements?page=${page}&page_size=${pageSize}`);
+}
+
 export function useAnnouncements(userId?: number, enabled = true, page = 1, pageSize = 10) {
   const prefix = userId === undefined ? ["announcements", "public"] : receivedKey(userId);
   const qc = useQueryClient();
   const query = useQuery({
     ...sessionReadOptions,
     queryKey: [...prefix, "feed", page, pageSize],
-    queryFn: async () => {
-      const prefetchKey = [...prefix, "page-prefetch", page, pageSize];
-      const prefetched = qc.getQueryCache().find<AnnouncementFeed>({ queryKey: prefetchKey, exact: true });
-      let data: AnnouncementFeed | undefined;
-      if (prefetched?.meta && !prefetched.meta.consumed) {
-        const pending = prefetched.state.fetchStatus === "fetching";
-        const timestamp = pending ? Number(prefetched.meta.startedAt) : prefetched.state.dataUpdatedAt;
-        if (Date.now() - timestamp < pagePrefetchLifetime && (pending || prefetched.state.status === "success")) {
-          prefetched.meta.consumed = true;
-          try {
-            data = pending ? await prefetched.promise : prefetched.state.data;
-          } catch {
-            // Navigation, not hover, retries a failed speculative request.
-          }
-        }
-        qc.removeQueries({ queryKey: prefetchKey, exact: true });
-      }
-      return data ?? api.get<AnnouncementFeed>(`/announcements?page=${page}&page_size=${pageSize}`);
-    },
+    queryFn: () => fetchAnnouncementPage(qc, prefix, page, pageSize),
     enabled,
   });
   const data = useRetainedAnnouncementPage(query.data, `${userId === undefined ? "public" : `received:${userId}`}:${pageSize}`);

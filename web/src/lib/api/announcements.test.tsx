@@ -22,6 +22,16 @@ function feedData(items = [announcement]): Feed {
   return { items, total: items.length, page: 1, page_size: 10 };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("announcement API hooks", () => {
   beforeEach(() => {
     get.mockReset().mockResolvedValue(firstPage);
@@ -151,7 +161,7 @@ describe("announcement API hooks", () => {
   });
 
   it.each(["received", "public", "admin"] as const)("retains the last %s page and total while navigation is pending or fails", async (scope) => {
-    const deferred = Promise.withResolvers<Feed>();
+    const deferred = createDeferred<Feed>();
     const first = { ...firstPage, total: 510 };
     get.mockResolvedValueOnce(first).mockReturnValueOnce(deferred.promise);
     const { result, rerender } = renderHook(({ page }) => scope === "admin"
@@ -174,7 +184,7 @@ describe("announcement API hooks", () => {
   });
 
   it.each(["received", "public", "admin"] as const)("replaces retained %s rows only after the next page succeeds", async (scope) => {
-    const deferred = Promise.withResolvers<Feed>();
+    const deferred = createDeferred<Feed>();
     const second = { ...firstPage, page: 2, total: 51, items: [{ ...announcement, id: 22 }] };
     get.mockResolvedValueOnce({ ...firstPage, total: 51 }).mockReturnValueOnce(deferred.promise);
     const { result, rerender } = renderHook(({ page }) => scope === "admin"
@@ -195,8 +205,8 @@ describe("announcement API hooks", () => {
   });
 
   it.each(["received", "admin"] as const)("never retains %s rows across identity or page-size changes", async (scope) => {
-    const nextIdentity = Promise.withResolvers<Feed>();
-    const nextSize = Promise.withResolvers<Feed>();
+    const nextIdentity = createDeferred<Feed>();
+    const nextSize = createDeferred<Feed>();
     get.mockResolvedValueOnce(firstPage).mockReturnValueOnce(nextIdentity.promise).mockReturnValueOnce(nextSize.promise);
     const { result, rerender } = renderHook(({ userId, size }) => scope === "admin"
       ? useAdminAnnouncements(1, size, userId)
@@ -243,7 +253,7 @@ describe("announcement API hooks", () => {
   });
 
   it("deduplicates pending page hovers and navigation", async () => {
-    const deferred = Promise.withResolvers<Feed>();
+    const deferred = createDeferred<Feed>();
     const second = { ...firstPage, page: 2 };
     get.mockReturnValueOnce(deferred.promise);
     const qc = createTestQueryClient();
@@ -262,7 +272,7 @@ describe("announcement API hooks", () => {
   });
 
   it.each([false, true])("retries failed pending=%s page hover only on navigation", async (pending) => {
-    const deferred = Promise.withResolvers<Feed>();
+    const deferred = createDeferred<Feed>();
     const second = { ...firstPage, page: 2 };
     get.mockReturnValueOnce(deferred.promise).mockResolvedValueOnce(second);
     const qc = createTestQueryClient();
@@ -280,7 +290,7 @@ describe("announcement API hooks", () => {
   });
 
   it.each([false, true])("expires pending=%s page hover after five seconds", async (pending) => {
-    const deferred = Promise.withResolvers<Feed>();
+    const deferred = createDeferred<Feed>();
     const expired = { ...firstPage, page: 2 };
     const fresh = { ...expired, items: [{ ...announcement, id: 22 }] };
     get.mockReturnValueOnce(deferred.promise).mockResolvedValueOnce(fresh);
@@ -316,7 +326,7 @@ describe("announcement API hooks", () => {
   });
 
   it("keeps a late private page hover isolated after the identity changes", async () => {
-    const deferred = Promise.withResolvers<Feed>();
+    const deferred = createDeferred<Feed>();
     const qc = createTestQueryClient();
     const wrapper = queryClientWrapper(qc);
     const secondUser = { ...firstPage, page: 2, items: [{ ...announcement, id: 22 }] };
@@ -496,7 +506,7 @@ describe("announcement API hooks", () => {
   it("deduplicates pending hover and open requests without prematurely publishing a body", async () => {
     const qc = createTestQueryClient();
     const wrapper = queryClientWrapper(qc);
-    const { promise, resolve } = Promise.withResolvers<typeof announcement & { content: string }>();
+    const { promise, resolve } = createDeferred<typeof announcement & { content: string }>();
     get.mockReturnValueOnce(promise);
     const hover = renderHook(() => usePrefetchAnnouncementDetail(1), { wrapper });
     let first!: Promise<void>;
@@ -515,7 +525,7 @@ describe("announcement API hooks", () => {
   it("claims a pending hover only once even when the first open closes before completion", async () => {
     const qc = createTestQueryClient();
     const wrapper = queryClientWrapper(qc);
-    const { promise, resolve } = Promise.withResolvers<typeof announcement & { content: string }>();
+    const { promise, resolve } = createDeferred<typeof announcement & { content: string }>();
     get.mockReturnValueOnce(promise).mockResolvedValueOnce({ ...announcement, content: "Reauthorized body" });
     const hover = renderHook(() => usePrefetchAnnouncementDetail(1), { wrapper });
     let prefetch!: Promise<void>;
@@ -554,7 +564,7 @@ describe("announcement API hooks", () => {
   it("does not reuse a pending hover after its authorization window expires", async () => {
     const qc = createTestQueryClient();
     const wrapper = queryClientWrapper(qc);
-    const { promise, resolve } = Promise.withResolvers<typeof announcement & { content: string }>();
+    const { promise, resolve } = createDeferred<typeof announcement & { content: string }>();
     get.mockReturnValueOnce(promise)
       .mockResolvedValueOnce({ ...announcement, content: "Freshly authorized" });
     const hover = renderHook(() => usePrefetchAnnouncementDetail(1), { wrapper });
@@ -576,7 +586,7 @@ describe("announcement API hooks", () => {
   it.each([false, true])("falls back to an authorized detail request when pending=%s prefetch fails", async (pending) => {
     const qc = createTestQueryClient();
     const wrapper = queryClientWrapper(qc);
-    const { promise, reject } = Promise.withResolvers<typeof announcement & { content: string }>();
+    const { promise, reject } = createDeferred<typeof announcement & { content: string }>();
     get.mockReturnValueOnce(promise)
       .mockRejectedValueOnce(new ApiError(403, "Still unauthorized"));
     const hover = renderHook(() => usePrefetchAnnouncementDetail(1), { wrapper });
@@ -615,7 +625,7 @@ describe("announcement API hooks", () => {
   it("keeps late hover responses isolated after switching identities", async () => {
     const qc = createTestQueryClient();
     const wrapper = queryClientWrapper(qc);
-    const { promise, resolve } = Promise.withResolvers<typeof announcement & { content: string }>();
+    const { promise, resolve } = createDeferred<typeof announcement & { content: string }>();
     get.mockReturnValueOnce(promise)
       .mockResolvedValueOnce({ ...announcement, content: "Second user's body" });
     const hover = renderHook(({ userId }) => usePrefetchAnnouncementDetail(userId), { initialProps: { userId: 1 }, wrapper });
