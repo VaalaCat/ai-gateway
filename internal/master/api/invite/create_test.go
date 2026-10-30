@@ -1,6 +1,7 @@
 package invite
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -20,7 +21,7 @@ func TestCreate_UserUnderCap_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if out.Value.Code == "" || out.Value.CreatorID != 1 {
+	if out.Value.Code == "" || out.Value.CreatorID != 1 || out.Value.GroupID != 0 {
 		t.Fatalf("bad result: %+v", out.Value)
 	}
 }
@@ -70,5 +71,67 @@ func TestCreate_AdminOverCap_Success(t *testing.T) {
 	}
 	if out.Value.MaxUses != 1000 {
 		t.Fatalf("maxUses = %d, want 1000", out.Value.MaxUses)
+	}
+}
+
+func TestCreate_UserCannotSupplyGroup(t *testing.T) {
+	for _, groupID := range []uint{0, models.DefaultUserGroupID, 8} {
+		db := newInviteDB(t)
+		setEnabled(t, db)
+		var req CreateRequest
+		if err := json.Unmarshal([]byte(`{"group_id":`+itoa(groupID)+`}`), &req); err != nil {
+			t.Fatal(err)
+		}
+		_, err := (&Handler{}).Create(inviteCtx(t, db, false, 1), req)
+		assertStatus(t, err, 403)
+		var count int64
+		db.Model(&models.InviteCode{}).Count(&count)
+		if count != 0 {
+			t.Fatalf("group %d: forbidden create persisted %d codes", groupID, count)
+		}
+	}
+}
+
+func TestCreate_AdminSelectsGroup(t *testing.T) {
+	for _, groupID := range []uint{0, models.DefaultUserGroupID, 8} {
+		db := newInviteDB(t)
+		setEnabled(t, db)
+		if err := db.Create(&models.UserGroup{ID: 8, Name: "selected"}).Error; err != nil {
+			t.Fatal(err)
+		}
+		out, err := (&Handler{}).Create(inviteCtx(t, db, true, 99), CreateRequest{GroupID: &groupID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored models.InviteCode
+		if err := db.First(&stored, out.Value.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if out.Value.GroupID != groupID || stored.GroupID != groupID {
+			t.Fatalf("selected %d: response=%+v stored=%+v", groupID, out.Value, stored)
+		}
+	}
+}
+
+func TestCreate_AdminRejectsUnavailableGroup(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		db := newInviteDB(t)
+		setEnabled(t, db)
+		groupID := uint(8)
+		if disabled {
+			if err := db.Create(&models.UserGroup{ID: groupID, Name: "disabled", Status: consts.StatusDisabled}).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Model(&models.UserGroup{}).Where("id = ?", groupID).Update("status", consts.StatusDisabled).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err := (&Handler{}).Create(inviteCtx(t, db, true, 99), CreateRequest{GroupID: &groupID})
+		assertStatus(t, err, 400)
+		var count int64
+		db.Model(&models.InviteCode{}).Count(&count)
+		if count != 0 {
+			t.Fatalf("unavailable group persisted %d codes", count)
+		}
 	}
 }

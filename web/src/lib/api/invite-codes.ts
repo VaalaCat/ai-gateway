@@ -17,7 +17,7 @@ export function useInviteCodes(
 export function useCreateInviteCode() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { note?: string; max_uses?: number; expires_at?: number }) =>
+    mutationFn: (data: { note?: string; max_uses?: number; expires_at?: number; group_id?: number }) =>
       api.post<InviteCodeRow>("/invite-codes", data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["invite-codes"] });

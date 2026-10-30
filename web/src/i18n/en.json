@@ -2257,6 +2257,8 @@
       "jwksUri": "JWKS URI",
       "clientId": "Client ID",
       "scopes": "Scopes",
+      "defaultGroup": "New account group",
+      "defaultGroupHint": "Only new accounts registered with this provider join this group. Existing accounts keep their current group.",
       "iconUrl": "Icon URL"
     }
   },
@@ -2657,6 +2659,9 @@
     "note": "Note",
     "notePlaceholder": "Optional label",
     "maxUses": "Max Uses",
+    "group": "Registration group",
+    "defaultGroup": "System default group",
+    "groupHint": "New accounts created with this invite join this group. Leave empty to use the system default group.",
     "expiresAt": "Expires At",
     "expiresAtPlaceholder": "Leave empty for no expiry",
     "expiresAtHint": "Leave empty to never expire.",

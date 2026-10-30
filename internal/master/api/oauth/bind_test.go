@@ -34,7 +34,7 @@ func setupMasterForBind(t *testing.T) *master.Server {
 
 func TestBind_Success(t *testing.T) {
 	srv := setupMasterForBind(t)
-	srv.DB.Create(&models.OAuthProvider{Name: "github", DisplayName: "GH", Enabled: true})
+	srv.DB.Create(&models.OAuthProvider{Name: "github", DisplayName: "GH", Enabled: true, DefaultGroupID: 999})
 	hashed, _ := bcrypt.GenerateFromPassword([]byte("pw1"), bcrypt.DefaultCost)
 	srv.DB.Create(&models.User{Username: "alice", Password: string(hashed), PasswordSet: true, Status: 1})
 
@@ -55,6 +55,13 @@ func TestBind_Success(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["token"] == "" {
 		t.Fatal("no token")
+	}
+	var user models.User
+	if err := srv.DB.Where("username = ?", "alice").First(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	if user.GroupID != models.DefaultUserGroupID {
+		t.Fatalf("binding overwrote group: %d", user.GroupID)
 	}
 }
 

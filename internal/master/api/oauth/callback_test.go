@@ -181,6 +181,10 @@ func TestCallback_ExistingUser_DoesNotOverwriteProfile(t *testing.T) {
 		"picture": "https://idp/new.png",
 	}
 	p := seedProvider(t, srv, idp)
+	// An invalid registration target must not affect existing-account login.
+	if err := srv.DB.Model(p).Update("default_group_id", 999).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	// Pre-create user with custom values
 	srv.DB.Create(&models.User{
@@ -190,6 +194,7 @@ func TestCallback_ExistingUser_DoesNotOverwriteProfile(t *testing.T) {
 		Status:      1,
 		DisplayName: "我的自定义昵称",
 		AvatarURL:   "https://my-custom/avatar.png",
+		GroupID:     models.DefaultUserGroupID,
 	})
 	var u models.User
 	srv.DB.Where("username = ?", "alice_keep").First(&u)
@@ -213,6 +218,9 @@ func TestCallback_ExistingUser_DoesNotOverwriteProfile(t *testing.T) {
 	}
 	if got.AvatarURL != "https://my-custom/avatar.png" {
 		t.Errorf("existing user AvatarURL 被覆盖: %q", got.AvatarURL)
+	}
+	if got.GroupID != models.DefaultUserGroupID {
+		t.Errorf("existing user group overwritten: %d", got.GroupID)
 	}
 }
 

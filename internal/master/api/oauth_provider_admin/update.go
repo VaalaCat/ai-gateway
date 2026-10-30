@@ -1,6 +1,7 @@
 package oauth_provider_admin
 
 import (
+	"errors"
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -22,6 +23,7 @@ var allowedUpdateKeys = map[string]bool{
 	"scopes":                 true,
 	"icon_url":               true,
 	"enabled":                true,
+	"default_group_id":       true,
 }
 
 func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.OAuthProvider, error) {
@@ -46,11 +48,21 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.OAuthProvide
 		}
 		updates[k] = v
 	}
+	if raw, ok := updates["default_group_id"]; ok {
+		number, valid := raw.(float64)
+		if !valid || number <= 0 || number > 1<<53-1 || number != float64(uint(number)) {
+			return models.OAuthProvider{}, api.BadRequestError("default_group_id must be a positive integer", nil)
+		}
+		updates["default_group_id"] = uint(number)
+	}
 	if len(updates) == 0 {
 		return models.OAuthProvider{}, api.BadRequestError("no updatable fields", nil)
 	}
 
 	if err := m.OAuthProvider().Update(id, updates); err != nil {
+		if errors.Is(err, dao.ErrInvalidRegistrationGroup) {
+			return models.OAuthProvider{}, api.BadRequestError(err.Error(), err)
+		}
 		return models.OAuthProvider{}, api.InternalError("update oauth provider failed", err)
 	}
 

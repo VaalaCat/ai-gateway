@@ -6,6 +6,7 @@ type InviteCode struct {
 	ID        uint   `gorm:"primaryKey" json:"id"`
 	Code      string `gorm:"uniqueIndex;size:32;not null" json:"code"`
 	CreatorID uint   `gorm:"index;not null" json:"creator_id"`
+	GroupID   uint   `gorm:"not null;default:0" json:"group_id"` // 0 resolves to the system default group at registration.
 	MaxUses   int    `gorm:"not null;default:1" json:"max_uses"`
 	UsedCount int    `gorm:"not null;default:0" json:"used_count"`
 	ExpiresAt int64  `gorm:"default:0" json:"expires_at"`

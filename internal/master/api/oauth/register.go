@@ -1,6 +1,8 @@
 package oauth
 
 import (
+	"errors"
+
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
@@ -31,6 +33,10 @@ func (h *Handler) Register(c *app.Context, req RegisterRequest) (RegisterRespons
 	}
 	userID, err := h.createUserFromClaims(c.RequestContext(), claims)
 	if err != nil {
+		var apiErr *api.APIError
+		if errors.As(err, &apiErr) {
+			return RegisterResponse{}, apiErr
+		}
 		return RegisterResponse{}, api.InternalError("create user failed", err)
 	}
 	u, err := q.User().GetByID(userID)

@@ -1,6 +1,8 @@
 package oauth_provider_admin
 
 import (
+	"errors"
+
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/oauth"
@@ -40,8 +42,14 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		IconURL:               req.IconURL,
 		Enabled:               req.Enabled,
 	}
+	if req.DefaultGroupID != nil {
+		p.DefaultGroupID = *req.DefaultGroupID
+	}
 
 	if err := m.OAuthProvider().Create(&p); err != nil {
+		if errors.Is(err, dao.ErrInvalidRegistrationGroup) {
+			return api.Created[models.OAuthProvider]{}, api.BadRequestError(err.Error(), err)
+		}
 		return api.Created[models.OAuthProvider]{}, api.InternalError("create oauth provider failed", err)
 	}
 

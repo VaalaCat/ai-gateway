@@ -75,6 +75,10 @@ func (h *Handler) Register(c *app.Context, req RegisterRequest) (api.Created[mod
 		if err != nil {
 			return err
 		}
+		user.GroupID = ic.GroupID
+		if user.GroupID == 0 {
+			user.GroupID = models.DefaultUserGroupID
+		}
 		if err := txm.User().Create(&user); err != nil {
 			return err
 		}
@@ -88,6 +92,9 @@ func (h *Handler) Register(c *app.Context, req RegisterRequest) (api.Created[mod
 	if err != nil {
 		if errors.Is(err, dao.ErrInviteCodeUnavailable) {
 			return api.Created[models.User]{}, api.BadRequestError("invalid or unavailable invite code", nil)
+		}
+		if errors.Is(err, dao.ErrInvalidRegistrationGroup) {
+			return api.Created[models.User]{}, api.BadRequestError("invite user group unavailable", nil)
 		}
 		return api.Created[models.User]{}, api.InternalError("create user failed", err)
 	}

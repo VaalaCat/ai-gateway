@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,10 +12,12 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/middleware"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 func (h *Handler) HandleCallback(c *gin.Context) {
@@ -159,6 +162,22 @@ func (h *Handler) createUserFromClaims(requestCtx context.Context, claims BindTi
 	var newID uint
 	err := dao.RunInTx[dao.Context](dao.NewContextWithContext(h.App, requestCtx), func(ctx dao.Context) error {
 		q := dao.NewAdminQuery(ctx)
+		provider, err := q.OAuthProvider().GetByID(claims.ProviderID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return api.BadRequestError("oauth provider unavailable", err)
+			}
+			return err
+		}
+		if !provider.Enabled {
+			return api.ForbiddenError("oauth provider disabled")
+		}
+		if err := dao.ValidateRegistrationGroup(ctx.GetCoreDB(), provider.DefaultGroupID); err != nil {
+			if errors.Is(err, dao.ErrInvalidRegistrationGroup) {
+				return api.BadRequestError(err.Error(), err)
+			}
+			return err
+		}
 		info := UserinfoPayload{
 			Sub:               claims.Subject,
 			Email:             claims.Email,
@@ -191,7 +210,7 @@ func (h *Handler) createUserFromClaims(requestCtx context.Context, claims BindTi
 			PasswordSet: false,
 			Role:        consts.RoleUser,
 			Status:      consts.StatusEnabled,
-			GroupID:     1,
+			GroupID:     provider.DefaultGroupID,
 		}
 		m := dao.NewAdminMutation(ctx)
 		if err := m.User().Create(u); err != nil {

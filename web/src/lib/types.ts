@@ -1293,6 +1293,7 @@ export interface InviteCodeRow {
   id: number;
   code: string;
   creator_id: number;
+  group_id: number;
   max_uses: number;
   used_count: number;
   expires_at: number;

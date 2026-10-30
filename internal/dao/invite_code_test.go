@@ -8,7 +8,10 @@ import (
 )
 
 func TestInviteCode_CreateGetByCode(t *testing.T) {
-	ctx, _ := setupAdminContext(t)
+	ctx, db := setupAdminContext(t)
+	if err := db.Create(&models.UserGroup{ID: models.DefaultUserGroupID, Name: "default"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	m := NewAdminMutation(ctx).InviteCode()
 	q := NewAdminQuery(ctx).InviteCode()
 	if err := m.Create(&models.InviteCode{Code: "CODE1", CreatorID: 7, MaxUses: 3}); err != nil {
@@ -27,7 +30,7 @@ func TestInviteCode_CountActiveExcludesUsedUpAndExpired(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx).InviteCode()
 	now := int64(1000)
-	db.Create(&models.InviteCode{Code: "A", CreatorID: 1, MaxUses: 2, UsedCount: 1, ExpiresAt: 0})  // active
+	db.Create(&models.InviteCode{Code: "A", CreatorID: 1, MaxUses: 2, UsedCount: 1, ExpiresAt: 0})   // active
 	db.Create(&models.InviteCode{Code: "B", CreatorID: 1, MaxUses: 1, UsedCount: 1})                 // used up
 	db.Create(&models.InviteCode{Code: "C", CreatorID: 1, MaxUses: 5, UsedCount: 0, ExpiresAt: 500}) // expired
 	db.Create(&models.InviteCode{Code: "D", CreatorID: 2, MaxUses: 1, UsedCount: 0})                 // other creator
@@ -74,6 +77,9 @@ func TestInviteCode_ListAllSearchByCode(t *testing.T) {
 func TestInviteCode_RedeemSuccessIncrements(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	m := NewAdminMutation(ctx).InviteCode()
+	if err := db.Create(&models.UserGroup{ID: models.DefaultUserGroupID, Name: "default"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	db.Create(&models.InviteCode{Code: "RED", CreatorID: 1, MaxUses: 2, UsedCount: 0})
 	ic, err := m.Redeem("RED", 1000)
 	if err != nil {
@@ -113,6 +119,9 @@ func TestInviteCode_RedeemNonexistentUnavailable(t *testing.T) {
 func TestInviteCode_RedeemLastSlotOnlyOnce(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	m := NewAdminMutation(ctx).InviteCode()
+	if err := db.Create(&models.UserGroup{ID: models.DefaultUserGroupID, Name: "default"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	db.Create(&models.InviteCode{Code: "ONE", CreatorID: 1, MaxUses: 1, UsedCount: 0})
 	if _, err := m.Redeem("ONE", 1000); err != nil {
 		t.Fatalf("first redeem: %v", err)
@@ -132,5 +141,43 @@ func TestInviteCode_RecordRedemption(t *testing.T) {
 	db.Model(&models.InviteRedemption{}).Where("invitee_id = ?", 99).Count(&cnt)
 	if cnt != 1 {
 		t.Fatalf("redemption rows = %d, want 1", cnt)
+	}
+}
+
+func TestInviteCode_RedeemInvalidGroupDoesNotConsume(t *testing.T) {
+	for _, groupID := range []uint{0, 8} {
+		ctx, db := setupAdminContext(t)
+		if err := db.Create(&models.InviteCode{Code: "INVALID_GROUP", CreatorID: 1, MaxUses: 1, GroupID: groupID}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewAdminMutation(ctx).InviteCode().Redeem("INVALID_GROUP", 1000); !errors.Is(err, ErrInvalidRegistrationGroup) {
+			t.Fatalf("group %d: redeem error = %v", groupID, err)
+		}
+		var stored models.InviteCode
+		if err := db.Where("code = ?", "INVALID_GROUP").First(&stored).Error; err != nil {
+			t.Fatal(err)
+		}
+		if stored.UsedCount != 0 {
+			t.Fatalf("invalid group consumed invite: %+v", stored)
+		}
+	}
+}
+
+func TestInviteCode_DefaultGroupRemainsUsableWhenDisabled(t *testing.T) {
+	for _, groupID := range []uint{0, models.DefaultUserGroupID} {
+		ctx, db := setupAdminContext(t)
+		if err := db.Create(&models.UserGroup{ID: models.DefaultUserGroupID, Name: "default"}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&models.UserGroup{}).Where("id = ?", models.DefaultUserGroupID).Update("status", 0).Error; err != nil {
+			t.Fatal(err)
+		}
+		m := NewAdminMutation(ctx).InviteCode()
+		if err := m.Create(&models.InviteCode{Code: "DEFAULT", CreatorID: 1, MaxUses: 1, GroupID: groupID}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Redeem("DEFAULT", 1000); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

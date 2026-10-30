@@ -9,7 +9,10 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/config"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master"
+	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -80,6 +83,9 @@ func TestOAuthProviderAdminCRUD(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &created)
 	if got := created["client_secret"]; got != "***" {
 		t.Fatalf("expected masked, got %v", got)
+	}
+	if created["default_group_id"] != float64(models.DefaultUserGroupID) {
+		t.Fatalf("default group = %v", created["default_group_id"])
 	}
 	id := uintIDFrom(created)
 
@@ -171,7 +177,7 @@ func TestOAuthProviderAdmin_Protocol_Invalid(t *testing.T) {
 	w := doJSON(t, srv, jwt, "POST", "/api/admin/oauth-providers", map[string]any{
 		"name": "bad", "display_name": "Bad", "protocol": "dingding",
 		"authorization_endpoint": "https://x/a", "token_endpoint": "https://x/t",
-		"userinfo_endpoint":      "https://x/u", "client_id": "c", "client_secret": "s",
+		"userinfo_endpoint": "https://x/u", "client_id": "c", "client_secret": "s",
 	})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid protocol: want 400, got %d %s", w.Code, w.Body.String())
@@ -222,4 +228,42 @@ func TestOAuthProviderAdmin_Update_RejectsReadonlyFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOAuthProviderAdmin_RegistrationGroup(t *testing.T) {
+	srv := setupMaster(t)
+	jwt := adminToken(t, srv)
+	group := &models.UserGroup{Name: "selected"}
+	disabled := &models.UserGroup{Name: "disabled"}
+	require.NoError(t, srv.DB.Create(group).Error)
+	require.NoError(t, srv.DB.Create(disabled).Error)
+	require.NoError(t, srv.DB.Model(disabled).Update("status", consts.StatusDisabled).Error)
+	body := map[string]any{
+		"name": "group-provider", "authorization_endpoint": "https://example/a",
+		"token_endpoint": "https://example/t", "userinfo_endpoint": "https://example/u",
+		"client_id": "client", "client_secret": "secret", "default_group_id": group.ID,
+	}
+	w := doJSON(t, srv, jwt, http.MethodPost, "/api/admin/oauth-providers", body)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var created models.OAuthProvider
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
+	require.Equal(t, group.ID, created.DefaultGroupID)
+	path := "/api/admin/oauth-providers/" + uintToStr(created.ID)
+	w = doJSON(t, srv, jwt, http.MethodPut, path, map[string]any{"default_group_id": 1})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	for _, invalid := range []any{0, -1, 1.5, "1", nil, uint(999), disabled.ID, 1e20} {
+		body["name"] = "invalid-group"
+		body["default_group_id"] = invalid
+		// null is the same as an omitted optional create field; patch null is invalid.
+		if invalid != nil {
+			w = doJSON(t, srv, jwt, http.MethodPost, "/api/admin/oauth-providers", body)
+			require.Equal(t, http.StatusBadRequest, w.Code, "create %v: %s", invalid, w.Body.String())
+		}
+		w = doJSON(t, srv, jwt, http.MethodPut, path, map[string]any{"default_group_id": invalid, "display_name": "must-not-save"})
+		require.Equal(t, http.StatusBadRequest, w.Code, "update %v: %s", invalid, w.Body.String())
+	}
+	var persisted models.OAuthProvider
+	require.NoError(t, srv.DB.First(&persisted, created.ID).Error)
+	require.Equal(t, models.DefaultUserGroupID, persisted.DefaultGroupID)
+	require.NotEqual(t, "must-not-save", persisted.DisplayName)
 }

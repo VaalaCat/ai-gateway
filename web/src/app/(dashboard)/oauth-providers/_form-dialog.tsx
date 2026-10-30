@@ -24,6 +24,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import {
   useCreateOAuthProvider,
   useUpdateOAuthProvider,
@@ -45,7 +46,7 @@ interface Props {
 const UPDATE_KEYS = [
   "display_name", "issuer", "authorization_endpoint", "token_endpoint",
   "userinfo_endpoint", "jwks_uri", "client_id", "client_secret",
-  "scopes", "icon_url", "enabled",
+  "scopes", "icon_url", "enabled", "default_group_id",
 ] as const;
 
 // 创建时允许提交的字段（含 name + protocol，因为 create 需要 slug 且 protocol 不可 update）
@@ -77,6 +78,7 @@ function pickFormState(p: OAuthProvider): FormState {
     scopes: p.scopes,
     icon_url: p.icon_url,
     enabled: p.enabled,
+    default_group_id: p.default_group_id ?? 1,
   };
 }
 
@@ -105,7 +107,7 @@ export function ProviderFormDialog({ mode, open, onOpenChange, initial }: Props)
   const create = useCreateOAuthProvider();
   const update = useUpdateOAuthProvider();
   const [form, setForm] = useState<FormState>(() =>
-    mode === "create" ? { enabled: true, protocol: "oidc" } : initial ? pickFormState(initial) : {},
+    mode === "create" ? { enabled: true, protocol: "oidc", default_group_id: 1 } : initial ? pickFormState(initial) : {},
   );
 
   const isSubmitting = create.isPending || update.isPending;
@@ -195,6 +197,18 @@ export function ProviderFormDialog({ mode, open, onOpenChange, initial }: Props)
               <p className="text-xs text-muted-foreground">{t("secretChangeHint")}</p>
             )}
           </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="default_group_id">{t("defaultGroup")}</Label>
+            <EntityPicker
+              id="default_group_id"
+              entity="user-group"
+              defaultAdminScope="all"
+              value={form.default_group_id ? String(form.default_group_id) : ""}
+              onChange={(value) => setForm((p) => ({ ...p, default_group_id: Number(value) || 0 }))}
+              disabled={isSubmitting}
+            />
+            <p className="text-xs text-muted-foreground">{t("defaultGroupHint")}</p>
+          </div>
           <div className="flex items-center gap-2">
             <Switch
               id="enabled"
@@ -208,7 +222,7 @@ export function ProviderFormDialog({ mode, open, onOpenChange, initial }: Props)
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {tc("cancel")}
           </Button>
-          <Button onClick={handleSubmit} disabled={isSubmitting}>
+          <Button onClick={handleSubmit} disabled={isSubmitting || !form.default_group_id}>
             {isSubmitting && <Loader2 className="mr-2 size-4 animate-spin" />}
             {tc("save")}
           </Button>

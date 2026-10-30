@@ -215,3 +215,40 @@ func openBootstrapRawPair(t *testing.T) (*gorm.DB, *gorm.DB) {
 	t.Cleanup(func() { closeGORM(t, target) })
 	return source, target
 }
+
+func TestBootstrapCorePreservesRegistrationGroups(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "configured"
+		if legacy {
+			name = "pre-feature"
+		}
+		t.Run(name, func(t *testing.T) {
+			sourcePath := filepath.Join(t.TempDir(), "master.db")
+			source := openLegacyFixture(t, sourcePath)
+			t.Cleanup(func() { closeGORM(t, source) })
+			if legacy {
+				require.NoError(t, source.Migrator().DropColumn(&models.OAuthProvider{}, "DefaultGroupID"))
+				require.NoError(t, source.Migrator().DropColumn(&models.InviteCode{}, "GroupID"))
+				require.NoError(t, source.Exec(`INSERT INTO o_auth_providers (id, name) VALUES (1, 'provider')`).Error)
+				require.NoError(t, source.Exec(`INSERT INTO invite_codes (id, code, creator_id) VALUES (1, 'invite', 1)`).Error)
+			} else {
+				require.NoError(t, source.Create(&models.OAuthProvider{ID: 1, Name: "provider", DefaultGroupID: 7}).Error)
+				require.NoError(t, source.Create(&models.InviteCode{ID: 1, Code: "invite", CreatorID: 1, GroupID: 8}).Error)
+			}
+			target := openBootstrapTarget(t)
+			_, err := BootstrapCore(t.Context(), source, target, LegacyLayoutInfo{Kind: LegacyLayoutMonolith, Path: sourcePath}, BootstrapOptions{})
+			require.NoError(t, err)
+			var provider models.OAuthProvider
+			var invite models.InviteCode
+			require.NoError(t, target.First(&provider, 1).Error)
+			require.NoError(t, target.First(&invite, 1).Error)
+			if legacy {
+				require.Equal(t, models.DefaultUserGroupID, provider.DefaultGroupID)
+				require.Zero(t, invite.GroupID)
+			} else {
+				require.EqualValues(t, 7, provider.DefaultGroupID)
+				require.EqualValues(t, 8, invite.GroupID)
+			}
+		})
+	}
+}
