@@ -15,6 +15,7 @@ import {
   Key,
   KeyRound,
   LayoutDashboard,
+  Megaphone,
   MessageSquare,
   Network,
   Route,
@@ -31,6 +32,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { usePublicConfig } from "@/lib/api/system";
+import { BrandPlaceholder, SiteIcon } from "@/components/site-branding";
+import { SITE_BRANDING_DEFAULTS } from "@/lib/site-branding";
 import {
   isGenericAPIVisible,
   isModelMarketplaceVisible,
@@ -196,6 +199,7 @@ export function AppSidebar() {
               href: "/monitoring",
             },
             { label: t("maintenance"), icon: Wrench, href: "/system" },
+            { label: t("announcements"), icon: Megaphone, href: "/announcements" },
           ],
         },
       ]
@@ -212,8 +216,12 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
               <Link href="/dashboard">
-                <Bot className="size-5" />
-                <span className="font-semibold">AI Gateway</span>
+                {publicConfig ? (
+                  <>
+                    <SiteIcon iconUrl={publicConfig.site_icon_url} className="size-5 shrink-0 object-contain" />
+                    <span className="font-semibold">{publicConfig.site_name || SITE_BRANDING_DEFAULTS.site_name}</span>
+                  </>
+                ) : <BrandPlaceholder />}
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

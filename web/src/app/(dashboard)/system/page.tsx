@@ -28,6 +28,7 @@ import {
 import { toast } from "sonner";
 import { BYOKSettingsCard } from "@/components/system/byok-settings";
 import { AgentRelaySettings } from "@/components/system/agent-relay-settings";
+import { SiteCustomization } from "@/components/system/site-customization";
 import {
   buildGenericAPISettingUpdates,
   currentGenericAPISettingValues,
@@ -1460,7 +1461,12 @@ export default function SystemMaintenancePage() {
       <div className="flex min-w-0 flex-col gap-6">
 
       <SystemMaintenanceTabs
-        overview={<SystemInfoCard system={stats?.system} t={t} />}
+        overview={
+          <div className="flex min-w-0 flex-col gap-6">
+            <SystemInfoCard system={stats?.system} t={t} />
+            <SiteCustomization />
+          </div>
+        }
         requestPath={
           <RequestPathSettingsContent
             draft={requestPathDraft}

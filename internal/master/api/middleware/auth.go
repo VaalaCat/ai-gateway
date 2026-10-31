@@ -45,6 +45,18 @@ func AuthMiddleware(secret string) gin.HandlerFunc {
 	}
 }
 
+// OptionalAuthMiddleware permits an absent header, never invalid credentials.
+func OptionalAuthMiddleware(secret string) gin.HandlerFunc {
+	authenticate := AuthMiddleware(secret)
+	return func(c *gin.Context) {
+		if c.GetHeader(consts.HeaderAuthorization) == "" {
+			c.Next()
+			return
+		}
+		authenticate(c)
+	}
+}
+
 func GenerateToken(secret string, userID uint, role int, username, displayName, avatarURL string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		consts.ClaimUserID:      userID,

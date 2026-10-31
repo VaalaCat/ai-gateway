@@ -3,6 +3,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { CatalogAccessScope } from "@/app/(dashboard)/api-catalog/_components/catalog-token-scope";
 import { createTestQueryClient } from "@/test/render";
 import { useAPICatalogEffective, useAPICatalogOpenAPI, useAPICatalogRoutes, useAPICatalogService, useAPICatalogServices, useAPIRole, useAPIRoleBindings, useAPIRoles, useCreateAPIRole, useCreateAPIRoleBinding, useReplaceAPIAccessGrant } from "./api-access";
 
@@ -208,7 +209,7 @@ describe("generic API access hooks", () => {
     apiGet
       .mockResolvedValueOnce({ document: { openapi: "3.1.0", paths: {} } })
       .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
-    const { result, rerender } = renderHook(({ scope }) => useAPICatalogOpenAPI(1, scope, 7), { initialProps: { scope: token17 }, wrapper: localWrapper });
+    const { result, rerender } = renderHook(({ scope }: { scope: CatalogAccessScope }) => useAPICatalogOpenAPI(1, scope, 7), { initialProps: { scope: token17 as CatalogAccessScope }, wrapper: localWrapper });
     await waitFor(() => expect(result.current.data?.document.openapi).toBe("3.1.0"));
 
     rerender({ scope: { mode: "token", tokenID: 18 } });

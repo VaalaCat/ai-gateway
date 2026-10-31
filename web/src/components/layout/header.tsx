@@ -13,6 +13,7 @@ import {
 import { LangSwitcher } from "@/components/layout/lang-switcher";
 import { ThemeSwitcher } from "@/components/layout/theme-switcher";
 import { UserMenu } from "@/components/layout/user-menu";
+import { AnnouncementInbox } from "@/components/layout/announcement-inbox";
 
 const pageKeys: Record<string, string> = {
   dashboard: "dashboard",
@@ -25,6 +26,7 @@ const pageKeys: Record<string, string> = {
   logs: "logs",
   playground: "playground",
   profile: "profile",
+  announcements: "announcements",
 };
 
 export function AppHeader() {
@@ -46,6 +48,7 @@ export function AppHeader() {
         </BreadcrumbList>
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-1">
+        <AnnouncementInbox />
         <LangSwitcher />
         <ThemeSwitcher />
         <UserMenu />

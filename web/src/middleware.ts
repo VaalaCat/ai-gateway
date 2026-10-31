@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 import { STORAGE_KEYS, ROLE } from "@/lib/constants";
 
 const publicPaths = ["/login", "/register", "/oauth/bind", "/oauth/choose", "/oauth/success"];
-const adminPaths = ["/users", "/channels", "/models", "/agents", "/agent-routes", "/system", "/token-templates", "/oauth-providers"];
+const adminPaths = ["/users", "/channels", "/models", "/agents", "/agent-routes", "/system", "/token-templates", "/oauth-providers", "/announcements"];
 
 function parseJWT(token: string) {
   try {

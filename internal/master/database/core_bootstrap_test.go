@@ -286,6 +286,7 @@ func TestBootstrapTableCopiersMatchModelTableNames(t *testing.T) {
 		&models.OAuthProvider{}, &models.OAuthIdentity{}, &models.ModelRouting{}, &models.PrivateChannel{},
 		&models.PrivateChannelShare{}, &models.AdminScript{}, &models.InviteCode{}, &models.InviteRedemption{},
 		&models.MasterSigningKey{},
+		&models.Announcement{}, &models.AnnouncementGroup{}, &models.AnnouncementSeen{},
 	}
 	copiers := bootstrapTableCopiers()
 	require.Len(t, copiers, len(modelsInOrder))

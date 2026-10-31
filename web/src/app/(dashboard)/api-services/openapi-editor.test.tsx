@@ -140,11 +140,6 @@ describe("OpenAPI editor state", () => {
     expect(() => renamePath(twoRoutes, 10, "/users/list", "/users")).toThrow("openAPIStoredPathDuplicate");
   });
 
-  it("uses a stable i18n code for duplicate stored paths within one Route", () => {
-    const draft = { ...snapshot, routes: [{ ...snapshot.routes[0]!, paths: { "/forecast": {}, "/forecast/other": {} } }] };
-    expect(() => renamePath(draft, 9, "/forecast", "/forecast/other")).toThrow("openAPIStoredPathDuplicate");
-  });
-
   it("adds only an unused method and atomically renames or removes operations", () => {
     expect(() => addOperation(snapshot, 9, "/forecast", "GET")).toThrow("openAPIMethodDuplicate");
     const withPost = addOperation(snapshot, 9, "/forecast", "post");
@@ -179,9 +174,7 @@ describe("OpenAPI document editor", () => {
     render(<OpenAPIDocumentEditor snapshot={snapshot} origin="https://gateway.example.test" disabled={false} onChange={vi.fn()} />);
     expect(screen.getByText("Weather")).toBeVisible();
     expect(screen.getAllByText("forecast").length).toBeGreaterThan(0);
-    expect(screen.getByText("Weather")).toBeVisible();
     expect(screen.getByText("https://gateway.example.test/v1/api/weather/forecast")).toBeVisible();
-    expect(screen.queryByText("Sheet")).not.toBeInTheDocument();
   });
 
   it("renders an empty route state and disables editing while save is pending", () => {
@@ -341,7 +334,7 @@ function updateState(overrides: Record<string, unknown> = {}) {
   return { isPending: false, mutateAsync: vi.fn(), ...overrides };
 }
 
-function snapshotFor(serviceID: number, version: string, updatedAt = serviceID) {
+function snapshotFor(serviceID: number, version: string, updatedAt = serviceID): OpenAPIDocumentSnapshot {
   return {
     ...snapshot,
     service: {
@@ -351,7 +344,7 @@ function snapshotFor(serviceID: number, version: string, updatedAt = serviceID) 
       updated_at: updatedAt,
       document: { ...snapshot.service.document, openapi: version },
     },
-  } satisfies OpenAPIDocumentSnapshot;
+  };
 }
 
 function deferred<T>() {

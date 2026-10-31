@@ -30,6 +30,26 @@ var settingDefs = map[string]struct {
 	Default  string
 	Validate func(string) bool
 }{
+	"site_name": {
+		Default:  "AI Gateway",
+		Validate: func(v string) bool { return validBrandingText(strings.TrimSpace(v), 20, true) },
+	},
+	"site_title": {
+		Default:  "AI Gateway",
+		Validate: func(v string) bool { return validBrandingText(strings.TrimSpace(v), 20, true) },
+	},
+	"site_icon_url": {
+		Default:  "",
+		Validate: validSiteIconURL,
+	},
+	"welcome_title": {
+		Default:  "",
+		Validate: func(v string) bool { return validBrandingText(v, 20, false) },
+	},
+	"welcome_message": {
+		Default:  "",
+		Validate: func(v string) bool { return validBrandingText(v, 100, false) },
+	},
 	"registration_enabled": {
 		Default: "false",
 		Validate: func(v string) bool {
@@ -312,6 +332,10 @@ func (h *Handler) UpdateSettings(c *app.Context, req UpdateSettingsRequest) (Set
 
 	agentKeys := settings.Defaults()
 	for key, value := range req.Settings {
+		if key == "site_name" || key == "site_title" {
+			value = strings.TrimSpace(value)
+			req.Settings[key] = value
+		}
 		_, isAgent := agentKeys[key]
 		def, isDef := settingDefs[key]
 		if !isAgent && !isDef {

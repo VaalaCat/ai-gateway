@@ -70,7 +70,7 @@ describe("log debug file download", () => {
     get.mockResolvedValueOnce([]);
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:opaque-id");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function () {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
       filename = this.download;
     });
 

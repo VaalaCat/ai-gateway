@@ -16,6 +16,8 @@ A distributed-by-design AI API gateway with a separated control-plane (master) /
 - **Model Routing** — Aggregate multiple upstream models under one name with priority/weight load balancing and error retries
 - **BYOK (Bring Your Own Key)** — End-users can self-serve upload their own provider API keys (AES-GCM encrypted at rest); private channels are merged into the candidate pool with priority over shared admin channels, with optional service-fee billing mode
 - **Single Binary** — Frontend static assets embedded; no separate web server needed
+- **Announcements** — Target announcements by user group and guest visibility.
+- **Site Settings** — Customize the website title, name, and icon.
 
 ## Screenshots
 

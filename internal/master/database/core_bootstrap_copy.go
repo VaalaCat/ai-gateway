@@ -102,6 +102,9 @@ func bootstrapTableCopiers() []bootstrapTableCopier {
 		bootstrapUintCopier[models.PrivateChannelShare]("private_channel_shares"), bootstrapUintCopier[models.AdminScript]("admin_scripts"),
 		bootstrapUintCopier[models.InviteCode]("invite_codes"), bootstrapUintCopier[models.InviteRedemption]("invite_redemptions"),
 		bootstrapStringCopier[models.MasterSigningKey]("master_signing_keys", "key_id"),
+		bootstrapUintCopier[models.Announcement]("announcements"),
+		bootstrapCompositeCopier("announcement_groups", "announcement_id", "group_id"),
+		bootstrapCompositeCopier("announcement_seens", "user_id", "announcement_id"),
 	}
 }
 
@@ -146,6 +149,62 @@ func bootstrapCopier[T any](name, key string) bootstrapTableCopier {
 			last = rows[len(rows)-1][key]
 			if last == nil {
 				return 0, fmt.Errorf("bootstrap pagination key %s is null", key)
+			}
+			copied += int64(len(rows))
+		}
+	}}
+}
+
+func bootstrapCompositeCopier(name, firstKey, secondKey string) bootstrapTableCopier {
+	return bootstrapTableCopier{name: name, copyAll: func(ctx context.Context, source, target *gorm.DB) (int64, error) {
+		exists, err := bootstrapSourceHasTable(ctx, source, name)
+		if err != nil || !exists {
+			return 0, err
+		}
+		sourceColumns, err := readBootstrapColumns(ctx, source, name)
+		if err != nil {
+			return 0, err
+		}
+		targetColumns, err := readBootstrapColumns(ctx, target, name)
+		if err != nil {
+			return 0, err
+		}
+		columns, err := sharedBootstrapColumns(sourceColumns, targetColumns, firstKey)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := sharedBootstrapColumns(sourceColumns, targetColumns, secondKey); err != nil {
+			return 0, err
+		}
+		var copied int64
+		var lastFirst, lastSecond any
+		for {
+			query := source.WithContext(ctx).Table(name).
+				Clauses(clause.Select{Columns: bootstrapClauseColumns(columns)}).
+				Order(clause.OrderByColumn{Column: clause.Column{Name: firstKey}}).
+				Order(clause.OrderByColumn{Column: clause.Column{Name: secondKey}}).
+				Limit(defaultMigrationReadBatch)
+			if lastFirst != nil {
+				query = query.Where(clause.Or(
+					clause.Gt{Column: clause.Column{Name: firstKey}, Value: lastFirst},
+					clause.And(clause.Eq{Column: clause.Column{Name: firstKey}, Value: lastFirst},
+						clause.Gt{Column: clause.Column{Name: secondKey}, Value: lastSecond}),
+				))
+			}
+			var rows []map[string]any
+			if err := query.Find(&rows).Error; err != nil {
+				return 0, err
+			}
+			if len(rows) == 0 {
+				return copied, nil
+			}
+			if err := insertBootstrapRows(ctx, target, name, columns, rows); err != nil {
+				return 0, err
+			}
+			last := rows[len(rows)-1]
+			lastFirst, lastSecond = last[firstKey], last[secondKey]
+			if lastFirst == nil || lastSecond == nil {
+				return 0, fmt.Errorf("bootstrap composite pagination key is null in %s", name)
 			}
 			copied += int64(len(rows))
 		}

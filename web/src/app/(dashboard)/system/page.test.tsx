@@ -63,6 +63,10 @@ vi.mock("@/components/system/agent-relay-settings", () => ({
   AgentRelaySettings: () => <div>agentRelaySettings</div>,
 }));
 
+vi.mock("@/components/system/site-customization", () => ({
+  SiteCustomization: () => <div>siteCustomization</div>,
+}));
+
 vi.mock("@/components/system/byok-settings", () => ({
   BYOKSettingsCard: () => <div>byokSettings</div>,
 }));

@@ -23,6 +23,8 @@ import { Separator } from "@/components/ui/separator";
 import { OAuthProviderBadge } from "@/components/business/oauth-provider-badge";
 import { Loader2 } from "lucide-react";
 import Link from "next/link";
+import { BrandPlaceholder, SiteIcon } from "@/components/site-branding";
+import { SITE_BRANDING_DEFAULTS } from "@/lib/site-branding";
 
 function LoginContent() {
   const t = useTranslations("auth");
@@ -62,8 +64,16 @@ function LoginContent() {
     <div className="flex min-h-screen items-center justify-center bg-background">
       <Card className="w-full max-w-md mx-4">
         <CardHeader className="text-center">
-          <CardTitle className="text-2xl">{t("loginTitle")}</CardTitle>
-          <CardDescription>{t("loginSubtitle")}</CardDescription>
+          <CardTitle className="flex items-center justify-center gap-2 text-2xl">
+            {publicConfig ? (
+              <>
+                {publicConfig.site_icon_url && <SiteIcon iconUrl={publicConfig.site_icon_url} className="size-8 shrink-0 object-contain" />}
+                {publicConfig.site_name || SITE_BRANDING_DEFAULTS.site_name}
+              </>
+            ) : <BrandPlaceholder className="h-8 w-40" />}
+          </CardTitle>
+          {publicConfig?.welcome_title && <p className="font-medium whitespace-pre-wrap break-words">{publicConfig.welcome_title}</p>}
+          <CardDescription className="whitespace-pre-wrap break-words">{publicConfig ? (publicConfig.welcome_message || t("loginSubtitle")) : <BrandPlaceholder className="w-48" />}</CardDescription>
         </CardHeader>
         <CardContent>
           {(oauthError || error) && (

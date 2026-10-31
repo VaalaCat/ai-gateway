@@ -77,7 +77,7 @@ func TestAutoMigrate(t *testing.T) {
 	sqlDB, _ := db.DB()
 	defer sqlDB.Close()
 
-	tables := []string{"users", "tokens", "channels", "model_configs", "agents", "usage_logs", "o_auth_providers", "o_auth_identities", "master_signing_keys"}
+	tables := []string{"users", "tokens", "channels", "model_configs", "agents", "usage_logs", "o_auth_providers", "o_auth_identities", "master_signing_keys", "announcements", "announcement_groups", "announcement_seens"}
 	for _, table := range tables {
 		if !db.Migrator().HasTable(table) {
 			t.Errorf("table %s not created", table)

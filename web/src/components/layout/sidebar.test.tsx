@@ -7,7 +7,10 @@ import type { CapabilitiesResponse } from "@/lib/api/capabilities";
 import { createTestQueryClient } from "@/test/render";
 import { AppSidebar } from "./sidebar";
 
-const { apiGet } = vi.hoisted(() => ({ apiGet: vi.fn() }));
+const { apiGet, branding } = vi.hoisted(() => ({
+  apiGet: vi.fn(),
+  branding: { current: {} as Record<string, string> },
+}));
 
 vi.mock("next/link", () => ({
   default: ({ href, children }: { href: string; children: React.ReactNode }) => (
@@ -20,7 +23,7 @@ vi.mock("@/lib/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/client")>();
   return { ...actual, api: { get: apiGet } };
 });
-vi.mock("@/lib/api/system", () => ({ usePublicConfig: () => ({ data: {} }) }));
+vi.mock("@/lib/api/system", () => ({ usePublicConfig: () => ({ data: branding.current }) }));
 vi.mock("@/hooks/use-sidebar-section", () => ({ useSidebarSection: () => [true, vi.fn()] }));
 vi.mock("@/components/ui/sidebar", () => ({
   Sidebar: ({ children }: { children: React.ReactNode }) => <nav>{children}</nav>,
@@ -40,6 +43,8 @@ vi.mock("@/components/ui/collapsible", () => ({
   CollapsibleContent: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   CollapsibleTrigger: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
+
+beforeEach(() => { branding.current = {}; });
 
 function authToken(userId: number, role: number) {
   const payload = btoa(JSON.stringify({
@@ -168,5 +173,24 @@ describe("generic API navigation", () => {
     expect(screen.getByRole("link", { name: "apiAccess" })).toHaveAttribute("href", "/api-access");
     expect(screen.getByRole("link", { name: "channels" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "maintenance" })).toBeInTheDocument();
+  });
+});
+
+describe("sidebar site branding", () => {
+  it("updates the brand label and image and restores the original icon when cleared", () => {
+    window.localStorage.clear();
+    apiGet.mockReset().mockResolvedValue(capabilities(false));
+    branding.current = { site_name: "Custom Gateway", site_icon_url: "/brand.svg" };
+    const { rerender } = renderSidebar();
+    const brand = screen.getByRole("link", { name: "Custom Gateway" });
+    expect(brand).toHaveAttribute("href", "/dashboard");
+    expect(brand.querySelector("img")).toHaveAttribute("src", "/brand.svg");
+
+    branding.current = { site_name: "AI Gateway", site_icon_url: "" };
+    rerender(<AppSidebar />);
+    const restored = screen.getByRole("link", { name: "AI Gateway" });
+    expect(restored.querySelector("img")).not.toBeInTheDocument();
+    expect(restored.querySelector("svg")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Custom Gateway" })).not.toBeInTheDocument();
   });
 });
