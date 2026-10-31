@@ -24,6 +24,9 @@ func newInviteDB(t *testing.T) *gorm.DB {
 	if err := models.AutoMigrate(db); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Create(&models.UserGroup{ID: models.DefaultUserGroupID, Name: "default", Status: consts.StatusEnabled}).Error; err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 

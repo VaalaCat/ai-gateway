@@ -1,6 +1,10 @@
 package dao
 
-import "github.com/VaalaCat/ai-gateway/internal/models"
+import (
+	"fmt"
+
+	"github.com/VaalaCat/ai-gateway/internal/models"
+)
 
 type AdminOAuthProviderQuery interface {
 	GetByID(id uint) (*models.OAuthProvider, error)
@@ -43,6 +47,9 @@ func (q *adminOAuthProviderQuery) ListEnabled() ([]models.OAuthProvider, error) 
 }
 
 func (m *adminOAuthProviderMutation) Create(p *models.OAuthProvider) error {
+	if p.DefaultGroupID == 0 {
+		p.DefaultGroupID = models.DefaultUserGroupID
+	}
 	// Two-step Create wrapped in a transaction: GORM's default:true tag overrides
 	// an explicit Enabled=false (zero-value bool indistinguishable from "not set"),
 	// so we Create then UpdateColumn. Without the tx, a failed UpdateColumn would
@@ -50,6 +57,9 @@ func (m *adminOAuthProviderMutation) Create(p *models.OAuthProvider) error {
 	// commit ada013a) but SQLite still applied the column DEFAULT.
 	intendedEnabled := p.Enabled
 	return RunInTx[Context](m.ctx, func(txCtx Context) error {
+		if err := ValidateRegistrationGroup(txCtx.GetCoreDB(), p.DefaultGroupID); err != nil {
+			return err
+		}
 		if err := txCtx.GetCoreDB().Create(p).Error; err != nil {
 			return err
 		}
@@ -64,7 +74,18 @@ func (m *adminOAuthProviderMutation) Create(p *models.OAuthProvider) error {
 }
 
 func (m *adminOAuthProviderMutation) Update(id uint, updates map[string]any) error {
-	return m.ctx.GetCoreDB().Model(&models.OAuthProvider{}).Where("id = ?", id).Updates(updates).Error
+	return RunInTx[Context](m.ctx, func(txCtx Context) error {
+		if raw, ok := updates["default_group_id"]; ok {
+			groupID, valid := raw.(uint)
+			if !valid || groupID == 0 {
+				return fmt.Errorf("%w: default_group_id must be a positive integer", ErrInvalidRegistrationGroup)
+			}
+			if err := ValidateRegistrationGroup(txCtx.GetCoreDB(), groupID); err != nil {
+				return err
+			}
+		}
+		return txCtx.GetCoreDB().Model(&models.OAuthProvider{}).Where("id = ?", id).Updates(updates).Error
+	})
 }
 
 func (m *adminOAuthProviderMutation) Delete(id uint) error {

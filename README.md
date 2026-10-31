@@ -16,6 +16,7 @@ A distributed-by-design AI API gateway with a separated control-plane (master) /
 - **Model Routing** — Aggregate multiple upstream models under one name with priority/weight load balancing and error retries
 - **BYOK (Bring Your Own Key)** — End-users can self-serve upload their own provider API keys (AES-GCM encrypted at rest); private channels are merged into the candidate pool with priority over shared admin channels, with optional service-fee billing mode
 - **Single Binary** — Frontend static assets embedded; no separate web server needed
+- **Registration Groups** — Set a default group per OAuth provider, or let administrators select a group when creating invite codes. Unspecified groups use the system default. Assignment applies only to new accounts; OAuth login and account linking preserve existing groups. Ordinary users cannot select invite-code groups. OAuth registration does not accept invite codes.
 
 ## Screenshots
 

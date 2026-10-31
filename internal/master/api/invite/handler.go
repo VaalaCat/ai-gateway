@@ -83,6 +83,9 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		maxUses = 1
 	}
 	if scope == nil || !scope.IsAdmin {
+		if req.GroupID != nil {
+			return api.Created[models.InviteCode]{}, api.ForbiddenError("only administrators can select an invite user group")
+		}
 		if err := checkUserCreateQuota(q, uid, maxUses); err != nil {
 			return api.Created[models.InviteCode]{}, err
 		}
@@ -92,7 +95,13 @@ func (h *Handler) Create(c *app.Context, req CreateRequest) (api.Created[models.
 		return api.Created[models.InviteCode]{}, api.InternalError("generate invite code failed", err)
 	}
 	ic := models.InviteCode{Code: code, CreatorID: uid, MaxUses: maxUses, ExpiresAt: req.ExpiresAt, Note: req.Note}
+	if req.GroupID != nil {
+		ic.GroupID = *req.GroupID
+	}
 	if err := m.InviteCode().Create(&ic); err != nil {
+		if errors.Is(err, dao.ErrInvalidRegistrationGroup) {
+			return api.Created[models.InviteCode]{}, api.BadRequestError("invite user group unavailable", err)
+		}
 		return api.Created[models.InviteCode]{}, api.InternalError("create invite code failed", err)
 	}
 	return api.Created[models.InviteCode]{Value: ic}, nil

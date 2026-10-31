@@ -66,6 +66,9 @@ func (q *adminInviteCodeQuery) CountActiveByCreator(creatorID uint, now int64) (
 }
 
 func (m *adminInviteCodeMutation) Create(code *models.InviteCode) error {
+	if err := validateInviteGroup(m.ctx.GetCoreDB(), code.GroupID); err != nil {
+		return err
+	}
 	return m.ctx.GetCoreDB().Create(code).Error
 }
 
@@ -85,7 +88,10 @@ func (m *adminInviteCodeMutation) Redeem(code string, now int64) (*models.Invite
 		if res.RowsAffected == 0 {
 			return ErrInviteCodeUnavailable
 		}
-		return tx.Where("code = ?", code).First(&ic).Error
+		if err := tx.Where("code = ?", code).First(&ic).Error; err != nil {
+			return err
+		}
+		return validateInviteGroup(tx, ic.GroupID)
 	})
 	if err != nil {
 		return nil, err
@@ -95,4 +101,11 @@ func (m *adminInviteCodeMutation) Redeem(code string, now int64) (*models.Invite
 
 func (m *adminInviteCodeMutation) RecordRedemption(r *models.InviteRedemption) error {
 	return m.ctx.GetCoreDB().Create(r).Error
+}
+
+func validateInviteGroup(db *gorm.DB, groupID uint) error {
+	if groupID == 0 {
+		groupID = models.DefaultUserGroupID
+	}
+	return ValidateRegistrationGroup(db, groupID)
 }

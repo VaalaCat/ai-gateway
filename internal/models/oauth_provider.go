@@ -14,6 +14,7 @@ type OAuthProvider struct {
 	Scopes                string `gorm:"size:255" json:"scopes"`
 	IconURL               string `gorm:"size:512" json:"icon_url"`
 	Enabled               bool   `gorm:"default:true" json:"enabled"`
+	DefaultGroupID        uint   `gorm:"not null;default:1" json:"default_group_id"`
 	Protocol              string `gorm:"size:16;default:oidc;not null" json:"protocol"`
 	CreatedAt             int64  `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt             int64  `gorm:"autoUpdateTime" json:"updated_at"`

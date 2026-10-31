@@ -8,6 +8,7 @@ type CreateRequest struct {
 	Note      string `json:"note"`
 	MaxUses   int    `json:"max_uses"`
 	ExpiresAt int64  `json:"expires_at"`
+	GroupID   *uint  `json:"group_id"`
 }
 
 type ListRequest struct {

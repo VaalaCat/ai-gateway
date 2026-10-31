@@ -26,10 +26,27 @@ func TestOAuthProviderMigrate(t *testing.T) {
 	if p.ID == 0 {
 		t.Fatal("expected ID")
 	}
+	if p.DefaultGroupID != DefaultUserGroupID {
+		t.Fatalf("default group = %d, want %d", p.DefaultGroupID, DefaultUserGroupID)
+	}
 	dup := *p
 	dup.ID = 0
 	if err := db.Create(&dup).Error; err == nil {
 		t.Fatal("expected duplicate name to fail")
+	}
+	// A pre-feature row gains the system default when the column is migrated.
+	if err := db.Migrator().DropColumn(&OAuthProvider{}, "DefaultGroupID"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&OAuthProvider{}); err != nil {
+		t.Fatal(err)
+	}
+	var migrated OAuthProvider
+	if err := db.First(&migrated, p.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migrated.DefaultGroupID != DefaultUserGroupID {
+		t.Fatalf("migrated group = %d", migrated.DefaultGroupID)
 	}
 }
 

@@ -61,6 +61,27 @@ func (q *adminUserGroupQuery) GetByID(id uint) (*models.UserGroup, error) {
 	return &g, err
 }
 
+var ErrInvalidRegistrationGroup = errors.New("registration user group does not exist or is disabled")
+
+// ValidateRegistrationGroup uses the caller's transaction so registration cannot
+// consume an invitation or create an account with an invalid target group.
+func ValidateRegistrationGroup(db *gorm.DB, groupID uint) error {
+	if groupID == 0 {
+		return ErrInvalidRegistrationGroup
+	}
+	var group models.UserGroup
+	if err := db.First(&group, groupID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrInvalidRegistrationGroup
+		}
+		return err
+	}
+	if models.UserGroupAccessDisabled(&group) {
+		return ErrInvalidRegistrationGroup
+	}
+	return nil
+}
+
 func (q *adminUserGroupQuery) GetByName(name string) (*models.UserGroup, error) {
 	var g models.UserGroup
 	err := q.ctx.GetCoreDB().Where("name = ?", name).First(&g).Error

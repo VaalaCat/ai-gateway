@@ -18,6 +18,7 @@ export interface OAuthProvider {
   scopes?: string;
   icon_url?: string;
   enabled: boolean;
+  default_group_id: number;
   protocol?: "oidc" | "feishu";
   created_at: number;
   updated_at: number;

@@ -16,6 +16,7 @@ type CreateRequest struct {
 	Scopes                string `json:"scopes" binding:"max=255"`
 	IconURL               string `json:"icon_url" binding:"max=512"`
 	Enabled               bool   `json:"enabled"`
+	DefaultGroupID        *uint  `json:"default_group_id" binding:"omitempty,gt=0"`
 }
 
 type UpdateRequest struct {

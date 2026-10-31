@@ -32,6 +32,9 @@ func TestInviteCode_MaxUsesDefaultsToOne(t *testing.T) {
 	if got.MaxUses != 1 {
 		t.Fatalf("MaxUses default = %d, want 1", got.MaxUses)
 	}
+	if got.GroupID != 0 {
+		t.Fatalf("GroupID default = %d, want unspecified (0)", got.GroupID)
+	}
 }
 
 func TestInviteRedemption_UniqueInvitee(t *testing.T) {

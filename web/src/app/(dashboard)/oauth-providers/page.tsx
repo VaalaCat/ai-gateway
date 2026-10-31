@@ -23,6 +23,7 @@ import {
 
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { OAuthProviderBadge } from "@/components/business/oauth-provider-badge";
+import { EntityLabel } from "@/components/business/entity-label";
 
 import {
   useOAuthProviders,
@@ -103,6 +104,11 @@ export default function OAuthProvidersPage() {
       accessorKey: "client_id",
       header: "Client ID",
       cell: ({ row }) => <code className="text-xs">{row.original.client_id}</code>,
+    },
+    {
+      accessorKey: "default_group_id",
+      header: t("defaultGroup"),
+      cell: ({ row }) => <EntityLabel entity="user-group" scope="all" id={row.original.default_group_id} />,
     },
     {
       accessorKey: "enabled",

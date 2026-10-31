@@ -35,6 +35,7 @@ import {
 import { DateTimePicker } from "@/components/business/date-picker/date-time-picker";
 import { CopyableText } from "@/components/business/copyable-text";
 import { EntityLabel } from "@/components/business/entity-label";
+import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
 import { DateCell } from "@/components/business/date-cell";
 import { DeleteConfirm } from "@/components/business/delete-confirm";
 import { PAGE_SIZES } from "@/lib/constants";
@@ -74,23 +75,29 @@ function InvitesPageSkeleton() {
 
 function CreateInviteDialog() {
   const t = useTranslations("invites");
+  const { isAdmin } = useAuth();
   const create = useCreateInviteCode();
   const [open, setOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [note, setNote] = useState("");
   const [maxUses, setMaxUses] = useState(1);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [groupId, setGroupId] = useState("");
 
   const reset = () => {
     setNote("");
     setMaxUses(1);
     setExpiresAt(null);
+    setGroupId("");
   };
 
   const submit = async () => {
     setSubmitting(true);
     try {
-      await create.mutateAsync({ note, max_uses: maxUses, expires_at: expiresAt ?? 0 });
+      await create.mutateAsync({
+        note, max_uses: maxUses, expires_at: expiresAt ?? 0,
+        ...(isAdmin ? { group_id: groupId ? Number(groupId) : 0 } : {}),
+      });
       toast.success(t("createSuccess"));
       setOpen(false);
       reset();
@@ -127,6 +134,19 @@ function CreateInviteDialog() {
               placeholder={t("notePlaceholder")}
             />
           </div>
+          {isAdmin && (
+            <div className="space-y-2">
+              <Label htmlFor="invite-group">{t("group")}</Label>
+              <EntityPicker
+                id="invite-group"
+                entity="user-group"
+                value={groupId}
+                onChange={setGroupId}
+                placeholder={t("defaultGroup")}
+              />
+              <p className="text-xs text-muted-foreground">{t("groupHint")}</p>
+            </div>
+          )}
           <div className="space-y-2">
             <Label>{t("maxUses")}</Label>
             <Input
@@ -228,6 +248,13 @@ function InvitesPageInner() {
         accessorKey: "note",
         header: t("note"),
         cell: ({ row }) => row.original.note || "—",
+      },
+      {
+        accessorKey: "group_id",
+        header: t("group"),
+        cell: ({ row }) => row.original.group_id
+          ? <EntityLabel entity="user-group" id={row.original.group_id} />
+          : t("defaultGroup"),
       },
     ];
     if (isAdmin) {

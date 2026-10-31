@@ -2264,6 +2264,8 @@
       "jwksUri": "JWKS URI",
       "clientId": "Client ID",
       "scopes": "Scopes",
+      "defaultGroup": "新账号用户组",
+      "defaultGroupHint": "仅通过此提供商注册的新账号加入此用户组，已有账号保留原用户组。",
       "iconUrl": "图标 URL"
     }
   },
@@ -2664,6 +2666,9 @@
     "note": "备注",
     "notePlaceholder": "可选,便于区分用途",
     "maxUses": "最大使用次数",
+    "group": "注册用户组",
+    "defaultGroup": "系统默认用户组",
+    "groupHint": "使用此邀请码注册的新账号将加入该用户组；留空使用系统默认用户组。",
     "expiresAt": "过期时间",
     "expiresAtPlaceholder": "不设则永不过期",
     "expiresAtHint": "留空表示永不过期。",

@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/master"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/oauth"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/stretchr/testify/require"
 )
 
 func postRegister(t *testing.T, srv *master.Server, ticket string) *httptest.ResponseRecorder {
@@ -55,6 +57,9 @@ func TestRegister_Success(t *testing.T) {
 	}
 	if u.PasswordSet {
 		t.Fatal("auto-created user should have PasswordSet=false")
+	}
+	if u.GroupID != models.DefaultUserGroupID {
+		t.Fatalf("default group = %d", u.GroupID)
 	}
 }
 
@@ -163,5 +168,68 @@ func TestRegister_EmailConflict(t *testing.T) {
 	srv.DB.First(&newUser, ident.UserID)
 	if newUser.Email != "" {
 		t.Fatalf("expected empty email on conflict, got %q", newUser.Email)
+	}
+}
+
+func TestRegister_UsesCurrentProviderGroup(t *testing.T) {
+	srv := setupMaster(t)
+	require.NoError(t, srv.DB.Create(&models.Setting{Key: "oauth_auto_create", Value: "true"}).Error)
+	group := &models.UserGroup{Name: "selected"}
+	require.NoError(t, srv.DB.Create(group).Error)
+	provider := &models.OAuthProvider{Name: "group-provider", Enabled: true}
+	require.NoError(t, srv.DB.Create(provider).Error)
+	ticket, err := oauth.SignBindTicket(srv.Cfg.Master.JWTSecret, oauth.BindTicketClaims{
+		ProviderID: provider.ID, Subject: "current-group", SuggestedUsername: "new_user",
+		ExpiresAt: time.Now().Add(2 * time.Minute).Unix(),
+	})
+	require.NoError(t, err)
+	// Configuration changes after ticket issuance must be reflected at registration.
+	require.NoError(t, srv.DB.Model(provider).Update("default_group_id", group.ID).Error)
+	body, err := json.Marshal(map[string]any{"ticket": ticket, "default_group_id": 1, "group_id": 1})
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/oauth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var user models.User
+	require.NoError(t, srv.DB.Where("username = ?", "new_user").First(&user).Error)
+	require.Equal(t, group.ID, user.GroupID)
+}
+
+func TestRegister_InvalidCurrentGroupRollsBack(t *testing.T) {
+	for _, change := range []string{"deleted", "disabled", "provider-deleted", "provider-disabled"} {
+		t.Run(change, func(t *testing.T) {
+			srv := setupMaster(t)
+			require.NoError(t, srv.DB.Create(&models.Setting{Key: "oauth_auto_create", Value: "true"}).Error)
+			group := &models.UserGroup{Name: "selected"}
+			require.NoError(t, srv.DB.Create(group).Error)
+			provider := &models.OAuthProvider{Name: "provider", Enabled: true, DefaultGroupID: group.ID}
+			require.NoError(t, srv.DB.Create(provider).Error)
+			ticket, err := oauth.SignBindTicket(srv.Cfg.Master.JWTSecret, oauth.BindTicketClaims{
+				ProviderID: provider.ID, Subject: "invalid-group", SuggestedUsername: "rejected",
+				ExpiresAt: time.Now().Add(2 * time.Minute).Unix(),
+			})
+			require.NoError(t, err)
+			wantStatus := http.StatusBadRequest
+			switch change {
+			case "deleted":
+				require.NoError(t, srv.DB.Delete(group).Error)
+			case "disabled":
+				require.NoError(t, srv.DB.Model(group).Update("status", consts.StatusDisabled).Error)
+			case "provider-deleted":
+				require.NoError(t, srv.DB.Delete(provider).Error)
+			case "provider-disabled":
+				require.NoError(t, srv.DB.Model(provider).Update("enabled", false).Error)
+				wantStatus = http.StatusForbidden
+			}
+			w := postRegister(t, srv, ticket)
+			require.Equal(t, wantStatus, w.Code, w.Body.String())
+			var count int64
+			require.NoError(t, srv.DB.Model(&models.User{}).Where("username = ?", "rejected").Count(&count).Error)
+			require.Zero(t, count)
+			require.NoError(t, srv.DB.Model(&models.OAuthIdentity{}).Where("subject = ?", "invalid-group").Count(&count).Error)
+			require.Zero(t, count)
+		})
 	}
 }
