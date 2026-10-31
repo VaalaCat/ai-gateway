@@ -124,3 +124,30 @@ func TestForChannelPreservesPassthroughCombinations(t *testing.T) {
 		})
 	}
 }
+
+func TestToolSchemaCompatibilityBypassesPassthroughForMappedModel(t *testing.T) {
+	ch := &models.Channel{
+		ChannelCore: models.ChannelCore{
+			Type: consts.ChannelTypeOpenAI, PassthroughEnabled: true,
+			OtherSettings: `{"model_tool_schema_compatibility":[
+				{"model_pattern":"^gemini-excluded$","profile":"none"},
+				{"model_pattern":"^gemini-.*$","profile":"gemini_compat"}
+			]}`,
+		},
+		ModelMapping: `{"alias":"gemini-4-argon","excluded":"gemini-excluded","reverse-alias":"gpt-5"}`,
+	}
+	for _, tt := range []struct {
+		model string
+		want  attemptproxy.ExecutionMode
+	}{
+		{"alias", attemptproxy.ModeNative},
+		{"gemini-4-argon", attemptproxy.ModeNative},
+		{"excluded", attemptproxy.ModePassthrough},
+		{"reverse-alias", attemptproxy.ModePassthrough},
+		{"gpt-5", attemptproxy.ModePassthrough},
+	} {
+		t.Run(tt.model, func(t *testing.T) {
+			require.Equal(t, tt.want, ForChannel(ch, tt.model, llmkit.ProtocolOpenAIChat))
+		})
+	}
+}

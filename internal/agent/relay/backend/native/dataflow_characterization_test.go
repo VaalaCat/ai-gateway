@@ -13,6 +13,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/stretchr/testify/require"
 )
 
 // capturedUpstream 记录上游 server 收到的请求,供断言。
@@ -49,6 +50,90 @@ func runRelayCapture(t *testing.T, ch *models.Channel, reqBody string, inbound l
 
 // chatBody 是一个最小 openai_chat 入站请求。
 const chatBody = `{"model":"req-model","messages":[{"role":"user","content":"hi"}]}`
+
+func TestChar_ToolSchemaCompatibilityAcrossClientProtocols(t *testing.T) {
+	schema := `{"type":"object","required":["strict"],"properties":{
+		"strict":{"type":"boolean"},"count":{"type":"number","exclusiveMinimum":0}
+	},"default":{"exclusiveMinimum":1}}`
+	for _, tt := range []struct {
+		name    string
+		inbound llmkit.Protocol
+		body    string
+	}{
+		{"chat", llmkit.ProtocolOpenAIChat, `{"model":"public-alias","messages":[{"role":"user","content":"read"}],"tools":[{"type":"function","function":{"name":"read","strict":true,"parameters":` + schema + `}}]}`},
+		{"responses", llmkit.ProtocolOpenAIResponses, `{"model":"public-alias","input":"read","tools":[{"type":"function","name":"read","strict":true,"parameters":` + schema + `}]}`},
+		{"responses namespace", llmkit.ProtocolOpenAIResponses, `{"model":"public-alias","input":"read","tools":[{"type":"namespace","name":"fs","tools":[{"type":"function","name":"read","strict":true,"parameters":` + schema + `}]}]}`},
+		{"claude", llmkit.ProtocolClaude, `{"model":"public-alias","max_tokens":128,"messages":[{"role":"user","content":"read"}],"tools":[{"name":"read","input_schema":` + schema + `}]}`},
+	} {
+		for _, enabled := range []bool{true, false} {
+			t.Run(tt.name+"/enabled="+strconv.FormatBool(enabled), func(t *testing.T) {
+				ch := &models.Channel{
+					ChannelCore: models.ChannelCore{
+						ID: 1, Type: consts.ChannelTypeOpenAI, Status: 1,
+						SupportedAPITypes: `["chat_completions"]`,
+					},
+					Key: "test-key", ModelMapping: `{"public-alias":"gemini-4-argon"}`,
+				}
+				if enabled {
+					ch.OtherSettings = `{"model_tool_schema_compatibility":[{"model_pattern":"^gemini-.*$","profile":"gemini_compat"}]}`
+				}
+				captured := runRelayCapture(t, ch, tt.body, tt.inbound, "public-alias")
+				require.Equal(t, "gemini-4-argon", captured.Body["model"])
+				tools := captured.Body["tools"].([]any)
+				function := tools[0].(map[string]any)["function"].(map[string]any)
+				parameters := function["parameters"].(map[string]any)
+				properties := parameters["properties"].(map[string]any)
+				count := properties["count"].(map[string]any)
+				if enabled {
+					require.NotContains(t, function, "strict")
+					require.NotContains(t, count, "exclusiveMinimum")
+				} else {
+					require.Contains(t, count, "exclusiveMinimum")
+					if tt.inbound != llmkit.ProtocolClaude {
+						require.Equal(t, true, function["strict"])
+					}
+				}
+				require.Contains(t, properties, "strict")
+				require.Equal(t, []any{"strict"}, parameters["required"])
+				require.Equal(t, map[string]any{"exclusiveMinimum": float64(1)}, parameters["default"])
+			})
+		}
+	}
+}
+
+func TestChar_NamespacedToolSchemaCompatibilityToResponses(t *testing.T) {
+	captured := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+	channel := &models.Channel{ChannelCore: models.ChannelCore{
+		ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: server.URL,
+		SupportedAPITypes: `["responses"]`,
+		OtherSettings:     `{"model_tool_schema_compatibility":[{"model_pattern":"gemini","profile":"gemini_compat"}]}`,
+	}, Key: "test-key"}
+	body := `{"model":"gemini-4-argon","input":"read","tools":[{"type":"namespace","name":"fs","tools":[{
+		"type":"function","name":"read","strict":true,"parameters":{
+			"type":"object","properties":{"size":{"type":"integer","exclusiveMaximum":9007199254740993}},
+			"default":{"size":9007199254740993}
+		}
+	}]}]}`
+	relay, _ := newNativeTestCtx(t, []byte(body), llmkit.ProtocolOpenAIResponses, false)
+	result := (&Backend{}).Relay(relay, state.Attempt{Channel: channel, RealModel: "gemini-4-argon"})
+	require.NoError(t, result.Err)
+	requestBody := <-captured
+	require.Contains(t, requestBody, `"type":"namespace"`)
+	require.NotContains(t, requestBody, `"strict"`)
+	require.NotContains(t, requestBody, "exclusiveMaximum")
+	require.Contains(t, requestBody, `"size":9007199254740993`)
+}
 
 func TestChar_ModelMapping_RemapsUpstreamModel(t *testing.T) {
 	ch := &models.Channel{

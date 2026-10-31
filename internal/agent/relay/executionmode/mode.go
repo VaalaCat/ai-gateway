@@ -2,6 +2,7 @@ package executionmode
 
 import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -43,6 +44,9 @@ func shouldPassthrough(ch *models.Channel, inbound llmkit.Protocol, modelName st
 	override := upstream.ResolveOverride(rules, modelName)
 	outbound := protocolconfig.NegotiateOutboundProtocol(inbound, ch.Type, ch.SupportedAPITypes, ch.Endpoints, override)
 	channelConfig := upstream.BuildChannelConfig(ch, modelName, outbound)
+	if upstream.NewToolSchemaRules(ch).Profile(state.ApplyModelMapping(ch, modelName)) != llmkit.ToolSchemaProfileNone {
+		return false
+	}
 	if outbound == llmkit.ProtocolOpenAIResponses &&
 		llmkit.NormalizeBuiltinToolFallback(channelConfig.BuiltinToolFallback) == llmkit.BuiltinToolFallbackFunction {
 		return false

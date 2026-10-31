@@ -53,6 +53,7 @@ var byokValidators = []validatorFn{
 	validateNameUniquenessCtx,
 	validateBaseURLAllowlistCtx,
 	validateEndpointsCtx,
+	validateToolSchemaCompatibilityCtx,
 	validateModelsNonEmptyCtx,
 	validateModelsSubsetOfModelConfigsCtx,
 	validateModelMappingTargetsCtx,
@@ -96,6 +97,19 @@ func RunValidators(c ValidatorCtx) error {
 }
 
 // --- ValidatorCtx-based validator implementations ---
+
+// validateToolSchemaCompatibilityCtx 校验新增或修改的工具定义兼容规则。
+func validateToolSchemaCompatibilityCtx(c ValidatorCtx) error {
+	// 1. 校验本次写入的渠道规则。
+	if !c.IsDirty("other_settings") {
+		return nil
+	}
+	otherSettings, _ := c.Req["other_settings"].(string)
+	if err := models.ValidateToolSchemaCompatibility(otherSettings); err != nil {
+		return api.BadRequestError(err.Error(), err)
+	}
+	return nil
+}
 
 func validateStatusCtx(c ValidatorCtx) error {
 	if !c.IsDirty("status") {

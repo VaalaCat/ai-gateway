@@ -237,7 +237,7 @@ func validateFinalChannel(channel *models.Channel) error {
 	if err := channel.Affinity.Data().Validate(); err != nil {
 		return err
 	}
-	return nil
+	return models.ValidateToolSchemaCompatibility(channel.OtherSettings)
 }
 
 // behavior change: mutable patch values are copied at every ownership boundary.

@@ -46,6 +46,34 @@ func TestPublicDisplayNameValidation(t *testing.T) {
 	}
 }
 
+func TestAdminChannelToolSchemaRuleValidation(t *testing.T) {
+	for _, tt := range []struct {
+		pattern string
+		valid   bool
+	}{
+		{`(?i)^gemini-`, true},
+		{`^gemini-(?=4)`, false},
+	} {
+		t.Run(tt.pattern, func(t *testing.T) {
+			settings := `{"model_tool_schema_compatibility":[{"model_pattern":"` + tt.pattern + `","profile":"gemini_compat"}]}`
+			_, createErr := buildAdminChannel(AdminChannelCreateInput{Name: "test", OtherSettings: settings})
+			patch, err := ParseChannelPatch(map[string]any{"other_settings": settings})
+			require.NoError(t, err)
+			candidate := &models.Channel{ChannelCore: models.ChannelCore{Name: "test"}}
+			patchErr := patch.Apply(candidate)
+			if tt.valid {
+				require.NoError(t, createErr)
+				require.NoError(t, patchErr)
+				require.Equal(t, settings, candidate.OtherSettings)
+			} else {
+				require.ErrorContains(t, createErr, "rule 1")
+				require.ErrorContains(t, patchErr, "rule 1")
+				require.Empty(t, candidate.OtherSettings)
+			}
+		})
+	}
+}
+
 func TestCreateAdminChannelsRejectsNonBinaryAutoBanWithoutWriteOrPublish(t *testing.T) {
 	db := setupTestDB(t)
 	ctx, bus := newBatchEditTestContext(t, db, zap.NewNop())

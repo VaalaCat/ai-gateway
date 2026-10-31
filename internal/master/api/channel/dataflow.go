@@ -27,7 +27,7 @@ type DataFlowResponse struct {
 }
 
 // buildDataFlowResponse 纯逻辑:按 channel 主出站协议装配 dataflow,
-// 把 AllStepInfos()(全 11 道)与 flow.Describe()(实跑工序+Detail)合并成有序 DTO。
+// 把 AllStepInfos() 与 flow.Describe()(实跑工序+Detail)合并成有序 DTO。
 func buildDataFlowResponse(ch *models.Channel) DataFlowResponse {
 	proto := protocolconfig.PrimaryOutboundProtocol(ch.Endpoints, ch.SupportedAPITypes)
 

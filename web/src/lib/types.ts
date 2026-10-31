@@ -209,6 +209,10 @@ export interface ChannelOtherSettings {
     model_pattern: string;
     send_back_thinking: boolean;
   }>;
+  model_tool_schema_compatibility?: Array<{
+    model_pattern: string;
+    profile: "gemini_compat" | "none";
+  }>;
 }
 
 export interface ModelMetadata {

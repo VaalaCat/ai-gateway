@@ -11,8 +11,8 @@ func TestBuildDataFlowResponse_EmptyChannel(t *testing.T) {
 	if resp.ResolvedProtocol != "openai_chat" {
 		t.Fatalf("ResolvedProtocol = %q, want openai_chat", resp.ResolvedProtocol)
 	}
-	if len(resp.Steps) != 11 {
-		t.Fatalf("Steps len = %d, want 11 (full catalog)", len(resp.Steps))
+	if len(resp.Steps) != 12 {
+		t.Fatalf("Steps len = %d, want 12 (full catalog)", len(resp.Steps))
 	}
 	active := map[string]bool{}
 	for _, s := range resp.Steps {
@@ -23,7 +23,7 @@ func TestBuildDataFlowResponse_EmptyChannel(t *testing.T) {
 			t.Fatalf("step %q should be active for empty openai_chat channel", k)
 		}
 	}
-	for _, k := range []string{"model_mapping", "inject_system_prompt", "role_mapping", "param_override", "header_override"} {
+	for _, k := range []string{"model_mapping", "inject_system_prompt", "role_mapping", "tool_schema_compatibility", "param_override", "header_override"} {
 		if active[k] {
 			t.Fatalf("step %q should be skipped for empty channel", k)
 		}

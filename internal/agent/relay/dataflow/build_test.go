@@ -63,25 +63,25 @@ func TestBuild_NonOpenAIChat_NoThinking(t *testing.T) {
 	}
 }
 
-func TestDescribeChannelDataFlowPreservesElevenStepContract(t *testing.T) {
+func TestDescribeChannelDataFlowIncludesToolSchemaCompatibility(t *testing.T) {
 	ch := &models.Channel{
 		ChannelCore: models.ChannelCore{
 			ID: 1, Type: consts.ChannelTypeOpenAI,
 			SystemPrompt: "p", RoleMapping: `{"default":{"system":"user"}}`,
-			ParamOverride: `{"temperature":0.5}`, OtherSettings: `{"inline_image_url":true}`,
+			ParamOverride: `{"temperature":0.5}`, OtherSettings: `{"inline_image_url":true,"model_tool_schema_compatibility":[{"model_pattern":"gemini","profile":"gemini_compat"}]}`,
 		},
 		ModelMapping: `{"a":"b"}`, HeaderOverride: `{"X-A":"1"}`,
 	}
 	want := []string{
 		"model_mapping", "inject_system_prompt", "role_mapping",
-		"thinking_passthrough", "thinking_strip", "inline_image",
+		"thinking_passthrough", "thinking_strip", "tool_schema_compatibility", "inline_image",
 		"encode", "forward_client_headers", "param_override", "header_override", "upstream_script",
 	}
 	if got := keysOfInfos(AllStepInfos()); !equalStrs(got, want) {
-		t.Fatalf("AllStepInfos keys = %v, want stable 11-step contract %v", got, want)
+		t.Fatalf("AllStepInfos keys = %v, want configured step order %v", got, want)
 	}
 	if got := keysOfInfos(DescribeChannelDataFlow(ch, llmkit.ProtocolOpenAIChat)); !equalStrs(got, want) {
-		t.Fatalf("active dataflow keys = %v, want all 11 configured steps %v", got, want)
+		t.Fatalf("active dataflow keys = %v, want all configured steps %v", got, want)
 	}
 }
 

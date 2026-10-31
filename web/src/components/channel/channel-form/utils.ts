@@ -89,7 +89,8 @@ export function channelProtocols(endpoints: string): ChannelProtocols {
 /**
  * Drop `protocol_override` entries that are auto / identity / target endpoint
  * no longer enabled. Drop empty `model_protocol_override` rules. Drop empty
- * or invalid-regex `model_thinking_passthrough` rules.
+ * or invalid-regex `model_thinking_passthrough` rules. Tool schema rules are
+ * validated by the server using Go regex; only unfinished entries are dropped here.
  */
 export function sanitizeOtherSettingsForSubmit(
   rawOtherSettings: string,
@@ -163,6 +164,16 @@ export function sanitizeOtherSettingsForSubmit(
       delete sanitized.model_thinking_passthrough;
     } else {
       sanitized.model_thinking_passthrough = cleaned;
+    }
+  }
+  if (sanitized.model_tool_schema_compatibility) {
+    const cleaned = sanitized.model_tool_schema_compatibility.filter((rule) => {
+      return !!rule.model_pattern && (rule.profile === "gemini_compat" || rule.profile === "none");
+    });
+    if (cleaned.length === 0) {
+      delete sanitized.model_tool_schema_compatibility;
+    } else {
+      sanitized.model_tool_schema_compatibility = cleaned;
     }
   }
   return stringifyOtherSettings(sanitized);

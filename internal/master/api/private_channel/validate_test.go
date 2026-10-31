@@ -13,6 +13,31 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+func TestValidateToolSchemaCompatibilityCtx(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		pattern string
+		dirty   map[string]bool
+		wantErr bool
+	}{
+		{"Go inline flags on create", "(?i)^gemini-", nil, false},
+		{"lookahead on create", "^gemini-(?=4)", nil, true},
+		{"lookahead on patch", "^gemini-(?=4)", map[string]bool{"other_settings": true}, true},
+		{"unrelated patch", "^gemini-(?=4)", map[string]bool{"name": true}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateToolSchemaCompatibilityCtx(ValidatorCtx{Dirty: tt.dirty, Req: map[string]any{
+				"other_settings": `{"model_tool_schema_compatibility":[{"model_pattern":"` + tt.pattern + `","profile":"gemini_compat"}]}`,
+			}})
+			if tt.wantErr {
+				require.ErrorContains(t, err, "rule 1")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func newValidatorTestCtx(t *testing.T, userID, groupID uint) *app.Context {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{

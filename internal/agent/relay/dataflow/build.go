@@ -10,13 +10,15 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"go.uber.org/zap"
 )
 
-// defaultStepOrder 同时是管理 API 的稳定 11 步展示契约。运行时只执行
+// defaultStepOrder 同时是管理 API 的工序展示顺序。运行时只执行
 // requestStepOrder；编码后的 wire 步骤由 native.attemptHTTPDoer 承担。
 var defaultStepOrder = []string{
 	"model_mapping", "inject_system_prompt", "role_mapping",
 	"thinking_passthrough", "thinking_strip",
+	"tool_schema_compatibility",
 	"inline_image",
 	"encode", "forward_client_headers", "param_override", "header_override", "upstream_script",
 }
@@ -27,6 +29,7 @@ var requestStepOrder = []string{
 	"role_mapping",
 	"thinking_passthrough",
 	"thinking_strip",
+	"tool_schema_compatibility",
 	"inline_image",
 }
 
@@ -39,6 +42,7 @@ type buildContext struct {
 	roleRules       *transform.RoleMappingConfig
 	thinking        upstream.ThinkingRules
 	thinkingEnabled bool
+	toolSchemaRules upstream.ToolSchemaRules
 }
 
 type stepFactory func(*buildContext) Step
@@ -74,6 +78,20 @@ var requestStepFactories = map[string]stepFactory{
 		}
 		return &StepThinkingStrip{rules: context.thinking}
 	},
+	"tool_schema_compatibility": func(context *buildContext) Step {
+		if context.toolSchemaRules.Len() == 0 {
+			return nil
+		}
+		logger := context.deps.Logger
+		if logger == nil {
+			logger = zap.L()
+		}
+		logger = logger.With(zap.Uint("channel_id", context.ch.ID))
+		if context.deps.RCtx != nil {
+			logger = logger.With(zap.String("request_id", context.deps.RCtx.Input.RequestID))
+		}
+		return &StepToolSchemaCompatibility{rules: context.toolSchemaRules, logger: logger}
+	},
 	"inline_image": func(context *buildContext) Step {
 		if !context.cfg.InlineImageURL {
 			return nil
@@ -103,8 +121,7 @@ func BuildChannelRequestFlow(ch *models.Channel, protocol llmkit.Protocol, deps 
 	return &ChannelDataFlow{steps: steps}
 }
 
-// DescribeChannelDataFlow 保留管理 API 原 11 步的静态展示能力，但不把 encode
-// 及其后的 wire 动作重新伪装成运行时 dataflow Step。
+// DescribeChannelDataFlow 按工序顺序返回启用项及配置摘要。
 func DescribeChannelDataFlow(ch *models.Channel, protocol llmkit.Protocol) []StepInfo {
 	context := newBuildContext(ch, protocol, StepDeps{})
 	active := make(map[string]StepInfo, len(defaultStepOrder))
@@ -142,6 +159,7 @@ func newBuildContext(ch *models.Channel, protocol llmkit.Protocol, deps StepDeps
 	context.cfg = upstream.BuildChannelConfig(ch, "", protocol)
 	context.modelMap = parseModelMapping(ch.ModelMapping)
 	context.roleRules = transform.ParseRoleMapping(context.cfg.RoleMapping)
+	context.toolSchemaRules = upstream.NewToolSchemaRules(ch)
 	if protocol == llmkit.ProtocolOpenAIChat {
 		context.thinking = upstream.NewThinkingRules(ch)
 		context.thinkingEnabled = true

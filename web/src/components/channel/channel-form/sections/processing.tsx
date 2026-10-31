@@ -16,6 +16,7 @@ import { FieldTip } from "@/components/business/field-tip";
 import { ModelMappingInput } from "@/components/ui/model-mapping-input";
 import { RoleMappingEditor } from "@/components/channel/role-mapping-editor";
 import { ThinkingPassthroughCard } from "../thinking-passthrough-card";
+import { ToolSchemaCompatibilityCard } from "../tool-schema-compatibility-card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ChevronDown } from "lucide-react";
 import { useChannelDataFlow } from "@/lib/api/channels";
@@ -28,6 +29,7 @@ import { EncodeConfigSection } from "./encode-config";
 const STEP_ORDER = [
   "model_mapping", "inject_system_prompt", "role_mapping",
   "thinking_passthrough", "thinking_strip",
+  "tool_schema_compatibility",
   "inline_image",
   "encode", "forward_client_headers", "param_override", "header_override", "upstream_script",
 ] as const;
@@ -82,6 +84,8 @@ export function ProcessingSection({ form, setForm, channelId, scriptsHref, hidde
         return <ThinkingRulesEditor form={form} setForm={setForm} />;
       case "thinking_strip":
         return <p className="text-xs text-muted-foreground">{t("thinkingStripFollowsRules")}</p>;
+      case "tool_schema_compatibility":
+        return <ToolSchemaRulesEditor form={form} setForm={setForm} />;
       case "inline_image":
         return <InlineImageSettings form={form} setForm={setForm} />;
       case "forward_client_headers":
@@ -182,6 +186,7 @@ const DATAFLOW_STEP_LABELS: Record<string, (t: ChannelsTranslator) => string> = 
   role_mapping: (t) => t("dataflowStep.role_mapping"),
   thinking_passthrough: (t) => t("dataflowStep.thinking_passthrough"),
   thinking_strip: (t) => t("dataflowStep.thinking_strip"),
+  tool_schema_compatibility: (t) => t("dataflowStep.tool_schema_compatibility"),
   inline_image: (t) => t("dataflowStep.inline_image"),
   encode: (t) => t("dataflowStep.encode"),
   forward_client_headers: (t) => t("dataflowStep.forward_client_headers"),
@@ -197,7 +202,8 @@ function dataflowStepLabel(key: string, t: ChannelsTranslator): string {
 function stepDetailLabel(key: string, detail: string, t: ReturnType<typeof useTranslations<"channels">>): string {
   switch (key) {
     case "model_mapping": return t("dataflowDetailMappings", { count: Number(detail) || 0 });
-    case "role_mapping": return t("dataflowDetailRules", { count: Number(detail) || 0 });
+    case "role_mapping":
+    case "tool_schema_compatibility": return t("dataflowDetailRules", { count: Number(detail) || 0 });
     case "param_override":
     case "header_override": return t("dataflowDetailFields", { fields: detail });
     case "encode": return detail;
@@ -226,6 +232,36 @@ function ThinkingRulesEditor({ form, setForm }: { form: ChannelForm; setForm: (n
       ))}
       <Button type="button" variant="outline" size="sm" onClick={() => update({ model_thinking_passthrough: [...rules, { model_pattern: "", send_back_thinking: false }] })}>
         + {t("thinkingPassthroughAddRule")}
+      </Button>
+    </div>
+  );
+}
+
+function ToolSchemaRulesEditor({ form, setForm }: { form: ChannelForm; setForm: (next: ChannelForm) => void }) {
+  const t = useTranslations("channels");
+  const otherSettings = parseOtherSettings(form.other_settings);
+  const rules = otherSettings.model_tool_schema_compatibility ?? [];
+  const update = (nextRules: typeof rules) => setForm({
+    ...form,
+    other_settings: stringifyOtherSettings({
+      ...otherSettings,
+      model_tool_schema_compatibility: nextRules.length > 0 ? nextRules : undefined,
+    }),
+  });
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">{t("toolSchemaCompatibilityTip")}</p>
+      {rules.map((rule, index) => (
+        <ToolSchemaCompatibilityCard
+          key={index}
+          rule={rule}
+          onChange={(next) => update(rules.map((current, currentIndex) => currentIndex === index ? next : current))}
+          onDelete={() => update(rules.filter((_, currentIndex) => currentIndex !== index))}
+        />
+      ))}
+      <Button type="button" variant="outline" size="sm" onClick={() => update([...rules, { model_pattern: "", profile: "gemini_compat" }])}>
+        + {t("toolSchemaCompatibilityAddRule")}
       </Button>
     </div>
   );
