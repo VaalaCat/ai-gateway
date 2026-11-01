@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 const legacyDeleteMarkerVersion = 1
@@ -36,21 +34,9 @@ type legacyDeleteCoordinator struct {
 
 func acquireLegacyDeleteCoordinator(expected string) (*legacyDeleteCoordinator, error) {
 	markerPath := LegacyDeleteMarkerPath(expected)
-	fd, err := unix.Open(markerPath, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-	created := err == nil
-	if errors.Is(err, os.ErrExist) {
-		fd, err = unix.Open(markerPath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-	}
+	file, created, err := openLegacyDeleteCoordinator(markerPath)
 	if err != nil {
 		return nil, fmt.Errorf("open legacy delete coordinator %q: %w", markerPath, err)
-	}
-	file := os.NewFile(uintptr(fd), markerPath)
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = file.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
-			return nil, fmt.Errorf("%w: coordinator %q is locked", ErrLegacyDeleteInProgress, markerPath)
-		}
-		return nil, fmt.Errorf("lock legacy delete coordinator %q: %w", markerPath, err)
 	}
 	coordinator := &legacyDeleteCoordinator{file: file, path: markerPath, created: created}
 	if created {
@@ -66,7 +52,7 @@ func (c *legacyDeleteCoordinator) close() error {
 	if c == nil || c.file == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(c.file.Fd()), unix.LOCK_UN)
+	unlockErr := unlockLegacyDeleteCoordinator(c.file)
 	closeErr := c.file.Close()
 	return errors.Join(unlockErr, closeErr)
 }

@@ -202,6 +202,11 @@ func (c LegacyFileCleaner) deleteCanonicalFiles(coordinator *legacyDeleteCoordin
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return fmt.Errorf("legacy file %q must be a regular file", candidate)
 		}
+		// Windows FileInfo loads its file ID lazily. Resolve it while the
+		// original path still exists so the comparison survives quarantine rename.
+		if !os.SameFile(info, info) {
+			return fmt.Errorf("read legacy file %q identity before isolation", candidate)
+		}
 		identities[i] = info
 	}
 	metadata := legacyDeleteMetadata{Version: legacyDeleteMarkerVersion, Operation: "delete", Expected: expected}

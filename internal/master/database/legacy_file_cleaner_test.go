@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -337,7 +338,7 @@ func TestLegacyDeleteMarkerRemainsWhenRemoveAndRestoreFail(t *testing.T) {
 
 	err := cleaner.DeletePath(source, "DELETE")
 	require.ErrorContains(t, err, "remove denied")
-	require.ErrorContains(t, err, LegacyDeleteMarkerPath(source))
+	require.ErrorContains(t, err, strconv.Quote(LegacyDeleteMarkerPath(source)))
 	require.FileExists(t, LegacyDeleteMarkerPath(source))
 	marked := false
 	err = afterLegacyDeleteWithGroup(source, groupB, func() error {
