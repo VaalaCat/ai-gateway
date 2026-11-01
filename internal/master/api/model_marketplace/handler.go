@@ -438,9 +438,7 @@ func filterRoutingModelsToPricedOffers(
 		}
 		model.FlattenedDestinations = destinations
 		model.ReachableRealModels = reachableModels
-		if len(destinations) == 0 {
-			model.RoutingWarnings = appendRoutingWarning(model.RoutingWarnings, RoutingWarningNoVisibleOffer)
-		}
+		refreshRoutingOfferWarning(&model)
 		if retainDiagnostics || len(destinations) > 0 {
 			result = append(result, model)
 		}
