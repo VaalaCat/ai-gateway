@@ -226,6 +226,7 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 
 	if raw.Reasoning != nil {
 		req.ReasoningEffort = raw.Reasoning.Effort
+		req.ReasoningContext = ir.ReasoningContext(raw.Reasoning.Context)
 		if raw.Reasoning.Summary != "" {
 			if req.Extras == nil {
 				req.Extras = make(map[string]any)
@@ -475,6 +476,9 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 		if respObj.Usage.InputTokensDetails != nil {
 			u.CachedTokens = respObj.Usage.InputTokensDetails.CachedTokens
 		}
+		if respObj.Usage.OutputTokensDetails != nil {
+			u.ReasoningTokens = respObj.Usage.OutputTokensDetails.ReasoningTokens
+		}
 		ch <- ir.Event{
 			Type:  ir.EventUsage,
 			Usage: u,
@@ -490,11 +494,33 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 		}
 	}
 
-	doneEvent := ir.Event{Type: ir.EventDone, FinishReason: finishReason}
+	doneEvent := ir.Event{Type: ir.EventDone, FinishReason: finishReason, ReasoningContext: parseResponsesReasoningContext(&respObj)}
 	if len(fullMap) > 0 {
 		doneEvent.Extras = fullMap
 	}
 	ch <- doneEvent
+}
+
+// parseResponsesReasoningContext 读取响应中的实际思考上下文模式。
+func parseResponsesReasoningContext(response *respResponse) ir.ReasoningContext {
+	// 1. 读取响应专用的思考字段，缺失或形状异常时返回未知模式。
+	if response == nil {
+		return ir.ReasoningContextUnknown
+	}
+	var reasoning struct {
+		Context ir.ReasoningContext `json:"context"`
+	}
+	if err := json.Unmarshal(response.Reasoning, &reasoning); err != nil {
+		return ir.ReasoningContextUnknown
+	}
+
+	// 2. 只接受服务端明确报告的已知模式。
+	switch reasoning.Context {
+	case ir.ReasoningContextCurrentTurn, ir.ReasoningContextAllTurns:
+		return reasoning.Context
+	default:
+		return ir.ReasoningContextUnknown
+	}
 }
 
 // responsesItemAggState holds per-item aggregation state for streaming function_call items.
@@ -982,6 +1008,9 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 				if evt.Response.Usage.InputTokensDetails != nil {
 					u.CachedTokens = evt.Response.Usage.InputTokensDetails.CachedTokens
 				}
+				if evt.Response.Usage.OutputTokensDetails != nil {
+					u.ReasoningTokens = evt.Response.Usage.OutputTokensDetails.ReasoningTokens
+				}
 				ch <- ir.Event{
 					Type:  ir.EventUsage,
 					Usage: u,
@@ -1003,8 +1032,9 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			}
 
 			ch <- ir.Event{
-				Type:         ir.EventDone,
-				FinishReason: finishReason,
+				Type:             ir.EventDone,
+				FinishReason:     finishReason,
+				ReasoningContext: parseResponsesReasoningContext(evt.Response),
 				RawPassthrough: &ir.RawSSEEvent{
 					EventName: currentEvent,
 					Data:      data,
@@ -1035,12 +1065,15 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 				if evt.Response.Usage.InputTokensDetails != nil {
 					u.CachedTokens = evt.Response.Usage.InputTokensDetails.CachedTokens
 				}
+				if evt.Response.Usage.OutputTokensDetails != nil {
+					u.ReasoningTokens = evt.Response.Usage.OutputTokensDetails.ReasoningTokens
+				}
 				ch <- ir.Event{
 					Type:  ir.EventUsage,
 					Usage: u,
 				}
 			}
-			ch <- ir.Event{Type: ir.EventDone, FinishReason: consts.FinishReasonLength}
+			ch <- ir.Event{Type: ir.EventDone, FinishReason: consts.FinishReasonLength, ReasoningContext: parseResponsesReasoningContext(evt.Response)}
 			sentDone = true
 
 		default:

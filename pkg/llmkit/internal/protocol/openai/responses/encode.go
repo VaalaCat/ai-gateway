@@ -207,9 +207,16 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		out["stream_options"] = req.StreamOptions
 	}
 
-	// Reconstruct reasoning from ReasoningEffort + Extras["reasoning_summary"]
-	if req.ReasoningEffort != "" {
-		reasoning := map[string]any{"effort": req.ReasoningEffort}
+	// 由 ReasoningEffort、ReasoningContext 和 Extras["reasoning_summary"] 重建 reasoning；
+	// effort 与 context 都为空时不发送 reasoning。
+	if req.ReasoningEffort != "" || req.ReasoningContext != "" {
+		reasoning := map[string]any{}
+		if req.ReasoningEffort != "" {
+			reasoning["effort"] = req.ReasoningEffort
+		}
+		if req.ReasoningContext != "" {
+			reasoning["context"] = string(req.ReasoningContext)
+		}
 		if req.Extras != nil {
 			if summary, ok := req.Extras["reasoning_summary"]; ok {
 				reasoning["summary"] = summary

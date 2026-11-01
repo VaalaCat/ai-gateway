@@ -4,7 +4,7 @@ data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk"
 
 data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk","created":1700000000,"model":"o4-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
-data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk","created":1700000000,"model":"o4-mini","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":148,"total_tokens":158}}
+data: {"id":"chatcmpl-10bea77fc80e01a50e936e41","object":"chat.completion.chunk","created":1700000000,"model":"o4-mini","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":148,"total_tokens":158,"completion_tokens_details":{"reasoning_tokens":128}}}
 
 data: [DONE]
 

@@ -24,6 +24,9 @@ type ErrorPayload = ir.ErrorPayload
 type ReasoningContent = ir.ReasoningContent
 type ReasoningStatus = ir.ReasoningStatus
 
+// ReasoningContext 是思考上下文模式：在请求中表示调用方指定的模式，在响应事件中表示服务端报告的实际模式。
+type ReasoningContext = ir.ReasoningContext
+
 const (
 	ProtocolOpenAIChat      = ir.ProtocolOpenAIChat
 	ProtocolOpenAIResponses = ir.ProtocolOpenAIResponses
@@ -71,4 +74,8 @@ const (
 
 	ReasoningCompleted   = ir.ReasoningCompleted
 	ReasoningInterrupted = ir.ReasoningInterrupted
+
+	ReasoningContextUnknown     = ir.ReasoningContextUnknown
+	ReasoningContextCurrentTurn = ir.ReasoningContextCurrentTurn
+	ReasoningContextAllTurns    = ir.ReasoningContextAllTurns
 )

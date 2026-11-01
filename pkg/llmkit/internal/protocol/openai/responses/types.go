@@ -30,6 +30,7 @@ type respRequest struct {
 type respReasoning struct {
 	Effort  string `json:"effort,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	Context string `json:"context,omitempty"`
 }
 
 type respInputMessage struct {
@@ -92,6 +93,7 @@ type respResponse struct {
 	Output    []respOutputItem `json:"output"`
 	Usage     *respUsage       `json:"usage,omitempty"`
 	Error     *respError       `json:"error,omitempty"`
+	Reasoning json.RawMessage  `json:"reasoning,omitempty"`
 }
 
 type respError struct {
@@ -127,16 +129,18 @@ type respContentBlock struct {
 	Annotations *[]any `json:"annotations,omitempty"`
 }
 
-// R3: respUsage includes input_tokens_details for cached token reporting.
+// respUsage 保存服务端报告的总用量与缓存、思考细分。
 type respUsage struct {
-	InputTokens        int              `json:"input_tokens"`
-	OutputTokens       int              `json:"output_tokens"`
-	TotalTokens        int              `json:"total_tokens"`
-	InputTokensDetails *respTokenDetail `json:"input_tokens_details,omitempty"`
+	InputTokens         int              `json:"input_tokens"`
+	OutputTokens        int              `json:"output_tokens"`
+	TotalTokens         int              `json:"total_tokens"`
+	InputTokensDetails  *respTokenDetail `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *respTokenDetail `json:"output_tokens_details,omitempty"`
 }
 
 type respTokenDetail struct {
-	CachedTokens int `json:"cached_tokens,omitempty"`
+	CachedTokens    int `json:"cached_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // Streaming event types

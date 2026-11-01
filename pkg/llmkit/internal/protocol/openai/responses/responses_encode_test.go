@@ -1175,3 +1175,46 @@ func TestResponsesEncodeRequest_AssistantMultiTextPartsUseOutputText(t *testing.
 		}
 	}
 }
+
+func TestResponsesEncodeRequest_ReasoningConfig(t *testing.T) {
+	tests := []struct {
+		name          string
+		effort        string
+		context       ir.ReasoningContext
+		summary       any
+		wantReasoning map[string]any // nil 表示请求体不应出现 reasoning
+	}{
+		{name: "only_effort", effort: "high", wantReasoning: map[string]any{"effort": "high"}},
+		{name: "only_context", context: ir.ReasoningContextAllTurns, wantReasoning: map[string]any{"context": "all_turns"}},
+		{name: "only_context_auto", context: "auto", wantReasoning: map[string]any{"context": "auto"}},
+		{name: "effort_and_context", effort: "high", context: ir.ReasoningContextCurrentTurn, wantReasoning: map[string]any{"effort": "high", "context": "current_turn"}},
+		{name: "neither"},
+		{name: "effort_with_summary", effort: "high", summary: "auto", wantReasoning: map[string]any{"effort": "high", "summary": "auto"}},
+		{name: "context_with_summary", context: ir.ReasoningContextAllTurns, summary: "detailed", wantReasoning: map[string]any{"context": "all_turns", "summary": "detailed"}},
+		{name: "effort_context_and_summary", effort: "low", context: ir.ReasoningContextCurrentTurn, summary: "auto", wantReasoning: map[string]any{"effort": "low", "context": "current_turn", "summary": "auto"}},
+		{name: "only_summary", summary: "auto"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &ir.Request{
+				Messages:         []ir.Message{ir.TextMessage(ir.RoleUser, "hi")},
+				ReasoningEffort:  tt.effort,
+				ReasoningContext: tt.context,
+			}
+			if tt.summary != nil {
+				req.Extras = map[string]any{"reasoning_summary": tt.summary}
+			}
+			body := encodeResponsesRequestBody(t, req)
+			got, exists := body["reasoning"]
+			if tt.wantReasoning == nil {
+				if exists {
+					t.Fatalf("reasoning = %#v, want absent", got)
+				}
+				return
+			}
+			if !reflect.DeepEqual(got, any(tt.wantReasoning)) {
+				t.Fatalf("reasoning = %#v, want %#v", got, tt.wantReasoning)
+			}
+		})
+	}
+}

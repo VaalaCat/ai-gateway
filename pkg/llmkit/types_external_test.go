@@ -87,3 +87,38 @@ func TestPublicReasoningEventCanCarryCompletedAndInterruptedStatus(t *testing.T)
 		}
 	}
 }
+
+func TestPublicReasoningContextEventJSONRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		mode llmkit.ReasoningContext
+		want string
+	}{
+		{name: "unknown", mode: llmkit.ReasoningContextUnknown, want: ``},
+		{name: "current_turn", mode: llmkit.ReasoningContextCurrentTurn, want: `"current_turn"`},
+		{name: "all_turns", mode: llmkit.ReasoningContextAllTurns, want: `"all_turns"`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			original := llmkit.Event{Type: llmkit.EventDone, ReasoningContext: test.mode}
+			encoded, err := json.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if string(fields["reasoning_context"]) != test.want {
+				t.Fatalf("reasoning_context = %s, want %s", fields["reasoning_context"], test.want)
+			}
+			var clone llmkit.Event
+			if err := json.Unmarshal(encoded, &clone); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(clone, original) {
+				t.Fatalf("event = %#v, want %#v", clone, original)
+			}
+		})
+	}
+}

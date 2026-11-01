@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -802,4 +803,142 @@ func TestResponsesStreamDecode_ToolCallEvents(t *testing.T) {
 	require.Len(t, deltas, 2, "expected 2 EventToolCallArgumentsDelta events")
 	require.True(t, hasEnd, "expected EventToolCallEnd")
 	require.NoError(t, convert.AssertStreamingToolCallInvariant(events))
+}
+
+func TestResponsesDecodeReasoningContextAndUsage(t *testing.T) {
+	paths := []struct {
+		name         string
+		stream       bool
+		finishReason string
+	}{
+		{name: "non_stream", finishReason: "stop"},
+		{name: "completed", stream: true, finishReason: "stop"},
+		{name: "incomplete", stream: true, finishReason: "length"},
+	}
+	modes := []struct {
+		name      string
+		reasoning string
+		want      ir.ReasoningContext
+	}{
+		{name: "current_turn", reasoning: `{"context":"current_turn"}`, want: ir.ReasoningContextCurrentTurn},
+		{name: "all_turns", reasoning: `{"context":"all_turns"}`, want: ir.ReasoningContextAllTurns},
+		{name: "missing"},
+		{name: "null", reasoning: `null`},
+		{name: "context_missing", reasoning: `{"effort":"high"}`},
+		{name: "context_null", reasoning: `{"context":null}`},
+		{name: "auto", reasoning: `{"context":"auto"}`},
+		{name: "unknown", reasoning: `{"context":"future_mode"}`},
+		{name: "string", reasoning: `"current_turn"`},
+		{name: "array", reasoning: `[]`},
+		{name: "number", reasoning: `42`},
+		{name: "bool", reasoning: `true`},
+		{name: "context_object", reasoning: `{"context":{}}`},
+		{name: "context_array", reasoning: `{"context":[]}`},
+		{name: "context_number", reasoning: `{"context":42}`},
+		{name: "context_bool", reasoning: `{"context":true}`},
+	}
+	usages := []struct {
+		name string
+		json string
+		want *ir.Usage
+	}{
+		{name: "missing"},
+		{name: "null", json: `null`},
+		{
+			name: "detailed",
+			json: `{"input_tokens":9000,"output_tokens":5000,"total_tokens":14000,"input_tokens_details":{"cached_tokens":2000},"output_tokens_details":{"reasoning_tokens":4000}}`,
+			want: &ir.Usage{PromptTokens: 9000, CompletionTokens: 5000, TotalTokens: 14000, CachedTokens: 2000, ReasoningTokens: 4000},
+		},
+		{
+			name: "without_details",
+			json: `{"input_tokens":9000,"output_tokens":5000,"total_tokens":14000}`,
+			want: &ir.Usage{PromptTokens: 9000, CompletionTokens: 5000, TotalTokens: 14000},
+		},
+	}
+	for _, path := range paths {
+		for _, mode := range modes {
+			for _, usage := range usages {
+				t.Run(path.name+"/"+mode.name+"/"+usage.name, func(t *testing.T) {
+					response := map[string]any{
+						"id": "resp_context",
+						"output": []any{map[string]any{
+							"type": "message", "role": "assistant",
+							"content": []any{map[string]any{"type": "output_text", "text": "ok"}},
+						}},
+					}
+					if mode.reasoning != "" {
+						response["reasoning"] = json.RawMessage(mode.reasoning)
+					}
+					if usage.json != "" {
+						response["usage"] = json.RawMessage(usage.json)
+					}
+					body, err := json.Marshal(response)
+					require.NoError(t, err)
+					if path.stream {
+						body = []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+							fmt.Sprintf("event: response.%s\ndata: {\"type\":\"response.%s\",\"response\":%s}\n\n", path.name, path.name, body))
+					}
+					resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}
+					events, err := (&handler{}).decodeHTTPResponse(resp, path.stream)
+					require.NoError(t, err)
+					var text string
+					var gotUsage *ir.Usage
+					var last ir.Event
+					var doneCount int
+					for event := range events {
+						require.NotEqual(t, ir.EventError, event.Type, "unexpected error: %#v", event.Error)
+						switch event.Type {
+						case ir.EventContentDelta:
+							if event.Delta != nil {
+								text += event.Delta.Text
+							}
+						case ir.EventUsage:
+							gotUsage = event.Usage
+						case ir.EventDone:
+							doneCount++
+						}
+						last = event
+					}
+					require.Equal(t, "ok", text)
+					require.Equal(t, usage.want, gotUsage)
+					require.Equal(t, 1, doneCount)
+					require.Equal(t, ir.EventDone, last.Type)
+					require.Equal(t, path.finishReason, last.FinishReason)
+					require.Equal(t, mode.want, last.ReasoningContext)
+				})
+			}
+		}
+	}
+}
+
+func TestResponsesDecodeRequest_ReasoningContext(t *testing.T) {
+	tests := []struct {
+		name        string
+		reasoning   string // 为空表示请求体不带 reasoning
+		wantContext ir.ReasoningContext
+		wantEffort  string
+	}{
+		{name: "all_turns", reasoning: `{"effort":"high","context":"all_turns"}`, wantContext: ir.ReasoningContextAllTurns, wantEffort: "high"},
+		{name: "current_turn", reasoning: `{"context":"current_turn"}`, wantContext: ir.ReasoningContextCurrentTurn},
+		{name: "auto_kept_verbatim", reasoning: `{"context":"auto"}`, wantContext: "auto"},
+		{name: "unknown_kept_verbatim", reasoning: `{"context":"future_mode"}`, wantContext: "future_mode"},
+		{name: "context_missing", reasoning: `{"effort":"low"}`, wantEffort: "low"},
+		{name: "context_empty", reasoning: `{"effort":"low","context":""}`, wantEffort: "low"},
+		{name: "reasoning_missing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"model":"gpt-5","input":"hi"`
+			if tt.reasoning != "" {
+				body += `,"reasoning":` + tt.reasoning
+			}
+			body += `}`
+			r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+			req, err := (&handler{}).decodeHTTPRequest(r)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantContext, req.ReasoningContext)
+			require.Equal(t, tt.wantEffort, req.ReasoningEffort)
+			require.NotContains(t, req.Extras, "reasoning", "reasoning 由结构化字段承载，不应进入 Extras")
+		})
+	}
 }

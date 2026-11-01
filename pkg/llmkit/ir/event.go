@@ -30,6 +30,15 @@ const (
 	ReasoningInterrupted ReasoningStatus = "interrupted"
 )
 
+// ReasoningContext 是思考上下文模式：在请求中表示调用方指定的模式，在响应事件中表示服务端报告的实际模式。
+type ReasoningContext string
+
+const (
+	ReasoningContextUnknown     ReasoningContext = ""
+	ReasoningContextCurrentTurn ReasoningContext = "current_turn"
+	ReasoningContextAllTurns    ReasoningContext = "all_turns"
+)
+
 // RawSSEEvent carries a raw SSE event that could not be parsed into a known IR event.
 type RawSSEEvent struct {
 	EventName string `json:"event_name"`
@@ -54,6 +63,7 @@ type Event struct {
 	StopSequence      string             `json:"stop_sequence,omitempty"`
 	Reasoning         *ReasoningContent  `json:"reasoning,omitempty"`
 	ReasoningStatus   ReasoningStatus    `json:"reasoning_status,omitempty"`
+	ReasoningContext  ReasoningContext   `json:"reasoning_context,omitempty"`
 }
 
 // DeltaPayload carries incremental content for delta events.

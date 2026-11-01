@@ -4883,3 +4883,63 @@ func TestResponsesEncodeRequest_CustomEndpointPath(t *testing.T) {
 		t.Errorf("URL = %q, want %q", httpReq.URL.String(), want)
 	}
 }
+
+func TestResponsesReasoningContextPreservesRequestReasoning(t *testing.T) {
+	modes := []struct {
+		name string
+		json string
+	}{
+		{name: "unknown", json: `null`},
+		{name: "current_turn", json: `{"context":"current_turn"}`},
+		{name: "all_turns", json: `{"context":"all_turns"}`},
+	}
+	const reasoningItem = `{"id":"rs_history","type":"reasoning","summary":[{"type":"summary_text","text":"summary"}],"content":[{"type":"reasoning_text","text":"thought"}],"encrypted_content":"opaque","future":"kept"}`
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"id":"resp_history","reasoning":%s,"output":[%s]}`, mode.json, reasoningItem)
+			resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
+			codec := &handler{}
+			events, err := codec.decodeHTTPResponse(resp, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded []ir.Event
+			for event := range events {
+				decoded = append(decoded, event)
+			}
+			reasoning := findResponsesReasoningDone(t, decoded).Reasoning
+			req := &ir.Request{Model: "m", Messages: []ir.Message{
+				{Role: ir.RoleAssistant, Content: []ir.ContentBlock{{Type: ir.ContentTypeThinking, Reasoning: reasoning}}},
+				ir.TextMessage(ir.RoleUser, "continue"),
+			}}
+			encoded, err := codec.encodeHTTPRequest(req, &channelConfig{BaseURL: "https://example.com", Model: "m"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer encoded.Body.Close()
+			var wire struct {
+				Input     []json.RawMessage `json:"input"`
+				Reasoning map[string]any    `json:"reasoning"`
+			}
+			if err := json.NewDecoder(encoded.Body).Decode(&wire); err != nil {
+				t.Fatal(err)
+			}
+			if len(wire.Input) != 2 {
+				t.Fatalf("input = %s, want reasoning and user", wire.Input)
+			}
+			var want, got map[string]any
+			if err := json.Unmarshal([]byte(reasoningItem), &want); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(wire.Input[0], &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("reasoning = %#v, want %#v", got, want)
+			}
+			if _, exists := wire.Reasoning["context"]; exists {
+				t.Fatalf("response mode leaked into request: %#v", wire.Reasoning)
+			}
+		})
+	}
+}

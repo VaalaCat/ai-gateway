@@ -16,6 +16,7 @@ func TestRequest_NewFields_JSONRoundTrip(t *testing.T) {
 		ToolChoice:        &ToolChoice{Type: "auto"},
 		ParallelToolCalls: &parallel,
 		ReasoningEffort:   "xhigh",
+		ReasoningContext:  ReasoningContextAllTurns,
 		Store:             &store,
 		Extras: map[string]any{
 			"include":          []any{"reasoning.encrypted_content"},
@@ -46,6 +47,9 @@ func TestRequest_NewFields_JSONRoundTrip(t *testing.T) {
 	}
 	if decoded.ReasoningEffort != "xhigh" {
 		t.Errorf("ReasoningEffort = %q, want xhigh", decoded.ReasoningEffort)
+	}
+	if decoded.ReasoningContext != ReasoningContextAllTurns {
+		t.Errorf("ReasoningContext = %q, want %q", decoded.ReasoningContext, ReasoningContextAllTurns)
 	}
 	if decoded.Store == nil || !*decoded.Store {
 		t.Error("Store lost after roundtrip")

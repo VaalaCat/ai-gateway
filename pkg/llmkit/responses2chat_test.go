@@ -1,6 +1,7 @@
 package llmkit_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -323,5 +324,41 @@ func TestResponses2Chat_ToolChoice(t *testing.T) {
 	}
 	if tc != "required" {
 		t.Errorf("tool_choice = %v, want required", tc)
+	}
+}
+
+func TestResponses2Chat_ReasoningContextNotForwarded(t *testing.T) {
+	tests := []struct {
+		name       string
+		reasoning  string
+		wantEffort any // nil 表示 Chat 请求体不应出现 reasoning_effort
+	}{
+		{name: "all_turns", reasoning: `{"context":"all_turns"}`},
+		{name: "current_turn_with_effort", reasoning: `{"effort":"high","context":"current_turn"}`, wantEffort: "high"},
+		{name: "auto_with_summary", reasoning: `{"effort":"low","summary":"auto","context":"auto"}`, wantEffort: "low"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"model":"gpt-5","input":[{"role":"user","content":"Hello"}],"reasoning":` + tt.reasoning + `}`
+			result := roundTripRequest(t, codec.ProtocolOpenAIResponses, codec.ProtocolOpenAIChat, body)
+
+			if result["reasoning_effort"] != tt.wantEffort {
+				t.Errorf("reasoning_effort = %#v, want %#v", result["reasoning_effort"], tt.wantEffort)
+			}
+			for _, key := range []string{"reasoning", "reasoning_context", "context"} {
+				if v, exists := result[key]; exists {
+					t.Errorf("Chat output has %q = %#v, want absent", key, v)
+				}
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, leaked := range []string{"context", "all_turns", "current_turn"} {
+				if strings.Contains(string(encoded), leaked) {
+					t.Errorf("Chat output contains %q: %s", leaked, encoded)
+				}
+			}
+		})
 	}
 }

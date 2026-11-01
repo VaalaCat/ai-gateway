@@ -16,9 +16,11 @@ type Request struct {
 	ToolChoice        *ToolChoice `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool       `json:"parallel_tool_calls,omitempty"`
 	ReasoningEffort   string      `json:"reasoning_effort,omitempty"`
-	ThinkingEnabled   bool        `json:"thinking_enabled,omitempty"`
-	ThinkingBudget    int         `json:"thinking_budget,omitempty"`
-	Store             *bool       `json:"store,omitempty"`
+	// ReasoningContext 是请求指定的思考上下文模式；为空表示请求不发送，服务端按默认（auto）处理。
+	ReasoningContext ReasoningContext `json:"reasoning_context,omitempty"`
+	ThinkingEnabled  bool             `json:"thinking_enabled,omitempty"`
+	ThinkingBudget   int              `json:"thinking_budget,omitempty"`
+	Store            *bool            `json:"store,omitempty"`
 
 	// Sampling / generation parameters
 	FrequencyPenalty *float64       `json:"frequency_penalty,omitempty"`
