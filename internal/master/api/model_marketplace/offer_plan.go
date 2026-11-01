@@ -231,14 +231,42 @@ func applyOfferPlansToRouting(
 				model.ReachableRealModels = append(model.ReachableRealModels, destination.ModelName)
 			}
 		}
-		if len(model.FlattenedDestinations) == 0 {
-			model.RoutingWarnings = appendRoutingWarning(model.RoutingWarnings, RoutingWarningNoVisibleOffer)
-		}
+		refreshRoutingOfferWarning(&model)
 		if retainDiagnostics || (runtimeRouting && len(model.FlattenedDestinations) > 0) {
 			result = append(result, model)
 		}
 	}
 	return result, runtimeRoutings
+}
+
+// Availability comes from the runtime plan, then pricing visibility. Do not
+// retain availability warnings from the earlier catalog-only routing walk.
+func refreshRoutingOfferWarning(model *RoutingModel) {
+	warnings := make([]RoutingWarning, 0, len(model.RoutingWarnings))
+	for _, warning := range model.RoutingWarnings {
+		if warning != RoutingWarningNoVisibleOffer {
+			warnings = append(warnings, warning)
+		}
+	}
+	model.RoutingWarnings = warnings
+	visible := make(map[string]bool, len(model.FlattenedDestinations))
+	for _, destination := range model.FlattenedDestinations {
+		visible[destination.ModelName] = len(destination.Offers) > 0
+	}
+	missing := len(visible) == 0
+	for _, definition := range model.Facts.Definitions {
+		if !definition.Enabled {
+			continue
+		}
+		for _, member := range definition.Members {
+			if member.Kind == RoutingMemberTargetModel && !visible[member.ModelName] {
+				missing = true
+			}
+		}
+	}
+	if missing {
+		model.RoutingWarnings = appendRoutingWarning(model.RoutingWarnings, RoutingWarningNoVisibleOffer)
+	}
 }
 
 func indexMarketplaceOffers(catalog []MarketplaceModel) map[ModelOfferIdentity]ModelOffer {
