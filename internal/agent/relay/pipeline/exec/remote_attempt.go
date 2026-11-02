@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -103,8 +104,14 @@ func (e *remoteExecutor) Execute(
 		return remoteExecutionRejected(target.AgentID, err)
 	}
 	meta := attemptwire.AttemptProxyMeta{Attempt: bound, RequestPath: request.URL.Path}
+	if request.Method != http.MethodPost {
+		meta.RequestMethod = request.Method
+	}
+	if protocolconfig.IsProviderAPI(rctx.Input.InboundProto) {
+		meta.RequestQuery = request.URL.RawQuery
+	}
 	if target.Kind != AttemptTargetRemote || target.AgentID == "" || meta.Validate() != nil ||
-		!attemptwire.ProviderPathAllowed(http.MethodPost, meta.RequestPath) {
+		!attemptwire.ProviderPathAllowed(meta.ProviderMethod(), meta.RequestPath) {
 		return remoteExecutionRejected(target.AgentID, errors.New("remote attempt input invalid"))
 	}
 	snapshot, ok := e.remoteTarget(target.AgentID)

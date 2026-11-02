@@ -35,6 +35,9 @@ func (h *Handler) scriptEngine() *script.Engine {
 // applyRequestScripts 在路由前执行 onRequest 钩子。
 // 返回 true 表示请求已被脚本拒绝并写回响应，调用方应直接返回。
 func (h *Handler) applyRequestScripts(rctx *state.RelayContext) (bool, error) {
+	if len(rctx.Input.Body) == 0 {
+		return false, nil
+	}
 	eng := h.scriptEngine()
 	if eng == nil {
 		return false, nil

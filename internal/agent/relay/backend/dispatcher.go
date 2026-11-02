@@ -6,6 +6,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/legacy"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/native"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/passthrough"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -43,6 +44,13 @@ func (d *Dispatcher) Dispatch(rctx *state.RelayContext, a state.Attempt) state.A
 		return state.AttemptResult{Err: fmt.Errorf("no backend for mode %q", string(a.Mode))}
 	}
 	raw := backend.Relay(rctx, a)
+	if protocolconfig.IsProviderAPI(rctx.Input.InboundProto) {
+		raw.TokenSource = string(upstream.TokenSourceNone)
+		if raw.PromptTokens > 0 || raw.CompletionTokens > 0 || raw.CacheReadTokens > 0 || raw.CacheWriteTokens > 0 {
+			raw.TokenSource = string(upstream.TokenSourceProvider)
+		}
+		return raw
+	}
 	final := upstream.FinalizeTokenCounts(rctx.Input.Body, raw.PromptTokens, raw.CompletionTokens, raw.ResponseText, a.RealModel)
 	raw.PromptTokens = final.PromptTokens
 	raw.CompletionTokens = final.CompletionTokens

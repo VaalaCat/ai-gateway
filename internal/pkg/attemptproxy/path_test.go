@@ -59,3 +59,18 @@ func TestProviderPathAllowedRejectsUntrustedPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderMediaMethods(t *testing.T) {
+	for _, path := range []string{"/v1/images/edits", "/v1/images/variations", "/v1/decisions", "/v1/videos", "/v1/videos/task/remix"} {
+		require.True(t, ProviderPathAllowed(http.MethodPost, path), path)
+	}
+	for _, path := range []string{"/v1/videos/task", "/v1/videos/task/content"} {
+		require.True(t, ProviderPathAllowed(http.MethodGet, path), path)
+	}
+	require.True(t, ProviderPathAllowed(http.MethodDelete, "/v1/videos/task"))
+	for _, path := range []string{"/v1/videos/..", "/v1/videos/a/other", "/v1/videos/a/b/content", "/v1/videos/a%2fb"} {
+		require.False(t, ProviderPathAllowed(http.MethodGet, path), path)
+	}
+	require.False(t, ProviderPathAllowed(http.MethodPost, "/v1/videos/task/content"))
+	require.False(t, ProviderPathAllowed(http.MethodDelete, "/v1/videos/task/remix"))
+}

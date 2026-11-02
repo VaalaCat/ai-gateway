@@ -211,7 +211,7 @@ func executeAttemptStream(
 
 func buildRelayOpenRequest(ctx context.Context, req RelayTransportRequest) (AttemptStreamRequest, error) {
 	if req.Attempt == nil || req.Attempt.Validate() != nil ||
-		!attemptwire.ProviderPathAllowed(http.MethodPost, req.Attempt.RequestPath) {
+		!attemptwire.ProviderPathAllowed(req.Attempt.ProviderMethod(), req.Attempt.RequestPath) {
 		return AttemptStreamRequest{}, errDirectAttemptInvalid
 	}
 	attempt := *req.Attempt
@@ -223,8 +223,8 @@ func buildRelayOpenRequest(ctx context.Context, req RelayTransportRequest) (Atte
 }
 
 func buildDirectOpenRequest(ctx context.Context, req DirectRequest) (AttemptStreamRequest, error) {
-	if req.Request.Method != http.MethodPost || req.Attempt.Validate() != nil ||
-		!attemptwire.ProviderPathAllowed(http.MethodPost, req.Attempt.RequestPath) {
+	if req.Request.Method != req.Attempt.ProviderMethod() || req.Attempt.Validate() != nil ||
+		!attemptwire.ProviderPathAllowed(req.Attempt.ProviderMethod(), req.Attempt.RequestPath) {
 		return AttemptStreamRequest{}, errDirectAttemptInvalid
 	}
 	return AttemptStreamRequest{
