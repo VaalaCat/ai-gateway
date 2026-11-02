@@ -18,12 +18,20 @@ const (
 )
 
 var defaultEndpointPaths = map[llmkit.Protocol]string{
+	ProtocolImageEdits:             "/v1/images/edits",
+	ProtocolImageVariations:        "/v1/images/variations",
+	ProtocolVideos:                 "/v1/videos",
+	ProtocolDecisions:              "/v1/decisions",
 	llmkit.ProtocolOpenAIChat:      "/v1/chat/completions",
 	llmkit.ProtocolOpenAIResponses: "/v1/responses",
 	llmkit.ProtocolClaudeMessages:  "/v1/messages",
 }
 
 var endpointKeyToProtocol = map[string]llmkit.Protocol{
+	"image_edits":              ProtocolImageEdits,
+	"image_variations":         ProtocolImageVariations,
+	"videos":                   ProtocolVideos,
+	"decisions":                ProtocolDecisions,
 	EndpointKeyChatCompletions: llmkit.ProtocolOpenAIChat,
 	EndpointKeyResponses:       llmkit.ProtocolOpenAIResponses,
 	EndpointKeyMessages:        llmkit.ProtocolClaudeMessages,
@@ -54,7 +62,7 @@ func PathToProtocol(path string) llmkit.Protocol {
 	case consts.RouteMessages:
 		return llmkit.ProtocolClaudeMessages
 	default:
-		return llmkit.ProtocolUnknown
+		return providerAPIProtocol(path)
 	}
 }
 

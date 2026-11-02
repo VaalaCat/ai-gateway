@@ -23,6 +23,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/videotask"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -77,6 +78,7 @@ type RelayContext struct {
 
 // RelayInput 是请求 immutable 输入（ctxBuilder 装配完不再改）。
 type RelayInput struct {
+	VideoTask        *videotask.Task
 	RequestID        string
 	StartTime        time.Time
 	UserInfo         *app.UserInfo

@@ -16,6 +16,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/publish"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	agenttunnel "github.com/VaalaCat/ai-gateway/internal/agent/tunnel"
@@ -1270,4 +1271,24 @@ func canceledRemoteContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	return ctx, cancel
+}
+
+func TestRemoteVideoContentKeepsMethodAndQuery(t *testing.T) {
+	rctx, client := newRemoteAttemptContext(t, context.Background(), 0)
+	rctx.Request.Method = http.MethodGet
+	rctx.Request.URL.Path = "/v1/videos/opaque-task/content"
+	rctx.Request.URL.RawQuery = "variant=thumbnail"
+	rctx.Input.InboundProto = protocolconfig.ProtocolVideos
+	direct := &remoteDirectStub{forward: func(_ context.Context, req agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		require.Equal(t, http.MethodGet, req.Attempt.ProviderMethod())
+		require.Equal(t, "variant=thumbnail", req.Attempt.RequestQuery)
+		writeRemoteResponse(t, dst, http.StatusOK, []byte{0, 255, 1}, attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true, ResponseStarted: true})
+		return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true}
+	}}
+	executor := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, &remoteRelayLinkStub{})
+	bound := validRemoteBoundAttempt()
+	bound.Mode = attemptwire.ModePassthrough
+	result := executor.Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 42, bound)
+	require.Equal(t, AttemptSucceeded, result.Kind)
+	require.Equal(t, []byte{0, 255, 1}, client.Body.Bytes())
 }

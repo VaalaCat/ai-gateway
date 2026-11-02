@@ -66,7 +66,7 @@ func trustedTunnelIngressKind(kind string) bool {
 func attemptPathAllowed(request *http.Request, meta attemptwire.AttemptProxyMeta) bool {
 	return request != nil && request.Method == http.MethodPost && request.URL != nil &&
 		request.URL.Path == attemptwire.EndpointPath &&
-		attemptwire.ProviderPathAllowed(http.MethodPost, meta.RequestPath)
+		attemptwire.ProviderPathAllowed(meta.ProviderMethod(), meta.RequestPath)
 }
 
 func installIngress(c *gin.Context, identity agentproxy.IngressMeta, meta attemptwire.AttemptProxyMeta) {

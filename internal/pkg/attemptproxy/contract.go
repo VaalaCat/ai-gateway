@@ -3,6 +3,7 @@ package attemptproxy
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 )
 
@@ -57,8 +58,10 @@ type BoundAttempt struct {
 }
 
 type AttemptProxyMeta struct {
-	Attempt     BoundAttempt `json:"attempt"`
-	RequestPath string       `json:"request_path"`
+	RequestMethod string       `json:"request_method,omitempty"`
+	RequestQuery  string       `json:"request_query,omitempty"`
+	Attempt       BoundAttempt `json:"attempt"`
+	RequestPath   string       `json:"request_path"`
 }
 
 type AttemptTraceWire struct {
@@ -159,6 +162,17 @@ func (attempt BoundAttempt) Validate() error {
 }
 
 func (meta AttemptProxyMeta) Validate() error {
+	switch meta.ProviderMethod() {
+	case "POST", "GET", "DELETE":
+	default:
+		return ErrInvalidContract
+	}
+	if len(meta.RequestQuery) > 8192 || strings.ContainsAny(meta.RequestQuery, "\r\n#") {
+		return ErrInvalidContract
+	}
+	if _, err := url.ParseQuery(meta.RequestQuery); err != nil {
+		return ErrInvalidContract
+	}
 	if meta.Attempt.Validate() != nil || strings.TrimSpace(meta.RequestPath) == "" {
 		return ErrInvalidContract
 	}
@@ -184,4 +198,12 @@ func (result AttemptProxyResult) Validate() error {
 	default:
 		return ErrInvalidContract
 	}
+}
+
+// ProviderMethod defaults to POST for wire compatibility with older Agents.
+func (meta AttemptProxyMeta) ProviderMethod() string {
+	if meta.RequestMethod == "" {
+		return "POST"
+	}
+	return meta.RequestMethod
 }

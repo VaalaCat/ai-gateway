@@ -16,7 +16,9 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/videotask"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
@@ -204,4 +206,30 @@ func (b *contextReplayBody) Bytes(limit int64) ([]byte, error) {
 func (b *contextReplayBody) Close() error {
 	b.closes.Add(1)
 	return nil
+}
+
+func TestContextBuilderPreservesVideoMethodQueryAndTask(t *testing.T) {
+	ch := &models.Channel{ChannelCore: models.ChannelCore{BaseURL: "https://upstream.invalid"}, Key: "secret"}
+	task := videotask.Task{UserID: 7, TokenID: 9, Source: "admin", ChannelID: 11, Model: "provider-real-model", RequestModel: "alias", ID: "native-job"}
+	handle, err := task.Seal(ch)
+	require.NoError(t, err)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			c, _ := newAttemptTestContext(http.MethodPost, attemptwire.EndpointPath, nil)
+			c.Set(consts.CtxKeyUserInfo, &app.UserInfo{UserID: 7, TokenID: 9})
+			meta := validAttemptMeta("/v1/videos/" + handle)
+			meta.RequestMethod = method
+			meta.RequestQuery = "variant=thumbnail"
+			rctx, release, err := NewContextBuilder(&contextAgent{bodyStore: &contextMemoryStore{}}).Build(c, meta)
+			require.NoError(t, err)
+			require.NotNil(t, rctx.Input.VideoTask)
+			require.Equal(t, method, c.Request.Method)
+			require.Equal(t, "thumbnail", c.Query("variant"))
+			require.Equal(t, "native-job", rctx.Input.VideoTask.ID)
+			require.NotNil(t, rctx.Resources.Body())
+			release()
+			require.Equal(t, http.MethodPost, c.Request.Method)
+			require.Empty(t, c.Request.URL.RawQuery)
+		})
+	}
 }

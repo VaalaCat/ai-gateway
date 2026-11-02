@@ -68,14 +68,22 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 
 	upstreamModel := state.ApplyModelMapping(ch, modelName)
 
-	newBody, err := buildPassthroughBody(bodyBytes, ch, modelName, upstreamModel)
+	var newBody []byte
+	var upstreamReq *http.Request
+	var err error
+	if protocolconfig.IsProviderAPI(inboundProto) {
+		upstreamReq, newBody, err = prepareProviderRequest(rctx, a)
+	} else {
+		newBody, err = buildPassthroughBody(bodyBytes, ch, modelName, upstreamModel)
+		if err == nil {
+			upstreamReq, err = buildPassthroughRequest(c.Request, ch, inboundProto, newBody)
+		}
+	}
 	if err != nil {
 		return state.AttemptResult{Err: err}
 	}
-
-	upstreamReq, err := buildPassthroughRequest(c.Request, ch, inboundProto, newBody)
-	if err != nil {
-		return state.AttemptResult{Err: err}
+	if upstreamReq.Body != nil {
+		defer upstreamReq.Body.Close()
 	}
 
 	newBody = applyPassthroughOverrides(upstreamReq, newBody, ch, logger)
@@ -96,9 +104,16 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 		return result
 	}
 
+	if err := bindVideoResponse(rctx, a, resp); err != nil {
+		return state.AttemptResult{Err: err}
+	}
 	streamPassthroughResponse(c, rec, resp)
 
 	promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, responseText := extractPassthroughUsage(rec.UpstreamBodyBytes(), isStream)
+	// Polling/downloading/deleting a video must not settle its generation usage again.
+	if rctx.Input.VideoTask != nil && c.Request.Method != http.MethodPost {
+		promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens = 0, 0, 0, 0
+	}
 
 	return state.AttemptResult{
 		Written:          true,

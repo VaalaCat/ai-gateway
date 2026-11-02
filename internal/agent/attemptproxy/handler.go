@@ -47,7 +47,7 @@ func (h *Handler) Serve(c *gin.Context) {
 		writeProxyRejection(c, http.StatusBadRequest, "attempt_meta_invalid", "bound attempt metadata invalid")
 		return
 	}
-	if c.Request == nil || !attemptwire.ProviderPathAllowed(c.Request.Method, meta.RequestPath) {
+	if c.Request == nil || !attemptwire.ProviderPathAllowed(meta.ProviderMethod(), meta.RequestPath) {
 		writeProxyRejection(c, http.StatusBadRequest, "attempt_path_invalid", "provider request path invalid")
 		return
 	}

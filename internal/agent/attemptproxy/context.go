@@ -37,7 +37,7 @@ func (b *contextBuilder) Build(c *gin.Context, meta attemptwire.AttemptProxyMeta
 	if err := meta.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("%w: invalid metadata", ErrContextBuildRejected)
 	}
-	if !attemptwire.ProviderPathAllowed(c.Request.Method, meta.RequestPath) {
+	if !attemptwire.ProviderPathAllowed(meta.ProviderMethod(), meta.RequestPath) {
 		return nil, nil, fmt.Errorf("%w: provider path not allowed", ErrContextBuildRejected)
 	}
 
@@ -45,6 +45,9 @@ func (b *contextBuilder) Build(c *gin.Context, meta attemptwire.AttemptProxyMeta
 	// all provider backends must observe the original provider path.
 	requestURL := c.Request.URL
 	endpointPath, endpointRawPath := requestURL.Path, requestURL.RawPath
+	endpointMethod, endpointQuery := c.Request.Method, requestURL.RawQuery
+	c.Request.Method = meta.ProviderMethod()
+	requestURL.RawQuery = meta.RequestQuery
 	requestURL.Path = meta.RequestPath
 	requestURL.RawPath = meta.RequestPath
 	rctx := relay.NewContext(c, b.agent)
@@ -52,6 +55,8 @@ func (b *contextBuilder) Build(c *gin.Context, meta attemptwire.AttemptProxyMeta
 		relay.CloseContext(rctx)
 		requestURL.Path = endpointPath
 		requestURL.RawPath = endpointRawPath
+		c.Request.Method = endpointMethod
+		requestURL.RawQuery = endpointQuery
 	}
 	if err := ctxbuild.Build(rctx); err != nil {
 		release()

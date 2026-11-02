@@ -145,7 +145,7 @@ func validateAttemptOrProbeOpen(open wire.Open) error {
 	if open.Path != attemptwire.EndpointPath {
 		return errTargetPath
 	}
-	if open.Attempt.Validate() != nil || !attemptwire.ProviderPathAllowed(http.MethodPost, open.Attempt.RequestPath) {
+	if open.Attempt.Validate() != nil || !attemptwire.ProviderPathAllowed(open.Attempt.ProviderMethod(), open.Attempt.RequestPath) {
 		return errTargetMetadata
 	}
 	return nil

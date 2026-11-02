@@ -57,6 +57,9 @@ func NewSolver(aff *affinity.Engine) Solver {
 // 一次铺开，而非边算边重试。
 func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 	chain := s.ChainBuilder.Build(rctx)
+	if task := rctx.Input.VideoTask; task != nil {
+		chain = ModelChain{Models: []string{task.Model}}
+	}
 	// trace 非空（命中过 routing）时 emit 一条 Info 日志，
 	// 字段：request_model / real_model（链头）/ user_id / trace。
 	if len(chain.Trace) > 0 {
@@ -102,6 +105,15 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 			continue
 		}
 		cands := s.Pool.Available(rctx, realModel)
+		if task := rctx.Input.VideoTask; task != nil {
+			pinned := cands[:0]
+			for _, candidate := range cands {
+				if ui := rctx.Input.UserInfo; ui != nil && string(candidate.Source) == task.Source && candidate.SourceID == task.ChannelID && task.Verify(candidate.Channel, ui.UserID, ui.TokenID) {
+					pinned = append(pinned, candidate)
+				}
+			}
+			cands = pinned
+		}
 		if len(cands) == 0 {
 			continue
 		}

@@ -24,6 +24,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/videotask"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -57,7 +58,14 @@ func Build(rctx *state.RelayContext) error {
 		}
 	}
 	rctx.Input.InboundProto = protocolconfig.PathToProtocol(rctx.Context.Request.URL.Path)
-	if rctx.Context.Request.Method == http.MethodGet {
+	if handle, _, ok := videotask.Path(rctx.Context.Request.URL.Path); ok {
+		task, err := videotask.Parse(handle)
+		if err != nil {
+			return fmt.Errorf("%w: invalid video task", state.ErrInvalidBody)
+		}
+		rctx.Input.VideoTask = task
+		rctx.Input.Model = task.RequestModel
+	} else if rctx.Context.Request.Method == http.MethodGet {
 		return nil
 	}
 
@@ -87,13 +95,23 @@ func Build(rctx *state.RelayContext) error {
 	rctx.Context.Request.GetBody = replay.Open
 	rctx.Context.Request.ContentLength = replay.Size()
 
-	if isAudioMultipartPath(rctx.Context.Request.URL.Path) {
+	if rctx.Input.VideoTask != nil && rctx.Context.Request.Method != http.MethodPost {
+		// Task retrieval/deletion has no model-bearing body. Keep an empty replay body for remote attempts.
+	} else if isAudioMultipartPath(rctx.Context.Request.URL.Path) || (protocolconfig.IsProviderAPI(rctx.Input.InboundProto) && isMultipartContentType(rctx.Context.GetHeader("Content-Type"))) {
 		model, err := parseMultipartModel(
 			rctx.Context.Request.Context(),
 			replay,
 			rctx.Context.Request.Header.Get("Content-Type"),
 			limits.HardLimit,
 		)
+		if task := rctx.Input.VideoTask; task != nil {
+			if errors.Is(err, state.ErrModelRequired) {
+				model, err = task.RequestModel, nil
+			}
+			if err == nil && model != task.RequestModel {
+				err = fmt.Errorf("%w: video task model cannot change", state.ErrInvalidBody)
+			}
+		}
 		if err != nil {
 			rec.WithFail(trace.StageInboundDecode, err)
 			return err
@@ -118,6 +136,12 @@ func Build(rctx *state.RelayContext) error {
 			wrapped := fmt.Errorf("%w: %v", state.ErrInvalidBody, err)
 			rec.WithFail(trace.StageInboundDecode, wrapped)
 			return wrapped
+		}
+		if task := rctx.Input.VideoTask; task != nil && req.Model != "" && req.Model != task.RequestModel {
+			return fmt.Errorf("%w: video task model cannot change", state.ErrInvalidBody)
+		}
+		if req.Model == "" && rctx.Input.VideoTask != nil {
+			req.Model = rctx.Input.VideoTask.RequestModel
 		}
 		if req.Model == "" {
 			rec.WithFail(trace.StageInboundDecode, state.ErrModelRequired)
@@ -324,4 +348,9 @@ func drainWithContext(ctx context.Context, r io.Reader, limit int64) error {
 			return nil
 		}
 	}
+}
+
+func isMultipartContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && strings.EqualFold(mediaType, "multipart/form-data")
 }

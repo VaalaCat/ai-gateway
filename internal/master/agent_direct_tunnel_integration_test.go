@@ -1020,6 +1020,13 @@ func (f *directTunnelIntegrationFixture) startRuntimeManagers(
 			done := make(chan error, 1)
 			go func(manager *agenttunnel.Manager) { done <- manager.Run(runCtx) }(server.srv.TunnelManager)
 			f.managerRuns = append(f.managerRuns, routedRelayManagerRun{cancel: cancel, done: done})
+		} else {
+			// HTTP readiness does not wait for the standalone desired-state loop.
+			// Let its initial (unsupported bootstrap) configuration land before
+			// installing the fixture's relay URI, so it cannot overwrite it.
+			require.Eventually(f.t, func() bool {
+				return server.srv.TunnelManager.Snapshot().DesiredGeneration > 0
+			}, 2*time.Second, 5*time.Millisecond, "standalone tunnel desired state was not initialized")
 		}
 		server.srv.TunnelManager.Apply(agenttunnel.Desired{
 			Mode: "custom", ConfiguredURI: relayURI, EffectiveURI: relayURI,
