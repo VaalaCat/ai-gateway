@@ -10,6 +10,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 )
 
@@ -82,26 +83,31 @@ func (h *Handler) applyRequestScripts(rctx *state.RelayContext) (bool, error) {
 			_ = previous.Close()
 		}
 		rctx.Input.Body = res.Body
-		reparseModelStream(rctx, res.Body)
+		reparseRequestFacts(rctx, res.Body)
 	}
 	return false, nil
 }
 
-// reparseModelStream 在 onRequest 改写后重新提取 model/stream（脚本可能改了它们）。
-// 缺失的 key 不覆盖原值。
-func reparseModelStream(rctx *state.RelayContext, body []byte) {
+// reparseRequestFacts 在 onRequest 改写后重新提取 model、stream 和工具调用特征（脚本可能改了它们）。
+// 缺失的 key 不覆盖原值，解析失败保持原值。
+func reparseRequestFacts(rctx *state.RelayContext, body []byte) {
+	// 1. model 和 stream：缺失的 key 保持原值
 	var meta struct {
 		Model  *string `json:"model"`
 		Stream *bool   `json:"stream"`
 	}
-	if json.Unmarshal(body, &meta) != nil {
-		return
+	if json.Unmarshal(body, &meta) == nil {
+		if meta.Model != nil && *meta.Model != "" {
+			rctx.Input.Model = *meta.Model
+		}
+		if meta.Stream != nil {
+			rctx.Input.IsStream = *meta.Stream
+		}
 	}
-	if meta.Model != nil && *meta.Model != "" {
-		rctx.Input.Model = *meta.Model
-	}
-	if meta.Stream != nil {
-		rctx.Input.IsStream = *meta.Stream
+
+	// 2. 工具调用特征：本地选执行模式用它，远端 agent 会按改写后的 body 重算，两边必须一致
+	if info, err := llmkit.InspectToolCallRequest(rctx.Input.InboundProto, body); err == nil {
+		rctx.Input.ToolCalls = info
 	}
 }
 

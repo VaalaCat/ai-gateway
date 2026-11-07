@@ -291,7 +291,9 @@ func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundP
 // 返回重新 marshal 后的 body。失败返回 wrapped error，由调用方包成 state.AttemptResult。
 func buildPassthroughBody(bodyBytes []byte, ch *models.Channel, modelName, upstreamModel string) ([]byte, error) {
 	var bodyMap map[string]any
-	if err := json.Unmarshal(bodyBytes, &bodyMap); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
+	decoder.UseNumber()
+	if err := decoder.Decode(&bodyMap); err != nil {
 		return nil, fmt.Errorf("unmarshal request for passthrough: %w", err)
 	}
 	bodyMap["model"] = upstreamModel

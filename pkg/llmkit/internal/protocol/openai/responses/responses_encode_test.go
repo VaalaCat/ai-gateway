@@ -184,6 +184,161 @@ func TestResponsesEncodeStreamReasoningKeepsMessageOutputIndexConsistent(t *test
 	}
 }
 
+// 原样保留的工具结果 item 写出时 call_id 以 IR 的 ToolCallID 为准，其他字段不变。
+func TestResponsesEncodeToolResultRawJSONUsesIRCallID(t *testing.T) {
+	const imageOutput = `[{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":{"n":9007199254740993}}]`
+	tests := []struct {
+		name       string
+		message    ir.Message
+		wantCallID string
+		wantRaw    string // 非空时要求 item 原样写出
+	}{
+		{
+			name: "packed call_id replaced by IR id",
+			message: ir.Message{Role: ir.RoleTool, ToolCallID: "call_1",
+				RawJSON: json.RawMessage(`{"type":"function_call_output","call_id":"call_llmkit_v1_abc","output":` + imageOutput + `}`)},
+			wantCallID: "call_1",
+		},
+		{
+			name: "same id kept as is",
+			message: ir.Message{Role: ir.RoleTool, ToolCallID: "call_1",
+				RawJSON: json.RawMessage(`{"type":"function_call_output","call_id":"call_1","output":` + imageOutput + `}`)},
+			wantCallID: "call_1",
+			wantRaw:    `{"type":"function_call_output","call_id":"call_1","output":` + imageOutput + `}`,
+		},
+		{
+			name:       "raw item that is not a tool result untouched",
+			message:    ir.Message{RawJSON: json.RawMessage(`{"type":"custom_tool_call_output","call_id":"call_custom","output":"ok"}`)},
+			wantCallID: "call_custom",
+			wantRaw:    `{"type":"custom_tool_call_output","call_id":"call_custom","output":"ok"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpReq, err := (&handler{}).encodeHTTPRequest(&ir.Request{Messages: []ir.Message{tt.message}}, &channelConfig{BaseURL: "https://api.openai.com", Model: "gpt"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodyBytes, err := io.ReadAll(httpReq.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body struct {
+				Input []json.RawMessage `json:"input"`
+			}
+			if err := json.Unmarshal(bodyBytes, &body); err != nil {
+				t.Fatal(err)
+			}
+			if len(body.Input) != 1 {
+				t.Fatalf("input = %s", bodyBytes)
+			}
+			var item struct {
+				CallID string          `json:"call_id"`
+				Output json.RawMessage `json:"output"`
+			}
+			if err := json.Unmarshal(body.Input[0], &item); err != nil {
+				t.Fatal(err)
+			}
+			if item.CallID != tt.wantCallID {
+				t.Errorf("call_id = %q, want %q", item.CallID, tt.wantCallID)
+			}
+			if tt.wantRaw != "" && string(body.Input[0]) != tt.wantRaw {
+				t.Errorf("item = %s, want unchanged %s", body.Input[0], tt.wantRaw)
+			}
+			if tt.message.Role == ir.RoleTool && !strings.Contains(string(item.Output), "9007199254740993") {
+				t.Errorf("output lost precision: %s", item.Output)
+			}
+		})
+	}
+}
+
+func TestResponsesEncodeRequestTruncatesToolCallIDs(t *testing.T) {
+	// 1. 覆盖普通 ID、长度边界、实际 Grok ID 和待转发的签名包。
+	const grokID = "call-ff0d9a76-533e-4280-9d31-394ef8a9044d-24__fc_91105360-b333-9abb-9d7b-4dbf05945257_0"
+	packedID := convert.PackToolCallID("call_original", &ir.ToolCallProviderData{
+		Protocol: ir.ProtocolOpenAIChat,
+		Models:   []string{"inner-model"},
+		Fields:   map[string]json.RawMessage{"signature": json.RawMessage(`"signature-data"`)},
+	})
+	for _, tt := range []struct{ name, id, want string }{
+		{"short", "call_short", "call_short"},
+		{"64", strings.Repeat("a", 64), strings.Repeat("a", 64)},
+		{"65", strings.Repeat("a", 65), strings.Repeat("a", 64)},
+		{"grok", grokID, grokID[:64]},
+		{"unicode", strings.Repeat("界", 65), strings.Repeat("界", 64)},
+		{"packed_for_next_gateway", packedID, packedID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, rawResult := range []bool{false, true} {
+				result := ir.Message{Role: ir.RoleTool, ToolCallID: tt.id, Content: []ir.ContentBlock{{Type: ir.ContentTypeText, Text: "done"}}}
+				if rawResult {
+					encodedID, _ := json.Marshal(tt.id)
+					result.RawJSON = json.RawMessage(`{"type":"function_call_output","call_id":` + string(encodedID) + `,"output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}],"future":9007199254740993}`)
+				}
+				req := &ir.Request{Messages: []ir.Message{
+					{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{{ID: tt.id, Name: "read_file", Arguments: `{}`}}},
+					result,
+				}}
+				before, err := json.Marshal(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// 2. 调用与结果写出相同短 ID，图片和原始字段保留，输入历史不变。
+				httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{BaseURL: "https://api.openai.com", Model: "gpt"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := io.ReadAll(httpReq.Body)
+				httpReq.Body.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var encoded struct {
+					Input []struct {
+						CallID string `json:"call_id"`
+					} `json:"input"`
+				}
+				if err := json.Unmarshal(body, &encoded); err != nil {
+					t.Fatal(err)
+				}
+				if len(encoded.Input) != 2 || encoded.Input[0].CallID != tt.want || encoded.Input[1].CallID != tt.want {
+					t.Fatalf("rawResult=%v input=%s, want call_id=%q", rawResult, body, tt.want)
+				}
+				if rawResult && (!bytes.Contains(body, []byte("9007199254740993")) || !bytes.Contains(body, []byte("data:image/png;base64,AAAA"))) {
+					t.Fatalf("structured output changed: %s", body)
+				}
+				after, _ := json.Marshal(req)
+				if !bytes.Equal(before, after) {
+					t.Fatal("request history mutated")
+				}
+			}
+		})
+	}
+}
+
+func TestResponsesEncodeRequestTruncatesRawToolCallIDs(t *testing.T) {
+	// 1. 原样工具调用和结果按同一规则截断，其他 item 的字段不变。
+	id := strings.Repeat("c", 87)
+	for _, itemType := range []string{"function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "future_item"} {
+		t.Run(itemType, func(t *testing.T) {
+			raw := json.RawMessage(`{"type":"` + itemType + `","call_id":"` + id + `","name":"run","input":"pwd","output":"done"}`)
+			req := &ir.Request{Messages: []ir.Message{{RawJSON: raw}}}
+			body := encodeResponsesRequestBody(t, req)
+			item := body["input"].([]any)[0].(map[string]any)
+			want := id[:64]
+			if itemType == "future_item" {
+				want = id
+			}
+			if item["call_id"] != want || item["input"] != "pwd" || item["output"] != "done" {
+				t.Fatalf("item=%#v", item)
+			}
+			if !bytes.Equal(req.Messages[0].RawJSON, raw) {
+				t.Fatal("raw history mutated")
+			}
+		})
+	}
+}
+
 func encodeResponsesRequestBody(t *testing.T, req *ir.Request) map[string]any {
 	t.Helper()
 	httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{BaseURL: "https://api.openai.com", Model: "gpt"})

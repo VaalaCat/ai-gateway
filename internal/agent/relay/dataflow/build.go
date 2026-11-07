@@ -18,7 +18,7 @@ import (
 var defaultStepOrder = []string{
 	"model_mapping", "inject_system_prompt", "role_mapping",
 	"thinking_passthrough", "thinking_strip",
-	"tool_schema_compatibility",
+	"tool_compatibility",
 	"inline_image",
 	"encode", "forward_client_headers", "param_override", "header_override", "upstream_script",
 }
@@ -29,20 +29,20 @@ var requestStepOrder = []string{
 	"role_mapping",
 	"thinking_passthrough",
 	"thinking_strip",
-	"tool_schema_compatibility",
+	"tool_compatibility",
 	"inline_image",
 }
 
 type buildContext struct {
-	ch              *models.Channel
-	cfg             *upstream.ChannelConfig
-	proto           llmkit.Protocol
-	deps            StepDeps
-	modelMap        map[string]string
-	roleRules       *transform.RoleMappingConfig
-	thinking        upstream.ThinkingRules
-	thinkingEnabled bool
-	toolSchemaRules upstream.ToolSchemaRules
+	ch                     *models.Channel
+	cfg                    *upstream.ChannelConfig
+	proto                  llmkit.Protocol
+	deps                   StepDeps
+	modelMap               map[string]string
+	roleRules              *transform.RoleMappingConfig
+	thinking               upstream.ThinkingRules
+	thinkingEnabled        bool
+	toolCompatibilityRules upstream.ToolCompatibilityRules
 }
 
 type stepFactory func(*buildContext) Step
@@ -78,8 +78,8 @@ var requestStepFactories = map[string]stepFactory{
 		}
 		return &StepThinkingStrip{rules: context.thinking}
 	},
-	"tool_schema_compatibility": func(context *buildContext) Step {
-		if context.toolSchemaRules.Len() == 0 {
+	"tool_compatibility": func(context *buildContext) Step {
+		if context.toolCompatibilityRules.Len() == 0 {
 			return nil
 		}
 		logger := context.deps.Logger
@@ -90,7 +90,7 @@ var requestStepFactories = map[string]stepFactory{
 		if context.deps.RCtx != nil {
 			logger = logger.With(zap.String("request_id", context.deps.RCtx.Input.RequestID))
 		}
-		return &StepToolSchemaCompatibility{rules: context.toolSchemaRules, logger: logger}
+		return &StepToolCompatibility{rules: context.toolCompatibilityRules, logger: logger}
 	},
 	"inline_image": func(context *buildContext) Step {
 		if !context.cfg.InlineImageURL {
@@ -159,7 +159,7 @@ func newBuildContext(ch *models.Channel, protocol llmkit.Protocol, deps StepDeps
 	context.cfg = upstream.BuildChannelConfig(ch, "", protocol)
 	context.modelMap = parseModelMapping(ch.ModelMapping)
 	context.roleRules = transform.ParseRoleMapping(context.cfg.RoleMapping)
-	context.toolSchemaRules = upstream.NewToolSchemaRules(ch)
+	context.toolCompatibilityRules = upstream.NewToolCompatibilityRules(ch)
 	if protocol == llmkit.ProtocolOpenAIChat {
 		context.thinking = upstream.NewThinkingRules(ch)
 		context.thinkingEnabled = true

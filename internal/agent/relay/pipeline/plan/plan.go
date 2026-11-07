@@ -122,7 +122,7 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 			plan.Attempts = append(plan.Attempts, state.Attempt{
 				Channel:    sc.Channel,
 				RealModel:  realModel,
-				Mode:       s.Picker.Pick(sc.Channel, realModel, rctx.Input.InboundProto),
+				Mode:       s.Picker.Pick(sc.Channel, realModel, rctx.Input.InboundProto, rctx.Input.ToolCalls),
 				Source:     sc.Source,
 				SourceID:   sc.SourceID,
 				ByAffinity: sc.ByAffinity,

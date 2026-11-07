@@ -9,6 +9,7 @@ type Message = ir.Message
 type ContentBlock = ir.ContentBlock
 type Tool = ir.Tool
 type ToolCall = ir.ToolCall
+type ToolCallProviderData = ir.ToolCallProviderData
 type ToolChoice = ir.ToolChoice
 type Event = ir.Event
 type Usage = ir.Usage

@@ -61,9 +61,9 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 	var inputItems []json.RawMessage
 	var systemTexts []string
 	for _, m := range req.Messages {
-		// RawJSON messages: emit as-is (unknown input item types)
+		// 原样消息只调整工具调用和结果的 call_id，其他类型保留。
 		if m.RawJSON != nil {
-			raw := m.RawJSON
+			raw := toolCallInputItem(m.RawJSON, m.ToolCallID)
 			if toolPolicy == convert.BuiltinToolFallbackFunction {
 				raw = encodeFunctionFallbackInputItem(raw)
 			}
@@ -88,7 +88,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 			}
 			fco := respFunctionCallOutputInput{
 				Type:   "function_call_output",
-				CallID: m.ToolCallID,
+				CallID: truncateToolCallID(m.ToolCallID),
 				Output: text,
 			}
 			b, _ := json.Marshal(fco)
@@ -116,7 +116,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 			for _, tc := range m.ToolCalls {
 				fc := respFunctionCallInput{
 					Type:      "function_call",
-					CallID:    tc.ID,
+					CallID:    truncateToolCallID(tc.ID),
 					Name:      tc.Name,
 					Namespace: tc.Namespace,
 					Arguments: tc.Arguments,
@@ -311,6 +311,50 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 	}
 
 	return httpReq, nil
+}
+
+// truncateToolCallID 将普通工具调用 ID 截到 64 个字符，待下一层解包的 ID 原样传递。
+func truncateToolCallID(callID string) string {
+	// 1. 保留短 ID 和网关之间传递的完整签名包。
+	if len(callID) <= 64 || convert.IsPackedToolCallID(callID) {
+		return callID
+	}
+	// 2. 取前 64 个字符。
+	characters := []rune(callID)
+	return string(characters[:min(len(characters), 64)])
+}
+
+// toolCallInputItem 调整原样工具调用或结果的 call_id，结果优先使用 IR ID，其余字段不变。
+func toolCallInputItem(raw json.RawMessage, callID string) json.RawMessage {
+	// 1. 解出顶层字段，仅处理工具调用和结果。
+	var item map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return raw
+	}
+	var itemType string
+	_ = json.Unmarshal(item["type"], &itemType)
+	switch itemType {
+	case "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output":
+	default:
+		return raw
+	}
+	if callID == "" {
+		if err := json.Unmarshal(item["call_id"], &callID); err != nil {
+			return raw
+		}
+	}
+	encodedID, err := json.Marshal(truncateToolCallID(callID))
+	if err != nil || bytes.Equal(item["call_id"], encodedID) {
+		return raw
+	}
+
+	// 2. 换掉 call_id 后重新编码，嵌套内容保持原始字节。
+	item["call_id"] = encodedID
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		return raw
+	}
+	return encoded
 }
 
 func encodeFunctionFallbackInputItem(raw json.RawMessage) json.RawMessage {

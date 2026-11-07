@@ -9,51 +9,69 @@ import (
 	"go.uber.org/zap"
 )
 
-type toolSchemaRule struct {
-	pattern *regexp.Regexp
-	profile llmkit.ToolSchemaProfile
+type toolCompatibilityRule struct {
+	pattern       *regexp.Regexp
+	compatibility ToolCompatibility
 }
 
-// ToolSchemaRules 保存某渠道已编译的工具定义兼容规则。
-type ToolSchemaRules struct {
-	rules []toolSchemaRule
+// ToolCompatibility 保存一条模型规则的工具定义和签名兼容方式。
+type ToolCompatibility struct {
+	Profile           llmkit.ToolSchemaProfile
+	SignatureFallback llmkit.ToolSignatureFallback
 }
 
-// NewToolSchemaRules 读取渠道配置，按配置顺序编译有效规则。
-func NewToolSchemaRules(ch *models.Channel) ToolSchemaRules {
+// ToolCompatibilityRules 保存某渠道已编译的工具兼容规则。
+type ToolCompatibilityRules struct {
+	rules []toolCompatibilityRule
+}
+
+// NewToolCompatibilityRules 读取渠道配置，按配置顺序编译有效规则。
+func NewToolCompatibilityRules(ch *models.Channel) ToolCompatibilityRules {
 	// 1. 读取规则列表。
 	var other map[string]any
 	if ch == nil || json.Unmarshal([]byte(ch.OtherSettings), &other) != nil {
-		return ToolSchemaRules{}
+		return ToolCompatibilityRules{}
 	}
 	entries, _ := other["model_tool_schema_compatibility"].([]any)
-	var rules []toolSchemaRule
+	var rules []toolCompatibilityRule
 	// 2. 编译模型正则，保留有效的兼容方式。
 	for index, entry := range entries {
 		obj, _ := entry.(map[string]any)
 		pattern, _ := obj["model_pattern"].(string)
 		profile, _ := obj["profile"].(string)
+		fallback, _ := obj["signature_fallback"].(string)
+		if fallback == "" {
+			fallback = string(llmkit.ToolSignatureFallbackNone)
+		}
 		compiled, err := regexp.Compile(pattern)
-		if pattern == "" || err != nil || (profile != string(llmkit.ToolSchemaProfileNone) && profile != string(llmkit.ToolSchemaProfileGeminiCompat)) {
+		if pattern == "" || err != nil ||
+			(profile != string(llmkit.ToolSchemaProfileNone) && profile != string(llmkit.ToolSchemaProfileGeminiCompat)) ||
+			(fallback != string(llmkit.ToolSignatureFallbackNone) && fallback != string(llmkit.ToolSignatureFallbackGemini)) {
 			zap.L().Warn("model_tool_schema_compatibility: invalid rule",
 				zap.Uint("channel_id", ch.ID), zap.Int("index", index))
 			continue
 		}
-		rules = append(rules, toolSchemaRule{pattern: compiled, profile: llmkit.ToolSchemaProfile(profile)})
+		rules = append(rules, toolCompatibilityRule{
+			pattern: compiled,
+			compatibility: ToolCompatibility{
+				Profile:           llmkit.ToolSchemaProfile(profile),
+				SignatureFallback: llmkit.ToolSignatureFallback(fallback),
+			},
+		})
 	}
-	return ToolSchemaRules{rules: rules}
+	return ToolCompatibilityRules{rules: rules}
 }
 
-// Profile 返回映射后模型名命中的首条规则；未命中时不处理。
-func (r ToolSchemaRules) Profile(model string) llmkit.ToolSchemaProfile {
+// Match 返回映射后模型名命中的首条规则；未命中时不处理。
+func (r ToolCompatibilityRules) Match(model string) ToolCompatibility {
 	// 1. 按顺序匹配模型名。
 	for _, rule := range r.rules {
 		if rule.pattern.MatchString(model) {
-			return rule.profile
+			return rule.compatibility
 		}
 	}
-	return llmkit.ToolSchemaProfileNone
+	return ToolCompatibility{Profile: llmkit.ToolSchemaProfileNone, SignatureFallback: llmkit.ToolSignatureFallbackNone}
 }
 
 // Len 返回有效规则数。
-func (r ToolSchemaRules) Len() int { return len(r.rules) }
+func (r ToolCompatibilityRules) Len() int { return len(r.rules) }

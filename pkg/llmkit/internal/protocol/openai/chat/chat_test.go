@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
+	"github.com/stretchr/testify/require"
 )
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1170,97 @@ func TestEncodeRequest_WithToolCalls(t *testing.T) {
 	}
 	if toolMsg["role"] != "tool" {
 		t.Errorf("tool msg role = %v, want tool", toolMsg["role"])
+	}
+}
+
+// 编码请求时把 Chat 协议的 ProviderData 写回 extra_content、调用 signature 和消息 signature。
+func TestEncodeRequest_ToolCallProviderData(t *testing.T) {
+	const googleExtra = `{"google":{"thought_signature":"g-sig"},"vendor":{"n":9007199254740993}}`
+	chatData := func(fields map[string]string) *ir.ToolCallProviderData {
+		raw := make(map[string]json.RawMessage, len(fields))
+		for key, value := range fields {
+			raw[key] = json.RawMessage(value)
+		}
+		return &ir.ToolCallProviderData{Protocol: ir.ProtocolOpenAIChat, Fields: raw}
+	}
+	call := func(id string, data *ir.ToolCallProviderData) ir.ToolCall {
+		return ir.ToolCall{ID: id, Name: "read", Arguments: "{}", ProviderData: data}
+	}
+	type wireCall struct {
+		ID           string          `json:"id"`
+		Signature    string          `json:"signature"`
+		ExtraContent json.RawMessage `json:"extra_content"`
+	}
+
+	tests := []struct {
+		name          string
+		message       ir.Message
+		wantSignature string
+		wantCalls     []wireCall
+	}{
+		{
+			name: "native fields written back",
+			message: ir.Message{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{
+				call("call_1", chatData(map[string]string{"extra_content": googleExtra, "signature": `"t-sig"`, "message_signature": `"m-sig"`})),
+			}},
+			wantSignature: "m-sig",
+			wantCalls:     []wireCall{{ID: "call_1", Signature: "t-sig", ExtraContent: json.RawMessage(googleExtra)}},
+		},
+		{
+			name: "message signature from the first call that has one",
+			message: ir.Message{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{
+				call("call_1", nil),
+				call("call_2", chatData(map[string]string{"message_signature": `"second"`})),
+				call("call_3", chatData(map[string]string{"message_signature": `"third"`})),
+			}},
+			wantSignature: "second",
+			wantCalls:     []wireCall{{ID: "call_1"}, {ID: "call_2"}, {ID: "call_3"}},
+		},
+		{
+			name: "other protocol ignored",
+			message: ir.Message{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{
+				call("call_1", &ir.ToolCallProviderData{Protocol: ir.ProtocolClaudeMessages, Fields: map[string]json.RawMessage{"signature": json.RawMessage(`"t-sig"`)}}),
+			}},
+			wantCalls: []wireCall{{ID: "call_1"}},
+		},
+		{
+			name:      "tool round ignores Message.Signature",
+			message:   ir.Message{Role: ir.RoleAssistant, Signature: "stale", ToolCalls: []ir.ToolCall{call("call_1", nil)}},
+			wantCalls: []wireCall{{ID: "call_1"}},
+		},
+		{
+			name:          "text message keeps Message.Signature",
+			message:       ir.Message{Role: ir.RoleAssistant, Signature: "text-sig", Content: []ir.ContentBlock{{Type: ir.ContentTypeText, Text: "hi"}}},
+			wantSignature: "text-sig",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &ir.Request{Model: "m", Messages: []ir.Message{tt.message}}
+			httpRequest, err := (&handler{}).encodeHTTPRequest(request, &channelConfig{BaseURL: "https://api.openai.com", Model: "m"})
+			require.NoError(t, err)
+			var body struct {
+				Messages []struct {
+					Signature string     `json:"signature"`
+					ToolCalls []wireCall `json:"tool_calls"`
+				} `json:"messages"`
+			}
+			require.NoError(t, json.NewDecoder(httpRequest.Body).Decode(&body))
+			require.Len(t, body.Messages, 1)
+			require.Equal(t, tt.wantSignature, body.Messages[0].Signature)
+			require.Len(t, body.Messages[0].ToolCalls, len(tt.wantCalls))
+			for index, want := range tt.wantCalls {
+				got := body.Messages[0].ToolCalls[index]
+				require.Equal(t, want.ID, got.ID)
+				require.Equal(t, want.Signature, got.Signature)
+				if want.ExtraContent == nil {
+					require.Empty(t, got.ExtraContent)
+					continue
+				}
+				require.JSONEq(t, string(want.ExtraContent), string(got.ExtraContent))
+				require.Contains(t, string(got.ExtraContent), "9007199254740993")
+			}
+		})
 	}
 }
 

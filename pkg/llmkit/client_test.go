@@ -448,6 +448,52 @@ func TestClientCallOwnsNestedRequestContainers(t *testing.T) {
 	}
 }
 
+func TestCloneMessagesCopiesToolCallProviderData(t *testing.T) {
+	newMessages := func(data *ToolCallProviderData) []Message {
+		return []Message{{
+			Role:      RoleAssistant,
+			ToolCalls: []ToolCall{{ID: "call_1", Name: "lookup", ProviderData: data}},
+		}}
+	}
+	newData := func() *ToolCallProviderData {
+		return &ToolCallProviderData{
+			Protocol: ProtocolOpenAIChat,
+			Models:   []string{"gemini-3-pro"},
+			Fields:   map[string]json.RawMessage{"signature": json.RawMessage(`"sig"`)},
+		}
+	}
+	tests := []struct {
+		name string
+		data *ToolCallProviderData
+	}{
+		{name: "nil provider data", data: nil},
+		{name: "full provider data", data: newData()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := newMessages(tt.data)
+			cloned := cloneMessages(original)
+
+			got := cloned[0].ToolCalls[0].ProviderData
+			if !reflect.DeepEqual(got, tt.data) {
+				t.Fatalf("cloned ProviderData = %+v, want %+v", got, tt.data)
+			}
+			if tt.data == nil {
+				return
+			}
+			if got == tt.data {
+				t.Fatal("cloned ProviderData shares the original pointer")
+			}
+			got.Models[0] = "changed"
+			got.Fields["signature"][1] = 'X'
+			got.Fields["added"] = json.RawMessage(`1`)
+			if want := newData(); !reflect.DeepEqual(tt.data, want) {
+				t.Errorf("original ProviderData = %+v, want unchanged %+v", tt.data, want)
+			}
+		})
+	}
+}
+
 func TestClientCallCancellationDrainsProducer(t *testing.T) {
 	for _, cancelWhile := range []string{"waiting for source", "forwarding event"} {
 		t.Run(cancelWhile, func(t *testing.T) {

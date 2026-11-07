@@ -141,7 +141,7 @@ func buildAdminChannel(input AdminChannelCreateInput) (models.Channel, error) {
 	if err := input.Affinity.Validate(); err != nil {
 		return models.Channel{}, err
 	}
-	if err := models.ValidateToolSchemaCompatibility(input.OtherSettings); err != nil {
+	if err := models.ValidateToolCompatibility(input.OtherSettings); err != nil {
 		return models.Channel{}, err
 	}
 	mapping, err := json.Marshal(nonNilMap(input.ModelMapping))

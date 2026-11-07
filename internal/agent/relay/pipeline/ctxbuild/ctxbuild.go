@@ -27,6 +27,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // computeRequestID 取请求 ID：优先用 X-Request-Id 头，缺省回退到时间戳。
@@ -122,6 +123,14 @@ func Build(rctx *state.RelayContext) error {
 		if req.Model == "" {
 			rec.WithFail(trace.StageInboundDecode, state.ErrModelRequired)
 			return state.ErrModelRequired
+		}
+		if protocolconfig.IsSupportedProtocol(rctx.Input.InboundProto) {
+			info, err := llmkit.InspectToolCallRequest(rctx.Input.InboundProto, body)
+			if err != nil {
+				rec.WithFail(trace.StageInboundDecode, err)
+				return err
+			}
+			rctx.Input.ToolCalls = info
 		}
 		rctx.Input.Model = req.Model
 		rctx.Input.IsStream = req.Stream != nil && *req.Stream

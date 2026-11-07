@@ -171,7 +171,7 @@ func offerCandidateFromScored(
 	for _, inboundProtocol := range protocols {
 		result.Modes = append(result.Modes, ModelOfferCandidateMode{
 			Protocol: inboundProtocol,
-			Mode:     picker.Pick(candidate.Channel, realModel, inboundProtocol),
+			Mode:     picker.Pick(candidate.Channel, realModel, inboundProtocol, llmkit.ToolCallRequestInfo{}),
 		})
 	}
 	return result

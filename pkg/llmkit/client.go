@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/transport"
 )
 
@@ -356,6 +357,9 @@ func cloneMessages(messages []Message) []Message {
 			}
 		}
 		cloned[index].ToolCalls = append([]ToolCall(nil), message.ToolCalls...)
+		for i := range cloned[index].ToolCalls {
+			cloned[index].ToolCalls[i].ProviderData = convert.CloneToolCallProviderData(message.ToolCalls[i].ProviderData)
+		}
 		cloned[index].RawJSON = append([]byte(nil), message.RawJSON...)
 	}
 	return cloned

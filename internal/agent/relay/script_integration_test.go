@@ -10,36 +10,150 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/executionmode"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/config"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
 
-func TestReparseModelStream(t *testing.T) {
-	// 改了 model + stream
-	rctx := &state.RelayContext{Input: state.RelayInput{Model: "old", IsStream: false}}
-	reparseModelStream(rctx, []byte(`{"model":"new","stream":true}`))
-	assert.Equal(t, "new", rctx.Input.Model)
-	assert.True(t, rctx.Input.IsStream)
+func TestReparseRequestFacts(t *testing.T) {
+	tests := []struct {
+		name  string
+		start state.RelayInput
+		body  string
+		want  state.RelayInput
+	}{
+		{
+			name:  "改了 model + stream",
+			start: state.RelayInput{Model: "old", IsStream: false},
+			body:  `{"model":"new","stream":true}`,
+			want:  state.RelayInput{Model: "new", IsStream: true},
+		},
+		{
+			name:  "不带 key：保持原值（未提供不等于清空）",
+			start: state.RelayInput{Model: "keep", IsStream: true},
+			body:  `{"foo":1}`,
+			want:  state.RelayInput{Model: "keep", IsStream: true},
+		},
+		{
+			name:  "非法 JSON：保持原值",
+			start: state.RelayInput{Model: "keep", InboundProto: llmkit.ProtocolOpenAIChat, ToolCalls: llmkit.ToolCallRequestInfo{HasTools: true}},
+			body:  `not json`,
+			want:  state.RelayInput{Model: "keep", InboundProto: llmkit.ProtocolOpenAIChat, ToolCalls: llmkit.ToolCallRequestInfo{HasTools: true}},
+		},
+		{
+			name:  "改写后带工具定义",
+			start: state.RelayInput{Model: "m", InboundProto: llmkit.ProtocolOpenAIChat},
+			body:  `{"model":"m","tools":[{"type":"function","function":{"name":"f"}}]}`,
+			want:  state.RelayInput{Model: "m", InboundProto: llmkit.ProtocolOpenAIChat, ToolCalls: llmkit.ToolCallRequestInfo{HasTools: true}},
+		},
+		{
+			name:  "改写后去掉工具定义",
+			start: state.RelayInput{Model: "m", InboundProto: llmkit.ProtocolOpenAIChat, ToolCalls: llmkit.ToolCallRequestInfo{HasTools: true}},
+			body:  `{"model":"m","messages":[]}`,
+			want:  state.RelayInput{Model: "m", InboundProto: llmkit.ProtocolOpenAIChat},
+		},
+		{
+			name:  "不支持工具的协议：特征保持为空",
+			start: state.RelayInput{Model: "m", InboundProto: llmkit.ProtocolUnknown},
+			body:  `{"model":"m","tools":[{"type":"function"}]}`,
+			want:  state.RelayInput{Model: "m", InboundProto: llmkit.ProtocolUnknown},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rctx := &state.RelayContext{Input: tt.start}
+			reparseRequestFacts(rctx, []byte(tt.body))
+			assert.Equal(t, tt.want, rctx.Input)
+		})
+	}
+}
 
-	// 不带 key：保持原值（"未提供" ≠ "清空"）
-	rctx2 := &state.RelayContext{Input: state.RelayInput{Model: "keep", IsStream: true}}
-	reparseModelStream(rctx2, []byte(`{"foo":1}`))
-	assert.Equal(t, "keep", rctx2.Input.Model)
-	assert.True(t, rctx2.Input.IsStream)
+// TestApplyRequestScriptsRefreshesToolCalls 脚本改写请求体后，本地选出的执行模式要和远端按改写后 body 重算的一致。
+func TestApplyRequestScriptsRefreshesToolCalls(t *testing.T) {
+	const (
+		plainChat = `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`
+		toolChat  = `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}]}`
+	)
+	tests := []struct {
+		name      string
+		code      string
+		body      string
+		wantTools llmkit.ToolCallRequestInfo
+		wantMode  attemptproxy.ExecutionMode
+	}{
+		{
+			name:      "脚本删掉 tools 后不再要求协议转换",
+			code:      `function onRequest(ctx) { delete ctx.body.tools }`,
+			body:      toolChat,
+			wantTools: llmkit.ToolCallRequestInfo{},
+			wantMode:  attemptproxy.ModePassthrough,
+		},
+		{
+			name:      "脚本给纯文本 Chat 请求加 tools 后必须走协议转换",
+			code:      `function onRequest(ctx) { ctx.body.tools = [{type: "function", function: {name: "f"}}] }`,
+			body:      plainChat,
+			wantTools: llmkit.ToolCallRequestInfo{HasTools: true},
+			wantMode:  attemptproxy.ModeNative,
+		},
+		{
+			name:      "脚本往历史里塞打包的工具调用 ID",
+			code:      `function onRequest(ctx) { ctx.body.messages.push({role: "tool", tool_call_id: "call_llmkit_v1_abc", content: "x"}) }`,
+			body:      plainChat,
+			wantTools: llmkit.ToolCallRequestInfo{HasToolHistory: true, HasPackedToolCallID: true},
+			wantMode:  attemptproxy.ModeNative,
+		},
+		{
+			name:      "脚本没动请求体时特征保持不变",
+			code:      `function onRequest(ctx) { }`,
+			body:      toolChat,
+			wantTools: llmkit.ToolCallRequestInfo{HasTools: true},
+			wantMode:  attemptproxy.ModeNative,
+		},
+	}
+	channel := &models.Channel{ChannelCore: models.ChannelCore{
+		Type:               consts.ChannelTypeOpenAI,
+		PassthroughEnabled: true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newResourceTestHandler(scriptCache(t, tt.code), &handlerTrackingBodyStore{})
+			rctx, _ := scriptTestRelayContext(t, h, &handlerTrackingReplayBody{data: []byte(tt.body)})
+			rctx.Input.InboundProto = llmkit.ProtocolOpenAIChat
+			before, err := llmkit.InspectToolCallRequest(rctx.Input.InboundProto, rctx.Input.Body)
+			require.NoError(t, err)
+			rctx.Input.ToolCalls = before
 
-	// 非法 JSON：保持原值
-	rctx3 := &state.RelayContext{Input: state.RelayInput{Model: "keep"}}
-	reparseModelStream(rctx3, []byte(`not json`))
-	assert.Equal(t, "keep", rctx3.Input.Model)
+			rejected, err := h.applyRequestScripts(rctx)
+			require.NoError(t, err)
+			require.False(t, rejected)
+
+			// 远端 agent 收到的是改写后的请求体，ctxbuild 会按它重算特征。
+			rewritten, err := io.ReadAll(rctx.Context.Request.Body)
+			require.NoError(t, err)
+			remote, err := llmkit.InspectToolCallRequest(rctx.Input.InboundProto, rewritten)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantTools, rctx.Input.ToolCalls)
+			assert.Equal(t, remote, rctx.Input.ToolCalls)
+			localMode := executionmode.ForChannel(channel, "gpt-4", rctx.Input.InboundProto, rctx.Input.ToolCalls)
+			remoteMode := executionmode.ForChannel(channel, "gpt-4", rctx.Input.InboundProto, remote)
+			assert.Equal(t, tt.wantMode, localMode)
+			assert.Equal(t, remoteMode, localMode)
+		})
+	}
 }
 
 func TestApplyRequestScriptsAtomicallyReplacesReplayBody(t *testing.T) {
-	store := scriptMutationCache(t)
+	store := scriptCache(t, mutateModelStreamScript)
 	nextStore := &handlerTrackingBodyStore{}
 	h := newResourceTestHandler(store, nextStore)
 	old := &handlerTrackingReplayBody{data: []byte(`{"model":"old","stream":false}`)}
@@ -91,7 +205,7 @@ func TestApplyRequestScriptsAtomicallyReplacesReplayBody(t *testing.T) {
 
 func TestApplyRequestScriptsCaptureFailureKeepsOldBodyUsable(t *testing.T) {
 	wantErr := errors.New("replacement capture failed")
-	h := newResourceTestHandler(scriptMutationCache(t), &handlerTrackingBodyStore{captureErr: wantErr})
+	h := newResourceTestHandler(scriptCache(t, mutateModelStreamScript), &handlerTrackingBodyStore{captureErr: wantErr})
 	oldBytes := []byte(`{"model":"old","stream":false}`)
 	old := &handlerTrackingReplayBody{data: oldBytes}
 	rctx, oldReader := scriptTestRelayContext(t, h, old)
@@ -128,7 +242,7 @@ func TestApplyRequestScriptsOpenFailureKeepsOldBodyAndReaderUsable(t *testing.T)
 	secretErr := errors.New("replacement open failed at /secret/spill")
 	next := &handlerTrackingReplayBody{openErr: secretErr}
 	h := newResourceTestHandler(
-		scriptMutationCache(t),
+		scriptCache(t, mutateModelStreamScript),
 		&handlerTrackingBodyStore{nextBody: next},
 	)
 	oldBytes := []byte(`{"model":"old","stream":false}`)
@@ -164,12 +278,15 @@ func TestApplyRequestScriptsOpenFailureKeepsOldBodyAndReaderUsable(t *testing.T)
 	}
 }
 
-func scriptMutationCache(t *testing.T) *cache.Store {
+// mutateModelStreamScript 把请求的 model 改成 new、stream 改成 true。
+const mutateModelStreamScript = `function onRequest(ctx) { ctx.body.model = "new"; ctx.body.stream = true }`
+
+func scriptCache(t *testing.T, code string) *cache.Store {
 	t.Helper()
 	store := cache.NewStore(nil, config.AgentCacheConfig{})
 	store.LoadScripts([]models.AdminScript{{
 		ID: 1, Name: "mutate", Enabled: true,
-		Code:  `function onRequest(ctx) { ctx.body.model = "new"; ctx.body.stream = true }`,
+		Code:  code,
 		Scope: datatypes.NewJSONType(models.ScriptScope{}),
 	}})
 	return store

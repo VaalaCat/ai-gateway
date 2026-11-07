@@ -8,9 +8,9 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
-// ValidateToolSchemaCompatibility 校验渠道工具定义兼容规则的模型正则和兼容方式。
-func ValidateToolSchemaCompatibility(otherSettings string) error {
-	// 1. 读取工具定义兼容规则。
+// ValidateToolCompatibility 校验渠道工具兼容规则的模型正则和兼容方式。
+func ValidateToolCompatibility(otherSettings string) error {
+	// 1. 读取工具兼容规则。
 	var other map[string]json.RawMessage
 	if json.Unmarshal([]byte(otherSettings), &other) != nil {
 		return nil
@@ -20,8 +20,9 @@ func ValidateToolSchemaCompatibility(otherSettings string) error {
 		return nil
 	}
 	var rules []struct {
-		ModelPattern string                   `json:"model_pattern"`
-		Profile      llmkit.ToolSchemaProfile `json:"profile"`
+		ModelPattern      string                       `json:"model_pattern"`
+		Profile           llmkit.ToolSchemaProfile     `json:"profile"`
+		SignatureFallback llmkit.ToolSignatureFallback `json:"signature_fallback"`
 	}
 	if err := json.Unmarshal(raw, &rules); err != nil {
 		return fmt.Errorf("model_tool_schema_compatibility: %w", err)
@@ -37,6 +38,9 @@ func ValidateToolSchemaCompatibility(otherSettings string) error {
 		}
 		if rule.Profile != llmkit.ToolSchemaProfileNone && rule.Profile != llmkit.ToolSchemaProfileGeminiCompat {
 			return fmt.Errorf("model_tool_schema_compatibility rule %d: unsupported profile %q", index+1, rule.Profile)
+		}
+		if rule.SignatureFallback != "" && rule.SignatureFallback != llmkit.ToolSignatureFallbackNone && rule.SignatureFallback != llmkit.ToolSignatureFallbackGemini {
+			return fmt.Errorf("model_tool_schema_compatibility rule %d: unsupported signature_fallback %q", index+1, rule.SignatureFallback)
 		}
 	}
 	return nil

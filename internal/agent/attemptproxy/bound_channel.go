@@ -25,6 +25,7 @@ const (
 )
 
 type BoundChannelInput struct {
+	ToolCalls       llmkit.ToolCallRequestInfo
 	User            *app.UserInfo
 	Attempt         attemptwire.BoundAttempt
 	InboundProtocol llmkit.Protocol
@@ -76,7 +77,7 @@ func (f *channelFinder) Find(input BoundChannelInput) (state.Attempt, error) {
 	if err != nil {
 		return state.Attempt{}, err
 	}
-	if executionmode.ForChannel(channel, input.Attempt.RealModel, input.InboundProtocol) != input.Attempt.Mode {
+	if executionmode.ForChannel(channel, input.Attempt.RealModel, input.InboundProtocol, input.ToolCalls) != input.Attempt.Mode {
 		return state.Attempt{}, boundChannelError(boundModeMismatch)
 	}
 

@@ -135,7 +135,9 @@ func (backend *Backend) buildCallOptions(
 	attempt state.Attempt,
 	inbound, outbound llmkit.Protocol,
 	config *upstream.ChannelConfig,
+	mappedModel string,
 ) llmkit.CallOptions {
+	compatibility := upstream.NewToolCompatibilityRules(attempt.Channel).Match(mappedModel)
 	policy := llmkit.NormalizeBuiltinToolFallback(config.BuiltinToolFallback)
 	return llmkit.CallOptions{
 		HTTPClient: &attemptHTTPDoer{
@@ -143,8 +145,9 @@ func (backend *Backend) buildCallOptions(
 			attempt: attempt, protocol: outbound, recorder: relay.State.Recorder,
 		},
 		Conversion: llmkit.ConversionOptions{
-			BuiltinToolFallback: policy,
-			RequestFields:       config.RequestFieldPermissions,
+			ToolSignatureFallback: compatibility.SignatureFallback,
+			BuiltinToolFallback:   policy,
+			RequestFields:         config.RequestFieldPermissions,
 			OnDroppedTools: func(dropped []llmkit.DroppedTool) {
 				upstream.EmitDroppedTools(
 					backend.logger(), dropped, attempt.Channel.ID,
@@ -168,9 +171,8 @@ func (backend *Backend) callTarget(
 	if client == nil {
 		client = llmkit.NewClient(llmkit.ClientOptions{Codec: backend.codec()})
 	}
-	return client.Call(ctx, request, target, backend.buildCallOptions(
-		relay, attempt, request.InboundProtocol, target.Protocol, config,
-	))
+	options := backend.buildCallOptions(relay, attempt, request.InboundProtocol, target.Protocol, config, target.Model)
+	return client.Call(ctx, request, target, options)
 }
 
 func (backend *Backend) writeClientResponse(

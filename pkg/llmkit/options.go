@@ -32,9 +32,10 @@ func DefaultRequestFieldPermissions() RequestFieldPermissions {
 }
 
 type ConversionOptions struct {
-	BuiltinToolFallback BuiltinToolFallbackPolicy
-	RequestFields       RequestFieldPermissions
-	OnDroppedTools      func([]DroppedTool)
+	ToolSignatureFallback ToolSignatureFallback // 这一轮没有可用签名时补什么：none / gemini
+	BuiltinToolFallback   BuiltinToolFallbackPolicy
+	RequestFields         RequestFieldPermissions
+	OnDroppedTools        func([]DroppedTool)
 	// MergeMessageRoles lists the roles whose adjacent messages are merged into one before encoding:
 	// Content and ToolCalls are concatenated in order. Messages carrying ToolCallID or RawJSON never merge
 	// and break adjacency.

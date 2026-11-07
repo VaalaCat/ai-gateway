@@ -11,7 +11,7 @@ import (
 // Solver 在选完 channel 后调用它给 AttemptPlan 填 Mode 字段。
 // 与 Handler 解耦——预判仅依赖 channel + inboundProto + realModel，不读 Handler 字段。
 type ModePicker interface {
-	Pick(ch *models.Channel, realModel string, inboundProto llmkit.Protocol) state.RelayMode
+	Pick(ch *models.Channel, realModel string, inboundProto llmkit.Protocol, toolCalls llmkit.ToolCallRequestInfo) state.RelayMode
 }
 
 // defaultModePicker 是 ModePicker 的默认实现。
@@ -23,6 +23,6 @@ type ModePicker interface {
 type defaultModePicker struct{}
 
 // Pick 见接口文档。
-func (defaultModePicker) Pick(ch *models.Channel, realModel string, inboundProto llmkit.Protocol) state.RelayMode {
-	return executionmode.ForChannel(ch, realModel, inboundProto)
+func (defaultModePicker) Pick(ch *models.Channel, realModel string, inboundProto llmkit.Protocol, toolCalls llmkit.ToolCallRequestInfo) state.RelayMode {
+	return executionmode.ForChannel(ch, realModel, inboundProto, toolCalls)
 }

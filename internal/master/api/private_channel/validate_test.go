@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func TestValidateToolSchemaCompatibilityCtx(t *testing.T) {
+func TestValidateToolCompatibilityCtx(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		pattern string
@@ -26,7 +26,7 @@ func TestValidateToolSchemaCompatibilityCtx(t *testing.T) {
 		{"unrelated patch", "^gemini-(?=4)", map[string]bool{"name": true}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateToolSchemaCompatibilityCtx(ValidatorCtx{Dirty: tt.dirty, Req: map[string]any{
+			err := validateToolCompatibilityCtx(ValidatorCtx{Dirty: tt.dirty, Req: map[string]any{
 				"other_settings": `{"model_tool_schema_compatibility":[{"model_pattern":"` + tt.pattern + `","profile":"gemini_compat"}]}`,
 			}})
 			if tt.wantErr {

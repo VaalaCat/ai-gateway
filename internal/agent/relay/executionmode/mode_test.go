@@ -93,7 +93,7 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, ForChannel(tt.channel, tt.model, tt.inbound))
+			require.Equal(t, tt.want, ForChannel(tt.channel, tt.model, tt.inbound, llmkit.ToolCallRequestInfo{}))
 		})
 	}
 }
@@ -120,7 +120,7 @@ func TestForChannelPreservesPassthroughCombinations(t *testing.T) {
 				PassthroughEnabled: tt.passthrough,
 				SupportedAPITypes:  tt.supported,
 			}}
-			require.Equal(t, tt.want, ForChannel(ch, "", tt.inbound))
+			require.Equal(t, tt.want, ForChannel(ch, "", tt.inbound, llmkit.ToolCallRequestInfo{}))
 		})
 	}
 }
@@ -130,7 +130,8 @@ func TestToolSchemaCompatibilityBypassesPassthroughForMappedModel(t *testing.T) 
 		ChannelCore: models.ChannelCore{
 			Type: consts.ChannelTypeOpenAI, PassthroughEnabled: true,
 			OtherSettings: `{"model_tool_schema_compatibility":[
-				{"model_pattern":"^gemini-excluded$","profile":"none"},
+				{"model_pattern":"^gemini-excluded$","profile":"none","signature_fallback":"none"},
+				{"model_pattern":"^gemini-fallback$","profile":"none","signature_fallback":"gemini"},
 				{"model_pattern":"^gemini-.*$","profile":"gemini_compat"}
 			]}`,
 		},
@@ -142,12 +143,70 @@ func TestToolSchemaCompatibilityBypassesPassthroughForMappedModel(t *testing.T) 
 	}{
 		{"alias", attemptproxy.ModeNative},
 		{"gemini-4-argon", attemptproxy.ModeNative},
+		{"gemini-fallback", attemptproxy.ModePassthrough},
 		{"excluded", attemptproxy.ModePassthrough},
 		{"reverse-alias", attemptproxy.ModePassthrough},
 		{"gpt-5", attemptproxy.ModePassthrough},
 	} {
 		t.Run(tt.model, func(t *testing.T) {
-			require.Equal(t, tt.want, ForChannel(ch, tt.model, llmkit.ProtocolOpenAIChat))
+			require.Equal(t, tt.want, ForChannel(ch, tt.model, llmkit.ProtocolOpenAIChat, llmkit.ToolCallRequestInfo{}))
+		})
+	}
+}
+
+func TestForChannelToolCalls(t *testing.T) {
+	openAIChat := func() *models.Channel {
+		return &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI, PassthroughEnabled: true}}
+	}
+	openAIResponses := func() *models.Channel {
+		return &models.Channel{ChannelCore: models.ChannelCore{
+			Type: consts.ChannelTypeOpenAI, PassthroughEnabled: true, SupportedAPITypes: `["responses"]`,
+		}}
+	}
+	claude := func() *models.Channel {
+		return &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeAnthropic, PassthroughEnabled: true}}
+	}
+	for _, tt := range []struct {
+		name    string
+		channel *models.Channel
+		inbound llmkit.Protocol
+		info    llmkit.ToolCallRequestInfo
+		want    attemptproxy.ExecutionMode
+	}{
+		{"claude to claude with tools", claude(), llmkit.ProtocolClaude, llmkit.ToolCallRequestInfo{HasTools: true}, attemptproxy.ModePassthrough},
+		{"claude to claude with tool history", claude(), llmkit.ProtocolClaude, llmkit.ToolCallRequestInfo{HasTools: true, HasToolHistory: true}, attemptproxy.ModePassthrough},
+		{"claude to claude with packed id", claude(), llmkit.ProtocolClaude, llmkit.ToolCallRequestInfo{HasToolHistory: true, HasPackedToolCallID: true}, attemptproxy.ModeNative},
+		{"claude to claude text", claude(), llmkit.ProtocolClaude, llmkit.ToolCallRequestInfo{}, attemptproxy.ModePassthrough},
+		{"responses to responses with tools", openAIResponses(), llmkit.ProtocolOpenAIResponses, llmkit.ToolCallRequestInfo{HasTools: true}, attemptproxy.ModePassthrough},
+		{"responses to responses with packed id", openAIResponses(), llmkit.ProtocolOpenAIResponses, llmkit.ToolCallRequestInfo{HasToolHistory: true, HasPackedToolCallID: true}, attemptproxy.ModeNative},
+		{"chat outbound with tools", openAIChat(), llmkit.ProtocolOpenAIChat, llmkit.ToolCallRequestInfo{HasTools: true}, attemptproxy.ModeNative},
+		{"chat outbound with tool history", openAIChat(), llmkit.ProtocolOpenAIChat, llmkit.ToolCallRequestInfo{HasToolHistory: true}, attemptproxy.ModeNative},
+		{"chat outbound with packed id", openAIChat(), llmkit.ProtocolOpenAIChat, llmkit.ToolCallRequestInfo{HasPackedToolCallID: true}, attemptproxy.ModeNative},
+		{"chat outbound text", openAIChat(), llmkit.ProtocolOpenAIChat, llmkit.ToolCallRequestInfo{}, attemptproxy.ModePassthrough},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ForChannel(tt.channel, "gemini", tt.inbound, tt.info))
+			tt.channel.UseLegacyAdaptor = true
+			require.Equal(t, attemptproxy.ModeLegacy, ForChannel(tt.channel, "gemini", tt.inbound, tt.info))
+		})
+	}
+}
+
+func TestForChannelSignatureFallbackFollowsToolCallRule(t *testing.T) {
+	ch := &models.Channel{ChannelCore: models.ChannelCore{
+		Type: consts.ChannelTypeOpenAI, PassthroughEnabled: true,
+		OtherSettings: `{"model_tool_schema_compatibility":[{"model_pattern":"^gemini-.*$","profile":"none","signature_fallback":"gemini"}]}`,
+	}}
+	for _, tt := range []struct {
+		name string
+		info llmkit.ToolCallRequestInfo
+		want attemptproxy.ExecutionMode
+	}{
+		{"text", llmkit.ToolCallRequestInfo{}, attemptproxy.ModePassthrough},
+		{"tools", llmkit.ToolCallRequestInfo{HasTools: true}, attemptproxy.ModeNative},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ForChannel(ch, "gemini-3", llmkit.ProtocolOpenAIChat, tt.info))
 		})
 	}
 }

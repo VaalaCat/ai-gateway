@@ -59,12 +59,20 @@ type oaiImageURL struct {
 // a delta belongs to. It uses `json:"index"` (not omitempty) so it always
 // appears in stream chunk JSON per the OpenAI spec.
 type oaiToolCall struct {
-	Index     int             `json:"index"`
-	ID        string          `json:"id,omitempty"`
-	Signature string          `json:"signature,omitempty"`
-	Type      string          `json:"type,omitempty"`
-	Function  oaiToolFunction `json:"function"`
+	Index        int                        `json:"index"`
+	ID           string                     `json:"id,omitempty"`
+	Signature    string                     `json:"signature,omitempty"`
+	ExtraContent map[string]json.RawMessage `json:"extra_content,omitempty"`
+	Type         string                     `json:"type,omitempty"`
+	Function     oaiToolFunction            `json:"function"`
 }
+
+// ProviderData.Fields 里 Chat 工具调用用的三个键。
+const (
+	providerFieldExtraContent     = "extra_content"     // 调用上的 extra_content 对象
+	providerFieldSignature        = "signature"         // 调用上的 signature
+	providerFieldMessageSignature = "message_signature" // 所在 assistant 消息上的 signature
+)
 
 type oaiToolFunction struct {
 	Name      string `json:"name"`

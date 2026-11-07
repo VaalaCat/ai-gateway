@@ -2,6 +2,7 @@ package chat
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
@@ -91,6 +94,469 @@ func collectEventChannel(events <-chan ir.Event) []ir.Event {
 		result = append(result, event)
 	}
 	return result
+}
+
+func TestChatDecodeStreamToolReadError(t *testing.T) {
+	const partialCall = "data: " + `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{\"cmd\":"}}]}}]}` + "\n\n"
+	const finishedCall = "data: " + `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n"
+	tests := []struct {
+		name       string
+		sse        string
+		wantArgs   string
+		wantEnds   int
+		wantFinish string
+	}{
+		{
+			name:       "断流时工具参数只收到一半",
+			sse:        partialCall,
+			wantArgs:   `{"cmd":`,
+			wantEnds:   0,
+			wantFinish: "",
+		},
+		{
+			name:       "断流前工具调用已经随 finish_reason 结束",
+			sse:        finishedCall,
+			wantArgs:   `{}`,
+			wantEnds:   1,
+			wantFinish: "tool_calls",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 1. 上游在发送工具调用后断开流。
+			response := &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(io.MultiReader(strings.NewReader(tt.sse), iotest.ErrReader(io.ErrUnexpectedEOF))),
+			}
+			events, err := (&handler{}).decodeHTTPResponse(response, true)
+			require.NoError(t, err)
+			got := collectEventChannel(events)
+
+			// 2. 错误前保留已收到的工具片段，没结束的工具不标记为完成，错误之后也不补 tool_calls 结束原因。
+			require.Less(t, indexEvent(got, ir.EventToolCallStart), indexEvent(got, ir.EventError))
+			require.Less(t, indexEvent(got, ir.EventToolCallArgumentsDelta), indexEvent(got, ir.EventError))
+			require.Equal(t, tt.wantArgs, findEvent(t, got, ir.EventToolCallArgumentsDelta).ToolCall.Arguments)
+			require.Equal(t, tt.wantEnds, countEvents(got, ir.EventToolCallEnd))
+			require.Equal(t, tt.wantFinish, findEvent(t, got, ir.EventDone).FinishReason)
+		})
+	}
+}
+
+func TestChatDecodeStreamToolTextOrder(t *testing.T) {
+	// 1. 上游在工具参数分片之间输出文本。
+	sse := "data: " + `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"shell","arguments":"{"}}]}}]}` + "\n\n" +
+		"data: " + `{"choices":[{"delta":{"content":"working"}}]}` + "\n\n" +
+		"data: " + `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}]}` + "\n\ndata: [DONE]\n\n"
+	got := collectStreamEvents(t, sse)
+
+	// 2. 文本与工具调用的事件按到达顺序发出。
+	require.Equal(t, []ir.EventType{
+		ir.EventStreamStart, ir.EventToolCallStart, ir.EventToolCallArgumentsDelta,
+		ir.EventContentDelta, ir.EventToolCallArgumentsDelta, ir.EventToolCallEnd, ir.EventDone,
+	}, eventTypesOf(got))
+	require.Equal(t, "working", findEvent(t, got, ir.EventContentDelta).Delta.Text)
+}
+
+// 流式工具调用收到第一块就发 Start，参数片段和后续文本立刻发，后到的签名并进该调用并随 End 带出。
+func TestChatStreamToolCallEmitsOnFirstChunk(t *testing.T) {
+	const (
+		firstChunk  = `{"index":0,"id":"call_1","function":{"name":"write","arguments":"{\"a\":"}}`
+		bigNumber   = `{"google":{"thought_signature":"sig-1"},"vendor":{"n":9007199254740993}}`
+		finishChunk = `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`
+	)
+	toolChunk := func(call string) string {
+		return `{"choices":[{"delta":{"tool_calls":[` + call + `]}}]}`
+	}
+	extraChunk := func(extra string) string {
+		return toolChunk(`{"index":0,"function":{"arguments":""},"extra_content":` + extra + `}`)
+	}
+	extraFields := func(extra string) map[string]string { return map[string]string{"extra_content": extra} }
+	providerData := func(fields map[string]string) *ir.ToolCallProviderData {
+		raw := make(map[string]json.RawMessage, len(fields))
+		for key, value := range fields {
+			raw[key] = json.RawMessage(value)
+		}
+		return &ir.ToolCallProviderData{Protocol: ir.ProtocolOpenAIChat, Fields: raw}
+	}
+	toolEvents := func(events []ir.Event, eventType ir.EventType) []ir.Event {
+		var result []ir.Event
+		for _, event := range events {
+			if event.Type == eventType {
+				result = append(result, event)
+			}
+		}
+		return result
+	}
+
+	tests := []struct {
+		name   string
+		chunks []string
+		// finish 之前 300ms 内必须收到的事件类型，按到达顺序。
+		wantLive []ir.EventType
+		check    func(t *testing.T, all []ir.Event)
+	}{
+		{
+			name:     "first chunk emits start and arguments before finish",
+			chunks:   []string{toolChunk(firstChunk)},
+			wantLive: []ir.EventType{ir.EventStreamStart, ir.EventToolCallStart, ir.EventToolCallArgumentsDelta},
+			check: func(t *testing.T, all []ir.Event) {
+				start := findEvent(t, all, ir.EventToolCallStart).ToolCall
+				require.Equal(t, "call_1", start.CallID)
+				require.Equal(t, "write", start.Name)
+				require.Nil(t, start.ProviderData)
+				require.Equal(t, `{"a":`, findEvent(t, all, ir.EventToolCallArgumentsDelta).ToolCall.Arguments)
+				end := findEvent(t, all, ir.EventToolCallEnd).ToolCall
+				require.Equal(t, "call_1", end.CallID)
+				require.Equal(t, `{"a":`, end.Arguments)
+				require.Nil(t, end.ProviderData)
+			},
+		},
+		{
+			name: "signature in the first chunk is on start and end",
+			chunks: []string{toolChunk(`{"index":0,"id":"call_1","function":{"name":"write","arguments":"{}"},` +
+				`"extra_content":{"google":{"thought_signature":"sig-1"}}}`)},
+			wantLive: []ir.EventType{ir.EventStreamStart, ir.EventToolCallStart, ir.EventToolCallArgumentsDelta},
+			check: func(t *testing.T, all []ir.Event) {
+				want := providerData(extraFields(`{"google":{"thought_signature":"sig-1"}}`))
+				requireProviderDataEqual(t, want, findEvent(t, all, ir.EventToolCallStart).ToolCall.ProviderData)
+				requireProviderDataEqual(t, want, findEvent(t, all, ir.EventToolCallEnd).ToolCall.ProviderData)
+			},
+		},
+		{
+			name: "signature in the third chunk only reaches end",
+			chunks: []string{
+				toolChunk(firstChunk),
+				toolChunk(`{"index":0,"function":{"arguments":"1"}}`),
+				toolChunk(`{"index":0,"function":{"arguments":"}"},"signature":"t-sig","extra_content":{"google":{"thought_signature":"sig-3"}}}`),
+			},
+			wantLive: []ir.EventType{
+				ir.EventStreamStart, ir.EventToolCallStart,
+				ir.EventToolCallArgumentsDelta, ir.EventToolCallArgumentsDelta, ir.EventToolCallArgumentsDelta,
+			},
+			check: func(t *testing.T, all []ir.Event) {
+				require.Len(t, toolEvents(all, ir.EventToolCallStart), 1)
+				require.Nil(t, findEvent(t, all, ir.EventToolCallStart).ToolCall.ProviderData)
+				end := findEvent(t, all, ir.EventToolCallEnd).ToolCall
+				require.Equal(t, `{"a":1}`, end.Arguments)
+				requireProviderDataEqual(t, providerData(map[string]string{
+					"extra_content": `{"google":{"thought_signature":"sig-3"}}`,
+					"signature":     `"t-sig"`,
+				}), end.ProviderData)
+			},
+		},
+		{
+			name: "empty id on the first chunk keeps the generated id",
+			chunks: []string{
+				toolChunk(`{"index":0,"function":{"name":"write","arguments":"{"}}`),
+				toolChunk(`{"index":0,"id":"call_late","function":{"arguments":"}"}}`),
+			},
+			wantLive: []ir.EventType{
+				ir.EventStreamStart, ir.EventToolCallStart,
+				ir.EventToolCallArgumentsDelta, ir.EventToolCallArgumentsDelta,
+			},
+			check: func(t *testing.T, all []ir.Event) {
+				startID := findEvent(t, all, ir.EventToolCallStart).ToolCall.CallID
+				require.True(t, strings.HasPrefix(startID, "call_") && len(startID) > len("call_"), startID)
+				require.NotEqual(t, "call_late", startID)
+				for _, delta := range toolEvents(all, ir.EventToolCallArgumentsDelta) {
+					require.Equal(t, startID, delta.ToolCall.CallID)
+				}
+				require.Equal(t, startID, findEvent(t, all, ir.EventToolCallEnd).ToolCall.CallID)
+				require.NoError(t, convert.AssertStreamingToolCallInvariant(all))
+			},
+		},
+		{
+			name: "text after a tool call is emitted immediately",
+			chunks: []string{
+				toolChunk(firstChunk),
+				`{"choices":[{"delta":{"content":"working"}}]}`,
+			},
+			wantLive: []ir.EventType{
+				ir.EventStreamStart, ir.EventToolCallStart, ir.EventToolCallArgumentsDelta, ir.EventContentDelta,
+			},
+			check: func(t *testing.T, all []ir.Event) {
+				require.Equal(t, "working", findEvent(t, all, ir.EventContentDelta).Delta.Text)
+				require.Less(t, indexEvent(all, ir.EventContentDelta), indexEvent(all, ir.EventToolCallEnd))
+			},
+		},
+		{
+			name: "parallel calls each start on their first chunk",
+			chunks: []string{
+				toolChunk(`{"index":0,"id":"call_a","function":{"name":"a","arguments":"{}"}}`),
+				toolChunk(`{"index":1,"id":"call_b","function":{"name":"b","arguments":"{}"}}`),
+			},
+			wantLive: []ir.EventType{
+				ir.EventStreamStart,
+				ir.EventToolCallStart, ir.EventToolCallArgumentsDelta,
+				ir.EventToolCallStart, ir.EventToolCallArgumentsDelta,
+			},
+			check: func(t *testing.T, all []ir.Event) {
+				var endIDs []string
+				for _, end := range toolEvents(all, ir.EventToolCallEnd) {
+					endIDs = append(endIDs, end.ToolCall.CallID)
+				}
+				require.Equal(t, []string{"call_a", "call_b"}, endIDs)
+				require.NoError(t, convert.AssertStreamingToolCallInvariant(all))
+			},
+		},
+		{
+			name: "later partial google object keeps the earlier thought signature",
+			chunks: []string{
+				toolChunk(`{"index":0,"id":"call_1","function":{"name":"write","arguments":"{}"},"extra_content":` + bigNumber + `}`),
+				extraChunk(`{"google":{"note":"x"}}`),
+			},
+			wantLive: []ir.EventType{ir.EventStreamStart, ir.EventToolCallStart, ir.EventToolCallArgumentsDelta},
+			check: func(t *testing.T, all []ir.Event) {
+				requireProviderDataEqual(t,
+					providerData(extraFields(`{"google":{"thought_signature":"sig-1","note":"x"},"vendor":{"n":9007199254740993}}`)),
+					findEvent(t, all, ir.EventToolCallEnd).ToolCall.ProviderData)
+			},
+		},
+		{
+			name: "later empty value does not erase the thought signature",
+			chunks: []string{
+				toolChunk(`{"index":0,"id":"call_1","function":{"name":"write","arguments":"{}"},"extra_content":` + bigNumber + `}`),
+				extraChunk(`{"google":{"thought_signature":""}}`),
+			},
+			wantLive: []ir.EventType{ir.EventStreamStart, ir.EventToolCallStart, ir.EventToolCallArgumentsDelta},
+			check: func(t *testing.T, all []ir.Event) {
+				requireProviderDataEqual(t, providerData(extraFields(bigNumber)), findEvent(t, all, ir.EventToolCallEnd).ToolCall.ProviderData)
+			},
+		},
+		{
+			name: "later non-empty value overrides the thought signature",
+			chunks: []string{
+				toolChunk(`{"index":0,"id":"call_1","function":{"name":"write","arguments":"{}"},"extra_content":` + bigNumber + `}`),
+				extraChunk(`{"google":{"thought_signature":"sig-2"},"other":{"k":1}}`),
+			},
+			wantLive: []ir.EventType{ir.EventStreamStart, ir.EventToolCallStart, ir.EventToolCallArgumentsDelta},
+			check: func(t *testing.T, all []ir.Event) {
+				requireProviderDataEqual(t,
+					providerData(extraFields(`{"google":{"thought_signature":"sig-2"},"vendor":{"n":9007199254740993},"other":{"k":1}}`)),
+					findEvent(t, all, ir.EventToolCallEnd).ToolCall.ProviderData)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 1. 用 io.Pipe 逐块写入，不写 finish。
+			reader, writer := io.Pipe()
+			defer reader.Close()
+			events, err := (&handler{}).decodeHTTPResponse(&http.Response{StatusCode: http.StatusOK, Body: reader}, true)
+			require.NoError(t, err)
+			for _, chunk := range tt.chunks {
+				_, err := writer.Write([]byte("data: " + chunk + "\n\n"))
+				require.NoError(t, err)
+			}
+
+			// 2. 300ms 内应已收到工具调用的事件，不等 finish。
+			var all []ir.Event
+			for index, want := range tt.wantLive {
+				select {
+				case event := <-events:
+					require.Equal(t, want, event.Type, "live event %d", index)
+					all = append(all, event)
+				case <-time.After(300 * time.Millisecond):
+					require.FailNow(t, "event not emitted before finish", "want %v at %d, got %v", want, index, eventTypesOf(all))
+				}
+			}
+
+			// 3. 写入 finish 收尾，取回剩余事件后检查。
+			_, err = writer.Write([]byte("data: " + finishChunk + "\n\ndata: [DONE]\n\n"))
+			require.NoError(t, err)
+			require.NoError(t, writer.Close())
+			for event := range events {
+				all = append(all, event)
+			}
+			tt.check(t, all)
+		})
+	}
+}
+
+// extra_content 合并按命名空间内的字段递归进行，字段值保持原样。
+func TestMergeChatExtraContent(t *testing.T) {
+	tests := []struct {
+		name         string
+		earlier, now string
+		want         string
+	}{
+		{"disjoint namespaces", `{"google":{"a":"1"}}`, `{"vendor":{"b":"2"}}`, `{"google":{"a":"1"},"vendor":{"b":"2"}}`},
+		{"same namespace different fields", `{"google":{"a":"1"}}`, `{"google":{"b":"2"}}`, `{"google":{"a":"1","b":"2"}}`},
+		{"nested objects merge", `{"google":{"x":{"a":"1"}}}`, `{"google":{"x":{"b":"2"}}}`, `{"google":{"x":{"a":"1","b":"2"}}}`},
+		{"later non-empty wins", `{"google":{"a":"1"}}`, `{"google":{"a":"2"}}`, `{"google":{"a":"2"}}`},
+		{"later empty string keeps earlier", `{"google":{"a":"1"}}`, `{"google":{"a":""}}`, `{"google":{"a":"1"}}`},
+		{"later null keeps earlier", `{"google":{"a":"1"}}`, `{"google":{"a":null}}`, `{"google":{"a":"1"}}`},
+		{"later empty object keeps earlier", `{"google":{"a":"1"}}`, `{"google":{}}`, `{"google":{"a":"1"}}`},
+		{"non-object value is replaced", `{"google":"old"}`, `{"google":{"a":"1"}}`, `{"google":{"a":"1"}}`},
+		{"large integer is preserved", `{"vendor":{"n":9007199254740993}}`, `{"vendor":{"m":1}}`, `{"vendor":{"n":9007199254740993,"m":1}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var earlier, now map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(tt.earlier), &earlier))
+			require.NoError(t, json.Unmarshal([]byte(tt.now), &now))
+
+			got, err := json.Marshal(mergeChatExtraContent(earlier, now))
+			require.NoError(t, err)
+			require.JSONEq(t, tt.want, string(got))
+			require.Equal(t, strings.Contains(tt.want, "9007199254740993"), strings.Contains(string(got), "9007199254740993"))
+		})
+	}
+}
+
+// Chat 工具调用上的 extra_content、signature 和所在消息的 signature 收进该调用的 ProviderData。
+func TestChatDecodeToolCallProviderData(t *testing.T) {
+	const googleExtra = `{"google":{"thought_signature":"g-sig"},"vendor":{"n":9007199254740993}}`
+	providerData := func(fields map[string]string) *ir.ToolCallProviderData {
+		raw := make(map[string]json.RawMessage, len(fields))
+		for key, value := range fields {
+			raw[key] = json.RawMessage(value)
+		}
+		return &ir.ToolCallProviderData{Protocol: ir.ProtocolOpenAIChat, Fields: raw}
+	}
+	decodeRequest := func(body string) func(*testing.T) ([]ir.ToolCall, *ir.Request) {
+		return func(t *testing.T) ([]ir.ToolCall, *ir.Request) {
+			request, err := (&handler{}).decodeHTTPRequest(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
+			require.NoError(t, err)
+			var calls []ir.ToolCall
+			for _, message := range request.Messages {
+				calls = append(calls, message.ToolCalls...)
+			}
+			return calls, request
+		}
+	}
+	decodeResponse := func(stream bool, body string) func(*testing.T) ([]ir.ToolCall, *ir.Request) {
+		return func(t *testing.T) ([]ir.ToolCall, *ir.Request) {
+			events, err := (&handler{}).decodeHTTPResponse(&http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, stream)
+			require.NoError(t, err)
+			var calls []ir.ToolCall
+			startIDs := map[int]string{}
+			for _, event := range collectEventChannel(events) {
+				switch event.Type {
+				case ir.EventToolCallStart:
+					startIDs[event.ToolCall.Index] = event.ToolCall.CallID
+				case ir.EventToolCallEnd:
+					require.Equal(t, startIDs[event.ToolCall.Index], event.ToolCall.CallID)
+					calls = append(calls, ir.ToolCall{ID: event.ToolCall.CallID, ProviderData: event.ToolCall.ProviderData})
+				case ir.EventToolCallDelta:
+					calls = append(calls, ir.ToolCall{ID: event.Delta.ToolCall.ID, ProviderData: event.Delta.ToolCall.ProviderData})
+				}
+			}
+			return calls, nil
+		}
+	}
+
+	tests := []struct {
+		name   string
+		decode func(*testing.T) ([]ir.ToolCall, *ir.Request)
+		want   []ir.ToolCall // ID 为空表示上游没给 ID，应生成 call_ 开头的 ID
+	}{
+		{
+			name: "request call and message signatures",
+			decode: decodeRequest(`{"model":"m","messages":[{"role":"assistant","signature":"m-sig","tool_calls":[` +
+				`{"id":"call_1","type":"function","function":{"name":"a","arguments":"{}"},"signature":"t-sig","extra_content":` + googleExtra + `},` +
+				`{"id":"call_2","type":"function","function":{"name":"b","arguments":"{}"}}]},` +
+				`{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`),
+			want: []ir.ToolCall{
+				{ID: "call_1", ProviderData: providerData(map[string]string{"extra_content": googleExtra, "signature": `"t-sig"`, "message_signature": `"m-sig"`})},
+				{ID: "call_2", ProviderData: providerData(map[string]string{"message_signature": `"m-sig"`})},
+			},
+		},
+		{
+			name:   "request without signatures",
+			decode: decodeRequest(`{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"a","arguments":"{}"}}]}]}`),
+			want:   []ir.ToolCall{{ID: "call_1"}},
+		},
+		{
+			name:   "request empty id",
+			decode: decodeRequest(`{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"","type":"function","function":{"name":"a","arguments":"{}"}}]},{"role":"tool","tool_call_id":"","content":"ok"}]}`),
+			want:   []ir.ToolCall{{}},
+		},
+		{
+			name: "nonstream response",
+			decode: decodeResponse(false, `{"choices":[{"message":{"role":"assistant","signature":"m-sig","tool_calls":[`+
+				`{"id":"call_1","type":"function","function":{"name":"a","arguments":"{}"},"extra_content":`+googleExtra+`},`+
+				`{"id":"","type":"function","function":{"name":"b","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`),
+			want: []ir.ToolCall{
+				{ID: "call_1", ProviderData: providerData(map[string]string{"extra_content": googleExtra, "message_signature": `"m-sig"`})},
+				{ProviderData: providerData(map[string]string{"message_signature": `"m-sig"`})},
+			},
+		},
+		{
+			name: "stream signature in a later chunk",
+			decode: decodeResponse(true, "data: "+`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"a","arguments":"{"}}]}}]}`+"\n\n"+
+				"data: "+`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"},"signature":"t-sig","extra_content":`+googleExtra+`}]}}]}`+"\n\n"+
+				"data: "+`{"choices":[{"delta":{"signature":"m-sig"},"finish_reason":"tool_calls"}]}`+"\n\ndata: [DONE]\n\n"),
+			want: []ir.ToolCall{
+				{ID: "call_1", ProviderData: providerData(map[string]string{"extra_content": googleExtra, "signature": `"t-sig"`, "message_signature": `"m-sig"`})},
+			},
+		},
+		{
+			name:   "stream without signatures",
+			decode: decodeResponse(true, "data: "+`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"a","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`+"\n\ndata: [DONE]\n\n"),
+			want:   []ir.ToolCall{{ID: "call_1"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, request := tt.decode(t)
+			require.Len(t, got, len(tt.want))
+			for index, want := range tt.want {
+				if want.ID == "" {
+					require.True(t, strings.HasPrefix(got[index].ID, "call_") && len(got[index].ID) > len("call_"), got[index].ID)
+				} else {
+					require.Equal(t, want.ID, got[index].ID)
+				}
+				requireProviderDataEqual(t, want.ProviderData, got[index].ProviderData)
+			}
+			if request == nil {
+				return
+			}
+			// 带工具调用的 assistant 消息不再保留消息签名；工具结果跟随调用的 ID。
+			for _, message := range request.Messages {
+				if len(message.ToolCalls) > 0 {
+					require.Empty(t, message.Signature)
+				}
+				if message.Role == ir.RoleTool {
+					require.Equal(t, got[0].ID, message.ToolCallID)
+				}
+			}
+		})
+	}
+}
+
+// 纯文本 assistant 消息照旧把签名写进 Message.Signature。
+func TestChatDecodeTextMessageKeepsSignature(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, want string
+	}{
+		{name: "with signature", body: `{"model":"m","messages":[{"role":"assistant","content":"hi","signature":"text-sig"}]}`, want: "text-sig"},
+		{name: "without signature", body: `{"model":"m","messages":[{"role":"assistant","content":"hi"}]}`, want: ""},
+		{name: "empty content", body: `{"model":"m","messages":[{"role":"assistant","content":"","signature":"text-sig"}]}`, want: "text-sig"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			request, err := (&handler{}).decodeHTTPRequest(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tt.body)))
+			require.NoError(t, err)
+			require.Equal(t, tt.want, request.Messages[0].Signature)
+		})
+	}
+}
+
+// requireProviderDataEqual 比较 ProviderData，Fields 按 JSON 等值比较且保留大整数精度。
+func requireProviderDataEqual(t *testing.T, want, got *ir.ToolCallProviderData) {
+	t.Helper()
+	if want == nil {
+		require.Nil(t, got)
+		return
+	}
+	require.NotNil(t, got)
+	require.Equal(t, want.Protocol, got.Protocol)
+	require.Equal(t, want.Models, got.Models)
+	require.Len(t, got.Fields, len(want.Fields))
+	for key, value := range want.Fields {
+		require.JSONEq(t, string(value), string(got.Fields[key]), key)
+		require.Equal(t, strings.Contains(string(value), "9007199254740993"), strings.Contains(string(got.Fields[key]), "9007199254740993"), key)
+	}
 }
 
 func TestChatDecodeStreamReasoningLifecycleCompletesBeforeContent(t *testing.T) {

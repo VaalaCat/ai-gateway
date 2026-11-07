@@ -85,6 +85,8 @@ type StreamingToolCall struct {
 	Name      string `json:"name,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+
+	ProviderData *ToolCallProviderData `json:"provider_data,omitempty"` // Start 带当时已有的，End 带完整的
 }
 
 // ToolCallDelta carries incremental data for a streaming tool call.
@@ -93,6 +95,8 @@ type ToolCallDelta struct {
 	Name      string `json:"name,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+
+	ProviderData *ToolCallProviderData `json:"provider_data,omitempty"`
 }
 
 // Usage reports token consumption for a request.

@@ -23,7 +23,7 @@ func TestBuildDataFlowResponse_EmptyChannel(t *testing.T) {
 			t.Fatalf("step %q should be active for empty openai_chat channel", k)
 		}
 	}
-	for _, k := range []string{"model_mapping", "inject_system_prompt", "role_mapping", "tool_schema_compatibility", "param_override", "header_override"} {
+	for _, k := range []string{"model_mapping", "inject_system_prompt", "role_mapping", "tool_compatibility", "param_override", "header_override"} {
 		if active[k] {
 			t.Fatalf("step %q should be skipped for empty channel", k)
 		}

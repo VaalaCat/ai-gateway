@@ -74,7 +74,7 @@ func TestDescribeChannelDataFlowIncludesToolSchemaCompatibility(t *testing.T) {
 	}
 	want := []string{
 		"model_mapping", "inject_system_prompt", "role_mapping",
-		"thinking_passthrough", "thinking_strip", "tool_schema_compatibility", "inline_image",
+		"thinking_passthrough", "thinking_strip", "tool_compatibility", "inline_image",
 		"encode", "forward_client_headers", "param_override", "header_override", "upstream_script",
 	}
 	if got := keysOfInfos(AllStepInfos()); !equalStrs(got, want) {

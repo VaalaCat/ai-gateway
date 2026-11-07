@@ -45,6 +45,26 @@ func oaiUsageFromIR(u *ir.Usage) *oaiUsage {
 // EncodeRequest
 // ---------------------------------------------------------------------------
 
+// writeChatToolCallProviderData 把 Chat 协议 ProviderData 里的 extra_content 和 signature 写回工具调用，返回其中的消息签名。
+func writeChatToolCallProviderData(toolCall *oaiToolCall, data *ir.ToolCallProviderData) (messageSignature string) {
+	// 1. 只认 Chat 协议产生的字段。
+	if data == nil || data.Protocol != ir.ProtocolOpenAIChat {
+		return ""
+	}
+
+	// 2. extra_content 原样写回，两个签名按字符串取出。
+	if raw, ok := data.Fields[providerFieldExtraContent]; ok {
+		_ = json.Unmarshal(raw, &toolCall.ExtraContent)
+	}
+	if raw, ok := data.Fields[providerFieldSignature]; ok {
+		_ = json.Unmarshal(raw, &toolCall.Signature)
+	}
+	if raw, ok := data.Fields[providerFieldMessageSignature]; ok {
+		_ = json.Unmarshal(raw, &messageSignature)
+	}
+	return messageSignature
+}
+
 func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.Request, error) {
 	chatReq, err := convert.PrepareNamespacedFunctionsForChat(req)
 	if err != nil {
@@ -98,8 +118,11 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 
 		om := oaiMessage{
 			Role:       string(m.Role),
-			ToolCallID: decodeToolCallID(m.ToolCallID).ID,
-			Signature:  m.Signature,
+			ToolCallID: m.ToolCallID,
+		}
+		// 工具轮次的消息签名只取自工具调用的 ProviderData，纯文本消息照旧用 Message.Signature。
+		if len(m.ToolCalls) == 0 {
+			om.Signature = m.Signature
 		}
 
 		// 拆分 thinking blocks（仅 assistant 消息）。
@@ -124,7 +147,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 						Signature        string  `json:"signature"`
 					}
 					_ = json.Unmarshal(raw, &restored)
-					if restored.Signature != "" {
+					if len(m.ToolCalls) == 0 && restored.Signature != "" {
 						om.Signature = restored.Signature
 					}
 					if restored.ReasoningContent != nil && *restored.ReasoningContent != "" {
@@ -197,19 +220,12 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 
 		// Tool calls
 		for _, tc := range m.ToolCalls {
-			identity := decodeToolCallID(tc.ID)
-			if identity.MessageSignature != "" {
-				om.Signature = identity.MessageSignature
+			toolCall := oaiToolCall{ID: tc.ID, Type: string(ir.ContentTypeFunction), Function: oaiToolFunction{Name: tc.Name, Arguments: tc.Arguments}}
+			messageSignature := writeChatToolCallProviderData(&toolCall, tc.ProviderData)
+			if om.Signature == "" {
+				om.Signature = messageSignature
 			}
-			om.ToolCalls = append(om.ToolCalls, oaiToolCall{
-				ID:        identity.ID,
-				Signature: identity.Signature,
-				Type:      string(ir.ContentTypeFunction),
-				Function: oaiToolFunction{
-					Name:      tc.Name,
-					Arguments: tc.Arguments,
-				},
-			})
+			om.ToolCalls = append(om.ToolCalls, toolCall)
 		}
 
 		raw.Messages = append(raw.Messages, om)

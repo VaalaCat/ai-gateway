@@ -46,7 +46,8 @@ type EncodedRequest struct {
 }
 
 type ConversionState struct {
-	value any
+	value       any
+	targetModel string // 解码响应时追加到 ProviderData.Models
 }
 
 type DecodeResponseInput struct {
@@ -116,6 +117,7 @@ func (c *codecImpl) DecodeRequest(input DecodeRequestInput) (DecodedRequest, err
 	if request == nil {
 		return DecodedRequest{}, ErrNilDecodedRequest
 	}
+	convert.UnpackRequestToolCallIDs(request)
 	return DecodedRequest{Protocol: endpoint.Protocol, Request: *request}, nil
 }
 
@@ -124,7 +126,8 @@ func (c *codecImpl) EncodeRequest(input EncodeRequestInput) (EncodedRequest, err
 	if !ok {
 		return EncodedRequest{}, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, input.Target.Protocol)
 	}
-	request := input.Request
+	request := cloneRequest(input.Request)
+	convert.PrepareToolCallsForUpstream(&request, input.Target.Protocol, input.Target.Model, input.Options.ToolSignatureFallback)
 	encoded, state, err := handler.EncodeRequest(protocol.EncodeRequestInput{
 		Request: &request,
 		Target: protocol.Target{
@@ -147,7 +150,7 @@ func (c *codecImpl) EncodeRequest(input EncodeRequestInput) (EncodedRequest, err
 	}
 	return EncodedRequest{
 		Method: encoded.Method, Path: encoded.Path, Headers: encoded.Headers,
-		Body: encoded.Body, State: ConversionState{value: state},
+		Body: encoded.Body, State: ConversionState{value: state, targetModel: input.Target.Model},
 	}, nil
 }
 
@@ -156,10 +159,14 @@ func (c *codecImpl) DecodeResponse(ctx context.Context, input DecodeResponseInpu
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, input.Protocol)
 	}
-	return handler.DecodeResponse(ctx, protocol.DecodeResponseInput{
+	events, err := handler.DecodeResponse(ctx, protocol.DecodeResponseInput{
 		Protocol: input.Protocol, StatusCode: input.StatusCode, Headers: input.Headers,
 		Body: input.Body, Stream: input.Stream,
 	}, input.State.value)
+	if err != nil {
+		return nil, err
+	}
+	return convert.UnpackToolCallEvents(ctx, events, input.State.targetModel), nil
 }
 
 func (c *codecImpl) EncodeResponse(ctx context.Context, input EncodeResponseInput) (<-chan EncodedChunk, error) {
@@ -168,7 +175,7 @@ func (c *codecImpl) EncodeResponse(ctx context.Context, input EncodeResponseInpu
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedProtocol, input.Protocol)
 	}
 	chunks, err := handler.EncodeResponse(ctx, protocol.EncodeResponseInput{
-		Protocol: input.Protocol, Events: input.Events, Stream: input.Stream,
+		Protocol: input.Protocol, Events: convert.PackToolCallEvents(ctx, input.Events), Stream: input.Stream,
 	})
 	if err != nil {
 		return nil, err

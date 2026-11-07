@@ -127,12 +127,10 @@ type cleanupPreviewAggregate struct {
 	SnapshotMaxKey sql.NullInt64
 }
 
-// DeleteCleanupTableBatch deletes at most 500 rows inside one database transaction.
+// DeleteCleanupTableBatch 按截止时间和预览上限，在一个写事务中删除最多 500 条记录。
 func DeleteCleanupTableBatch(ctx context.Context, coreDB, logDB *gorm.DB, req CleanupTableRequest) (CleanupBatchResult, error) {
-	return deleteCleanupTableBatch(ctx, coreDB, logDB, req, 500)
-}
-
-func deleteCleanupTableBatch(ctx context.Context, coreDB, logDB *gorm.DB, req CleanupTableRequest, limit int) (CleanupBatchResult, error) {
+	// 1. 校验请求上下文、清理表和预览上限。
+	const limit = 500
 	if err := ctx.Err(); err != nil {
 		return CleanupBatchResult{}, err
 	}
@@ -144,16 +142,25 @@ func deleteCleanupTableBatch(ctx context.Context, coreDB, logDB *gorm.DB, req Cl
 	if err != nil {
 		return CleanupBatchResult{}, err
 	}
-	var result CleanupBatchResult
-	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var deleteErr error
-		result, deleteErr = deleteCleanupIDBatch(tx, spec, req.Cutoff, snapshot, limit)
-		return deleteErr
-	})
-	if err != nil {
-		return CleanupBatchResult{}, err
+
+	// 2. 在一条 DELETE 中选取并删除本批记录，由 GORM 提交或回滚写事务。
+	db = db.WithContext(ctx)
+	keys := cleanupEligibleScope(db, spec, req.Cutoff).
+		Select(spec.DeleteKeyColumn).
+		Where(spec.SnapshotColumn+" <= ?", snapshot).
+		Order(spec.SnapshotColumn + " ASC").
+		Order(spec.DeleteKeyColumn + " ASC").
+		Limit(limit)
+	deleted := db.Table(spec.Name).Where(spec.DeleteKeyColumn+" IN (?)", keys).Delete(nil)
+	if deleted.Error != nil {
+		if err := ctx.Err(); err != nil {
+			return CleanupBatchResult{}, err
+		}
+		return CleanupBatchResult{}, deleted.Error
 	}
-	return result, nil
+
+	// 3. 返回实际删除条数，删满一批时继续请求下一批。
+	return CleanupBatchResult{Deleted: deleted.RowsAffected, HasMore: deleted.RowsAffected == int64(limit)}, nil
 }
 
 func cleanupTargetDB(coreDB, logDB *gorm.DB, database, table string) (CleanupTableSpec, *gorm.DB, error) {
@@ -184,48 +191,12 @@ func cleanupEligibleScope(db *gorm.DB, spec CleanupTableSpec, cutoff time.Time) 
 	return scope
 }
 
-func cleanupDeleteScope(db *gorm.DB, spec CleanupTableSpec, cutoff time.Time) *gorm.DB {
-	return cleanupEligibleScope(db, spec, cutoff)
-}
-
 func parseCleanupSnapshot(value string) (uint, error) {
 	snapshot, err := strconv.ParseUint(value, 10, strconv.IntSize)
 	if err != nil {
 		return 0, errors.Join(ErrInvalidCleanupSnapshot, err)
 	}
 	return uint(snapshot), nil
-}
-
-func deleteCleanupIDBatch(tx *gorm.DB, spec CleanupTableSpec, cutoff time.Time, snapshot uint, limit int) (CleanupBatchResult, error) {
-	if limit <= 0 {
-		return CleanupBatchResult{}, fmt.Errorf("cleanup batch limit must be positive")
-	}
-	var ids []uint
-	scope := cleanupDeleteScope(tx, spec, cutoff).
-		Where(spec.SnapshotColumn+" <= ?", snapshot).
-		Order(spec.SnapshotColumn + " ASC").
-		Order(spec.DeleteKeyColumn + " ASC").
-		Limit(limit + 1)
-	if err := scope.Pluck(spec.DeleteKeyColumn, &ids).Error; err != nil {
-		return CleanupBatchResult{}, err
-	}
-	return deleteCleanupIDs(tx, spec, ids, limit)
-}
-
-func deleteCleanupIDs(tx *gorm.DB, spec CleanupTableSpec, ids []uint, limit int) (CleanupBatchResult, error) {
-	result := CleanupBatchResult{HasMore: len(ids) > limit}
-	if len(ids) > limit {
-		ids = ids[:limit]
-	}
-	if len(ids) == 0 {
-		return result, nil
-	}
-	deleted := tx.Table(spec.Name).Where(spec.DeleteKeyColumn+" IN ?", ids).Delete(nil)
-	if deleted.Error != nil {
-		return CleanupBatchResult{}, deleted.Error
-	}
-	result.Deleted = deleted.RowsAffected
-	return result, nil
 }
 
 type BillingLogDeleteCursor struct {

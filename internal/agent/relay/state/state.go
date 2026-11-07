@@ -75,8 +75,10 @@ type RelayContext struct {
 	Inflight *inflight.Entry
 }
 
-// RelayInput 是请求 immutable 输入（ctxBuilder 装配完不再改）。
+// RelayInput 是请求级输入，由 ctxBuilder 装配；之后只有 onRequest 脚本改写请求体时，
+// 会重新提取 Body、Model、IsStream 和 ToolCalls，其余字段不再改。
 type RelayInput struct {
+	ToolCalls        llmkit.ToolCallRequestInfo
 	RequestID        string
 	StartTime        time.Time
 	UserInfo         *app.UserInfo

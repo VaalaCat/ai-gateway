@@ -212,6 +212,7 @@ export interface ChannelOtherSettings {
   model_tool_schema_compatibility?: Array<{
     model_pattern: string;
     profile: "gemini_compat" | "none";
+    signature_fallback?: "none" | "gemini";
   }>;
 }
 

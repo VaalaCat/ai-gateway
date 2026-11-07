@@ -70,7 +70,7 @@ func (h *Handler) Serve(c *gin.Context) {
 	defer release()
 
 	attempt, err := h.Channels.Find(BoundChannelInput{
-		User: rctx.Input.UserInfo, Attempt: meta.Attempt, InboundProtocol: rctx.Input.InboundProto,
+		ToolCalls: rctx.Input.ToolCalls, User: rctx.Input.UserInfo, Attempt: meta.Attempt, InboundProtocol: rctx.Input.InboundProto,
 	})
 	if err != nil {
 		status, reason, message := channelRejection(err)

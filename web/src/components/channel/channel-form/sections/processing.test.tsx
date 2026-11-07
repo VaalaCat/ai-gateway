@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, it, vi } from "vitest";
 
@@ -22,10 +22,10 @@ beforeAll(() => {
   HTMLElement.prototype.releasePointerCapture ??= () => {};
 });
 
-function ToolSchemaForm() {
+function ToolCompatibilityForm({ initialSettings = JSON.stringify({ custom_setting: "keep" }) }: { initialSettings?: string }) {
   const [form, setForm] = useState({
     ...emptyForm,
-    other_settings: JSON.stringify({ custom_setting: "keep" }),
+    other_settings: initialSettings,
   });
   const [saved, setSaved] = useState("");
   return (
@@ -37,6 +37,17 @@ function ToolSchemaForm() {
       <output data-testid="saved-settings">{saved}</output>
     </>
   );
+}
+
+// 规则卡片只有模型模式输入框、两个下拉（兼容档案、签名兜底）和删除按钮，没有别的控件。
+function expectCompatibilityCardControls() {
+  const card = screen.getByRole("textbox", { name: "toolCompatibilityModelLabel" }).closest<HTMLElement>("[data-slot='field-group']");
+  expect(card).not.toBeNull();
+  expect(within(card!).getAllByRole("textbox")).toHaveLength(1);
+  expect(within(card!).getAllByRole("combobox")).toHaveLength(2);
+  expect(within(card!).getByRole("combobox", { name: "toolCompatibilityProfileLabel" })).toBeEnabled();
+  expect(within(card!).getByRole("combobox", { name: "toolCompatibilitySignatureLabel" })).toBeEnabled();
+  expect(within(card!).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["delete"]);
 }
 
 it("edits inline_image_url from the inline image dataflow step", async () => {
@@ -59,41 +70,110 @@ it("edits inline_image_url from the inline image dataflow step", async () => {
   });
 });
 
-it("adds and saves tool schema rules from a step alongside thinking passthrough", async () => {
+it("adds and saves independent tool compatibility choices from a step alongside thinking passthrough", async () => {
   const user = userEvent.setup();
-  render(<ToolSchemaForm />);
+  render(<ToolCompatibilityForm />);
 
-  // 编码设置收起后，工具定义兼容仍可独立编辑。
+  // 编码设置收起后，工具兼容仍可独立编辑。
   await user.click(screen.getByRole("button", { name: "dataflowStep.encode*" }));
   const thinkingStep = screen.getByRole("button", { name: "dataflowStep.thinking_passthrough" });
-  const compatibilityStep = screen.getByRole("button", { name: "dataflowStep.tool_schema_compatibility" });
+  const compatibilityStep = screen.getByRole("button", { name: "dataflowStep.tool_compatibility" });
   expect(thinkingStep).toHaveAttribute("aria-expanded", "false");
   await user.click(compatibilityStep);
-  await user.click(screen.getByRole("button", { name: "+ toolSchemaCompatibilityAddRule" }));
-  await user.type(screen.getByRole("textbox", { name: "toolSchemaCompatibilityModelLabel" }), "^gemini-.*$");
+  await user.click(screen.getByRole("button", { name: "+ toolCompatibilityAddRule" }));
+  expect(screen.getByRole("combobox", { name: "toolCompatibilitySignatureLabel" })).toHaveTextContent("toolCompatibilitySignaturePreserve");
+  await user.type(screen.getByRole("textbox", { name: "toolCompatibilityModelLabel" }), "^gemini-.*$");
   await user.click(screen.getByRole("button", { name: "Save channel" }));
   expect(JSON.parse(screen.getByTestId("saved-settings").textContent!)).toEqual({
     custom_setting: "keep",
-    model_tool_schema_compatibility: [{ model_pattern: "^gemini-.*$", profile: "gemini_compat" }],
+    model_tool_schema_compatibility: [{ model_pattern: "^gemini-.*$", profile: "gemini_compat", signature_fallback: "none" }],
   });
 
-  await user.click(screen.getByRole("combobox", { name: "toolSchemaCompatibilityProfileLabel" }));
-  await user.click(screen.getByRole("option", { name: "toolSchemaCompatibilityNone" }));
+  await user.click(screen.getByRole("combobox", { name: "toolCompatibilityProfileLabel" }));
+  await user.click(screen.getByRole("option", { name: "toolCompatibilityNone" }));
   await user.click(screen.getByRole("button", { name: "Save channel" }));
   expect(JSON.parse(screen.getByTestId("saved-settings").textContent!)).toEqual({
     custom_setting: "keep",
-    model_tool_schema_compatibility: [{ model_pattern: "^gemini-.*$", profile: "none" }],
+    model_tool_schema_compatibility: [{ model_pattern: "^gemini-.*$", profile: "none", signature_fallback: "none" }],
   });
 });
 
-it("removes the last tool schema rule without clearing other channel settings", async () => {
+it("loads existing schema rules with signature fallback off and keeps their saved settings", async () => {
   const user = userEvent.setup();
-  render(<ToolSchemaForm />);
-  await user.click(screen.getByRole("button", { name: "dataflowStep.tool_schema_compatibility" }));
-  await user.click(screen.getByRole("button", { name: "+ toolSchemaCompatibilityAddRule" }));
-  await user.type(screen.getByRole("textbox", { name: "toolSchemaCompatibilityModelLabel" }), "^gemini-.*$");
+  const settings = {
+    custom_setting: "keep",
+    model_tool_schema_compatibility: [{ model_pattern: "^gemini-.*$", profile: "gemini_compat" }],
+  };
+  render(<ToolCompatibilityForm initialSettings={JSON.stringify(settings)} />);
+  await user.click(screen.getByRole("button", { name: "dataflowStep.tool_compatibility" }));
+  expect(screen.getByRole("combobox", { name: "toolCompatibilitySignatureLabel" })).toHaveTextContent("toolCompatibilitySignaturePreserve");
+  expect(screen.getByRole("combobox", { name: "toolCompatibilityProfileLabel" })).toHaveTextContent("toolCompatibilityGemini");
+  await user.click(screen.getByRole("button", { name: "Save channel" }));
+  expect(JSON.parse(screen.getByTestId("saved-settings").textContent!)).toEqual(settings);
+});
+
+it("saves and reloads combined compatibility and signature-only rules", async () => {
+  const user = userEvent.setup();
+  const { unmount } = render(<ToolCompatibilityForm />);
+  await user.click(screen.getByRole("button", { name: "dataflowStep.tool_compatibility" }));
+  await user.click(screen.getByRole("button", { name: "+ toolCompatibilityAddRule" }));
+  await user.type(screen.getByRole("textbox", { name: "toolCompatibilityModelLabel" }), "^gemini-.*$");
+  await user.click(screen.getByRole("combobox", { name: "toolCompatibilitySignatureLabel" }));
+  await user.click(screen.getByRole("option", { name: "toolCompatibilitySignatureFallback" }));
+  await user.click(screen.getByRole("button", { name: "Save channel" }));
+  expect(JSON.parse(screen.getByTestId("saved-settings").textContent!)).toEqual({
+    custom_setting: "keep",
+    model_tool_schema_compatibility: [{ model_pattern: "^gemini-.*$", profile: "gemini_compat", signature_fallback: "gemini" }],
+  });
+
+  await user.click(screen.getByRole("combobox", { name: "toolCompatibilityProfileLabel" }));
+  await user.click(screen.getByRole("option", { name: "toolCompatibilityNone" }));
+  await user.click(screen.getByRole("button", { name: "Save channel" }));
+  const savedSettings = screen.getByTestId("saved-settings").textContent!;
+  expect(JSON.parse(savedSettings)).toEqual({
+    custom_setting: "keep",
+    model_tool_schema_compatibility: [{ model_pattern: "^gemini-.*$", profile: "none", signature_fallback: "gemini" }],
+  });
+
+  unmount();
+  render(<ToolCompatibilityForm initialSettings={savedSettings} />);
+  await user.click(screen.getByRole("button", { name: "dataflowStep.tool_compatibility" }));
+  expect(screen.getByRole("combobox", { name: "toolCompatibilityProfileLabel" })).toHaveTextContent("toolCompatibilityNone");
+  expect(screen.getByRole("combobox", { name: "toolCompatibilitySignatureLabel" })).toHaveTextContent("toolCompatibilitySignatureFallback");
+});
+
+it("removes the last tool compatibility rule without clearing other channel settings", async () => {
+  const user = userEvent.setup();
+  render(<ToolCompatibilityForm />);
+  await user.click(screen.getByRole("button", { name: "dataflowStep.tool_compatibility" }));
+  await user.click(screen.getByRole("button", { name: "+ toolCompatibilityAddRule" }));
+  await user.type(screen.getByRole("textbox", { name: "toolCompatibilityModelLabel" }), "^gemini-.*$");
   await user.click(screen.getByRole("button", { name: "delete" }));
   await user.click(screen.getByRole("button", { name: "Save channel" }));
-  expect(screen.queryByRole("textbox", { name: "toolSchemaCompatibilityModelLabel" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "toolCompatibilityModelLabel" })).not.toBeInTheDocument();
   expect(JSON.parse(screen.getByTestId("saved-settings").textContent!)).toEqual({ custom_setting: "keep" });
+});
+
+it("shows only the base rule controls and keeps the gemini signature fallback after save and reopen", async () => {
+  const user = userEvent.setup();
+  const { unmount } = render(<ToolCompatibilityForm />);
+  await user.click(screen.getByRole("button", { name: "dataflowStep.tool_compatibility" }));
+  await user.click(screen.getByRole("button", { name: "+ toolCompatibilityAddRule" }));
+  await user.type(screen.getByRole("textbox", { name: "toolCompatibilityModelLabel" }), "^gemini-");
+  await user.click(screen.getByRole("combobox", { name: "toolCompatibilitySignatureLabel" }));
+  await user.click(screen.getByRole("option", { name: "toolCompatibilitySignatureFallback" }));
+
+  expectCompatibilityCardControls();
+
+  await user.click(screen.getByRole("button", { name: "Save channel" }));
+  const saved = screen.getByTestId("saved-settings").textContent!;
+  expect(JSON.parse(saved).model_tool_schema_compatibility).toEqual([
+    { model_pattern: "^gemini-", profile: "gemini_compat", signature_fallback: "gemini" },
+  ]);
+
+  unmount();
+  render(<ToolCompatibilityForm initialSettings={saved} />);
+  await user.click(screen.getByRole("button", { name: "dataflowStep.tool_compatibility" }));
+  expectCompatibilityCardControls();
+  expect(screen.getByRole("combobox", { name: "toolCompatibilitySignatureLabel" })).toHaveTextContent("toolCompatibilitySignatureFallback");
 });

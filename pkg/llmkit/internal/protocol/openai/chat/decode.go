@@ -14,37 +14,167 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
-// chatToolCallAggState accumulates per-index tool_call state across stream chunks.
+// chatToolCallAggState 记录一个 tool_calls[].index 对应的调用在流里已经收到的内容。
 type chatToolCallAggState struct {
-	callID      string
-	name        string
-	accumulated strings.Builder
+	callID       string // 第一次出现时定下，之后不再变
+	signature    string
+	extraContent map[string]json.RawMessage
+	accumulated  strings.Builder
 }
 
-// completeOpenChatToolCalls closes every structured tool call still tracked by
-// the stream decoder. A terminal Chat chunk may use "stop" for a forced named
-// tool, so lifecycle completion must follow the observed tool states rather
-// than one provider-specific finish_reason value.
-func completeOpenChatToolCalls(ch chan<- ir.Event, states map[int]*chatToolCallAggState) int {
-	indices := make([]int, 0, len(states))
-	for index := range states {
+// chatToolCallStream 按 tool_calls[].index 聚合流式工具调用，第一次出现就发 Start，参数片段立刻发。
+type chatToolCallStream struct {
+	states map[int]*chatToolCallAggState
+}
+
+func newChatToolCallStream() *chatToolCallStream {
+	return &chatToolCallStream{states: map[int]*chatToolCallAggState{}}
+}
+
+// accept 处理一块里的一个工具调用增量：新 index 发 Start，签名并进该调用，参数片段立刻发。
+func (s *chatToolCallStream) accept(ch chan<- ir.Event, tc oaiToolCall, messageSignature string) {
+	// 1. 新 index 建状态，上游没给 ID 就生成一个，之后不再改。
+	state, exists := s.states[tc.Index]
+	if !exists {
+		state = &chatToolCallAggState{callID: tc.ID}
+		if state.callID == "" {
+			state.callID = newChatToolCallID()
+		}
+		s.states[tc.Index] = state
+	}
+
+	// 2. 签名先并进状态，Start 就能带上这一块里已有的。
+	if tc.Signature != "" {
+		state.signature = tc.Signature
+	}
+	if len(tc.ExtraContent) > 0 {
+		state.extraContent = mergeChatExtraContent(state.extraContent, tc.ExtraContent)
+	}
+
+	// 3. 第一次出现发 Start，之后到的签名只进状态，由 End 带出。
+	if !exists {
+		ch <- ir.Event{
+			Type: ir.EventToolCallStart,
+			ToolCall: &ir.StreamingToolCall{
+				CallID:       state.callID,
+				Index:        tc.Index,
+				Name:         tc.Function.Name,
+				ProviderData: chatToolCallProviderData(state.extraContent, state.signature, messageSignature),
+			},
+		}
+	}
+
+	// 4. 参数片段立刻发，同时累计给 End。
+	if tc.Function.Arguments != "" {
+		state.accumulated.WriteString(tc.Function.Arguments)
+		ch <- ir.Event{
+			Type: ir.EventToolCallArgumentsDelta,
+			ToolCall: &ir.StreamingToolCall{
+				CallID:    state.callID,
+				Index:     tc.Index,
+				Arguments: tc.Function.Arguments,
+			},
+		}
+	}
+}
+
+// finish 返回本次收尾的工具调用数量；completed 为 true 时按 index 顺序发 End（带完整 ProviderData）并清空状态，
+// 为 false（流读取出错）时不发 End，也不算完成，返回 0。
+func (s *chatToolCallStream) finish(ch chan<- ir.Event, messageSignature string, completed bool) int {
+	// 1. 流读取出错时调用并未完成，不发 End，也不报告完成数。
+	if !completed {
+		return 0
+	}
+
+	// 2. 按 index 排序，保证 End 的顺序稳定。
+	indices := make([]int, 0, len(s.states))
+	for index := range s.states {
 		indices = append(indices, index)
 	}
 	sort.Ints(indices)
-
 	for _, index := range indices {
-		state := states[index]
+		state := s.states[index]
 		ch <- ir.Event{
 			Type: ir.EventToolCallEnd,
 			ToolCall: &ir.StreamingToolCall{
-				CallID:    state.callID,
-				Index:     index,
-				Arguments: state.accumulated.String(),
+				CallID:       state.callID,
+				Index:        index,
+				Arguments:    state.accumulated.String(),
+				ProviderData: chatToolCallProviderData(state.extraContent, state.signature, messageSignature),
 			},
 		}
-		delete(states, index)
+		delete(s.states, index)
 	}
 	return len(indices)
+}
+
+// mergeChatExtraContent 把 src 逐命名空间、逐字段并进 dst，同名字段后到的非空值覆盖先到的。
+func mergeChatExtraContent(dst, src map[string]json.RawMessage) map[string]json.RawMessage {
+	if dst == nil {
+		dst = make(map[string]json.RawMessage, len(src))
+	}
+	for namespace, value := range src {
+		dst[namespace] = mergeChatJSON(dst[namespace], value)
+	}
+	return dst
+}
+
+// mergeChatJSON 合并两个 JSON 值：都是对象时逐字段递归合并，否则后到的非空值覆盖先到的。
+func mergeChatJSON(earlier, later json.RawMessage) json.RawMessage {
+	// 1. 后到的是空值（缺失、null、空字符串）时保留先到的。
+	if trimmed := strings.TrimSpace(string(later)); trimmed == "" || trimmed == "null" || trimmed == `""` {
+		if len(earlier) == 0 {
+			return later
+		}
+		return earlier
+	}
+	if len(earlier) == 0 {
+		return later
+	}
+
+	// 2. 任一边不是对象就整体覆盖。
+	var earlierFields, laterFields map[string]json.RawMessage
+	if json.Unmarshal(earlier, &earlierFields) != nil || json.Unmarshal(later, &laterFields) != nil ||
+		earlierFields == nil || laterFields == nil {
+		return later
+	}
+
+	// 3. 两边都是对象，逐字段递归合并，字段值保持原样不经过 float64。
+	for key, value := range laterFields {
+		earlierFields[key] = mergeChatJSON(earlierFields[key], value)
+	}
+	merged, err := json.Marshal(earlierFields)
+	if err != nil {
+		return later
+	}
+	return merged
+}
+
+// chatToolCallProviderData 把 Chat 工具调用的 extra_content、signature 和所在消息的 signature 收进 ProviderData；三者都没有时返回 nil。
+func chatToolCallProviderData(extraContent map[string]json.RawMessage, signature, messageSignature string) *ir.ToolCallProviderData {
+	fields := map[string]json.RawMessage{}
+	// 1. extra_content 整个对象原样保存，包括未知命名空间。
+	if len(extraContent) > 0 {
+		if raw, err := json.Marshal(extraContent); err == nil {
+			fields[providerFieldExtraContent] = raw
+		}
+	}
+
+	// 2. 调用签名和消息签名按 JSON 字符串保存。
+	for key, value := range map[string]string{providerFieldSignature: signature, providerFieldMessageSignature: messageSignature} {
+		if value != "" {
+			fields[key], _ = json.Marshal(value)
+		}
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return &ir.ToolCallProviderData{Protocol: ir.ProtocolOpenAIChat, Fields: fields}
+}
+
+// newChatToolCallID 给上游没带 ID 的工具调用生成一个 call_ 开头的 ID。
+func newChatToolCallID() string {
+	return "call_" + strings.TrimPrefix(generateID(), "chatcmpl-")
 }
 
 func canonicalChatFinishReason(reason string, completedToolCalls int) string {
@@ -117,7 +247,10 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 		msg := ir.Message{
 			Role:       ir.Role(m.Role),
 			ToolCallID: m.ToolCallID,
-			Signature:  m.Signature,
+		}
+		// 带工具调用的消息签名随每个调用进 ProviderData，纯文本消息照旧放在消息上。
+		if len(m.ToolCalls) == 0 {
+			msg.Signature = m.Signature
 		}
 		if callID, ok := toolCallIDs[m.ToolCallID]; ok && msg.Role == ir.RoleTool {
 			msg.ToolCallID = callID
@@ -191,12 +324,16 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 
 		// Parse tool_calls on assistant messages
 		for _, tc := range m.ToolCalls {
-			callID := encodeToolCallID(tc.ID, tc.Signature, m.Signature)
+			callID := tc.ID
+			if callID == "" {
+				callID = newChatToolCallID()
+			}
 			toolCallIDs[tc.ID] = callID
 			msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{
-				ID:        callID,
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
+				ID:           callID,
+				Name:         tc.Function.Name,
+				Arguments:    tc.Function.Arguments,
+				ProviderData: chatToolCallProviderData(tc.ExtraContent, tc.Signature, m.Signature),
 			})
 		}
 
@@ -316,14 +453,19 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 				}
 			}
 			for _, tc := range choice.Message.ToolCalls {
+				id := tc.ID
+				if id == "" {
+					id = newChatToolCallID()
+				}
 				toolCallCount++
 				ch <- ir.Event{
 					Type: ir.EventToolCallDelta,
 					Delta: &ir.DeltaPayload{
 						ToolCall: &ir.ToolCallDelta{
-							ID:        encodeToolCallID(tc.ID, tc.Signature, choice.Message.Signature),
-							Name:      tc.Function.Name,
-							Arguments: tc.Function.Arguments,
+							ID:           id,
+							Name:         tc.Function.Name,
+							Arguments:    tc.Function.Arguments,
+							ProviderData: chatToolCallProviderData(tc.ExtraContent, tc.Signature, choice.Message.Signature),
 						},
 					},
 				}
@@ -390,8 +532,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	var reasoning chatReasoningAccumulator
 	sawDone := false
 	sawFinishReason := false
-	// toolStates tracks per-index aggregation for new Start/ArgsDelta/End events.
-	toolStates := map[int]*chatToolCallAggState{} // key: tool_calls[].index
+	toolCalls := newChatToolCallStream()
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -454,35 +595,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 					}
 				}
 				for _, tc := range choice.Delta.ToolCalls {
-					// New events: Start / ArgumentsDelta
-					state, exists := toolStates[tc.Index]
-					if !exists {
-						// First time we see this index — emit Start.
-						state = &chatToolCallAggState{
-							callID: encodeToolCallID(tc.ID, tc.Signature, reasoning.signature),
-							name:   tc.Function.Name,
-						}
-						toolStates[tc.Index] = state
-						ch <- ir.Event{
-							Type: ir.EventToolCallStart,
-							ToolCall: &ir.StreamingToolCall{
-								CallID: state.callID,
-								Index:  tc.Index,
-								Name:   tc.Function.Name,
-							},
-						}
-					}
-					if tc.Function.Arguments != "" {
-						state.accumulated.WriteString(tc.Function.Arguments)
-						ch <- ir.Event{
-							Type: ir.EventToolCallArgumentsDelta,
-							ToolCall: &ir.StreamingToolCall{
-								CallID:    state.callID,
-								Index:     tc.Index,
-								Arguments: tc.Function.Arguments,
-							},
-						}
-					}
+					toolCalls.accept(ch, tc, reasoning.signature)
 				}
 			}
 			// A non-empty finish_reason marks a terminal choice. Close observed tool
@@ -491,7 +604,7 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
 				sawFinishReason = true
 				reasoning.finish(ch, ir.ReasoningCompleted)
-				completed := completeOpenChatToolCalls(ch, toolStates)
+				completed := toolCalls.finish(ch, reasoning.signature, true)
 				finishReason = canonicalChatFinishReason(*choice.FinishReason, completed)
 			}
 		}
@@ -501,16 +614,19 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
+	readErr := scanner.Err()
+	if readErr != nil {
 		reasoning.finish(ch, ir.ReasoningInterrupted)
-		ch <- ir.Event{Type: ir.EventError, Error: &ir.ErrorPayload{Message: "stream read error: " + err.Error()}}
 	} else if sawDone || sawFinishReason {
 		reasoning.finish(ch, ir.ReasoningCompleted)
 	} else {
 		reasoning.finish(ch, ir.ReasoningInterrupted)
 	}
-	completed := completeOpenChatToolCalls(ch, toolStates)
+	completed := toolCalls.finish(ch, reasoning.signature, readErr == nil)
 	finishReason = canonicalChatFinishReason(finishReason, completed)
+	if readErr != nil {
+		ch <- ir.Event{Type: ir.EventError, Error: &ir.ErrorPayload{Message: "stream read error: " + readErr.Error()}}
+	}
 
 	ch <- ir.Event{Type: ir.EventDone, FinishReason: finishReason}
 }

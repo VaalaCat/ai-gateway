@@ -108,6 +108,96 @@ describe("useDataCleanup", () => {
     expect(result.current.run.status).toBe("stopped");
   });
 
+  it("finishes full batches with one empty batch without increasing progress", async () => {
+    const deleteBatch = vi
+      .fn()
+      .mockResolvedValueOnce({ deleted: 500, has_more: true })
+      .mockResolvedValueOnce({ deleted: 500, has_more: true })
+      .mockResolvedValueOnce({ deleted: 0, has_more: false });
+    const { result } = renderCleanupHook({
+      previewTable: vi.fn(async (table) => previewFor(table, 1_000)),
+      deleteBatch,
+    });
+    await act(() => result.current.preview("requestTraces", "2026-07-21"));
+
+    await act(() => result.current.start());
+
+    expect(deleteBatch).toHaveBeenCalledTimes(3);
+    expect(result.current.run).toMatchObject({
+      status: "completed",
+      deleted: 1_000,
+      totalToDelete: 1_000,
+    });
+    expect(result.current.run.tables[0]).toMatchObject({
+      table: "request_traces",
+      status: "completed",
+      deleted: 1_000,
+    });
+    expect(deleteBatch.mock.calls.map(([request]) => request)).toEqual(
+      Array.from({ length: 3 }, () => ({
+        database: "log",
+        table: "request_traces",
+        cutoff_date: "2026-07-21",
+        snapshot_max_key: "request_traces-snapshot",
+      })),
+    );
+  });
+
+  it("pauses on database busy and manually retries only the failed table with a new preview", async () => {
+    const previewTable = vi
+      .fn()
+      .mockImplementationOnce(async (table: CleanupTableRef) => previewFor(table, 2))
+      .mockImplementationOnce(async (table: CleanupTableRef) => ({
+        ...previewFor(table, 1_000), snapshot_max_key: "1000",
+      }))
+      .mockImplementationOnce(async (table: CleanupTableRef) => ({
+        ...previewFor(table, 501), snapshot_max_key: "1501",
+      }));
+    const deleteBatch = vi
+      .fn()
+      .mockResolvedValueOnce({ deleted: 2, has_more: false })
+      .mockResolvedValueOnce({ deleted: 500, has_more: true })
+      .mockRejectedValueOnce(new ApiError(503, "cleanup database is busy", { code: "CleanupDatabaseBusy" }))
+      .mockResolvedValueOnce({ deleted: 500, has_more: true })
+      .mockResolvedValueOnce({ deleted: 1, has_more: false });
+    const { result } = renderCleanupHook({ previewTable, deleteBatch });
+    await act(() => result.current.preview("billingAggregates", "2026-07-21"));
+
+    await act(() => result.current.start());
+
+    expect(deleteBatch).toHaveBeenCalledTimes(3);
+    expect(previewTable).toHaveBeenCalledTimes(2);
+    expect(result.current.run).toMatchObject({
+      status: "paused",
+      failurePhase: "delete",
+      deleted: 502,
+      activeTableIndex: 1,
+    });
+    expect(result.current.run.tables[0]).toMatchObject({ status: "completed", deleted: 2 });
+    expect(result.current.run.tables[1]).toMatchObject({
+      status: "failed", deleted: 500, error: "cleanup database is busy",
+    });
+
+    await act(() => result.current.retry());
+
+    expect(previewTable).toHaveBeenCalledTimes(3);
+    expect(previewTable).toHaveBeenLastCalledWith({
+      database: "log", table: "channel_daily_billings", cutoff_date: "2026-07-21",
+    });
+    expect(deleteBatch).toHaveBeenCalledTimes(5);
+    expect(deleteBatch.mock.calls.slice(3).map(([request]) => request)).toEqual(
+      Array.from({ length: 2 }, () => ({
+        database: "log",
+        table: "channel_daily_billings",
+        cutoff_date: "2026-07-21",
+        snapshot_max_key: "1501",
+      })),
+    );
+    expect(result.current.run).toMatchObject({ status: "completed", deleted: 1_003, totalToDelete: 1_003 });
+    expect(result.current.run.tables[0]).toMatchObject({ status: "completed", deleted: 2 });
+    expect(result.current.run.tables[1]).toMatchObject({ status: "completed", deleted: 1_001, to_delete: 1_001 });
+  });
+
   it("pauses on failure and retry re-previews only the failed table", async () => {
     const previewTable = vi.fn(async (table: CleanupTableRef) => previewFor(table, 1));
     const deleteBatch = vi
@@ -226,7 +316,8 @@ describe("useDataCleanup", () => {
       .fn()
       .mockResolvedValueOnce({ deleted: 500, has_more: true })
       .mockRejectedValueOnce(new Error("locked"))
-      .mockResolvedValueOnce({ deleted: 500, has_more: false });
+      .mockResolvedValueOnce({ deleted: 500, has_more: true })
+      .mockResolvedValueOnce({ deleted: 0, has_more: false });
     const { result } = renderCleanupHook({ previewTable, deleteBatch });
     await previewBillingFacts(result);
     await act(() => result.current.start());

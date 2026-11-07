@@ -28,6 +28,9 @@ it("keeps ordered compatibility rules including explicit exclusions when saving"
   const rules = [
     { model_pattern: "^gemini-exception$", profile: "none" },
     { model_pattern: "^gemini-.*$", profile: "gemini_compat" },
+    { model_pattern: "^unsigned-", profile: "none", signature_fallback: "gemini" },
+    { model_pattern: "^compat-", profile: "gemini_compat", signature_fallback: "gemini" },
+    { model_pattern: "^plain-", profile: "none", signature_fallback: "none" },
   ];
   const raw = JSON.stringify({ model_tool_schema_compatibility: rules, inline_image_url: true });
   expect(JSON.parse(sanitizeOtherSettingsForSubmit(raw, ""))).toEqual({
@@ -39,6 +42,7 @@ it("keeps ordered compatibility rules including explicit exclusions when saving"
 it.each([
   { model_pattern: "", profile: "gemini_compat" },
   { model_pattern: "gemini", profile: "unknown" },
+  { model_pattern: "gemini", profile: "none", signature_fallback: "unknown" },
 ])("does not save an unfinished compatibility rule: %j", (rule) => {
   const raw = JSON.stringify({ model_tool_schema_compatibility: [rule], inline_image_url: true });
   expect(JSON.parse(sanitizeOtherSettingsForSubmit(raw, ""))).toEqual({ inline_image_url: true });
