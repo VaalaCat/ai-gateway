@@ -150,7 +150,7 @@ func TestRoutingModelFinderFiltersTopLevelAliasesByEffectiveModelWhitelistBefore
 	}
 }
 
-func TestRoutingModelFinderTreatsDisabledGlobalAsRealOnlyWhenVisibleModelExists(t *testing.T) {
+func TestRoutingModelFinderDistinguishesDisabledRoutingFromSameNameRealModel(t *testing.T) {
 	routes := []models.ModelRouting{
 		routingRow(1, "root", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("shadow", 0, 1))),
 		routingRow(2, "shadow", models.RoutingScopeGlobal, 0, 0, false, routingMembers(member("hidden", 0, 1))),
@@ -182,6 +182,20 @@ func TestRoutingModelFinderTreatsDisabledGlobalAsRealOnlyWhenVisibleModelExists(
 			wantModels:   []string{},
 			wantWarnings: []RoutingWarning{RoutingWarningDisabled},
 		},
+		{
+			kind: "routing", name: "disabled route with same-name real stays disabled",
+			offers: map[string][]ModelOffer{
+				"shadow": {routingOffer("shadow", "p:shadow", OfferKindPlatform, 1, "Platform")},
+			},
+			wantModels:   []string{},
+			wantWarnings: []RoutingWarning{RoutingWarningDisabled},
+		},
+		{
+			kind: "routing", name: "disabled route with unavailable same-name real stays disabled",
+			offers:       map[string][]ModelOffer{"shadow": {}},
+			wantModels:   []string{},
+			wantWarnings: []RoutingWarning{RoutingWarningDisabled},
+		},
 	}
 
 	for _, test := range tests {
@@ -194,6 +208,13 @@ func TestRoutingModelFinderTreatsDisabledGlobalAsRealOnlyWhenVisibleModelExists(
 			root := findRoutingModel(t, got, "root")
 			require.Equal(t, test.wantModels, root.ReachableRealModels)
 			require.Equal(t, test.wantWarnings, root.RoutingWarnings)
+			if test.kind == "routing" {
+				require.Equal(t, RoutingMemberTargetRouting, root.Facts.Definitions[0].Members[0].Kind)
+				require.Equal(t, uint(2), root.Facts.Definitions[0].Members[0].RoutingID)
+				require.Len(t, root.Facts.Definitions, 2)
+				require.Equal(t, "shadow", root.Facts.Definitions[1].Name)
+				require.Empty(t, root.Facts.Definitions[1].Members)
+			}
 		})
 	}
 }
