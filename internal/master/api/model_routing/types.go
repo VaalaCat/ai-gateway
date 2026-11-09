@@ -59,6 +59,7 @@ type TokenRoutingPreviewRequest struct {
 }
 
 type MemberInput struct {
+	Kind     string `json:"kind"` // "model" | "routing"; never inferred at request time
 	Ref      string `json:"ref"`
 	Priority int    `json:"priority"`
 	Weight   int    `json:"weight"`

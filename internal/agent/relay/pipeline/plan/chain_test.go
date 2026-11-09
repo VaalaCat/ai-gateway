@@ -29,8 +29,8 @@ func TestBuildChainFromStore_WithMembers(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "A", Priority: 5, Weight: 1},
-					{Ref: "B", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "A", Priority: 5, Weight: 1},
+					{Kind: "model", Ref: "B", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -56,8 +56,8 @@ func TestBuildChainFromStore_SameNameRoutingKeepsRoutingIdentity(t *testing.T) {
 			"gpt-5.5": {
 				ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "gpt-5.5", Priority: 10, Weight: 1},
-					{Ref: "gpt-4o", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "gpt-5.5", Priority: 10, Weight: 1},
+					{Kind: "model", Ref: "gpt-4o", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -96,7 +96,7 @@ func TestBuildChainFromStore_UserScopeWinsOverGlobal(t *testing.T) {
 			"smart": {
 				ID: 2, Name: "smart", Scope: "user", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "user-only", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "user-only", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -104,7 +104,7 @@ func TestBuildChainFromStore_UserScopeWinsOverGlobal(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "global-only", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "global-only", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -120,13 +120,13 @@ func TestBuildChainFromStore_UserScopeWinsOverGlobal(t *testing.T) {
 func TestBuildChainFromStore_TokenScopeWinsOverUserAndGlobal(t *testing.T) {
 	rs := &stubRoutingStore{
 		token: map[string]*protocol.SyncedRouting{
-			"smart": {ID: 30, Name: "smart", Scope: "token", TokenID: 7, Enabled: true, Members: []protocol.RoutingMember{{Ref: "token-model", Weight: 1}}},
+			"smart": {ID: 30, Name: "smart", Scope: "token", TokenID: 7, Enabled: true, Members: []protocol.RoutingMember{{Kind: "model", Ref: "token-model", Weight: 1}}},
 		},
 		user: map[string]*protocol.SyncedRouting{
-			"smart": {ID: 20, Name: "smart", Scope: "user", UserID: 42, Enabled: true, Members: []protocol.RoutingMember{{Ref: "user-model", Weight: 1}}},
+			"smart": {ID: 20, Name: "smart", Scope: "user", UserID: 42, Enabled: true, Members: []protocol.RoutingMember{{Kind: "model", Ref: "user-model", Weight: 1}}},
 		},
 		global: map[string]*protocol.SyncedRouting{
-			"smart": {ID: 10, Name: "smart", Scope: "global", Enabled: true, Members: []protocol.RoutingMember{{Ref: "global-model", Weight: 1}}},
+			"smart": {ID: 10, Name: "smart", Scope: "global", Enabled: true, Members: []protocol.RoutingMember{{Kind: "model", Ref: "global-model", Weight: 1}}},
 		},
 	}
 	rctx := newTestRelayContext(nil, "smart", &app.UserInfo{UserID: 42, TokenID: 7}, 0)
@@ -147,7 +147,7 @@ func TestRoutingChainBuilder_Build_ThroughStubAgentCache(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "real-A", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "real-A", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -183,7 +183,7 @@ func TestBuildChainFromStore_Trace_NonEmptyOnRoutingHit(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "real-A", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "real-A", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -231,8 +231,8 @@ func TestBuildChainFromStore_TraceMatchesMainSnapshot(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "a", Priority: 10, Weight: 1},
-					{Ref: "b", Priority: 5, Weight: 1},
+					{Kind: "model", Ref: "a", Priority: 10, Weight: 1},
+					{Kind: "model", Ref: "b", Priority: 5, Weight: 1},
 				},
 			},
 		},
@@ -255,7 +255,7 @@ func TestBuildChainFromStore_TraceOnFirstResolveFailure(t *testing.T) {
 		global: map[string]*protocol.SyncedRouting{
 			"cyclic": {
 				ID: 1, Name: "cyclic", Scope: "global", Enabled: true,
-				Members: []protocol.RoutingMember{{Ref: "cyclic", Priority: 1, Weight: 1}},
+				Members: []protocol.RoutingMember{{Kind: "routing", Ref: "cyclic", Priority: 1, Weight: 1}},
 			},
 		},
 	}
@@ -296,11 +296,11 @@ func TestBuildChainFromStore_MultiMemberChain_SingleTraceEntry(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "a", Priority: 50, Weight: 1},
-					{Ref: "b", Priority: 40, Weight: 1},
-					{Ref: "c", Priority: 30, Weight: 1},
-					{Ref: "d", Priority: 20, Weight: 1},
-					{Ref: "e", Priority: 10, Weight: 1},
+					{Kind: "model", Ref: "a", Priority: 50, Weight: 1},
+					{Kind: "model", Ref: "b", Priority: 40, Weight: 1},
+					{Kind: "model", Ref: "c", Priority: 30, Weight: 1},
+					{Kind: "model", Ref: "d", Priority: 20, Weight: 1},
+					{Kind: "model", Ref: "e", Priority: 10, Weight: 1},
 				},
 			},
 		},
@@ -345,13 +345,13 @@ func TestBuildChainFromStore_NestedRouting_SingleTraceEntry(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "tier1", Priority: 1, Weight: 1},
+					{Kind: "routing", Ref: "tier1", Priority: 1, Weight: 1},
 				},
 			},
 			"tier1": {
 				ID: 2, Name: "tier1", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "gpt-4", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "gpt-4", Priority: 1, Weight: 1},
 				},
 			},
 		},

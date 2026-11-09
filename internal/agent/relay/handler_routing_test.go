@@ -71,7 +71,7 @@ func TestRelay_RoutingHit_Success(t *testing.T) {
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "deepseek", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "deepseek", Priority: 0, Weight: 1},
 		},
 	})
 
@@ -137,8 +137,8 @@ func TestRelay_RoutingFallback_FirstMemberFailsAllChannels(t *testing.T) {
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "a", Priority: 10, Weight: 1},
-			{Ref: "b", Priority: 5, Weight: 1},
+			{Kind: "model", Ref: "a", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "b", Priority: 5, Weight: 1},
 		},
 	})
 
@@ -189,8 +189,8 @@ func TestRelay_SameNameRoutingHTTP400FallsBackAndKeepsRoutingName(t *testing.T) 
 	store.SetGlobalRouting("gpt-5.5", &protocol.SyncedRouting{
 		ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "gpt-5.5", Priority: 10, Weight: 1},
-			{Ref: "gpt-4o", Priority: 1, Weight: 1},
+			{Kind: "model", Ref: "gpt-5.5", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "gpt-4o", Priority: 1, Weight: 1},
 		},
 	})
 
@@ -232,8 +232,8 @@ func TestRelay_RoutingExhausted_404(t *testing.T) {
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "a", Priority: 0, Weight: 1},
-			{Ref: "b", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "a", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "b", Priority: 0, Weight: 1},
 		},
 	})
 
@@ -303,7 +303,7 @@ func TestRelay_AgentRoute_MatchesByRealModel(t *testing.T) {
 	s := cache.NewStore(nil, config.AgentCacheConfig{})
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "deepseek", Priority: 0, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "model", Ref: "deepseek", Priority: 0, Weight: 1}},
 	})
 
 	ctx := plan.NewResolveCtx()
@@ -442,8 +442,8 @@ func TestRelay_RoutingFallback_AllMembersNoChannel_Returns502(t *testing.T) {
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "A", Priority: 5, Weight: 1},
-			{Ref: "B", Priority: 1, Weight: 1},
+			{Kind: "model", Ref: "A", Priority: 5, Weight: 1},
+			{Kind: "model", Ref: "B", Priority: 1, Weight: 1},
 		},
 	})
 	logs := collectUsageLogs(bus)
@@ -533,8 +533,8 @@ func TestRelay_Whitelist_FailsAtRealModel_RoutingFallback(t *testing.T) {
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "gpt-4o", Priority: 10, Weight: 1},
-			{Ref: "deepseek-v3", Priority: 5, Weight: 1},
+			{Kind: "model", Ref: "gpt-4o", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "deepseek-v3", Priority: 5, Weight: 1},
 		},
 	})
 
@@ -597,8 +597,8 @@ func TestRelay_RoutingTrace_SuccessPath_SingleEntry(t *testing.T) {
 	store.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "a", Priority: 10, Weight: 1},
-			{Ref: "b", Priority: 5, Weight: 1},
+			{Kind: "model", Ref: "a", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "b", Priority: 5, Weight: 1},
 		},
 	})
 

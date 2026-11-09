@@ -166,8 +166,8 @@ func TestLoadGlobalRoutings_ReplacesAndFilters(t *testing.T) {
 	s.SetGlobalRouting("stale", &protocol.SyncedRouting{Name: "stale", Scope: "global", Enabled: true})
 
 	items := []models.ModelRouting{
-		{ID: 1, Name: "smart", Scope: "global", Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`, Enabled: true},
-		{ID: 2, Name: "off", Scope: "global", Members: `[{"ref":"x"}]`, Enabled: false}, // 应被过滤
+		{ID: 1, Name: "smart", Scope: "global", Members: `[{"kind":"model","ref":"gpt-4o","priority":0,"weight":1}]`, Enabled: true},
+		{ID: 2, Name: "off", Scope: "global", Members: `[{"kind":"model","ref":"x"}]`, Enabled: false}, // 应被过滤
 	}
 	s.LoadGlobalRoutings(items)
 
@@ -216,7 +216,7 @@ func TestCacheSnapshot_IncludesRoutingEntities(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 
 	items := []models.ModelRouting{
-		{ID: 1, Name: "auto", Scope: "global", Enabled: true, Members: `[{"ref":"m1","priority":1,"weight":1}]`},
+		{ID: 1, Name: "auto", Scope: "global", Enabled: true, Members: `[{"kind":"model","ref":"m1","priority":1,"weight":1}]`},
 	}
 	s.LoadGlobalRoutings(items)
 	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{

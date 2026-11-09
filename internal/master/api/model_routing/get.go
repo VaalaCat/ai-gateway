@@ -33,7 +33,7 @@ func (h *Handler) Get(c *app.Context, req api.IDPathRequest) (GetResponse, error
 }
 
 // expandRoutingToModels 递归展开 routing 成员，返回去重后的真实 model 名集合。
-// 遇到子 routing 则继续递归（最深 5 层），否则视为真实 model 名。
+// Only explicit routing members recurse; explicit model members are leaves.
 func expandRoutingToModels(r *models.ModelRouting, q dao.AdminQuery) []string {
 	seen := map[string]bool{}
 	var visit func(routing *models.ModelRouting, depth int)
@@ -46,11 +46,16 @@ func expandRoutingToModels(r *models.ModelRouting, q dao.AdminQuery) []string {
 			return
 		}
 		for _, m := range members {
+			if m.Kind == models.RoutingMemberModel {
+				seen[m.Ref] = true
+				continue
+			}
+			if m.Kind != models.RoutingMemberRouting {
+				continue
+			}
 			child, _ := q.ModelRouting().GetByName(models.RoutingScopeGlobal, 0, 0, m.Ref)
 			if child != nil && child.Enabled {
 				visit(child, depth+1)
-			} else {
-				seen[m.Ref] = true
 			}
 		}
 	}

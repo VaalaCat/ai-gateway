@@ -44,8 +44,8 @@ export function MembersRowEditor({
 }: MembersRowEditorProps) {
   const t = useTranslations("modelRoutings.members");
   const allMembers = form.watch("members");
-  const alreadyAdded = (allMembers ?? []).map((m) => m.ref).filter(Boolean);
-  const selfName = form.watch("name");
+  const alreadyAdded = (allMembers ?? []).filter((m) => m.ref);
+  const selfName = form.watch("scope") === "global" ? form.watch("name") : undefined;
 
   const useTokenCandidates = apiMode === "user" || limitCandidatesToToken;
   const adminQuery = useRoutingCandidates({ enabled: !useTokenCandidates });
@@ -89,7 +89,11 @@ export function MembersRowEditor({
               <div className="flex flex-col gap-1">
                 <RefCombobox
                   value={field.value}
-                  onChange={field.onChange}
+                  kind={form.watch(`members.${index}.kind`)}
+                  onChange={(ref, kind) => {
+                    form.setValue(`members.${index}.kind`, kind, { shouldDirty: true, shouldValidate: true });
+                    field.onChange(ref);
+                  }}
                   alreadyAdded={alreadyAdded}
                   excludeSelf={selfName}
                   apiMode={apiMode}

@@ -32,8 +32,8 @@ func TestPreview_FlatSamePriority(t *testing.T) {
 	seedChannel(t, srv, jwt, "a,b,c")
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"members": []map[string]any{
-			{"ref": "a", "priority": 0, "weight": 3},
-			{"ref": "b", "priority": 0, "weight": 1},
+			{"kind": "model", "ref": "a", "priority": 0, "weight": 3},
+			{"kind": "model", "ref": "b", "priority": 0, "weight": 1},
 		},
 	})
 	weights := resp["effective_weights"].([]any)
@@ -57,8 +57,8 @@ func TestPreview_PriorityOnlyTopGets100(t *testing.T) {
 	seedChannel(t, srv, jwt, "a,b")
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"members": []map[string]any{
-			{"ref": "a", "priority": 10, "weight": 1},
-			{"ref": "b", "priority": 5, "weight": 1},
+			{"kind": "model", "ref": "a", "priority": 10, "weight": 1},
+			{"kind": "model", "ref": "b", "priority": 5, "weight": 1},
 		},
 	})
 	weights := resp["effective_weights"].([]any)
@@ -78,16 +78,16 @@ func TestPreview_NestedRouting(t *testing.T) {
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "cheap-pool", "scope": "global", "enabled": true,
 		"members": []map[string]any{
-			{"ref": "x", "priority": 0, "weight": 1},
-			{"ref": "y", "priority": 0, "weight": 1},
+			{"kind": "model", "ref": "x", "priority": 0, "weight": 1},
+			{"kind": "model", "ref": "y", "priority": 0, "weight": 1},
 		},
 	})
 	// preview smart=[cheap-pool P0 W3, z P0 W1] → 75% cheap-pool, 25% z
 	// → 真实 model 维度: x=37.5%, y=37.5%, z=25%
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"members": []map[string]any{
-			{"ref": "cheap-pool", "priority": 0, "weight": 3},
-			{"ref": "z", "priority": 0, "weight": 1},
+			{"kind": "routing", "ref": "cheap-pool", "priority": 0, "weight": 3},
+			{"kind": "model", "ref": "z", "priority": 0, "weight": 1},
 		},
 	})
 	weights := resp["effective_weights"].([]any)
@@ -107,7 +107,7 @@ func TestPreview_InvalidRefMarked(t *testing.T) {
 	seedChannel(t, srv, jwt, "a")
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"members": []map[string]any{
-			{"ref": "nonexistent", "priority": 0, "weight": 1},
+			{"kind": "model", "ref": "nonexistent", "priority": 0, "weight": 1},
 		},
 	})
 	root := resp["root"].(map[string]any)
@@ -128,11 +128,11 @@ func TestPreview_DisabledRoutingMarked(t *testing.T) {
 	// 创建 disabled routing
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "off-pool", "scope": "global", "enabled": false,
-		"members": []map[string]any{{"ref": "x", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "x", "priority": 0, "weight": 1}},
 	})
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"members": []map[string]any{
-			{"ref": "off-pool", "priority": 0, "weight": 1},
+			{"kind": "routing", "ref": "off-pool", "priority": 0, "weight": 1},
 		},
 	})
 	root := resp["root"].(map[string]any)
@@ -154,11 +154,11 @@ func TestPreview_SelfNameModelNotCycle(t *testing.T) {
 	// 先建一个名为 gpt-5.5 的全局路由（成员随意填真实模型），使其进入 rIdx。
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "gpt-5.5", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"self_name": "gpt-5.5", "self_scope": "global",
-		"members": []map[string]any{{"ref": "gpt-5.5", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-5.5", "priority": 0, "weight": 1}},
 	})
 	root := resp["root"].(map[string]any)
 	children := root["children"].([]any)
@@ -187,11 +187,11 @@ func TestPreview_OffPathRoutingNotShortCircuitToModel(t *testing.T) {
 	seedChannel(t, srv, jwt, "N,realM")
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "N", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "realM", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "realM", "priority": 0, "weight": 1}},
 	})
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"self_name": "outer", "self_scope": "global",
-		"members": []map[string]any{{"ref": "N", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "routing", "ref": "N", "priority": 0, "weight": 1}},
 	})
 	root := resp["root"].(map[string]any)
 	children := root["children"].([]any)
@@ -215,11 +215,11 @@ func TestPreview_SelfNameNoModelCycle(t *testing.T) {
 	seedChannel(t, srv, jwt, "gpt-4o") // 没有 gpt-5.5 真实模型
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "gpt-5.5", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	resp := previewRouting(t, srv, jwt, map[string]any{
 		"self_name": "gpt-5.5", "self_scope": "global",
-		"members": []map[string]any{{"ref": "gpt-5.5", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "routing", "ref": "gpt-5.5", "priority": 0, "weight": 1}},
 	})
 	root := resp["root"].(map[string]any)
 	children := root["children"].([]any)
@@ -238,7 +238,7 @@ func TestCandidates_ListsModelsAndRoutings(t *testing.T) {
 	seedChannel(t, srv, jwt, "gpt-4o,claude-sonnet-4")
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "smart", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/admin/model-routings/candidates", nil)

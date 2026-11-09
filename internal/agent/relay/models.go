@@ -30,7 +30,12 @@ func ListModels(store *cache.Store) gin.HandlerFunc {
 				ui = got
 			}
 		}
-		items := modelview.ListVisibleModels(c.Request.Context(), store, ui)
+		var items []modelview.ListedModel
+		if c.Query("include_routings") == "false" {
+			items = modelview.ListVisibleRealModels(c.Request.Context(), store, ui)
+		} else {
+			items = modelview.ListVisibleModels(c.Request.Context(), store, ui)
+		}
 
 		now := time.Now().Unix()
 		// var (not make) — preserve prior `null` rendering on empty list for zero-behavior-change.

@@ -1204,6 +1204,7 @@ export interface CacheStatsResponse {
 }
 
 export interface RoutingMember {
+  kind: "model" | "routing";
   ref: string;
   priority: number;
   weight: number;
@@ -1240,7 +1241,7 @@ export interface RoutingPreviewNode {
   weight: number;
   effective_pct: number;
   children?: RoutingPreviewNode[];
-  error?: 'not_found' | 'disabled' | 'cycle' | 'max_depth';
+  error?: 'not_found' | 'disabled' | 'cycle' | 'max_depth' | 'invalid_kind';
 }
 
 export interface RoutingPreview {

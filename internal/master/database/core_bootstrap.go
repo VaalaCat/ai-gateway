@@ -62,6 +62,9 @@ func BootstrapCore(ctx context.Context, source, target *gorm.DB, layout LegacyLa
 				}
 			}
 		}
+		if err := models.MigrateRoutingMemberKinds(tx); err != nil {
+			return err
+		}
 		marker := models.HistoryMigration{
 			ID:            models.HistoryMigrationSingletonID,
 			SourceKind:    string(layout.Kind),

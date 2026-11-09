@@ -99,7 +99,7 @@ func TestPortal_CreateForcesUserScope(t *testing.T) {
 	id, w := createPortalRouting(t, srv, userJWT, map[string]any{
 		"name":    "my",
 		"scope":   "global", // 故意写 global，应被强制改为 user
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 		"enabled": true,
 	})
 	if w.Code != 200 && w.Code != 201 {
@@ -134,7 +134,7 @@ func TestPortal_CrossUserGetBlocked(t *testing.T) {
 	id, w := createPortalRouting(t, srv, aliceJWT, map[string]any{
 		"name":    "alices",
 		"scope":   "user",
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 		"enabled": true,
 	})
 	if w.Code != 200 && w.Code != 201 {
@@ -165,7 +165,7 @@ func TestPortal_CannotChangeScope(t *testing.T) {
 	id, w := createPortalRouting(t, srv, userJWT, map[string]any{
 		"name":    "x",
 		"scope":   "user",
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 		"enabled": true,
 	})
 	if w.Code != 200 && w.Code != 201 {
@@ -230,9 +230,9 @@ func TestPortalGlobalRoutingNames_OnlyEnabledGlobals(t *testing.T) {
 	_, userJWT := registerAndLoginUser(t, srv, "ned", "password123")
 
 	// 通过 admin API 造数据：两个 enabled global、一个 disabled global、一个 enabled user-scope
-	createGlobalRouting(t, srv, adminJWT, "fast", []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}}, true)
-	createGlobalRouting(t, srv, adminJWT, "premium", []map[string]any{{"ref": "deepseek-v3", "priority": 0, "weight": 1}}, true)
-	createGlobalRouting(t, srv, adminJWT, "legacy", []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}}, false)
+	createGlobalRouting(t, srv, adminJWT, "fast", []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}}, true)
+	createGlobalRouting(t, srv, adminJWT, "premium", []map[string]any{{"kind": "model", "ref": "deepseek-v3", "priority": 0, "weight": 1}}, true)
+	createGlobalRouting(t, srv, adminJWT, "legacy", []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}}, false)
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/model-routings/global-routing-names", nil)

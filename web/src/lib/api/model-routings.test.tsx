@@ -92,7 +92,7 @@ describe("token model routing API hooks", () => {
       scope: "token",
       user_id: 99,
       token_id: 88,
-      members: [{ ref: "gpt-4.1", priority: 0, weight: 1 }],
+      members: [{ kind: "model", ref: "gpt-4.1", priority: 0, weight: 1 }],
       enabled: true,
       remark: "",
     });
@@ -101,7 +101,7 @@ describe("token model routing API hooks", () => {
       "/tokens/23/model-routings",
       {
         name: "smart",
-        members: [{ ref: "gpt-4.1", priority: 0, weight: 1 }],
+        members: [{ kind: "model", ref: "gpt-4.1", priority: 0, weight: 1 }],
         enabled: true,
         remark: "",
       },

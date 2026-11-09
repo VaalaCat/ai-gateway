@@ -55,6 +55,13 @@ func ListVisibleModels(requestCtx context.Context, store ModelStore, ui *app.Use
 	return merge(admin, byok, routing)
 }
 
+// ListVisibleRealModels retains whitelist checks but does not shadow a real
+// model with a same-name routing. It supplies typed routing member candidates.
+func ListVisibleRealModels(requestCtx context.Context, store ModelStore, ui *app.UserInfo) []ListedModel {
+	ctx := &listingContext{store: store, ui: ui, routingSet: map[string]struct{}{}}
+	return merge(collectAdmin(ctx), collectBYOK(ctx), nil)
+}
+
 type listingContext struct {
 	store ModelStore
 	ui    *app.UserInfo

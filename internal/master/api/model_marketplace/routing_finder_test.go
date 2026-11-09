@@ -20,7 +20,7 @@ func TestRoutingModelFinderFlattensRoutesAndStablyDeduplicatesDestinations(t *te
 		routingRow(2, "nested", models.RoutingScopeGlobal, 0, 0, true,
 			routingMembers(member("real-a", 1, 2), member("real-a", 0, 1))),
 		routingRow(1, "a-smart", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("real-b", 0, 1), member("nested", 0, 1), member("real-b", -1, 1))),
+			routingMembers(member("real-b", 0, 1), routeMember("nested", 0, 1), member("real-b", -1, 1))),
 	}}
 	offers := map[string][]ModelOffer{
 		"real-a": {
@@ -58,7 +58,7 @@ func TestRoutingModelFinderUsesTokenUserGlobalPrecedenceAndGlobalOnlyRecursion(t
 		routingRow(6, "fallback-user", models.RoutingScopeToken, 0, 70, false, routingMembers(member("token-real", 0, 1))),
 		routingRow(7, "fallback-global", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("global-real", 0, 1))),
 		routingRow(8, "fallback-global", models.RoutingScopeUser, 7, 0, false, routingMembers(member("user-real", 0, 1))),
-		routingRow(9, "outer", models.RoutingScopeToken, 0, 70, true, routingMembers(member("nested", 0, 1))),
+		routingRow(9, "outer", models.RoutingScopeToken, 0, 70, true, routingMembers(routeMember("nested", 0, 1))),
 		routingRow(10, "nested", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("global-real", 0, 1))),
 		routingRow(11, "nested", models.RoutingScopeUser, 7, 0, true, routingMembers(member("user-real", 0, 1))),
 		routingRow(12, "other-tenant", models.RoutingScopeUser, 8, 0, true, routingMembers(member("hidden-real", 0, 1))),
@@ -152,17 +152,18 @@ func TestRoutingModelFinderFiltersTopLevelAliasesByEffectiveModelWhitelistBefore
 
 func TestRoutingModelFinderTreatsDisabledGlobalAsRealOnlyWhenVisibleModelExists(t *testing.T) {
 	routes := []models.ModelRouting{
-		routingRow(1, "root", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("shadow", 0, 1))),
+		routingRow(1, "root", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("shadow", 0, 1))),
 		routingRow(2, "shadow", models.RoutingScopeGlobal, 0, 0, false, routingMembers(member("hidden", 0, 1))),
 	}
 	tests := []struct {
+		kind         string
 		name         string
 		offers       map[string][]ModelOffer
 		wantModels   []string
 		wantWarnings []RoutingWarning
 	}{
 		{
-			name: "same-name real with available offer is a destination",
+			kind: "model", name: "same-name real with available offer is a destination",
 			offers: map[string][]ModelOffer{
 				"shadow": {routingOffer("shadow", "p:shadow", OfferKindPlatform, 1, "Platform")},
 			},
@@ -170,13 +171,13 @@ func TestRoutingModelFinderTreatsDisabledGlobalAsRealOnlyWhenVisibleModelExists(
 			wantWarnings: []RoutingWarning{},
 		},
 		{
-			name:         "same-name real without available offer reports no visible offer",
+			kind: "model", name: "same-name real without available offer reports no visible offer",
 			offers:       map[string][]ModelOffer{"shadow": {}},
 			wantModels:   []string{},
 			wantWarnings: []RoutingWarning{RoutingWarningNoVisibleOffer},
 		},
 		{
-			name:         "disabled route without same-name real stays disabled",
+			kind: "routing", name: "disabled route without same-name real stays disabled",
 			offers:       map[string][]ModelOffer{},
 			wantModels:   []string{},
 			wantWarnings: []RoutingWarning{RoutingWarningDisabled},
@@ -185,6 +186,7 @@ func TestRoutingModelFinderTreatsDisabledGlobalAsRealOnlyWhenVisibleModelExists(
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			routes[0].Members = routingMembers(models.RoutingMember{Kind: test.kind, Ref: "shadow", Weight: 1})
 			got, err := NewRoutingModelFinder(&fakeRoutingModelQuery{routings: routes}).Find(
 				context.Background(), scopedMarketplaceViewer(7, 70), test.offers,
 			)
@@ -200,17 +202,17 @@ func TestRoutingModelFinderTreatsDisabledGlobalAsRealOnlyWhenVisibleModelExists(
 // as a configured member loses the actual ref, priority, and weight.
 func TestRoutingModelFinderAllowsDepthFiveAndWarnsAtDepthSix(t *testing.T) {
 	routes := []models.ModelRouting{
-		routingRow(1, "depth-5", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d5-2", 0, 1))),
-		routingRow(2, "d5-2", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d5-3", 0, 1))),
-		routingRow(3, "d5-3", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d5-4", 0, 1))),
-		routingRow(4, "d5-4", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d5-5", 0, 1))),
+		routingRow(1, "depth-5", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d5-2", 0, 1))),
+		routingRow(2, "d5-2", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d5-3", 0, 1))),
+		routingRow(3, "d5-3", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d5-4", 0, 1))),
+		routingRow(4, "d5-4", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d5-5", 0, 1))),
 		routingRow(5, "d5-5", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("real", 0, 1))),
-		routingRow(6, "depth-6", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d6-2", 0, 1))),
-		routingRow(7, "d6-2", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d6-3", 0, 1))),
-		routingRow(8, "d6-3", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d6-4", 0, 1))),
-		routingRow(9, "d6-4", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d6-5", 0, 1))),
-		routingRow(10, "d6-5", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d6-6", 0, 1))),
-		routingRow(11, "d6-6", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("d6-7", 17, 9))),
+		routingRow(6, "depth-6", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d6-2", 0, 1))),
+		routingRow(7, "d6-2", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d6-3", 0, 1))),
+		routingRow(8, "d6-3", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d6-4", 0, 1))),
+		routingRow(9, "d6-4", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d6-5", 0, 1))),
+		routingRow(10, "d6-5", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d6-6", 0, 1))),
+		routingRow(11, "d6-6", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("d6-7", 17, 9))),
 		routingRow(12, "d6-7", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("real", 0, 1))),
 	}
 	got, err := NewRoutingModelFinder(&fakeRoutingModelQuery{routings: routes}).Find(
@@ -264,15 +266,15 @@ func TestRoutingModelFinderAllowsDepthFiveAndWarnsAtDepthSix(t *testing.T) {
 func TestRoutingModelFinderUsesPathLocalCycleDetectionAndSameNameRuntimeSemantics(t *testing.T) {
 	routes := []models.ModelRouting{
 		routingRow(1, "cycle-root", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("cycle-a", 0, 1), member("real", 0, 1))),
-		routingRow(2, "cycle-a", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("cycle-b", 0, 1))),
-		routingRow(3, "cycle-b", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("cycle-a", 0, 1))),
+			routingMembers(routeMember("cycle-a", 0, 1), member("real", 0, 1))),
+		routingRow(2, "cycle-a", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("cycle-b", 0, 1))),
+		routingRow(3, "cycle-b", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("cycle-a", 0, 1))),
 		routingRow(4, "same", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("same", 0, 1))),
-		routingRow(5, "off-path", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("nested-same", 0, 1))),
+		routingRow(5, "off-path", models.RoutingScopeGlobal, 0, 0, true, routingMembers(routeMember("nested-same", 0, 1))),
 		routingRow(6, "nested-same", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("real", 0, 1))),
 		routingRow(7, "shared", models.RoutingScopeGlobal, 0, 0, true, routingMembers(member("real", 0, 1))),
 		routingRow(8, "two-paths", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("shared", 0, 1), member("shared", 0, 1))),
+			routingMembers(routeMember("shared", 0, 1), routeMember("shared", 0, 1))),
 	}
 	offers := routingOffers("real", "same", "nested-same")
 	got, err := NewRoutingModelFinder(&fakeRoutingModelQuery{routings: routes}).Find(
@@ -282,21 +284,21 @@ func TestRoutingModelFinderUsesPathLocalCycleDetectionAndSameNameRuntimeSemantic
 	require.Equal(t, []string{"real"}, findRoutingModel(t, got, "cycle-root").ReachableRealModels)
 	require.Equal(t, []RoutingWarning{RoutingWarningCycle}, findRoutingModel(t, got, "cycle-root").RoutingWarnings)
 	require.Equal(t, []string{"same"}, findRoutingModel(t, got, "same").ReachableRealModels,
-		"a route revisiting itself may terminate at a same-name real model")
+		"an explicit model member is a leaf even when its name matches the route")
 	require.Equal(t, []string{"real"}, findRoutingModel(t, got, "off-path").ReachableRealModels,
 		"an off-path route with the same name as a real model still expands as a route")
 	require.Equal(t, []string{"real"}, findRoutingModel(t, got, "two-paths").ReachableRealModels,
 		"visited state is path-local and destinations are deduplicated")
 }
 
-// Break caught: rebuilding administrator member kinds from the global routing
-// index loses the walker's path-local same-name decision.
+// Administrator diagnostics retain explicit member kinds rather than inferring
+// them from the global routing name index.
 func TestRoutingModelFinderFactsRetainPathLocalMemberTargetsFromWalk(t *testing.T) {
 	routes := []models.ModelRouting{
 		routingRow(1, "same", models.RoutingScopeGlobal, 0, 0, true,
 			routingMembers(member("same", 10, 2))),
 		routingRow(2, "outer", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("nested-same", 7, 3))),
+			routingMembers(routeMember("nested-same", 7, 3))),
 		routingRow(3, "nested-same", models.RoutingScopeGlobal, 0, 0, true,
 			routingMembers(member("real", 5, 1))),
 	}
@@ -316,7 +318,7 @@ func TestRoutingModelFinderFactsRetainPathLocalMemberTargetsFromWalk(t *testing.
 	require.NoError(t, marshalErr)
 	require.JSONEq(t, `{
 		"ref":"same","priority":10,"weight":2,"kind":"model","model_name":"same"
-	}`, string(sameMemberJSON), "path revisit must not emit routing_id")
+	}`, string(sameMemberJSON), "an explicit model must not emit routing_id")
 
 	outerFacts := findRoutingModel(t, got, "outer").Facts.Definitions
 	require.Equal(t, []RoutingDefinitionFact{
@@ -356,13 +358,13 @@ func TestRoutingModelFinderFactsRetainPathLocalMemberTargetsFromWalk(t *testing.
 func TestRoutingModelFinderProjectsEverySharedDefinitionOccurrence(t *testing.T) {
 	routes := []models.ModelRouting{
 		routingRow(1, "root", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("branch", 20, 1), member("other", 10, 1))),
+			routingMembers(routeMember("branch", 20, 1), routeMember("other", 10, 1))),
 		routingRow(2, "branch", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("shared", 0, 1))),
+			routingMembers(routeMember("shared", 0, 1))),
 		routingRow(3, "other", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("shared", 0, 1))),
+			routingMembers(routeMember("shared", 0, 1))),
 		routingRow(4, "shared", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("branch", 0, 1))),
+			routingMembers(routeMember("branch", 0, 1))),
 	}
 	got, err := NewRoutingModelFinder(&fakeRoutingModelQuery{routings: routes}).Find(
 		t.Context(), scopedMarketplaceViewer(7, 70), routingOffers("branch"),
@@ -377,8 +379,8 @@ func TestRoutingModelFinderProjectsEverySharedDefinitionOccurrence(t *testing.T)
 		}
 	}
 	require.GreaterOrEqual(t, len(sharedFacts), 2, "both shared walker occurrences must be retained")
-	require.Equal(t, RoutingMemberTargetModel, sharedFacts[0].Members[0].Kind)
-	require.Equal(t, "branch", sharedFacts[0].Members[0].ModelName)
+	require.Equal(t, RoutingMemberTargetRouting, sharedFacts[0].Members[0].Kind)
+	require.Equal(t, uint(2), sharedFacts[0].Members[0].RoutingID)
 	require.Equal(t, RoutingMemberTargetRouting, sharedFacts[1].Members[0].Kind)
 	require.Equal(t, uint(2), sharedFacts[1].Members[0].RoutingID)
 
@@ -421,8 +423,8 @@ func TestRoutingModelFinderProjectsEverySharedDefinitionOccurrence(t *testing.T)
 		{Ref: "branch", RoutingID: 2},
 		{Ref: "shared", RoutingID: 4},
 	}, shared[0].Path)
-	require.Equal(t, RoutingMemberTargetModel, shared[0].Members[0].Kind)
-	require.Equal(t, "branch", shared[0].Members[0].ModelName)
+	require.Equal(t, RoutingMemberTargetRouting, shared[0].Members[0].Kind)
+	require.Equal(t, uint(2), shared[0].Members[0].RoutingID)
 	require.Equal(t, "root:1/1:3/0:4", shared[1].OccurrenceID)
 	require.Equal(t, []pathStep{
 		{Ref: "root", RoutingID: 1},
@@ -436,7 +438,7 @@ func TestRoutingModelFinderProjectsEverySharedDefinitionOccurrence(t *testing.T)
 func TestRoutingModelFinderAggregatesSafeWarningsWithoutLeakingReferences(t *testing.T) {
 	query := &fakeRoutingModelQuery{routings: []models.ModelRouting{
 		routingRow(1, "diagnostic", models.RoutingScopeGlobal, 0, 0, true,
-			routingMembers(member("secret-disabled", 0, 1), member("secret-missing", 0, 1), member("visible-without-offer", 0, 1))),
+			routingMembers(routeMember("secret-disabled", 0, 1), member("secret-missing", 0, 1), member("visible-without-offer", 0, 1))),
 		routingRow(2, "secret-disabled", models.RoutingScopeGlobal, 0, 0, false,
 			routingMembers(member("hidden-real", 99, 88))),
 	}}
@@ -714,7 +716,11 @@ func routingRow(id uint, name, scope string, userID, tokenID uint, enabled bool,
 }
 
 func member(ref string, priority, weight int) models.RoutingMember {
-	return models.RoutingMember{Ref: ref, Priority: priority, Weight: weight}
+	return models.RoutingMember{Kind: models.RoutingMemberModel, Ref: ref, Priority: priority, Weight: weight}
+}
+
+func routeMember(ref string, priority, weight int) models.RoutingMember {
+	return models.RoutingMember{Kind: models.RoutingMemberRouting, Ref: ref, Priority: priority, Weight: weight}
 }
 
 func routingMembers(members ...models.RoutingMember) string {

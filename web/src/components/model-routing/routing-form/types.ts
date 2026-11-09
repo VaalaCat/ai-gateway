@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const routingMemberSchema = z.object({
+  kind: z.enum(["model", "routing"]),
   ref: z.string().min(1),
   priority: z.number().int().min(0).max(999),
   weight: z.number().int().min(1).max(999),

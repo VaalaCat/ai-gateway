@@ -2,6 +2,7 @@ package dao
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -20,6 +21,7 @@ const (
 	ErrCodeMembersTooMany     = "members_too_many"
 	ErrCodeRefEmpty           = "ref_empty"
 	ErrCodeInvalidRef         = "invalid_ref"
+	ErrCodeInvalidMemberKind  = "invalid_member_kind"
 	ErrCodeCycleDetected      = "cycle_detected"
 	ErrCodeMaxDepth           = "max_depth"
 	ErrCodeReferencedBy       = "referenced_by"
@@ -36,6 +38,7 @@ type NameProvider interface {
 	HasToken(tokenID uint) bool
 	GetGlobalRouting(name string) *models.ModelRouting
 	AllGlobalRoutings() []*models.ModelRouting
+	AllRoutings() []*models.ModelRouting
 }
 
 // ValidateError 的 code 与 msg 分离：API 层按 code 做 i18n（前端见 ROUTING_ERROR_KEYS），
@@ -83,14 +86,18 @@ func ValidateRouting(r *models.ModelRouting, np NameProvider) *ValidateError {
 		if m.Ref == "" {
 			return newErr(ErrCodeRefEmpty, "member ref is empty", map[string]any{"index": i})
 		}
-		if !np.HasModel(m.Ref) && np.GetGlobalRouting(m.Ref) == nil {
+		if m.Kind != models.RoutingMemberModel && m.Kind != models.RoutingMemberRouting {
+			return newErr(ErrCodeInvalidMemberKind, "member kind must be model or routing", map[string]any{"index": i})
+		}
+		if (m.Kind == models.RoutingMemberModel && !np.HasModel(m.Ref)) ||
+			(m.Kind == models.RoutingMemberRouting && np.GetGlobalRouting(m.Ref) == nil && !(r.Scope == models.RoutingScopeGlobal && m.Ref == r.Name)) {
 			return newErr(ErrCodeInvalidRef, "ref does not exist in global namespace",
-				map[string]any{"ref": m.Ref})
+				map[string]any{"ref": m.Ref, "kind": m.Kind})
 		}
 	}
 
 	if r.Scope == models.RoutingScopeGlobal {
-		if err := dfsCycleAndDepth(r, np, members); err != nil {
+		if err := dfsCycleAndDepth(r, np); err != nil {
 			return err
 		}
 	}
@@ -120,42 +127,69 @@ func validateRoutingOwner(r *models.ModelRouting, np NameProvider) *ValidateErro
 	return nil
 }
 
-func dfsCycleAndDepth(start *models.ModelRouting, np NameProvider, startMembers []models.RoutingMember) *ValidateError {
-	// start 由此处种入 visited，但它不一定在 np 的 routings map 里（如校验 A 时 map 只注册了 B）；
-	// 因此 dfsRouting 必须先判 visited 再查 GetGlobalRouting，否则回边会被当真实模型漏检。
-	visited := map[string]bool{start.Name: true}
-	path := []string{start.Name}
-	return dfsRouting(startMembers, np, visited, path, 1)
-}
-
-func dfsRouting(members []models.RoutingMember, np NameProvider,
-	visited map[string]bool, path []string, depth int) *ValidateError {
-
-	if depth > routingMaxDepth {
-		return newErr(ErrCodeMaxDepth, "nesting depth exceeds 5", map[string]any{"path": path})
+// Check the candidate graph from every root, including disabled routes and every
+// priority group. Replacing the edited row is essential for back-edges and for
+// edits which make an existing ancestor exceed the maximum depth.
+func dfsCycleAndDepth(start *models.ModelRouting, np NameProvider) *ValidateError {
+	graph := map[string]*models.ModelRouting{}
+	for _, r := range np.AllGlobalRoutings() {
+		if start.ID != 0 && r.ID == start.ID {
+			continue
+		}
+		graph[r.Name] = r
 	}
-	for _, m := range members {
-		if visited[m.Ref] {
-			// ref 命中当前路径上的路由：存在同名真实模型则当叶子终结，否则才是真环。
-			if np.HasModel(m.Ref) {
+	graph[start.Name] = start
+	active := map[string]bool{}
+	longest := map[string][]string{}
+	var visit func(string, []string) ([]string, *ValidateError)
+	visit = func(name string, path []string) ([]string, *ValidateError) {
+		if active[name] {
+			return nil, newErr(ErrCodeCycleDetected, "cycle in routing graph", map[string]any{"path": append(path, name)})
+		}
+		if cached, ok := longest[name]; ok {
+			return cached, nil
+		}
+		r := graph[name]
+		if r == nil {
+			return nil, newErr(ErrCodeInvalidRef, "routing target does not exist", map[string]any{"ref": name, "kind": models.RoutingMemberRouting})
+		}
+		var members []models.RoutingMember
+		if err := json.Unmarshal([]byte(r.Members), &members); err != nil {
+			return nil, newErr(ErrCodeMembersInvalidJSON, "invalid routing graph members", map[string]any{"ref": name})
+		}
+		active[name] = true
+		defer delete(active, name)
+		best := []string{name}
+		for _, member := range members {
+			if member.Kind == models.RoutingMemberModel {
 				continue
 			}
-			cycle := append(append([]string{}, path...), m.Ref)
-			return newErr(ErrCodeCycleDetected, "cycle in routing graph",
-				map[string]any{"path": cycle})
+			if member.Kind != models.RoutingMemberRouting {
+				return nil, newErr(ErrCodeInvalidMemberKind, "invalid routing graph member kind", map[string]any{"ref": name})
+			}
+			child, err := visit(member.Ref, append(append([]string{}, path...), name))
+			if err != nil {
+				return nil, err
+			}
+			if len(child)+1 > len(best) {
+				best = append([]string{name}, child...)
+			}
 		}
-		r := np.GetGlobalRouting(m.Ref)
-		if r == nil {
-			continue // 真实 model 叶子
+		if len(best) > routingMaxDepth {
+			return nil, newErr(ErrCodeMaxDepth, "nesting depth exceeds 5", map[string]any{"path": best})
 		}
-		var childMembers []models.RoutingMember
-		_ = json.Unmarshal([]byte(r.Members), &childMembers)
-		visited[r.Name] = true
-		newPath := append(append([]string{}, path...), r.Name)
-		if e := dfsRouting(childMembers, np, visited, newPath, depth+1); e != nil {
-			return e
+		longest[name] = best
+		return best, nil
+	}
+	names := make([]string, 0, len(graph))
+	for name := range graph {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, err := visit(name, nil); err != nil {
+			return err
 		}
-		delete(visited, r.Name)
 	}
 	return nil
 }
@@ -166,7 +200,7 @@ func ValidateDelete(target *models.ModelRouting, np NameProvider) *ValidateError
 		return nil // user routing 不会被引用（user 不能引用 user）
 	}
 	var refs []string
-	for _, r := range np.AllGlobalRoutings() {
+	for _, r := range np.AllRoutings() {
 		if r.ID == target.ID {
 			continue
 		}
@@ -175,7 +209,7 @@ func ValidateDelete(target *models.ModelRouting, np NameProvider) *ValidateError
 			continue
 		}
 		for _, m := range members {
-			if m.Ref == target.Name {
+			if m.Kind == models.RoutingMemberRouting && m.Ref == target.Name {
 				refs = append(refs, r.Name)
 				break
 			}

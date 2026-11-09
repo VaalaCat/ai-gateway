@@ -62,6 +62,9 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := ensureModelRoutingOwnerIndex(db); err != nil {
 		return err
 	}
+	if err := MigrateRoutingMemberKinds(db); err != nil {
+		return err
+	}
 	if err := backfillPasswordSet(db); err != nil {
 		return err
 	}
@@ -246,6 +249,7 @@ func migrateCoreCleanup(db *gorm.DB) error {
 	steps := []func(*gorm.DB) error{
 		dropLegacyAgentRoutingColumn,
 		ensureModelRoutingOwnerIndex,
+		MigrateRoutingMemberKinds,
 		backfillPasswordSet,
 		ensureUserEmailUniqueIndex,
 		dropLegacyChannelBillingIndex,

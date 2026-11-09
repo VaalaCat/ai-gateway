@@ -15,6 +15,7 @@ type SyncedRouting struct {
 
 // RoutingMember 与 models.RoutingMember 字段一致。protocol 包独立定义避免反向依赖 models 包。
 type RoutingMember struct {
+	Kind     string `json:"kind"` // "model" | "routing"; never inferred at request time
 	Ref      string `json:"ref"`
 	Priority int    `json:"priority"`
 	Weight   int    `json:"weight"`

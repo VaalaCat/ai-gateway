@@ -18,7 +18,7 @@ func TestHandleSyncEvent_ModelRoutingGlobalCreate(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 	r := models.ModelRouting{
 		ID: 1, Name: "smart", Scope: models.RoutingScopeGlobal,
-		Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`,
+		Members: `[{"kind":"model","ref":"gpt-4o","priority":0,"weight":1}]`,
 		Enabled: true,
 	}
 	data, _ := json.Marshal(r)
@@ -37,11 +37,11 @@ func TestHandleSyncEvent_ModelRoutingGlobalUpdate(t *testing.T) {
 	s := NewStore(nil, config.AgentCacheConfig{})
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "old", Priority: 0, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "model", Ref: "old", Priority: 0, Weight: 1}},
 	})
 	r := models.ModelRouting{
 		ID: 1, Name: "smart", Scope: models.RoutingScopeGlobal,
-		Members: `[{"ref":"new","priority":0,"weight":1}]`,
+		Members: `[{"kind":"model","ref":"new","priority":0,"weight":1}]`,
 		Enabled: true,
 	}
 	data, _ := json.Marshal(r)
@@ -75,7 +75,7 @@ func TestHandleSyncEvent_ModelRoutingUserInvalidates(t *testing.T) {
 
 	r := models.ModelRouting{
 		ID: 1, Name: "my", Scope: models.RoutingScopeUser, UserID: 42,
-		Members: `[{"ref":"x","priority":0,"weight":1}]`, Enabled: true,
+		Members: `[{"kind":"model","ref":"x","priority":0,"weight":1}]`, Enabled: true,
 	}
 	data, _ := json.Marshal(r)
 	s.HandleSyncEvent(events.EntityModelRouting, events.ActionUpdate, data)
@@ -116,7 +116,7 @@ func TestApplyModelRoutingEvent_LogsApply(t *testing.T) {
 
 	r := &models.ModelRouting{
 		ID: 1, Name: "auto", Scope: "global", UserID: 0,
-		Members: `[{"ref":"m1","priority":1,"weight":1},{"ref":"m2","priority":1,"weight":2}]`,
+		Members: `[{"kind":"model","ref":"m1","priority":1,"weight":1},{"kind":"model","ref":"m2","priority":1,"weight":2}]`,
 		Enabled: true,
 	}
 	s.applyModelRoutingEvent("create", r)

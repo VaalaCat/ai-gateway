@@ -472,6 +472,9 @@ func parseMarketplaceRoutingMembers(raw string) ([]models.RoutingMember, error) 
 		return nil, errors.New("invalid routing members: members are empty")
 	}
 	for _, member := range members {
+		if member.Kind != models.RoutingMemberModel && member.Kind != models.RoutingMemberRouting {
+			return nil, errors.New("invalid routing member kind")
+		}
 		if strings.TrimSpace(member.Ref) == "" {
 			return nil, errors.New("empty routing member ref")
 		}

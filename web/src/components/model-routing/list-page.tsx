@@ -73,8 +73,8 @@ function MembersCell({ members }: { members: ModelRouting["members"] | string })
         <TooltipTrigger asChild>
           <div className="flex items-center gap-1 flex-wrap">
             {preview.map((m) => (
-              <Badge key={m.ref} variant="secondary" className="text-xs">
-                {m.ref}
+              <Badge key={`${m.kind}:${m.ref}`} variant="secondary" className="text-xs">
+                {m.ref} · {t(m.kind === "routing" ? "members.refKindRouting" : "members.refKindModel")}
               </Badge>
             ))}
             {rest > 0 && (

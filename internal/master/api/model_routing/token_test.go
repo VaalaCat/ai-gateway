@@ -29,7 +29,7 @@ func createTokenRouting(t *testing.T, srv *master.Server, jwt string, tokenID ui
 	t.Helper()
 	w := routingRequest(t, srv, jwt, http.MethodPost, fmt.Sprintf("/api/tokens/%d/model-routings", tokenID), map[string]any{
 		"name": name, "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	var routing models.ModelRouting
 	_ = json.Unmarshal(w.Body.Bytes(), &routing)
@@ -108,7 +108,7 @@ func TestTokenRoutingOwnershipAndOwnerFields(t *testing.T) {
 		{method: http.MethodGet},
 		{method: http.MethodPost, body: map[string]any{
 			"name": "blocked", "enabled": true,
-			"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+			"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 		}},
 	} {
 		w := routingRequest(t, srv, bobJWT, request.method, fmt.Sprintf("/api/tokens/%d/model-routings", token.ID), request.body)
@@ -117,7 +117,7 @@ func TestTokenRoutingOwnershipAndOwnerFields(t *testing.T) {
 
 	w := routingRequest(t, srv, aliceJWT, http.MethodPost, fmt.Sprintf("/api/tokens/%d/model-routings", token.ID), map[string]any{
 		"name": "bad-owner", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	var apiError map[string]any
@@ -127,7 +127,7 @@ func TestTokenRoutingOwnershipAndOwnerFields(t *testing.T) {
 	adminCreate := routingRequest(t, srv, adminJWT, http.MethodPost,
 		fmt.Sprintf("/api/admin/tokens/%d/model-routings", token.ID), map[string]any{
 			"name": "admin-route", "enabled": true,
-			"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+			"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 		})
 	require.Equal(t, http.StatusOK, adminCreate.Code, adminCreate.Body.String())
 }

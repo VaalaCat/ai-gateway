@@ -1,9 +1,11 @@
 package models
 
 const (
-	RoutingScopeGlobal = "global"
-	RoutingScopeUser   = "user"
-	RoutingScopeToken  = "token"
+	RoutingMemberModel   = "model"
+	RoutingMemberRouting = "routing"
+	RoutingScopeGlobal   = "global"
+	RoutingScopeUser     = "user"
+	RoutingScopeToken    = "token"
 )
 
 type ModelRouting struct {
@@ -20,6 +22,7 @@ type ModelRouting struct {
 }
 
 type RoutingMember struct {
+	Kind     string `json:"kind"` // "model" | "routing"; never inferred at request time
 	Ref      string `json:"ref"`
 	Priority int    `json:"priority"`
 	Weight   int    `json:"weight"`

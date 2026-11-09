@@ -108,7 +108,7 @@ func TestTokenFetchHandler_Found_IncludesSyncedUser(t *testing.T) {
 	}
 	if err := m.ModelRouting().Create(&models.ModelRouting{
 		Name: "smart", Scope: models.RoutingScopeToken, TokenID: tok.ID, Enabled: true,
-		Members: `[{"ref":"gpt-4o","priority":0,"weight":1}]`,
+		Members: `[{"kind":"model","ref":"gpt-4o","priority":0,"weight":1}]`,
 	}); err != nil {
 		t.Fatal(err)
 	}

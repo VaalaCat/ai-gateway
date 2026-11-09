@@ -41,7 +41,7 @@ vi.mock("./use-routing-form", async () => {
           name: "smart",
           scope: "token",
           user_id: 0,
-          members: [{ ref: "gpt-4.1", priority: 0, weight: 1 }],
+          members: [{ kind: "model", ref: "gpt-4.1", priority: 0, weight: 1 }],
           enabled: true,
           remark: "",
         },
@@ -82,7 +82,7 @@ describe("RoutingForm token owner", () => {
     await waitFor(() => expect(createRouting).toHaveBeenCalledWith(expect.objectContaining({
       name: "smart",
       scope: "token",
-      members: [{ ref: "gpt-4.1", priority: 0, weight: 1 }],
+      members: [{ kind: "model", ref: "gpt-4.1", priority: 0, weight: 1 }],
     })));
     expect(push).toHaveBeenCalledWith("/tokens?selected=23");
   });
