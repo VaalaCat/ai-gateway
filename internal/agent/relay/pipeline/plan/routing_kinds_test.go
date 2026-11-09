@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"testing"
 )
@@ -33,6 +34,8 @@ func TestResolve_TypedRoutingNeverFallsBackToSameNameModel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore()
 			t.Cleanup(s.Close)
+			s.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: 1}, Models: "A,B"})
+			s.RebuildModelIndex()
 			s.SetGlobalRouting("A", &protocol.SyncedRouting{ID: 1, Name: "A", Enabled: true, Members: []protocol.RoutingMember{{Kind: tc.kind, Ref: "B", Weight: 1}}})
 			if tc.nested {
 				s.SetGlobalRouting("B", &protocol.SyncedRouting{ID: 2, Name: "B", Enabled: true, Members: []protocol.RoutingMember{{Kind: "routing", Ref: "A", Weight: 1}}})

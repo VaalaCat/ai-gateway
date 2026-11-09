@@ -38,6 +38,7 @@ func TestRoutingMemberKindsMigrationRejectsAmbiguousCycleAtomically(t *testing.T
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&ModelRouting{}, &Channel{}))
+	require.NoError(t, db.Create(&Channel{ChannelCore: ChannelCore{Name: "same-name", Status: 1}, Models: "A"}).Error)
 	rows := []ModelRouting{
 		{Name: "safe", Scope: "global", Members: `[{"ref":"real"}]`},
 		{Name: "A", Scope: "global", Members: `[{"ref":"B"}]`},
