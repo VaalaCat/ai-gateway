@@ -4,9 +4,11 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/affinity"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/executionmode"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // Solver 求解整次请求的 AttemptPlan，写入 rctx.State.Plan。
@@ -102,6 +104,16 @@ func (s *defaultSolver) Solve(rctx *state.RelayContext) error {
 			continue
 		}
 		cands := s.Pool.Available(rctx, realModel)
+		if rctx.Input.InboundProto == llmkit.ProtocolGemini {
+			// 1. 原生 Gemini 只保留同协议、非 legacy 的候选。
+			kept := make([]ScoredCandidate, 0, len(cands))
+			for _, candidate := range cands {
+				if executionmode.SupportsGeminiPassthrough(candidate.Channel, realModel) {
+					kept = append(kept, candidate)
+				}
+			}
+			cands = kept
+		}
 		if len(cands) == 0 {
 			continue
 		}

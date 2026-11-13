@@ -20,6 +20,7 @@ const (
 	EventReasoningSummaryDelta                   // incremental readable reasoning summary
 	EventReasoningContentDelta                   // incremental full reasoning content
 	EventReasoningDone                           // reasoning block completed or was interrupted
+	EventContentBlock                            // 完整的图片等内容块。
 )
 
 // ReasoningStatus describes why a reasoning stream stopped.
@@ -48,6 +49,7 @@ type RawSSEEvent struct {
 // Event is a single element in the IR event stream produced when streaming
 // responses from an upstream provider.
 type Event struct {
+	ContentBlock      *ContentBlock      `json:"content_block,omitempty"`
 	Type              EventType          `json:"type"`
 	Delta             *DeltaPayload      `json:"delta,omitempty"`
 	ToolCall          *StreamingToolCall `json:"tool_call,omitempty"`

@@ -44,7 +44,7 @@ func TestGetAllInflight_OmitsAutoDisableTriggersFromMergedResponse(t *testing.T)
 			"uid-a": {Generation: 11, ConnectedAt: 900, HeartbeatAt: 990},
 		}}}, connectivity.Options{}),
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a"} },
-		HubCallSession: func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+		HubCallSession: func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 			return json.Marshal([]inflight.Snapshot{{
 				ID: 1, ReqID: rctx.Input.RequestID, View: publish.ProjectInflightEntry(rctx),
 			}})
@@ -108,7 +108,7 @@ func TestGetAllInflight_MergesAndIsolatesFailures(t *testing.T) {
 	h := &Handler{
 		Connections:       connectivity.NewService("epoch-all-inflight", connectivity.Sources{Control: control}, connectivity.Options{}),
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a", "uid-b", "uid-c"} },
-		HubCallSession: func(agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallSession: func(_ context.Context, agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			mu.Lock()
 			calls[agentID] = generation
 			mu.Unlock()
@@ -174,7 +174,7 @@ func TestGetAllInflight_OrdinaryFailuresStayIsolatedAndRedacted(t *testing.T) {
 					"uid-a": {Generation: 11, ConnectedAt: 900, HeartbeatAt: 990},
 				}}}, connectivity.Options{}),
 				GetOnlineAgentIDs: func() []string { return []string{"uid-a"} },
-				HubCallSession: func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+				HubCallSession: func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 					return tt.raw, tt.err
 				},
 			}
@@ -195,7 +195,9 @@ func TestGetAllInflight_NoOnlineAgents(t *testing.T) {
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return nil },
 		Connections:       connectivity.NewService("epoch-empty", connectivity.Sources{}, connectivity.Options{}),
-		HubCallSession:    func(string, uint64, string, any, time.Duration) (json.RawMessage, error) { return nil, nil },
+		HubCallSession: func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			return nil, nil
+		},
 	}
 	resp, err := h.GetAllInflight(ctx, api.EmptyRequest{})
 	if err != nil || len(resp.Requests) != 0 || len(resp.FailedAgents) != 0 {
@@ -217,7 +219,7 @@ func TestGetAllInflight_CanceledRequestPerformsNoRPC(t *testing.T) {
 	h := &Handler{
 		Connections:       connectivity.NewService("epoch-canceled", connectivity.Sources{Control: control}, connectivity.Options{}),
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a"} },
-		HubCallSession: func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+		HubCallSession: func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 			calls.Add(1)
 			return json.RawMessage(`[]`), nil
 		},
@@ -246,7 +248,7 @@ func TestInterrupt_PassesThroughToAgent(t *testing.T) {
 		Connections: connectivity.NewService("epoch-interrupt-compat", connectivity.Sources{Control: &apiControlSource{facts: map[string]connectivity.ControlSessionFact{
 			"uid-a": {Generation: 9, ConnectedAt: 900, HeartbeatAt: 990},
 		}}}, connectivity.Options{}),
-		HubCallSession: func(agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallSession: func(_ context.Context, agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			if generation != 9 {
 				t.Fatalf("generation = %d, want 9", generation)
 			}
@@ -274,8 +276,10 @@ func TestInterrupt_PassesThroughToAgent(t *testing.T) {
 func TestInterrupt_AgentNotFound(t *testing.T) {
 	ctx := newTestContext(t, setupTestDB(t))
 	h := &Handler{
-		Connections:    connectivity.NewService("epoch-missing", connectivity.Sources{}, connectivity.Options{}),
-		HubCallSession: func(string, uint64, string, any, time.Duration) (json.RawMessage, error) { return nil, nil },
+		Connections: connectivity.NewService("epoch-missing", connectivity.Sources{}, connectivity.Options{}),
+		HubCallSession: func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			return nil, nil
+		},
 	}
 	if _, err := h.Interrupt(ctx, InterruptRequest{AgentID: 999, ID: 1}); err == nil {
 		t.Fatalf("missing agent should error")
@@ -285,3 +289,85 @@ func TestInterrupt_AgentNotFound(t *testing.T) {
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }
+
+func TestGetAllInflightBudgetIncludesQueuedNodes(t *testing.T) {
+	h, appCtx, ids, _ := newFullSyncFixture(t, 34)
+	h.GetOnlineAgentIDs = func() []string { return ids }
+	var calls atomic.Int32
+	h.HubCallSession = func(ctx context.Context, agentID string, _ uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+		calls.Add(1)
+		if agentID == ids[0] {
+			return json.RawMessage(`[]`), nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	started := time.Now()
+	response, err := h.GetAllInflight(appCtx, api.EmptyRequest{})
+	require.NoError(t, err)
+	require.Less(t, time.Since(started), 17*time.Second)
+	require.Len(t, response.SuccessfulAgentIDs, 1, "empty success must remain distinguishable from failed nodes")
+	require.Len(t, response.FailedAgents, 33)
+	require.Less(t, calls.Load(), int32(len(ids)), "queued nodes must not start new RPCs after the aggregate deadline")
+	for _, failed := range response.FailedAgents {
+		require.Equal(t, "rpc_timeout", failed.Code)
+		require.GreaterOrEqual(t, failed.ElapsedMs, int64(9900))
+	}
+}
+
+func TestGetAllInflightCancellationStopsActiveAndQueuedNodes(t *testing.T) {
+	h, appCtx, ids, _ := newFullSyncFixture(t, 33)
+	h.GetOnlineAgentIDs = func() []string { return ids }
+	ctx, cancel := context.WithCancel(appCtx.RequestContext())
+	defer cancel()
+	appCtx.Request = appCtx.Request.WithContext(ctx)
+	started := make(chan struct{}, len(ids))
+	var calls atomic.Int32
+	h.HubCallSession = func(ctx context.Context, _ string, _ uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() { _, err := h.GetAllInflight(appCtx, api.EmptyRequest{}); done <- err }()
+	for range 16 {
+		<-started
+	}
+	cancel()
+	select {
+	case err := <-done:
+		require.Equal(t, "request_canceled", requireAPIError(t, err).Code)
+	case <-time.After(time.Second):
+		t.Fatal("canceled browser request left aggregation waiting")
+	}
+	require.Equal(t, int32(16), calls.Load())
+}
+
+func TestInterruptTimeoutAndCancellationRemainUnconfirmed(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		cause  error
+		status int
+		code   string
+	}{
+		{name: "timeout", cause: context.DeadlineExceeded, status: 504, code: "rpc_timeout"},
+		{name: "canceled", cause: context.Canceled, status: 408, code: "request_canceled"},
+		{name: "generation", cause: connectivity.ErrConnectionGenerationChanged, status: 409, code: "connection_generation_changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h, appCtx, _, _ := newFullSyncFixture(t, 1)
+			h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+				return nil, fmt.Errorf("private operation detail: %w", test.cause)
+			}
+			_, err := h.Interrupt(appCtx, InterruptRequest{AgentID: 1, ID: 7})
+			failure := requireAPIError(t, err)
+			require.Equal(t, test.status, failure.Status)
+			require.Equal(t, test.code, failure.Code)
+			require.NotContains(t, failure.Message, "private")
+			if test.status != 409 {
+				require.Contains(t, failure.Message, "could not be confirmed")
+			}
+		})
+	}
+}

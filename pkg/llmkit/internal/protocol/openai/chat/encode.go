@@ -202,8 +202,9 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 							imgURL = cb.MediaURL
 						}
 						b, _ := json.Marshal(oaiContentBlock{
-							Type:     string(ir.ContentTypeImageURL),
-							ImageURL: &oaiImageURL{URL: imgURL},
+							Type:         string(ir.ContentTypeImageURL),
+							ProviderData: convert.CloneToolCallProviderData(cb.ProviderData),
+							ImageURL:     &oaiImageURL{URL: imgURL},
 						})
 						blocks = append(blocks, b)
 					}
@@ -270,6 +271,28 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	// 保留入站提供的扩展字段，已生成的标准字段不被额外覆盖。
+	if len(chatReq.Extras) > 0 {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(body, &object); err != nil {
+			return nil, err
+		}
+		for key, value := range chatReq.Extras {
+			if _, exists := object[key]; exists {
+				continue
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, fmt.Errorf("marshal request extension %s: %w", key, err)
+			}
+			object[key] = encoded
+		}
+		body, err = json.Marshal(object)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	endpointPath := cfg.EndpointPath
 	if endpointPath == "" {
 		endpointPath = consts.RouteChatCompletions
@@ -309,7 +332,9 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 	var reasoning strings.Builder
 	var signature string
 	var refusal strings.Builder
+	toolIndexes := map[string]int{}
 	var toolCalls []oaiToolCall
+	var images []oaiImage
 	var usage *oaiUsage
 	var model string
 	created := time.Now().Unix() // default to current time for cross-protocol
@@ -338,6 +363,15 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 			if ev.Delta != nil {
 				reasoning.WriteString(ev.Delta.Text)
 			}
+		case ir.EventContentBlock:
+			if ev.ContentBlock != nil {
+				switch ev.ContentBlock.Type {
+				case ir.ContentTypeImage:
+					images = append(images, imageFromContentBlock(*ev.ContentBlock, len(images)))
+				case ir.ContentTypeText:
+					content.WriteString(ev.ContentBlock.Text)
+				}
+			}
 		case ir.EventContentDelta:
 			if ev.Delta != nil {
 				content.WriteString(ev.Delta.Text)
@@ -345,9 +379,32 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 					refusal.WriteString(ev.Delta.Refusal)
 				}
 			}
+		case ir.EventToolCallStart, ir.EventToolCallArgumentsDelta, ir.EventToolCallEnd:
+			if ev.ToolCall == nil {
+				continue
+			}
+			index, exists := toolIndexes[ev.ToolCall.CallID]
+			if !exists {
+				index = len(toolCalls)
+				toolIndexes[ev.ToolCall.CallID] = index
+				toolCalls = append(toolCalls, oaiToolCall{ID: ev.ToolCall.CallID, Type: "function", Index: index})
+			}
+			call := &toolCalls[index]
+			if ev.ToolCall.Name != "" {
+				call.Function.Name = ev.ToolCall.Name
+			}
+			if ev.Type == ir.EventToolCallArgumentsDelta {
+				call.Function.Arguments += ev.ToolCall.Arguments
+			} else if ev.ToolCall.Arguments != "" {
+				call.Function.Arguments = ev.ToolCall.Arguments
+			}
 		case ir.EventToolCallDelta:
 			if ev.Delta != nil && ev.Delta.ToolCall != nil {
 				tc := ev.Delta.ToolCall
+				if _, exists := toolIndexes[tc.ID]; exists {
+					continue
+				}
+				toolIndexes[tc.ID] = len(toolCalls)
 				toolCalls = append(toolCalls, oaiToolCall{
 					ID:   tc.ID,
 					Type: string(ir.ContentTypeFunction),
@@ -392,6 +449,7 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 					Signature:        signature,
 					Refusal:          refusal.String(),
 					ToolCalls:        toolCalls,
+					Images:           images,
 				},
 				FinishReason: &finishReason,
 			},
@@ -431,6 +489,7 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 	}
 	chatFcStates := map[string]*chatFcOutState{} // callID → output index
 	nextChatToolIndex := 0
+	nextImageIndex := 0
 
 	for ev := range events {
 		if ev.Model != "" {
@@ -497,6 +556,18 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 						},
 					},
 				}
+			}
+		case ir.EventContentBlock:
+			if ev.ContentBlock != nil {
+				delta := &oaiRespDelta{}
+				switch ev.ContentBlock.Type {
+				case ir.ContentTypeImage:
+					delta.Images = []oaiImage{imageFromContentBlock(*ev.ContentBlock, nextImageIndex)}
+					nextImageIndex++
+				case ir.ContentTypeText:
+					delta.Content = ev.ContentBlock.Text
+				}
+				chunk = &oaiResponse{ID: id, Object: "chat.completion.chunk", Model: model, Created: created, Choices: []oaiChoice{{Index: 0, Delta: delta}}}
 			}
 		case ir.EventContentDelta:
 			if ev.Delta != nil {

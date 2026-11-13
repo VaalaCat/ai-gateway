@@ -3,6 +3,7 @@ package inflight
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,14 +33,16 @@ type Meta struct {
 
 // Snapshot 是某一时刻一条在途请求的只读视图。View 即"进行中的 usage_log"（与落库同构）。
 type Snapshot struct {
-	ID             int64                  `json:"id"`
-	ReqID          string                 `json:"req_id"`
-	View           protocol.UsageLogEntry `json:"view"`
-	Stage          string                 `json:"stage"`
-	ElapsedMs      int64                  `json:"elapsed_ms"`
-	QueuedMs       int64                  `json:"queued_ms"`
-	QueuedReason   string                 `json:"queued_reason"`
-	CurrentAttempt *AttemptInProgress     `json:"current_attempt,omitempty"`
+	ID              int64                  `json:"id"`
+	ReqID           string                 `json:"req_id"`
+	View            protocol.UsageLogEntry `json:"view"`
+	Stage           string                 `json:"stage"`
+	ElapsedMs       int64                  `json:"elapsed_ms"`
+	QueuedMs        int64                  `json:"queued_ms"`
+	QueuedReason    string                 `json:"queued_reason"`
+	CurrentAttempt  *AttemptInProgress     `json:"current_attempt,omitempty"`
+	Progress        TransferProgress       `json:"progress"`
+	AttemptProgress *TransferProgress      `json:"attempt_progress,omitempty"`
 }
 
 // Entry 是一条在途请求的可变句柄。可变字段统一用 mu 保护(snapshot 频率低,mutex 足够清晰)。
@@ -50,19 +53,35 @@ type Entry struct {
 	id        int64
 	cancel    context.CancelFunc
 
-	mu             sync.RWMutex
-	stage          string
-	view           protocol.UsageLogEntry
-	queuedAt       time.Time
-	queuedReason   string
-	currentAttempt *AttemptInProgress
+	mu                      sync.RWMutex
+	stage                   string
+	view                    protocol.UsageLogEntry
+	queuedAt                time.Time
+	queuedReason            string
+	currentAttempt          *AttemptInProgress
+	upstreamTransfer        transferCounter
+	clientTransfer          transferCounter
+	attemptUpstreamTransfer transferCounter
+	attemptClientTransfer   transferCounter
 }
 
 // SetStage 更新当前阶段名(与 trace.Stage 字符串一致)。nil 接收者安全。
 func (e *Entry) SetStage(s string) { e.set(func() { e.stage = s }) }
 
 // Update 用阶段边界投影整份刷新（替代一堆 setter）。nil 接收者安全。
-func (e *Entry) Update(view protocol.UsageLogEntry) { e.set(func() { e.view = view }) }
+func (e *Entry) Update(view protocol.UsageLogEntry) {
+	// 1. 保存轻量字段和候选链的独立副本。
+	view.TraceData = ""
+	view.AttemptTraces = nil
+	view.AutoDisableTriggers = nil
+	view.FallbackChain = cloneFallbackChain(view.FallbackChain)
+	view.RateLimitHits = slices.Clone(view.RateLimitHits)
+	if view.ExecutionAgentID != nil {
+		id := *view.ExecutionAgentID
+		view.ExecutionAgentID = &id
+	}
+	e.set(func() { e.view = view })
+}
 
 // MarkQueued 标记"正卡在限流队列"。reason=卡在哪条规则。重复调不重置起点。
 func (e *Entry) MarkQueued(reason string) {
@@ -78,13 +97,24 @@ func (e *Entry) MarkQueued(reason string) {
 func (e *Entry) Unqueue() { e.set(func() { e.queuedAt = time.Time{}; e.queuedReason = "" }) }
 
 // SetCurrentAttempt 标记"当前正在尝试的候选"(打之前调)。nil 接收者安全。
-func (e *Entry) SetCurrentAttempt(a *AttemptInProgress) { e.set(func() { e.currentAttempt = a }) }
+func (e *Entry) SetCurrentAttempt(a *AttemptInProgress) {
+	// 1. 切换候选并清空候选内的传输进度。
+	e.set(func() {
+		if a != nil {
+			attempt := *a
+			a = &attempt
+		}
+		e.currentAttempt = a
+		e.attemptUpstreamTransfer = transferCounter{}
+		e.attemptClientTransfer = transferCounter{observed: e.clientTransfer.observed}
+	})
+}
 
 // UpdateFallbackChain 用已完成尝试链刷新 view.FallbackChain,并清"进行中"标记
 // (该候选刚 settle)。nil 接收者安全。
 func (e *Entry) UpdateFallbackChain(chain []models.AttemptRecord) {
 	e.set(func() {
-		e.view.FallbackChain = chain
+		e.view.FallbackChain = cloneFallbackChain(chain)
 		e.currentAttempt = nil
 	})
 }
@@ -116,15 +146,26 @@ func (e *Entry) snapshot(now time.Time) Snapshot {
 	if !e.queuedAt.IsZero() {
 		queuedMs = now.Sub(e.queuedAt).Milliseconds()
 	}
+	var attemptProgress *TransferProgress
+	if e.currentAttempt != nil {
+		progress := transferProgress(e.attemptUpstreamTransfer, e.attemptClientTransfer, now)
+		attemptProgress = &progress
+	}
+	requestID := e.view.RequestID
+	if requestID == "" {
+		requestID = e.reqID
+	}
 	return Snapshot{
-		ID:             e.id,
-		ReqID:          e.reqID,
-		View:           e.view,
-		Stage:          e.stage,
-		ElapsedMs:      now.Sub(e.startTime).Milliseconds(),
-		QueuedMs:       queuedMs,
-		QueuedReason:   e.queuedReason,
-		CurrentAttempt: e.currentAttempt,
+		ID:              e.id,
+		ReqID:           requestID,
+		View:            e.view,
+		Stage:           e.stage,
+		ElapsedMs:       now.Sub(e.startTime).Milliseconds(),
+		QueuedMs:        queuedMs,
+		QueuedReason:    e.queuedReason,
+		CurrentAttempt:  e.currentAttempt,
+		Progress:        transferProgress(e.upstreamTransfer, e.clientTransfer, now),
+		AttemptProgress: attemptProgress,
 	}
 }
 

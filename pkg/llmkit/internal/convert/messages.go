@@ -34,8 +34,10 @@ func NormalizeAssistantToolCallSequence(messages []ir.Message) []ir.Message {
 			switch {
 			case next.Role == ir.RoleAssistant && len(next.ToolCalls) > 0:
 				for _, block := range next.Content {
-					if block.Type == ir.ContentTypeText && block.Text != "" {
+					if block.Type == ir.ContentTypeText && block.Text != "" && block.ProviderData == nil && block.RawJSON == nil {
 						preambles = append(preambles, block.Text)
+					} else {
+						message.Content = append(message.Content, block)
 					}
 				}
 				message.ToolCalls = append(message.ToolCalls, next.ToolCalls...)
@@ -45,8 +47,10 @@ func NormalizeAssistantToolCallSequence(messages []ir.Message) []ir.Message {
 				j++
 			case next.Role == ir.RoleAssistant:
 				for _, block := range next.Content {
-					if block.Type == ir.ContentTypeText && block.Text != "" {
+					if block.Type == ir.ContentTypeText && block.Text != "" && block.ProviderData == nil && block.RawJSON == nil {
 						preambles = append(preambles, block.Text)
+					} else {
+						message.Content = append(message.Content, block)
 					}
 				}
 				j++
@@ -64,7 +68,7 @@ func NormalizeAssistantToolCallSequence(messages []ir.Message) []ir.Message {
 			merged := false
 			for index := range message.Content {
 				block := &message.Content[index]
-				if block.Type != ir.ContentTypeText || block.RawJSON != nil {
+				if block.Type != ir.ContentTypeText || block.RawJSON != nil || block.ProviderData != nil {
 					continue
 				}
 				if block.Text == "" {
@@ -89,7 +93,7 @@ func NormalizeAssistantToolCallSequence(messages []ir.Message) []ir.Message {
 func DropEmptyTextBlocks(blocks []ir.ContentBlock) []ir.ContentBlock {
 	out := make([]ir.ContentBlock, 0, len(blocks))
 	for _, block := range blocks {
-		if block.Type == ir.ContentTypeText && block.RawJSON == nil && block.Text == "" {
+		if block.Type == ir.ContentTypeText && block.RawJSON == nil && block.ProviderData == nil && block.Text == "" {
 			continue
 		}
 		out = append(out, block)

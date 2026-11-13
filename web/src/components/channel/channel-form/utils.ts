@@ -1,4 +1,4 @@
-import type { Channel } from "@/lib/types";
+import type { Channel, ChannelAuth } from "@/lib/types";
 import {
   ChannelForm,
   ChannelOtherSettings,
@@ -9,6 +9,35 @@ import {
 } from "./types";
 
 /* ── parseSetting / stringifySetting (existing logic) ─────────────────── */
+
+// parseChannelAuth 读取表单中的上游认证配置。
+export function parseChannelAuth(raw: string): ChannelAuth {
+  // 1. 读取序列化配置。
+  return raw ? JSON.parse(raw) : {};
+}
+
+// stringifyChannelAuth 序列化认证配置，空配置恢复默认。
+export function stringifyChannelAuth(auth: ChannelAuth): string {
+  // 1. 只保留已配置的默认值和协议覆盖。
+  const cleaned: ChannelAuth = {};
+  if (auth.default) cleaned.default = { ...auth.default };
+  if (auth.protocols && Object.keys(auth.protocols).length) {
+    cleaned.protocols = Object.fromEntries(
+      Object.entries(auth.protocols).map(([protocol, value]) => [protocol, { ...value }]),
+    );
+  }
+  return Object.keys(cleaned).length ? JSON.stringify(cleaned) : "";
+}
+
+// getChannelAuthValidationError 检查认证 Header 和 Value 是否完整。
+export function getChannelAuthValidationError(raw: string): "upstreamAuthIncomplete" | undefined {
+  // 1. 检查每组自定义认证，不修改 Value 原文。
+  const auth = parseChannelAuth(raw);
+  const entries = [auth.default, ...Object.values(auth.protocols ?? {})];
+  return entries.some((entry) => entry && (!entry.header.trim() || !entry.value.trim()))
+    ? "upstreamAuthIncomplete"
+    : undefined;
+}
 
 export function parseSetting(raw: string): ChannelSettings {
   if (!raw) return {};
@@ -79,6 +108,7 @@ export function channelProtocols(endpoints: string): ChannelProtocols {
   const eps = parseEndpoints(endpoints);
   return {
     claude: !!eps.messages,
+    gemini: !!eps.generate_content,
     openaiChat: !!eps.chat_completions,
     openaiResponses: !!eps.responses,
   };
@@ -106,12 +136,13 @@ export function sanitizeOtherSettingsForSubmit(
   const sanitized: ChannelOtherSettings = { ...parsed };
   if (sanitized.protocol_override) {
     const protos = channelProtocols(endpoints);
-    const cleaned: Record<string, "openai_chat" | "openai_responses" | "claude"> = {};
+    const cleaned: Record<string, "openai_chat" | "openai_responses" | "claude" | "gemini"> = {};
     for (const [inbound, target] of Object.entries(sanitized.protocol_override)) {
       if (!target || target === "auto" || target === inbound) continue;
       if (target === "openai_chat" && !protos.openaiChat) continue;
       if (target === "openai_responses" && !protos.openaiResponses) continue;
       if (target === "claude" && !protos.claude) continue;
+      if (target === "gemini" && !protos.gemini) continue;
       cleaned[inbound] = target;
     }
     if (Object.keys(cleaned).length === 0) {
@@ -126,6 +157,7 @@ export function sanitizeOtherSettingsForSubmit(
     if (protos.openaiChat) enabled.add("openai_chat");
     if (protos.openaiResponses) enabled.add("openai_responses");
     if (protos.claude) enabled.add("claude");
+    if (protos.gemini) enabled.add("gemini");
 
     const cleanedRules = sanitized.model_protocol_override.filter((rule) => {
       if (!rule.model) return false;
@@ -139,8 +171,8 @@ export function sanitizeOtherSettingsForSubmit(
         if (!outb || outb === "auto") return false;
         if (outb === inb) return false; // identity drop
         if (!enabled.has(outb as string)) return false;
-        // inbound: '*' is always valid; specific inbound must be enabled
-        return inb === "*" || enabled.has(inb as string);
+        // 入站协议不要求同一渠道同时配置该出站端点。
+        return ["*", "openai_chat", "openai_responses", "claude", "gemini"].includes(inb);
       });
       return validPairs.length > 0;
     });
@@ -279,6 +311,7 @@ export function mapChannelToForm(channel: Channel): ChannelForm {
     status_code_mapping: channel.status_code_mapping ?? "",
     param_override: channel.param_override ?? "",
     header_override: channel.header_override ?? "",
+    auth: stringifyChannelAuth(channel.auth ?? {}),
     other_settings: channel.other_settings ?? "",
     supported_api_types: channel.supported_api_types ?? "",
     endpoints: channel.endpoints ?? "",

@@ -10,7 +10,7 @@ export const batchFieldMessageKeys = [
   "weight", "priority", "testModel", "autoBan", "usageLimit", "batchEditFieldAffinity", "modelMapping",
   "systemPrompt", "roleMapping", "paramOverride", "headerOverride", "supportedApiTypes", "sectionEndpoints",
   "passthroughEnabled", "fieldSystemPromptInInput", "useLegacyAdaptor", "setting", "otherSettings", "proxy",
-  "organization", "apiVersion", "disableKeepalive", "statusCodeMapping", "resilienceOverride", "priceRatio", "free",
+  "organization", "apiVersion", "disableKeepalive", "statusCodeMapping", "resilienceOverride", "priceRatio", "free", "upstreamAuth",
 ] as const;
 
 export const channelBatchRuntimeMessageKeys = [

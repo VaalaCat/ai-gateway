@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 )
@@ -39,6 +40,12 @@ func NewRouteFailureError(code string, cause error) error {
 func PublicRouteErrorFromState(rctx *RelayContext) (protocol.PublicRouteError, bool) {
 	if rctx == nil || rctx.State == nil {
 		return protocol.PublicRouteError{}, false
+	}
+	var authErr *upstream.ChannelAuthError
+	if errors.As(rctx.State.Err, &authErr) {
+		return protocol.PublicRouteError{
+			Code: authErr.Code, Stage: "upstream_dispatch", RequestID: rctx.Input.RequestID, Message: authErr.Message,
+		}, true
 	}
 	var routeErr *RouteFailureError
 	if errors.As(rctx.State.Err, &routeErr) && routeErr != nil {
@@ -95,6 +102,10 @@ func StatusFromState(rctx *RelayContext) (int, string) {
 	err := rctx.State.Err
 	if err == nil {
 		return http.StatusInternalServerError, ""
+	}
+	var authErr *upstream.ChannelAuthError
+	if errors.As(err, &authErr) {
+		return http.StatusBadGateway, authErr.Message
 	}
 	var bodyErr interface{ BodyErrorCode() string }
 	if errors.As(err, &bodyErr) {

@@ -175,7 +175,7 @@ func TestMaskHeaders(t *testing.T) {
 		"Cookie":        {"session=abc123"},
 	}
 	secrets := []string{"sk-secret123"}
-	got := maskHeaders(input, secrets)
+	got := maskHeaders(input, secrets, nil)
 
 	if got["Authorization"][0] != "***" {
 		t.Errorf("Authorization should be masked, got %q", got["Authorization"][0])

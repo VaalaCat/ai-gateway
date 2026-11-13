@@ -14,11 +14,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"gorm.io/datatypes"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -409,4 +411,72 @@ func TestAttemptHTTPDoerNilDependenciesAndEmptyBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNoContent, response.StatusCode)
 	require.NoError(t, response.Body.Close())
+}
+
+func TestAttemptHTTPDoerMessagesChannelAuth(t *testing.T) {
+	tests := []struct {
+		name       string
+		header     string
+		value      string
+		key        string
+		override   string
+		script     string
+		wantHeader string
+		wantValue  string
+		wantCode   string
+	}{
+		{name: "ark bearer", header: "Authorization", value: "Bearer ${CHANNEL_KEY}", key: "selected-key", wantHeader: "Authorization", wantValue: "Bearer selected-key"},
+		{name: "custom header", header: "X-Ark-Token", value: "Token ${CHANNEL_KEY}", key: "selected-key", wantHeader: "X-Ark-Token", wantValue: "Token selected-key"},
+		{name: "override then script", header: "X-Ark-Token", value: "Token ${CHANNEL_KEY}", key: "selected-key", override: `{"X-Ark-Token":"ordinary-override"}`, script: `function onUpstreamRequest(ctx) { ctx.body.saw_auth = ctx.headers["X-Ark-Token"]; ctx.setHeader("X-Ark-Token", "script-secret"); }`, wantHeader: "X-Ark-Token", wantValue: "script-secret"},
+		{name: "missing key stops dispatch", header: "Authorization", value: "Bearer ${CHANNEL_KEY}", wantCode: "upstream_auth_key_missing"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			var gotHeaders http.Header
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				require.Equal(t, "/api/v3/messages", request.URL.Path)
+				gotHeaders = request.Header.Clone()
+				require.NoError(t, json.NewDecoder(request.Body).Decode(&gotBody))
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(writer, `{"id":"msg_1","type":"message","role":"assistant","model":"ark-model","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+			}))
+			t.Cleanup(server.Close)
+			channel := &models.Channel{ChannelCore: models.ChannelCore{Auth: datatypes.NewJSONType(models.ChannelAuth{Default: &models.AuthType{Header: test.header, Value: test.value}})}, Key: test.key, HeaderOverride: test.override}
+			rctx, _ := newNativeTestCtx(t, nil, llmkit.ProtocolOpenAIChat, false)
+			rctx.Context.Request.Header.Set("Authorization", "Bearer gateway-client-secret")
+			var agent app.AgentApplication
+			if test.script != "" {
+				agent = httpDoerAgentWithScript(t, test.script, nil)
+			}
+			doer := &attemptHTTPDoer{agent: agent, gin: rctx.Context, relay: rctx, attempt: state.Attempt{Channel: channel}, protocol: llmkit.ProtocolClaudeMessages, recorder: rctx.State.Recorder}
+			client := llmkit.NewClient(llmkit.ClientOptions{HTTPClient: doer})
+			events, err := client.Call(t.Context(), llmkit.Request{MaxTokens: 128, Messages: []llmkit.Message{{Role: llmkit.RoleUser, Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeText, Text: "hello"}}}}}, llmkit.Target{Protocol: llmkit.ProtocolClaudeMessages, BaseURL: server.URL, EndpointPath: "/api/v3/messages", APIKey: test.key, Model: "ark-model"}, llmkit.CallOptions{})
+			if test.wantCode != "" {
+				var authErr *upstream.ChannelAuthError
+				require.ErrorAs(t, err, &authErr)
+				require.Equal(t, test.wantCode, authErr.Code)
+				require.Zero(t, requests.Load())
+				require.Equal(t, trace.StageUpstreamDispatch, rctx.State.Recorder.Finalize().FailStage)
+				return
+			}
+			require.NoError(t, err)
+			for range events {
+			}
+			require.EqualValues(t, 1, requests.Load())
+			require.Equal(t, test.wantValue, gotHeaders.Get(test.wantHeader))
+			require.Empty(t, gotHeaders.Get("X-Api-Key"))
+			if test.wantHeader != "Authorization" {
+				require.Empty(t, gotHeaders.Get("Authorization"))
+			}
+			require.Equal(t, "ark-model", gotBody["model"])
+			require.NotEmpty(t, gotBody["messages"])
+			require.NotEmpty(t, gotBody["max_tokens"])
+			if test.script != "" {
+				require.Equal(t, "ordinary-override", gotBody["saw_auth"])
+			}
+		})
+	}
 }

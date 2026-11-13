@@ -11,8 +11,10 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
+	"github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
 // newPlannerTestRctx 构造 Planner 测试用的最小 state.RelayContext。
@@ -671,5 +673,25 @@ func TestPlanner_MultiModel_RetryMaxExactBoundary(t *testing.T) {
 	if atts[1].RealModel != "A" || atts[2].RealModel != "B" {
 		t.Errorf("RealModel 切换边界错误：atts[1]=%q atts[2]=%q, want A→B",
 			atts[1].RealModel, atts[2].RealModel)
+	}
+}
+
+func TestGeminiInboundFiltersNonGeminiAndLegacyCandidates(t *testing.T) {
+	channels := []*models.Channel{
+		{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, Status: 1}},
+		{ChannelCore: models.ChannelCore{ID: 2, Type: consts.ChannelTypeGemini, Status: 1, UseLegacyAdaptor: true}},
+		{ChannelCore: models.ChannelCore{ID: 3, Type: consts.ChannelTypeGemini, Status: 1}},
+	}
+	relay := newPlannerTestRctx(channels, &app.UserInfo{UserID: 1}, "gemini", 5)
+	relay.Input.InboundProto = llmkit.ProtocolGemini
+	if err := NewSolver(nil).Solve(relay); err != nil {
+		t.Fatal(err)
+	}
+	if len(relay.State.Plan.Attempts) != 1 {
+		t.Fatalf("got %#v", relay.State.Plan.Attempts)
+	}
+	got := relay.State.Plan.Attempts[0]
+	if got.Channel.ID != 3 || got.Mode != attemptproxy.ModePassthrough {
+		t.Fatalf("got %#v", got)
 	}
 }

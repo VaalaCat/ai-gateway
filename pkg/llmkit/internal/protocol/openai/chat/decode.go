@@ -2,6 +2,7 @@ package chat
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -286,30 +287,7 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 							var b oaiContentBlock
 							json.Unmarshal(rawBlock, &b)
 							if b.ImageURL != nil {
-								// O6: Detect data: URIs and split into MediaB64+MimeType
-								url := b.ImageURL.URL
-								if strings.HasPrefix(url, "data:") {
-									if commaIdx := strings.Index(url, ","); commaIdx > 0 {
-										meta := url[5:commaIdx] // after "data:", before ","
-										meta = strings.TrimSuffix(meta, ";base64")
-										msg.Content = append(msg.Content, ir.ContentBlock{
-											Type:     ir.ContentTypeImage,
-											MediaB64: url[commaIdx+1:],
-											MimeType: meta,
-										})
-									} else {
-										// Malformed data URI, pass as URL
-										msg.Content = append(msg.Content, ir.ContentBlock{
-											Type:     ir.ContentTypeImage,
-											MediaURL: url,
-										})
-									}
-								} else {
-									msg.Content = append(msg.Content, ir.ContentBlock{
-										Type:     ir.ContentTypeImage,
-										MediaURL: url,
-									})
-								}
+								msg.Content = append(msg.Content, imageContentBlock(b.ImageURL.URL, b.ProviderData))
 							}
 						default:
 							// Unknown content block type: preserve raw JSON
@@ -319,6 +297,18 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 						}
 					}
 				}
+			}
+		}
+
+		// 1. 显式数组保留调用方给定顺序，images 扩展保留独立的图片元数据。
+		if bytes.HasPrefix(bytes.TrimSpace(m.Content), []byte("[")) {
+			for i := range msg.Content {
+				msg.Content[i].Metadata = map[string]any{"explicit_content_order": true}
+			}
+		}
+		for _, image := range m.Images {
+			if image.ImageURL != nil {
+				msg.Content = append(msg.Content, imageContentBlock(image.ImageURL.URL, image.ProviderData))
 			}
 		}
 
@@ -383,6 +373,17 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 			Description: description,
 			RawConfig:   m,
 		})
+	}
+
+	// 2. 保留目标原生扩展参数，已解析的 Chat 字段由 IR 管理。
+	var extras map[string]any
+	if json.Unmarshal(body, &extras) == nil {
+		for _, key := range []string{"model", "messages", "tools", "stream", "max_tokens", "temperature", "top_p", "stop", "tool_choice", "parallel_tool_calls", "store", "frequency_penalty", "presence_penalty", "seed", "n", "user", "logit_bias", "logprobs", "top_logprobs", "service_tier", "safety_identifier", "response_format", "stream_options", "reasoning_effort"} {
+			delete(extras, key)
+		}
+		if len(extras) > 0 {
+			req.Extras = extras
+		}
 	}
 
 	req.InboundProtocol = ir.ProtocolOpenAIChat
@@ -450,6 +451,12 @@ func (c *handler) decodeNonStream(resp *http.Response, ch chan<- ir.Event) {
 					Delta: &ir.DeltaPayload{
 						Refusal: choice.Message.Refusal,
 					},
+				}
+			}
+			for _, image := range choice.Message.Images {
+				if image.ImageURL != nil {
+					block := imageContentBlock(image.ImageURL.URL, image.ProviderData)
+					ch <- ir.Event{Type: ir.EventContentBlock, ContentBlock: &block}
 				}
 			}
 			for _, tc := range choice.Message.ToolCalls {
@@ -525,8 +532,8 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 	ch <- ir.Event{Type: ir.EventStreamStart}
 
 	scanner := bufio.NewScanner(resp.Body)
-	// Some providers send large chunks; increase buffer to 1 MB.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// 完整图片 data URL 使用较大的有界 SSE 行缓冲。
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	firstChunk := true
 	var finishReason string // accumulated from stream chunks, attached to EventDone
 	var reasoning chatReasoningAccumulator
@@ -592,6 +599,12 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 						Delta: &ir.DeltaPayload{
 							Refusal: choice.Delta.Refusal,
 						},
+					}
+				}
+				for _, image := range choice.Delta.Images {
+					if image.ImageURL != nil {
+						block := imageContentBlock(image.ImageURL.URL, image.ProviderData)
+						ch <- ir.Event{Type: ir.EventContentBlock, ContentBlock: &block}
 					}
 				}
 				for _, tc := range choice.Delta.ToolCalls {

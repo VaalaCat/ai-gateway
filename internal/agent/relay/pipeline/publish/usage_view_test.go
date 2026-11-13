@@ -3,12 +3,14 @@ package publish
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
@@ -16,6 +18,29 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProjectInflightEntryDoesNotFinalizeOrIncludeBodies(t *testing.T) {
+	rctx := newSuccessfulUsageContext()
+	recorder := trace.NewRecorder(trace.CaptureFull, 64*1024)
+	rctx.State.Recorder = recorder
+	payload := strings.Repeat("private-body", 1000)
+	recorder.WithInbound(rctx.Request, []byte(payload))
+	recorder.SetUpstreamBody([]byte(payload))
+	recorder.WithStage(trace.StageUpstreamDecode)
+	registry := inflight.NewRegistry(nil, 0)
+	entry := registry.Track(inflight.Meta{})
+	entry.Update(ProjectInflightEntry(rctx))
+	data, err := json.Marshal(registry.Snapshot())
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "private-body")
+	require.NotContains(t, string(data), "trace_data")
+	require.NotContains(t, string(data), "attempt_traces")
+	// 读取在途视图后仍将这段等待计入原阶段。
+	time.Sleep(20 * time.Millisecond)
+	final := ProjectUsageEntry(rctx)
+	require.GreaterOrEqual(t, final.UpstreamDecodeMs, 20)
+	require.Contains(t, final.TraceData, "private-body")
+}
 
 func newSuccessfulUsageContext() *state.RelayContext {
 	gin.SetMode(gin.TestMode)

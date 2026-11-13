@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
+import { monitoringSignal } from "./monitoring";
 import type {
   AllInflightResponse,
   BreakerBoardResponse,
@@ -11,38 +13,63 @@ import type {
 } from "@/lib/types";
 import { useSettings } from "./system";
 
-export function useAllInflight() {
+export function useAllInflight(options: { paused?: boolean } = {}) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (options.paused) void queryClient.cancelQueries({ queryKey: ["observability", "inflight-all"], exact: true });
+  }, [options.paused, queryClient]);
   return useQuery({
     queryKey: ["observability", "inflight-all"],
-    queryFn: () => api.get<AllInflightResponse>("/admin/agents/inflight/all"),
-    refetchInterval: 5000,
+    queryFn: ({ signal }) => api.get<AllInflightResponse>("/admin/agents/inflight/all", { signal: monitoringSignal(signal) }),
+    enabled: !options.paused,
+    refetchInterval: options.paused ? false : 5000,
+    refetchOnWindowFocus: !options.paused,
+    retry: false,
   });
 }
 
-export function useLimiterUsage() {
+export function useLimiterUsage(options: { paused?: boolean } = {}) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (options.paused) void queryClient.cancelQueries({ queryKey: ["observability", "limiter-usage"], exact: true });
+  }, [options.paused, queryClient]);
   return useQuery({
     queryKey: ["observability", "limiter-usage"],
-    queryFn: () =>
-      api.get<LimiterUsageResponse>("/admin/observability/limiter-usage"),
-    refetchInterval: 5000,
+    queryFn: ({ signal }) => api.get<LimiterUsageResponse>("/admin/observability/limiter-usage", { signal: monitoringSignal(signal) }),
+    enabled: !options.paused,
+    refetchInterval: options.paused ? false : 5000,
+    refetchOnWindowFocus: !options.paused,
+    retry: false,
   });
 }
 
-export function useBreakerBoard() {
+export function useBreakerBoard(options: { paused?: boolean } = {}) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (options.paused) void queryClient.cancelQueries({ queryKey: ["observability", "breaker-board"], exact: true });
+  }, [options.paused, queryClient]);
   return useQuery({
     queryKey: ["observability", "breaker-board"],
-    queryFn: () =>
-      api.get<BreakerBoardResponse>("/admin/observability/breaker-board"),
-    refetchInterval: 5000,
+    queryFn: ({ signal }) => api.get<BreakerBoardResponse>("/admin/observability/breaker-board", { signal: monitoringSignal(signal) }),
+    enabled: !options.paused,
+    refetchInterval: options.paused ? false : 5000,
+    refetchOnWindowFocus: !options.paused,
+    retry: false,
   });
 }
 
-export function useDeliveryBoard() {
+export function useDeliveryBoard(options: { paused?: boolean } = {}) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (options.paused) void queryClient.cancelQueries({ queryKey: ["observability", "delivery-board"], exact: true });
+  }, [options.paused, queryClient]);
   return useQuery({
     queryKey: ["observability", "delivery-board"],
-    queryFn: () =>
-      api.get<DeliveryBoardResponse>("/admin/observability/delivery-board"),
-    refetchInterval: 5000,
+    queryFn: ({ signal }) => api.get<DeliveryBoardResponse>("/admin/observability/delivery-board", { signal: monitoringSignal(signal) }),
+    enabled: !options.paused,
+    refetchInterval: options.paused ? false : 5000,
+    refetchOnWindowFocus: !options.paused,
+    retry: false,
   });
 }
 

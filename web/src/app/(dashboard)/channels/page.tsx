@@ -210,6 +210,7 @@ export default function ChannelsPage() {
       { key: "chat_completions", label: "Chat Completions" },
       { key: "responses", label: "Responses API" },
       { key: "messages", label: "Claude Messages" },
+      { key: "generate_content", label: "Gemini" },
       { key: "models", label: t("apiTypeModels") },
     ];
 
@@ -367,6 +368,7 @@ export default function ChannelsPage() {
           { key: "chat_completions", label: t("endpointChat") },
           { key: "responses", label: t("endpointResp") },
           { key: "messages", label: t("endpointClaude") },
+          { key: "generate_content", label: t("endpointGemini") },
         ];
         return (
           <div className="flex gap-1">

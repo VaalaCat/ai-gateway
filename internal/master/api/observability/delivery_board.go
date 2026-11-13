@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/api/monitoring"
+	"github.com/VaalaCat/ai-gateway/internal/master/controlrpc"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/sourcegraph/conc/pool"
@@ -58,28 +61,39 @@ type AgentQueueRow struct {
 }
 
 type DeliveryBoardResponse struct {
-	Agents       []AgentQueueRow       `json:"agents"`
-	FailedAgents []FailedAgent         `json:"failed_agents"`
-	LogBacklog   monitoring.LogBacklog `json:"log_backlog"`
+	Agents             []AgentQueueRow       `json:"agents"`
+	FailedAgents       []FailedAgent         `json:"failed_agents"`
+	SuccessfulAgentIDs []uint                `json:"successful_agent_ids"`
+	LogBacklog         monitoring.LogBacklog `json:"log_backlog"`
 }
 
 // GetDeliveryBoard 扇出 agent.usageQueue 到所有在线 agent,汇总成每 agent 一行的投递
 // 看板(镜像 GetBreakerBoard 的扇出/隔离/排序骨架)。
 func (h *Handler) GetDeliveryBoard(c *app.Context, _ api.EmptyRequest) (DeliveryBoardResponse, error) {
-	resp := DeliveryBoardResponse{Agents: []AgentQueueRow{}, FailedAgents: []FailedAgent{}}
+	resp := DeliveryBoardResponse{Agents: []AgentQueueRow{}, FailedAgents: []FailedAgent{}, SuccessfulAgentIDs: []uint{}}
 	if h != nil && h.LogBacklogSnapshot != nil {
 		resp.LogBacklog = h.LogBacklogSnapshot()
 	}
-	if h.HubCall == nil || h.GetOnlineAgentIDs == nil {
+	if h.HubCallContext == nil || h.GetOnlineAgentIDs == nil {
 		return resp, api.InternalError("hub not available", nil)
+	}
+	// 1. 为查询、排队和节点 RPC 共用本次聚合预算。
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(c.RequestContext(), api.DiagnosticAggregateTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentUsageQueue, started, err)
 	}
 	ids := h.GetOnlineAgentIDs()
 	if len(ids) == 0 {
 		return resp, nil
 	}
-	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, ctx))
 	agents, err := q.Agent().ListByAgentIDs(ids)
 	if err != nil {
+		if ctx.Err() != nil {
+			return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentUsageQueue, started, ctx.Err())
+		}
 		return resp, api.InternalError("list agents failed", err)
 	}
 	byUID := map[string]models.Agent{}
@@ -95,13 +109,24 @@ func (h *Handler) GetDeliveryBoard(c *app.Context, _ api.EmptyRequest) (Delivery
 	for _, uid := range ids {
 		ag := byUID[uid]
 		p.Go(func() nodeRes {
-			raw, err := h.HubCall(uid, consts.RPCAgentUsageQueue, nil, 5*time.Second)
+			if ag.ID == 0 {
+				return nodeRes{failed: &FailedAgent{Code: "agent_operation_failed", Error: "agent not found", ElapsedMs: time.Since(started).Milliseconds()}}
+			}
+			nodeCtx, cancelNode := context.WithTimeout(ctx, api.DiagnosticNodeTimeout)
+			defer cancelNode()
+			var raw json.RawMessage
+			err := nodeCtx.Err()
+			if err == nil {
+				raw, err = h.HubCallContext(nodeCtx, uid, consts.RPCAgentUsageQueue, nil, api.DiagnosticNodeTimeout)
+			}
 			if err != nil {
-				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: err.Error()}}
+				failure := api.DiagnosticError(c.Logger, uid, consts.RPCAgentUsageQueue, started, err)
+				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: failure.Message, Code: failure.Code, ElapsedMs: time.Since(started).Milliseconds()}}
 			}
 			var snap agentQueueSnapshot
 			if err := json.Unmarshal(raw, &snap); err != nil {
-				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: "decode: " + err.Error()}}
+				failure := api.DiagnosticError(c.Logger, uid, consts.RPCAgentUsageQueue, started, fmt.Errorf("%w: %v", controlrpc.ErrInvalidResponse, err))
+				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: failure.Message, Code: failure.Code, ElapsedMs: time.Since(started).Milliseconds()}}
 			}
 			if snap.Items == nil {
 				// agent 旁路队列为空时 snapshot 的 items 是 nil slice,原样透传会序列化成
@@ -127,15 +152,20 @@ func (h *Handler) GetDeliveryBoard(c *app.Context, _ api.EmptyRequest) (Delivery
 			resp.FailedAgents = append(resp.FailedAgents, *r.failed)
 			continue
 		}
+		resp.SuccessfulAgentIDs = append(resp.SuccessfulAgentIDs, r.ag.ID)
 		resp.Agents = append(resp.Agents, r.row)
 	}
 	sortDeliveryBoard(&resp)
+	if err := c.RequestContext().Err(); err == context.Canceled {
+		return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentUsageQueue, started, err)
+	}
 	return resp, nil
 }
 
 // sortDeliveryBoard 确定性排序,避免扇出完成顺序不定导致看板刷新行乱跳。
 func sortDeliveryBoard(resp *DeliveryBoardResponse) {
 	sort.Slice(resp.Agents, func(i, j int) bool { return resp.Agents[i].AgentID < resp.Agents[j].AgentID })
+	sort.Slice(resp.SuccessfulAgentIDs, func(i, j int) bool { return resp.SuccessfulAgentIDs[i] < resp.SuccessfulAgentIDs[j] })
 	sort.Slice(resp.FailedAgents, func(i, j int) bool {
 		return resp.FailedAgents[i].AgentID < resp.FailedAgents[j].AgentID
 	})

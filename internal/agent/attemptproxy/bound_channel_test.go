@@ -528,3 +528,26 @@ func privateChannel(id uint, key, model string) *protocol.SyncedPrivateChannel {
 		Models:       []string{model},
 	}
 }
+
+func TestBoundGeminiRequiresNativeGeminiChannel(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		kind   int
+		legacy bool
+		want   bool
+	}{
+		{"native Gemini", consts.ChannelTypeGemini, false, true}, {"legacy Gemini", consts.ChannelTypeGemini, true, false}, {"OpenAI", consts.ChannelTypeOpenAI, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := adminChannel(7, "secret", "gemini")
+			channel.Type = tc.kind
+			channel.UseLegacyAdaptor = tc.legacy
+			_, err := NewBoundChannelFinder(newBoundChannelCache([]*models.Channel{channel}, nil)).Find(BoundChannelInput{User: allowedUser(11), Attempt: boundAttempt(attemptwire.SourceAdmin, 7, "gemini", attemptwire.ModePassthrough), InboundProtocol: llmkit.ProtocolGemini})
+			if tc.want {
+				require.NoError(t, err)
+			} else {
+				requireBoundChannelError(t, err, boundModeMismatch)
+			}
+		})
+	}
+}

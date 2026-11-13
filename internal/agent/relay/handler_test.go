@@ -15,6 +15,7 @@ import (
 
 	agentappkg "github.com/VaalaCat/ai-gateway/internal/agent/app"
 	"github.com/VaalaCat/ai-gateway/internal/agent/cache"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	relayupstream "github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/config"
@@ -27,7 +28,63 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+	"gorm.io/datatypes"
 )
+
+func TestRelayHandlerLiveTransferAndInterrupt(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passthrough=%t", passthrough), func(t *testing.T) {
+			chunk := "data: {\"id\":\"reply\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n"
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(writer, chunk)
+				writer.(http.Flusher).Flush()
+				<-request.Context().Done()
+			}))
+			t.Cleanup(server.Close)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			handler, _, _ := setupTestHandler([]*models.Channel{{ChannelCore: models.ChannelCore{
+				ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: server.URL, Status: 1, Weight: 1, PassthroughEnabled: passthrough,
+			}, Key: "key", Models: "gpt-4o"}})
+			registry := inflight.NewRegistry(nil, 0)
+			handler.registry = registry
+			router := setupRouter(handler)
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+			request.Header.Set("Content-Type", "application/json")
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				router.ServeHTTP(response, request)
+			}()
+			var snapshot inflight.Snapshot
+			require.Eventually(t, func() bool {
+				rows := registry.Snapshot()
+				if len(rows) != 1 || rows[0].Progress.ClientBodyBytes == nil || *rows[0].Progress.ClientBodyBytes == 0 {
+					return false
+				}
+				snapshot = rows[0]
+				return true
+			}, 3*time.Second, time.Millisecond)
+			require.EqualValues(t, len(chunk), *snapshot.Progress.UpstreamBodyBytes)
+			require.NotNil(t, snapshot.Progress.ClientIdleMs)
+			require.NotNil(t, snapshot.AttemptProgress)
+			require.EqualValues(t, 1, snapshot.View.UserID)
+			require.NotEmpty(t, snapshot.ReqID)
+			require.Equal(t, snapshot.View.RequestID, snapshot.ReqID)
+			require.True(t, registry.Interrupt(snapshot.ID))
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("relay did not finish after interrupt")
+			}
+			require.Empty(t, registry.Snapshot())
+			require.GreaterOrEqual(t, int64(response.Body.Len()), *snapshot.Progress.ClientBodyBytes)
+		})
+	}
+}
 
 // setupTestHandler 是测试用的 Handler 工厂，对应生产链路里 server.go.buildRelayHandler。
 // retryMax=3 / timeout=30s / pool=(100,10) 对齐 server.go.buildRelayHandler 的默认值。
@@ -142,6 +199,256 @@ func TestRelayHandler_Success(t *testing.T) {
 	case <-usageReceived:
 	case <-time.After(2 * time.Second):
 		t.Error("usage event not published")
+	}
+}
+
+// TestRelayHandlerGeminiConversion 验证真实 Handler 的协议转换、图片、认证和用量链路。
+func TestRelayHandlerGeminiConversion(t *testing.T) {
+	for _, client := range []struct{ name, path string }{
+		{"chat", "/v1/chat/completions"},
+		{"responses", "/v1/responses"},
+		{"claude", "/v1/messages"},
+	} {
+		for _, stream := range []bool{false, true} {
+			for _, customAuth := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/stream=%t/customAuth=%t", client.name, stream, customAuth), func(t *testing.T) {
+					// 1. 模拟 Gemini 上游，核对映射后 URL、独立认证与未知生成参数。
+					const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/cAAAAABJRU5ErkJggg=="
+					cacheTokens := 80
+					if customAuth {
+						cacheTokens = 100
+					}
+					captured := make(chan struct{}, 1)
+					up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						action := "generateContent"
+						if stream {
+							action = "streamGenerateContent"
+							require.Equal(t, "sse", r.URL.Query().Get("alt"))
+						}
+						require.Equal(t, "/v1beta/models/gemini-image:"+action, r.URL.Path)
+						if customAuth {
+							require.Equal(t, "Signed channel-key", r.Header.Get("X-Gemini-Auth"))
+							require.Empty(t, r.Header.Get("X-Goog-Api-Key"))
+						} else {
+							require.Equal(t, "channel-key", r.Header.Get("X-Goog-Api-Key"))
+						}
+						require.Empty(t, r.Header.Get("Authorization"))
+						require.Empty(t, r.Header.Get("X-Api-Key"))
+						var body map[string]any
+						require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+						require.Contains(t, body, "contents")
+						require.NotContains(t, body, "model")
+						require.Equal(t, "kept", body["generationConfig"].(map[string]any)["futureOption"])
+						parts := []any{map[string]any{"text": "hello from Gemini"}}
+						if client.name != "claude" {
+							parts = append(parts, map[string]any{
+								"inlineData":       map[string]any{"mimeType": "image/png", "data": image},
+								"thoughtSignature": "image-signature",
+							})
+						}
+						response := map[string]any{
+							"candidates":    []any{map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": parts}, "finishReason": "STOP"}},
+							"usageMetadata": map[string]any{"promptTokenCount": 100, "cachedContentTokenCount": cacheTokens, "candidatesTokenCount": 5, "thoughtsTokenCount": 7, "totalTokenCount": 112},
+						}
+						if stream {
+							w.Header().Set("Content-Type", "text/event-stream")
+							usage := response["usageMetadata"]
+							delete(response, "usageMetadata")
+							encoded, err := json.Marshal(response)
+							require.NoError(t, err)
+							fmt.Fprintf(w, "data: %s\n\n", encoded)
+							encoded, err = json.Marshal(map[string]any{"usageMetadata": usage})
+							require.NoError(t, err)
+							fmt.Fprintf(w, "data: %s\n\n", encoded)
+						} else {
+							w.Header().Set("Content-Type", "application/json")
+							require.NoError(t, json.NewEncoder(w).Encode(response))
+						}
+						captured <- struct{}{}
+					}))
+					t.Cleanup(up.Close)
+					channel := &models.Channel{ChannelCore: models.ChannelCore{
+						ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: up.URL, Status: 1, Weight: 1,
+						Endpoints:     `{"generate_content":"/v1beta/models/{model}:{action}"}`,
+						ParamOverride: `{"generationConfig":{"futureOption":"kept"}}`,
+					}, Key: "channel-key", Models: "public-model", ModelMapping: `{"public-model":"gemini-image"}`}
+					if customAuth {
+						channel.Auth = datatypes.NewJSONType(models.ChannelAuth{Protocols: map[string]models.AuthType{
+							"generate_content": {Header: "X-Gemini-Auth", Value: "Signed ${CHANNEL_KEY}"},
+						}})
+					}
+					handler, _, bus := setupTestHandler([]*models.Channel{channel})
+					usage := make(chan protocol.UsageLogEntry, 1)
+					events.SubscribeUsageCompleted(bus, func(_ context.Context, entry protocol.UsageLogEntry) error {
+						usage <- entry
+						return nil
+					})
+					// 2. 客户端经实际路由、计划、native 和发布阶段完成一次请求。
+					body := map[string]any{"model": "public-model", "stream": stream, "max_tokens": 32,
+						"messages": []any{map[string]any{"role": "user", "content": "hello"}}}
+					if client.name == "responses" {
+						delete(body, "messages")
+						body["input"] = "hello"
+					}
+					encoded, err := json.Marshal(body)
+					require.NoError(t, err)
+					router := gin.New()
+					router.POST(client.path, func(c *gin.Context) {
+						c.Set(consts.CtxKeyUserInfo, &app.UserInfo{UserID: 1, TokenID: 1})
+						handler.Relay(c)
+					})
+					request := httptest.NewRequest(http.MethodPost, client.path, strings.NewReader(string(encoded)))
+					request.Header.Set("Authorization", "Bearer client-key")
+					request.Header.Set("X-Goog-Api-Key", "client-google-key")
+					request.Header.Set("X-Api-Key", "client-api-key")
+					writer := httptest.NewRecorder()
+					router.ServeHTTP(writer, request)
+					require.Equal(t, http.StatusOK, writer.Code, writer.Body.String())
+					require.Contains(t, writer.Body.String(), "hello from Gemini")
+					if client.name != "claude" {
+						require.Contains(t, writer.Body.String(), image)
+						require.Contains(t, writer.Body.String(), "image-signature")
+					}
+					select {
+					case <-captured:
+					default:
+						t.Fatal("Gemini upstream was not called")
+					}
+					// 3. 后到的用量仍发布到计费日志，缓存和思考各算一次。
+					select {
+					case entry := <-usage:
+						require.Equal(t, 1, entry.Status)
+						require.Equal(t, "gemini", entry.OutboundProtocol)
+						require.Equal(t, "gemini-image", entry.UpstreamModel)
+						require.Equal(t, 100-cacheTokens, entry.PromptTokens)
+						require.Equal(t, cacheTokens, entry.CacheReadTokens)
+						require.Equal(t, 12, entry.CompletionTokens)
+					case <-time.After(2 * time.Second):
+						t.Fatal("Gemini usage was not published")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRelayHandlerChannelAuthErrorLogsAreMasked(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		script   bool
+		echoType bool
+		stream   bool
+	}{
+		{name: "literal", value: "literal-auth-secret"},
+		{name: "expanded", value: "Signed prefix-${CHANNEL_KEY}-suffix"},
+		{name: "script", value: "literal-auth-secret", script: true},
+		{name: "secret spans error truncation", value: strings.Repeat("long-auth-fragment-", 24)},
+		{name: "secret in provider type", value: "literal-auth-secret", echoType: true},
+		{name: "stream literal", value: "literal-auth-secret", stream: true},
+		{name: "stream expanded", value: "Signed prefix-${CHANNEL_KEY}-suffix", stream: true},
+		{name: "stream script", value: "literal-auth-secret", script: true, stream: true},
+		{name: "stream long secret", value: strings.Repeat("long-auth-fragment-", 24), stream: true},
+	}
+	for _, passthrough := range []bool{false, true} {
+		for _, status := range []int{http.StatusUnauthorized, http.StatusInternalServerError} {
+			for _, test := range tests {
+				if test.stream && (passthrough || status != http.StatusInternalServerError) {
+					continue
+				}
+				t.Run(fmt.Sprintf("passthrough=%t/status=%d/%s", passthrough, status, test.name), func(t *testing.T) {
+					const key = "picked-channel-key-secret"
+					expanded := strings.ReplaceAll(test.value, "${CHANNEL_KEY}", key)
+					var responseBody string
+					upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+						authValue := request.Header.Get("X-Custom-Auth")
+						if test.script {
+							require.Equal(t, "script-auth-secret", authValue)
+						} else {
+							require.Equal(t, expanded, authValue)
+						}
+						errorType := "authentication_error"
+						if test.echoType {
+							errorType = authValue
+						}
+						responseBody = fmt.Sprintf(`{"error":{"type":"%s","message":"echo %s %s %s"}}`, errorType, authValue, expanded, key)
+						writer.Header().Set("Content-Type", "application/json")
+						if test.stream {
+							responseBody = fmt.Sprintf("event: error\ndata: {\"type\":\"error\",\"code\":\"server_is_overloaded\",\"message\":\"echo %s %s %s\"}\n\n", authValue, expanded, key)
+							writer.Header().Set("Content-Type", "text/event-stream")
+							writer.WriteHeader(http.StatusOK)
+						} else {
+							writer.WriteHeader(status)
+						}
+						_, _ = io.WriteString(writer, responseBody)
+					}))
+					t.Cleanup(upstream.Close)
+					channel := &models.Channel{ChannelCore: models.ChannelCore{
+						ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: upstream.URL, Status: 1, Weight: 1, PassthroughEnabled: passthrough,
+						Auth: datatypes.NewJSONType(models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Auth", Value: test.value}}),
+					}, Key: key, Models: "gpt-4o"}
+					if test.stream {
+						channel.SupportedAPITypes = `["responses"]`
+					}
+					store := cache.NewStore(nil, config.AgentCacheConfig{})
+					store.SetChannel(channel)
+					store.RebuildModelIndex()
+					if test.script {
+						store.LoadScripts([]models.AdminScript{{ID: 1, Name: "custom-auth", Enabled: true, Code: `function onUpstreamRequest(ctx) { ctx.setHeader("X-Custom-Auth", "script-auth-secret"); }`}})
+					}
+					core, recorded := observer.New(zap.DebugLevel)
+					logger := zap.New(core)
+					bus := eventbus.NewMemoryBus()
+					pool := relayupstream.NewTransportPool(100, 10, 30*time.Second, relayupstream.KeepaliveConfig{})
+					t.Cleanup(pool.CloseIdleConnections)
+					agent := agentappkg.NewDefaultAgentApplication(store, relayTestBodyStore{}, logger, &config.AgentRuntimeConfig{}, pool)
+					handler := NewHandler(bus, agent, TestDispatcherFactory(agent), nil, nil, nil)
+					usageReceived := make(chan protocol.UsageLogEntry, 1)
+					events.SubscribeUsageCompleted(bus, func(_ context.Context, entry protocol.UsageLogEntry) error {
+						usageReceived <- entry
+						return nil
+					})
+					writer := httptest.NewRecorder()
+					request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`))
+					request.Header.Set("Content-Type", "application/json")
+					if test.stream {
+						request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4o","input":"hello","stream":true}`))
+						request.Header.Set("Content-Type", "application/json")
+						setupResponsesRouter(handler).ServeHTTP(writer, request)
+					} else {
+						setupRouter(handler).ServeHTTP(writer, request)
+					}
+					if test.stream {
+						require.Contains(t, writer.Body.String(), "server_is_overloaded", "client keeps the upstream error classification")
+					} else if status == http.StatusUnauthorized {
+						require.Equal(t, status, writer.Code)
+						require.Equal(t, responseBody, writer.Body.String(), "client keeps the original upstream error response")
+					} else {
+						require.Equal(t, http.StatusBadGateway, writer.Code)
+					}
+					select {
+					case entry := <-usageReceived:
+						require.NotEmpty(t, entry.ErrorMessage)
+						require.NotEmpty(t, entry.FallbackChain)
+						raw, err := json.Marshal(entry)
+						require.NoError(t, err)
+						for _, secret := range []string{key, expanded, "literal-auth-secret", "script-auth-secret", "long-auth-fragment-"} {
+							require.NotContains(t, string(raw), secret, "usage, fallback chain and trace must be masked")
+						}
+					case <-time.After(2 * time.Second):
+						t.Fatal("usage event not published")
+					}
+					var logMessages strings.Builder
+					for _, entry := range recorded.All() {
+						logMessages.WriteString(entry.Message)
+						logMessages.WriteString(fmt.Sprint(entry.ContextMap()))
+					}
+					for _, secret := range []string{key, expanded, "literal-auth-secret", "script-auth-secret", "long-auth-fragment-"} {
+						require.NotContains(t, logMessages.String(), secret, "runtime logs must be masked")
+					}
+				})
+			}
+		}
 	}
 }
 

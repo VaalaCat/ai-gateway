@@ -101,11 +101,24 @@ func TestNegotiateOutboundProtocol_Override(t *testing.T) {
 			want:      llmkit.ProtocolOpenAIChat,
 		},
 		{
-			name:      "override target llmkit.ProtocolGemini ignored",
+			name:      "gemini override unreachable in configured endpoints",
 			inbound:   llmkit.ProtocolOpenAIChat,
 			endpoints: endpointsAll,
 			override:  map[llmkit.Protocol]llmkit.Protocol{llmkit.ProtocolOpenAIChat: llmkit.ProtocolGemini},
 			want:      llmkit.ProtocolOpenAIChat,
+		},
+		{
+			name:      "gemini outbound reachable",
+			inbound:   llmkit.ProtocolOpenAIChat,
+			endpoints: `{"generate_content":"/v1beta/models/{model}:{action}"}`,
+			override:  map[llmkit.Protocol]llmkit.Protocol{llmkit.ProtocolOpenAIChat: llmkit.ProtocolGemini},
+			want:      llmkit.ProtocolGemini,
+		},
+		{
+			name:      "gemini selected without explicit override",
+			inbound:   llmkit.ProtocolClaude,
+			supported: `["gemini"]`,
+			want:      llmkit.ProtocolGemini,
 		},
 	}
 

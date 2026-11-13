@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -22,7 +23,7 @@ type Handler struct {
 	Connections          *connectivity.Service
 	ControlSessions      connectivity.ControlSource
 	Operations           *masteroperations.Service
-	HubCallSession       func(agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error)
+	HubCallSession       func(ctx context.Context, agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error)
 	Hub                  *msync.Hub // 用于获取合并后的地址
 	Now                  func() time.Time
 

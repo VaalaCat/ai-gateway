@@ -62,12 +62,14 @@ func NewToolCompatibilityRules(ch *models.Channel) ToolCompatibilityRules {
 	return ToolCompatibilityRules{rules: rules}
 }
 
-// Match 返回映射后模型名命中的首条规则；未命中时不处理。
-func (r ToolCompatibilityRules) Match(model string) ToolCompatibility {
-	// 1. 按顺序匹配模型名。
+// Match 返回任一模型名命中的首条完整规则；未命中时不处理。
+func (r ToolCompatibilityRules) Match(modelNames ...string) ToolCompatibility {
+	// 1. 按配置顺序匹配规则，每条规则检查映射前后的模型名。
 	for _, rule := range r.rules {
-		if rule.pattern.MatchString(model) {
-			return rule.compatibility
+		for _, modelName := range modelNames {
+			if rule.pattern.MatchString(modelName) {
+				return rule.compatibility
+			}
 		}
 	}
 	return ToolCompatibility{Profile: llmkit.ToolSchemaProfileNone, SignatureFallback: llmkit.ToolSignatureFallbackNone}

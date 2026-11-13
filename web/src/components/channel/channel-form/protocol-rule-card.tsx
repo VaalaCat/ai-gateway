@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/select";
 
 export type ProtocolInbound = "*" | "openai_chat" | "openai_responses" | "claude";
-export type ProtocolOutbound = "auto" | "openai_chat" | "openai_responses" | "claude";
+export type ProtocolOutbound = "auto" | "openai_chat" | "openai_responses" | "claude" | "gemini";
 
 export interface ProtocolRule {
   model: string;
@@ -108,9 +108,9 @@ export function ProtocolRuleCard({
               <SelectItem value="*">
                 {t("protocolOverridePerModelInboundWildcard")}
               </SelectItem>
-              {enabledOutbounds.map((p) => (
-                <SelectItem key={p.value} value={p.value}>
-                  {p.label}
+              {["openai_chat", "openai_responses", "claude"].map((protocol) => (
+                <SelectItem key={protocol} value={protocol}>
+                  {protocol}
                 </SelectItem>
               ))}
             </SelectContent>

@@ -942,3 +942,107 @@ func TestResponsesDecodeRequest_ReasoningContext(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesInputImageProviderData(t *testing.T) {
+	// 1. 输入图片数组携带目标厂商签名，保留数组顺序。
+	body := `{"model":"image-model","input":[{"role":"user","content":[{"type":"input_text","text":"edit"},{"type":"input_image","image_url":"data:image/webp;base64,YWJj","provider_data":{"protocol":"gemini","models":["image-model"],"fields":{"thoughtSignature":"sig"}}}]}]}`
+	request, err := (&handler{}).decodeHTTPRequest(httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body)))
+	require.NoError(t, err)
+	require.Len(t, request.Messages, 1)
+	require.Len(t, request.Messages[0].Content, 2)
+	image := request.Messages[0].Content[1]
+	require.Equal(t, "image/webp", image.MimeType)
+	require.Equal(t, "YWJj", image.MediaB64)
+	require.Equal(t, ir.ProtocolGemini, image.ProviderData.Protocol)
+	require.JSONEq(t, `"sig"`, string(image.ProviderData.Fields["thoughtSignature"]))
+	for _, block := range request.Messages[0].Content {
+		require.Equal(t, true, block.Metadata["explicit_content_order"])
+	}
+	// 2. 同协议重新编码仍保留输入扩展，不移动到消息级字段。
+	encoded := encodeResponsesRequestBody(t, request)
+	input := encoded["input"].([]any)[0].(map[string]any)
+	imageWire := input["content"].([]any)[1].(map[string]any)
+	require.Equal(t, "gemini", imageWire["provider_data"].(map[string]any)["protocol"])
+}
+
+func TestResponsesDecodeLargeImageFrameKeepsRawItem(t *testing.T) {
+	// 1. 单个原生 Responses 图片事件超过旧版 1 MiB 文本行上限。
+	image := strings.Repeat("YWJj", 512*1024)
+	item := map[string]any{"type": "image_generation_call", "id": "ig_large", "status": "completed", "output_format": "webp", "result": image, "provider_data": map[string]any{"protocol": "gemini", "fields": map[string]any{"thoughtSignature": "large-signature"}}}
+	frame, err := json.Marshal(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
+	require.NoError(t, err)
+	stream := "event: response.output_item.done\ndata: " + string(frame) + "\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_large\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":42,\"total_tokens\":52}}}\n\n"
+	events := collectResponsesStreamEvents(t, stream)
+	// 2. 原始图片项完整保留，后续用量和完成事件正常到达。
+	var found bool
+	var done bool
+	var usage *ir.Usage
+	for _, event := range events {
+		require.NotEqual(t, ir.EventError, event.Type)
+		if event.RawPassthrough != nil && event.RawPassthrough.EventName == "response.output_item.done" {
+			var decoded struct {
+				Item respOutputItem `json:"item"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(event.RawPassthrough.Data), &decoded))
+			require.Equal(t, image, decoded.Item.Result)
+			require.Equal(t, "webp", decoded.Item.OutputFormat)
+			require.JSONEq(t, `"large-signature"`, string(decoded.Item.ProviderData.Fields["thoughtSignature"]))
+			found = true
+		}
+		if event.Type == ir.EventUsage {
+			usage = event.Usage
+		}
+		if event.Type == ir.EventDone {
+			done = true
+		}
+	}
+	require.True(t, found)
+	require.True(t, done)
+	require.NotNil(t, usage)
+	require.Equal(t, 42, usage.CompletionTokens)
+}
+
+func TestResponsesDecodeCallImmediatelyBeforeImage(t *testing.T) {
+	// 1. 图片项紧接工具调用，没有中间文本触发 assistant 聚合结束。
+	for _, preamble := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preamble=%v", preamble), func(t *testing.T) {
+			items := []any{}
+			if preamble {
+				items = append(items, map[string]any{"type": "message", "role": "assistant", "content": "before"})
+			}
+			items = append(items,
+				map[string]any{"type": "function_call", "call_id": "call_read", "name": "read", "arguments": "{}"},
+				map[string]any{"type": "image_generation_call", "id": "ig_1", "result": "YWJj", "output_format": "webp", "provider_data": map[string]any{"protocol": "gemini", "fields": map[string]any{"thoughtSignature": "image-signature"}}},
+				map[string]any{"type": "message", "role": "assistant", "content": "after"},
+			)
+			body, err := json.Marshal(map[string]any{"model": "model", "input": items})
+			require.NoError(t, err)
+			request, err := (&handler{}).decodeHTTPRequest(httptest.NewRequest("POST", "/v1/responses", strings.NewReader(string(body))))
+			require.NoError(t, err)
+			// 2. 工具前的文本仍与调用同轮，工具之后的图片和文本属于后续有序内容。
+			require.Len(t, request.Messages, 2)
+			require.Len(t, request.Messages[0].ToolCalls, 1)
+			require.Equal(t, "call_read", request.Messages[0].ToolCalls[0].ID)
+			if preamble {
+				require.Equal(t, "before", request.Messages[0].Content[0].Text)
+			} else {
+				require.Empty(t, request.Messages[0].Content)
+			}
+			require.Empty(t, request.Messages[1].ToolCalls)
+			require.Len(t, request.Messages[1].Content, 2)
+			require.Equal(t, ir.ContentTypeImage, request.Messages[1].Content[0].Type)
+			require.JSONEq(t, `"image-signature"`, string(request.Messages[1].Content[0].ProviderData.Fields["thoughtSignature"]))
+			require.Equal(t, "after", request.Messages[1].Content[1].Text)
+			encoded := encodeResponsesRequestBody(t, request)
+			input := encoded["input"].([]any)
+			offset := 0
+			if preamble {
+				offset = 1
+			}
+			require.Len(t, input, offset+3)
+			require.Equal(t, "function_call", input[offset].(map[string]any)["type"])
+			require.Equal(t, "image_generation_call", input[offset+1].(map[string]any)["type"])
+			require.Equal(t, "message", input[offset+2].(map[string]any)["type"])
+		})
+	}
+}

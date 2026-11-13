@@ -31,6 +31,7 @@ const invocationEndpointOrder: MarketplaceEndpoint[] = [
   "chat_completions",
   "responses",
   "messages",
+  "generate_content",
 ];
 
 interface ModelCardRendererProps<T extends MarketplaceModel> {

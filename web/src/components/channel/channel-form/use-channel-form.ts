@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { useTranslations } from "next-intl";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import { ChannelForm, emptyForm } from "./types";
+import { getChannelAuthValidationError } from "./utils";
 import type { ChannelFormAdapter } from "./adapter";
 
 export type ChannelFormMode =
@@ -147,6 +148,11 @@ export function useChannelForm<Entity>(
   const rotateMutation = adapter.useRotateKey?.();
 
   const submit = useCallback(async () => {
+    const authError = getChannelAuthValidationError(form.auth);
+    if (authError) {
+      toast.error(t(authError));
+      return;
+    }
     try {
       if (mode.kind === "create" || mode.kind === "copy") {
         await createMutation.mutateAsync(adapter.buildCreatePayload(form));

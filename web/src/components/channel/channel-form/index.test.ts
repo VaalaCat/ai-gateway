@@ -20,3 +20,10 @@ it("does not count processing-only other settings as upstream request config", (
 it("keeps an empty upstream request stage unconfigured", () => {
   expect(isStageConfigured("connection", emptyForm)).toBe(false);
 });
+
+it("marks upstream request stage configured for authentication alone", () => {
+  expect(isStageConfigured("connection", {
+    ...emptyForm,
+    auth: JSON.stringify({ default: { header: "Authorization", value: "Bearer ${CHANNEL_KEY}" } }),
+  })).toBe(true);
+});

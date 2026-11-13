@@ -14,6 +14,7 @@ var marketplaceInboundProtocols = []llmkit.Protocol{
 	llmkit.ProtocolOpenAIChat,
 	llmkit.ProtocolOpenAIResponses,
 	llmkit.ProtocolClaude,
+	llmkit.ProtocolGemini,
 }
 
 type ModelOfferPlanFinder interface {
@@ -199,6 +200,8 @@ func plannedSupportedEndpoints(
 			available[EndpointResponses] = struct{}{}
 		case llmkit.ProtocolClaude:
 			available[EndpointMessages] = struct{}{}
+		case llmkit.ProtocolGemini:
+			available[EndpointGenerateContent] = struct{}{}
 		}
 	}
 	result := make([]SupportedEndpoint, 0, len(available))

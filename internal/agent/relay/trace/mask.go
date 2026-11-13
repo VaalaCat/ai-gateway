@@ -17,8 +17,26 @@ var sensitiveHeaderKeys = map[string]bool{
 	"x-goog-api-key": true,
 }
 
+type maskedError struct {
+	message string
+	cause   error
+}
+
+// Error 返回脱敏后的错误文本。
+func (err *maskedError) Error() string {
+	// 1. 返回采集时处理的文本。
+	return err.message
+}
+
+// Unwrap 返回原始错误供错误分类使用。
+func (err *maskedError) Unwrap() error {
+	// 1. 返回原始错误。
+	return err.cause
+}
+
 var sensitivePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-[A-Za-z0-9]{20,}`),
+	regexp.MustCompile(`(?i)[?&](?:key|api_key)=[^&\s"<>]+`),
 	regexp.MustCompile(`Bearer\s+[^\s,;"]+`),
 	regexp.MustCompile(`Key\s+[^\s,;"]+`),
 }
@@ -74,10 +92,13 @@ func maskTextPreservingLength(text string, secrets []string) string {
 	return text
 }
 
-func maskHeaders(headers map[string][]string, secrets []string) map[string][]string {
+// maskHeaders 按敏感头名整项屏蔽，并替换其余头中的敏感值。
+func maskHeaders(headers map[string][]string, secrets []string, customSensitiveHeaders map[string]bool) map[string][]string {
+	// 1. 逐项处理固定和本次渠道的敏感头名。
 	result := make(map[string][]string, len(headers))
 	for k, vals := range headers {
-		if sensitiveHeaderKeys[strings.ToLower(k)] {
+		isSensitive := sensitiveHeaderKeys[strings.ToLower(k)] || customSensitiveHeaders[strings.ToLower(k)]
+		if isSensitive {
 			result[k] = []string{"***"}
 			continue
 		}

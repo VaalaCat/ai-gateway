@@ -2,6 +2,7 @@ package exec
 
 import (
 	"errors"
+	"github.com/stretchr/testify/require"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
@@ -9,6 +10,38 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 )
+
+type transferCapturingDispatcher struct {
+	registry  *inflight.Registry
+	snapshots []inflight.Snapshot
+}
+
+func (dispatcher *transferCapturingDispatcher) Dispatch(rctx *state.RelayContext, _ state.Attempt) state.AttemptResult {
+	rctx.Inflight.ObserveUpstreamBytes(7)
+	if len(dispatcher.snapshots) == 0 {
+		dispatcher.snapshots = append(dispatcher.snapshots, dispatcher.registry.Snapshot()[0])
+		return state.AttemptResult{Err: errors.New("first failed")}
+	}
+	_, _ = rctx.Writer.WriteString("reply")
+	dispatcher.snapshots = append(dispatcher.snapshots, dispatcher.registry.Snapshot()[0])
+	return state.AttemptResult{Written: true}
+}
+
+func TestExecutorTransferProgressAcrossFallback(t *testing.T) {
+	plan := state.AttemptPlan{Attempts: []state.Attempt{chAttempt(1, "first"), chAttempt(2, "second")}}
+	rctx := newTestExecutorRctx(plan, &stubExecAgent{})
+	registry := trackInflight(rctx)
+	rctx.Writer = rctx.Inflight.WrapClientWriter(rctx.Writer)
+	dispatcher := &transferCapturingDispatcher{registry: registry}
+	newLocalTestExecutor(dispatcher, nil, nil).Run(rctx)
+	require.Len(t, dispatcher.snapshots, 2)
+	second := dispatcher.snapshots[1]
+	require.EqualValues(t, 14, *second.Progress.UpstreamBodyBytes)
+	require.EqualValues(t, 7, *second.AttemptProgress.UpstreamBodyBytes)
+	require.EqualValues(t, 5, *second.Progress.ClientBodyBytes)
+	require.EqualValues(t, 5, *second.AttemptProgress.ClientBodyBytes)
+	require.Nil(t, registry.Snapshot()[0].AttemptProgress)
+}
 
 // snapshotCapturingDispatcher 每次 Dispatch 被调时抓一份当时的在途快照(取第 0 条),
 // 用来断言"打某候选之前:已完成尝试链 + 进行中候选"的中途态。

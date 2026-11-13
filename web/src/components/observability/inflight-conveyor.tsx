@@ -7,6 +7,10 @@ import { cn } from "@/lib/utils";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import type { GlobalInflightRow } from "@/lib/types";
 import { EntityLabel } from "@/components/business/entity-label";
+import { ModelName } from "@/components/business/model-name";
+import { Badge } from "@/components/ui/badge";
+import { formatDate, formatDuration, formatFileSize } from "@/lib/utils/format";
+import { inflightChannel, inflightKey } from "@/lib/inflight";
 
 const SEGMENTS = ["queue", "plan", "exec", "dispatch", "streaming"] as const;
 type Segment = (typeof SEGMENTS)[number];
@@ -29,12 +33,6 @@ function segmentOf(row: GlobalInflightRow): Segment {
   }
 }
 
-// blockKey 用 (agent_id, id) 复合键——id 是每节点唯一自增，req_id 来自客户端
-// X-Request-Id 可能为空/重复，不能用作 React key 或 framer-motion layoutId。
-function blockKey(row: GlobalInflightRow): string {
-  return `${row.agent_id}:${row.id}`;
-}
-
 function blockClass(row: GlobalInflightRow, seg: Segment): string {
   if (seg === "queue") {
     const ms = row.queued_ms;
@@ -42,7 +40,6 @@ function blockClass(row: GlobalInflightRow, seg: Segment): string {
     if (ms > 1000) return "bg-amber-500";
     return "bg-muted-foreground/50";
   }
-  const stuck = row.elapsed_ms > 60000 ? "ring-2 ring-red-500" : "";
   const byStage: Record<Segment, string> = {
     queue: "",
     plan: "bg-blue-500",
@@ -50,18 +47,24 @@ function blockClass(row: GlobalInflightRow, seg: Segment): string {
     dispatch: "bg-violet-500",
     streaming: "bg-emerald-500",
   };
-  return cn(byStage[seg], stuck);
+  return byStage[seg];
 }
 
 const MAX_VISIBLE = 120;
 
-export function InflightConveyor({ rows, onSelect }: {
+export function InflightConveyor({ rows, onSelect, selectedKey, paused, stale, staleKeys, observedAt }: {
   rows: GlobalInflightRow[];
   onSelect: (row: GlobalInflightRow) => void;
+  selectedKey: string | null;
+  paused: boolean;
+  stale: boolean;
+  staleKeys: ReadonlySet<string>;
+  observedAt: ReadonlyMap<string, number>;
 }) {
   const t = useTranslations("observability");
+  const ti = useTranslations("inflight");
   const reduce = useReducedMotion();
-  const anim = !reduce;
+  const anim = !reduce && !paused && !stale;
   const grouped = useMemo(() => {
     const m: Record<Segment, GlobalInflightRow[]> = { queue: [], plan: [], exec: [], dispatch: [], streaming: [] };
     for (const r of rows) m[segmentOf(r)].push(r);
@@ -75,49 +78,59 @@ export function InflightConveyor({ rows, onSelect }: {
         const items = grouped[seg];
         const visible = items.slice(0, MAX_VISIBLE);
         const overflow = items.length - visible.length;
+        const staleCount = stale ? items.length : items.filter((row) => staleKeys.has(inflightKey(row))).length;
         return (
           <div key={seg} className={cn("rounded-md border p-2 lg:flex-1", seg === "queue" && "lg:max-w-[16rem] border-amber-500/40")}>
             <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
               <span>{t(`segment.${seg}`)}</span>
-              <span className="tabular-nums">{items.length}</span>
+              <span className="tabular-nums">{paused ? ti("dotSnapshotCount", { n: items.length }) : staleCount > 0 ? ti("dotPartialCount", { current: items.length - staleCount, stale: staleCount }) : items.length}</span>
             </div>
             <div className="flex flex-wrap gap-1">
               <AnimatePresence mode="popLayout">
-                {visible.map((row) => (
-                  <HoverCard key={blockKey(row)} openDelay={80}>
+                {visible.map((row) => {
+                  const key = inflightKey(row);
+                  const old = stale || staleKeys.has(key);
+                  const move = anim && !old;
+                  const channel = inflightChannel(row);
+                  return (
+                  <HoverCard key={key} openDelay={80}>
                     <HoverCardTrigger asChild>
                       <motion.button
-                        layout={anim}
-                        layoutId={anim ? blockKey(row) : undefined}
-                        initial={{ scale: 0, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0, opacity: 0 }}
+                        layout={move}
+                        layoutId={move ? key : undefined}
+                        initial={move ? { scale: 0, opacity: 0 } : false}
+                        animate={{ scale: 1, opacity: old ? 0.45 : 1 }}
+                        exit={move ? { scale: 0, opacity: 0 } : undefined}
                         transition={{ duration: 0.35, ease: "easeOut" }}
                         onClick={() => onSelect(row)}
-                        className={cn("h-4 w-4 rounded-sm", blockClass(row, seg))}
+                        className={cn("h-4 w-4 rounded-sm", blockClass(row, seg), selectedKey === key && "ring-2 ring-foreground ring-offset-2")}
+                        aria-pressed={selectedKey === key}
                         aria-label={`${row.view.model_name} ${row.stage}`}
                       />
                     </HoverCardTrigger>
                     <HoverCardContent className="w-72 text-xs">
                       <div className="space-y-0.5">
-                        <div className="font-medium">{row.view.model_name}</div>
+                        <div className="font-medium"><ModelName name={row.view.model_name} /></div>
                         <div className="text-muted-foreground">
-                          <EntityLabel entity="user" id={row.view.user_id} hover={false} />
+                          <EntityLabel entity="user" scope="all" id={row.view.user_id > 0 ? row.view.user_id : undefined} hover={false} />
                           {" · "}
-                          <EntityLabel entity="channel" id={row.view.channel_id} hover={false} />
+                          {channel.private ? <Badge variant="secondary">BYOK</Badge> : null}{" "}
+                          <EntityLabel entity={channel.private ? "byok-channel" : "channel"} scope="all" id={channel.id} snapshotName={channel.name} hover={false} />
                           {" · "}
-                          {row.agent_name}
+                          <EntityLabel entity="agent" id={row.view.route_source_agent_id} snapshotName={row.agent_name} showId={false} hover={false} />
                         </div>
                         {row.queued_ms > 0 ? (
-                          <div className="text-amber-600">{t("queuedFor", { s: (row.queued_ms / 1000).toFixed(1) })} · {row.queued_reason}</div>
+                          <div className="text-amber-600">{ti("queued", { value: formatDuration(row.queued_ms) })} · {row.queued_reason}</div>
                         ) : (
-                          <div>{t("stage")}: {row.stage} · {(row.elapsed_ms / 1000).toFixed(1)}s</div>
+                          <div>{t("stage")}: {row.stage} · {formatDuration(row.elapsed_ms)}</div>
                         )}
-                        {row.view.is_stream && <div>stream</div>}
+                        <div>{ti("clientProgress")}: {row.progress?.client_body_bytes == null ? "—" : formatFileSize(row.progress.client_body_bytes)} · {ti("idleColumn")}: {row.progress?.client_idle_ms == null ? "—" : formatDuration(row.progress.client_idle_ms)}</div>
+                        {old || paused ? <div>{ti(old ? "stale" : "dotPaused")} · {formatDate((observedAt.get(key) ?? 0) / 1000)}</div> : null}
                       </div>
                     </HoverCardContent>
                   </HoverCard>
-                ))}
+                );
+                })}
               </AnimatePresence>
               {overflow > 0 && (
                 <span className="flex h-4 items-center rounded-sm bg-muted px-1 text-[10px] tabular-nums">+{overflow}</span>

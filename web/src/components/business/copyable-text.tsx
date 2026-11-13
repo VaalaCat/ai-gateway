@@ -49,7 +49,7 @@ export function CopyableText({
       <PopoverContent align="start" className="w-auto max-w-sm">
         <div className="flex items-start gap-2">
           <code className="flex-1 select-all break-all font-mono text-xs">{text}</code>
-          <Button variant="ghost" size="icon" className="size-6 shrink-0" onClick={copy}>
+          <Button variant="ghost" size="icon" className="size-6 shrink-0" onClick={copy} aria-label={t("copy")}>
             <Copy className="size-3" />
           </Button>
         </div>
@@ -62,7 +62,7 @@ export function CopyableText({
   return (
     <div className="flex items-center gap-1">
       {label}
-      <Button variant="ghost" size="icon" className="size-6" onClick={copy}>
+      <Button variant="ghost" size="icon" className="size-6" onClick={copy} aria-label={t("copy")}>
         <Copy className="size-3" />
       </Button>
     </div>

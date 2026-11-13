@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 
-import { parseEndpoints, sanitizeOtherSettingsForSubmit } from "./utils";
+import { channelProtocols, parseEndpoints, sanitizeOtherSettingsForSubmit, stringifyEndpoints } from "./utils";
 
 it("returns an empty object for an empty string", () => {
   expect(parseEndpoints("")).toEqual({});
@@ -22,6 +22,28 @@ it("returns the parsed object for a valid endpoint config", () => {
   expect(parseEndpoints('{"chat_completions":"/v1/chat/completions"}')).toEqual({
     chat_completions: "/v1/chat/completions",
   });
+});
+
+it("preserves Gemini endpoint templates and arbitrary query parameters", () => {
+  const endpoints = { generate_content: "/proxy/v1beta/models/{model}:{action}?custom=value" };
+  expect(parseEndpoints(stringifyEndpoints(endpoints))).toEqual(endpoints);
+  expect(channelProtocols(stringifyEndpoints(endpoints))).toEqual({
+    claude: false, openaiChat: false, openaiResponses: false, gemini: true,
+  });
+});
+
+it("keeps Chat and Claude per-model conversions to a Gemini-only upstream", () => {
+  const settings = {
+    protocol_override: { openai_chat: "gemini", claude: "gemini" },
+    model_protocol_override: [
+      { model: "custom-.*", overrides: { openai_chat: "gemini" } },
+      { model: "other-.*", overrides: { claude: "gemini" } },
+    ],
+    unknown_setting: { anything: true },
+  };
+  expect(JSON.parse(sanitizeOtherSettingsForSubmit(JSON.stringify(settings), JSON.stringify({
+    generate_content: "/v1beta/models/{model}:{action}",
+  })))).toEqual(settings);
 });
 
 it("keeps ordered compatibility rules including explicit exclusions when saving", () => {

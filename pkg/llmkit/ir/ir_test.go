@@ -173,3 +173,32 @@ func TestEventErrorAllowsNilPayload(t *testing.T) {
 		t.Fatalf("unexpected event type: %v", event.Type)
 	}
 }
+
+func TestThinkingControlsPreserveExplicitZeroAndFalse(t *testing.T) {
+	zero, disabled := 0, false
+	for _, tc := range []struct {
+		name    string
+		request Request
+		present bool
+	}{
+		{"unspecified", Request{}, false},
+		{"explicit", Request{ThinkingEnabled: &disabled, ThinkingBudget: &zero, IncludeThoughts: &disabled}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(tc.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded Request
+			if err := json.Unmarshal(body, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if (decoded.ThinkingEnabled != nil) != tc.present || (decoded.ThinkingBudget != nil) != tc.present || (decoded.IncludeThoughts != nil) != tc.present {
+				t.Fatalf("presence lost: %s", body)
+			}
+			if tc.present && (*decoded.ThinkingEnabled || *decoded.ThinkingBudget != 0 || *decoded.IncludeThoughts) {
+				t.Fatalf("explicit zero changed: %s", body)
+			}
+		})
+	}
+}

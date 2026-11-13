@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// StepToolCompatibility 按映射后的模型名转换工具定义。
+// StepToolCompatibility 按映射前后的模型名匹配规则并转换工具定义。
 type StepToolCompatibility struct {
 	rules  upstream.ToolCompatibilityRules
 	logger *zap.Logger
@@ -19,7 +19,11 @@ func (s *StepToolCompatibility) Key() string { return "tool_compatibility" }
 
 func (s *StepToolCompatibility) Apply(_ context.Context, p *Pass) error {
 	// 1. 转换本次请求的工具定义副本。
-	compatibility := s.rules.Match(p.Working.Model)
+	originalModel := p.Working.Model
+	if p.Original != nil {
+		originalModel = p.Original.Model
+	}
+	compatibility := s.rules.Match(originalModel, p.Working.Model)
 	tools, changes := llmkit.ConvertToolSchemas(p.Working.Tools, compatibility.Profile)
 	p.Working.Tools = tools
 

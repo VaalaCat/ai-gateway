@@ -2,14 +2,17 @@ package protocolconfig
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 )
 
 var legacyEndpointAliases = map[string]string{
 	"anthropic":       EndpointKeyMessages,
 	"chat-completion": EndpointKeyChatCompletions,
 	"chat_completion": EndpointKeyChatCompletions,
+	"gemini":          EndpointKeyGenerateContent,
 }
 
 func NormalizeEndpointType(raw string) (key string, protocol llmkit.Protocol, ok bool) {
@@ -44,6 +47,23 @@ func BuildConnectivityTestRequest(endpoints, supportedAPITypes, endpointType, mo
 		return "", nil, err
 	}
 	body, err = buildConnectivityTestBody(protocol, model, stream)
+	if err == nil && protocol == llmkit.ProtocolGemini {
+		action := endpoint.GenerateContent
+		if stream {
+			action = endpoint.StreamGenerateContent
+		}
+		path, err = endpoint.GeminiPath(path, model, action)
+		if err == nil && stream {
+			u, parseErr := url.Parse(path)
+			if parseErr != nil {
+				return "", nil, parseErr
+			}
+			query := u.Query()
+			query.Set("alt", "sse")
+			u.RawQuery = query.Encode()
+			path = u.String()
+		}
+	}
 	return path, body, err
 }
 
@@ -51,8 +71,7 @@ func BuildRelayConnectivityTestRequest(protocol llmkit.Protocol, model string, s
 	if !IsSupportedProtocol(protocol) {
 		return "", nil, fmt.Errorf("unsupported connectivity test protocol: %s", protocol)
 	}
-	body, err = buildConnectivityTestBody(protocol, model, stream)
-	return DefaultEndpointPath(protocol), body, err
+	return BuildConnectivityTestRequest("", "", protocolToEndpointKey(protocol), model, stream)
 }
 
 func buildConnectivityTestBody(protocol llmkit.Protocol, model string, stream bool) (map[string]any, error) {
@@ -61,6 +80,12 @@ func buildConnectivityTestBody(protocol llmkit.Protocol, model string, stream bo
 	}
 	var body map[string]any
 	switch protocol {
+	case llmkit.ProtocolGemini:
+		return map[string]any{
+			"contents": []any{map[string]any{
+				"role": "user", "parts": []any{map[string]any{"text": "Say 'ok' and nothing else."}},
+			}},
+		}, nil
 	case llmkit.ProtocolOpenAIResponses:
 		body = map[string]any{"model": model, "input": "Say 'ok' and nothing else."}
 	default:
@@ -81,6 +106,8 @@ func protocolToEndpointKey(protocol llmkit.Protocol) string {
 		return EndpointKeyResponses
 	case llmkit.ProtocolClaudeMessages:
 		return EndpointKeyMessages
+	case llmkit.ProtocolGemini:
+		return EndpointKeyGenerateContent
 	default:
 		return EndpointKeyChatCompletions
 	}

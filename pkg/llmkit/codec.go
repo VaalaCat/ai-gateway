@@ -8,6 +8,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol/claude"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol/gemini"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol/openai/chat"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol/openai/responses"
 )
@@ -80,6 +81,7 @@ func NewCodec() Codec {
 		ProtocolOpenAIChat:      chat.NewHandler(),
 		ProtocolOpenAIResponses: responses.NewHandler(),
 		ProtocolClaudeMessages:  claude.NewHandler(),
+		ProtocolGemini:          gemini.NewHandler(),
 	})
 }
 

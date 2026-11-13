@@ -22,6 +22,7 @@ export const API_TYPES = {
   CHAT_COMPLETION: "chat-completion",
   RESPONSES: "responses",
   CLAUDE: "claude",
+  GEMINI: "gemini",
 } as const;
 
 // LocalStorage / Cookie key names

@@ -24,6 +24,12 @@ var affinityIdentityFinders = []affinityIdentityFinder{
 			ByUser: true, ByToken: true, ByModel: true,
 		},
 	},
+	headerAffinityIdentityFinder{
+		name: consts.HeaderClaudeCodeSessionID,
+		partition: state.AffinityPartition{
+			ByUser: true, ByToken: true, ByModel: true,
+		},
+	},
 }
 
 func findAffinityIdentity(input affinityIdentityInput) (state.AffinityIdentity, bool) {

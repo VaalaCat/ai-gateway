@@ -45,6 +45,83 @@ func TestNewCodecHasBuiltInEndpoints(t *testing.T) {
 	}
 }
 
+func TestCodecClaudeParallelToolResults(t *testing.T) {
+	// 1. 从 Claude 和 OpenAI 的并行工具调用历史解码。
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "Claude round trip",
+			path: "/v1/messages",
+			body: `{"model":"source","max_tokens":1024,"messages":[
+				{"role":"assistant","content":[
+					{"type":"tool_use","id":"call_1","name":"first","input":{}},
+					{"type":"tool_use","id":"call_2","name":"second","input":{}}
+				]},
+				{"role":"user","content":[
+					{"type":"tool_result","tool_use_id":"call_1","content":"first result"},
+					{"type":"tool_result","tool_use_id":"call_2","content":"second result"},
+					{"type":"text","text":"continue"}
+				]}
+			]}`,
+		},
+		{
+			name: "OpenAI to Claude",
+			path: "/v1/chat/completions",
+			body: `{"model":"source","messages":[
+				{"role":"assistant","tool_calls":[
+					{"id":"call_1","type":"function","function":{"name":"first","arguments":"{}"}},
+					{"id":"call_2","type":"function","function":{"name":"second","arguments":"{}"}}
+				]},
+				{"role":"tool","tool_call_id":"call_1","content":"first result"},
+				{"role":"tool","tool_call_id":"call_2","content":"second result"},
+				{"role":"user","content":"continue"}
+			]}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			codec := NewCodec()
+			decoded, err := codec.DecodeRequest(DecodeRequestInput{
+				Method: "POST",
+				Path:   tc.path,
+				Body:   []byte(tc.body),
+			})
+			require.NoError(t, err)
+			require.Len(t, decoded.Request.Messages, 4)
+			require.Equal(t, RoleTool, decoded.Request.Messages[1].Role)
+			require.Equal(t, RoleTool, decoded.Request.Messages[2].Role)
+
+			// 2. 编码成 Claude，两个结果紧接工具调用，用户文本排在结果之后。
+			encoded, err := codec.EncodeRequest(EncodeRequestInput{
+				Request: decoded.Request,
+				Target: Target{
+					Protocol: ProtocolClaude,
+					Model:    "claude-test",
+				},
+			})
+			require.NoError(t, err)
+			var body struct {
+				Messages json.RawMessage `json:"messages"`
+			}
+			require.NoError(t, json.Unmarshal(encoded.Body, &body))
+			require.JSONEq(t, `[
+				{"role":"assistant","content":[
+					{"type":"tool_use","id":"call_1","name":"first","input":{}},
+					{"type":"tool_use","id":"call_2","name":"second","input":{}}
+				]},
+				{"role":"user","content":[
+					{"type":"tool_result","tool_use_id":"call_1","content":"first result"},
+					{"type":"tool_result","tool_use_id":"call_2","content":"second result"}
+				]},
+				{"role":"user","content":"continue"}
+			]`, string(body.Messages))
+		})
+	}
+}
+
 func TestNewCodecHeaderOverrideIsCaseInsensitive(t *testing.T) {
 	overrideValues := []string{"caller-token"}
 	multiValues := []string{"first", "second"}
@@ -265,6 +342,89 @@ func irEventChannel(events ...ir.Event) <-chan ir.Event {
 	}
 	close(channel)
 	return channel
+}
+
+// TestCodecReasoningTextPresence 检查未指定、显式清空和替换推理明文后的请求编码。
+func TestCodecReasoningTextPresence(t *testing.T) {
+	// 1. 同一份原始推理分别使用 nil、空切片和新明文。
+	for _, tt := range []struct {
+		name        string
+		fragments   []string
+		wantSummary string
+		wantContent string
+	}{
+		{
+			name:        "unspecified_preserves_raw_text",
+			wantSummary: "old summary",
+			wantContent: "old content",
+		},
+		{
+			name:      "empty_clears_raw_text",
+			fragments: []string{},
+		},
+		{
+			name:        "specified_replaces_raw_text",
+			fragments:   []string{"new text"},
+			wantSummary: "new text",
+			wantContent: "new text",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reasoning := &ReasoningContent{
+				Summary:   tt.fragments,
+				Content:   tt.fragments,
+				Encrypted: "opaque",
+				RawJSON:   json.RawMessage(`{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"old summary"}],"content":[{"type":"reasoning_text","text":"old content"}],"encrypted_content":"opaque","provider_extra":"native"}`),
+			}
+			// 2. 经公开 Codec 编码，比较实际发送的明文与保留的原生数据。
+			encoded, err := NewCodec().EncodeRequest(EncodeRequestInput{
+				Request: Request{
+					Messages: []Message{
+						{
+							Role: RoleAssistant,
+							Content: []ContentBlock{
+								{
+									Type:      ContentTypeThinking,
+									Reasoning: reasoning,
+								},
+							},
+						},
+					},
+				},
+				Target: Target{
+					Protocol: ProtocolOpenAIResponses,
+					Model:    "m",
+				},
+			})
+			require.NoError(t, err)
+			var body struct {
+				Input []struct {
+					Type             string                  `json:"type"`
+					Summary          []struct{ Text string } `json:"summary"`
+					Content          []struct{ Text string } `json:"content"`
+					EncryptedContent string                  `json:"encrypted_content"`
+					ProviderExtra    string                  `json:"provider_extra"`
+				} `json:"input"`
+			}
+			require.NoError(t, json.Unmarshal(encoded.Body, &body))
+			require.Len(t, body.Input, 1)
+			item := body.Input[0]
+			require.Equal(t, "reasoning", item.Type)
+			var summary, content string
+			for _, part := range item.Summary {
+				summary += part.Text
+			}
+			for _, part := range item.Content {
+				content += part.Text
+			}
+			require.Equal(t, tt.wantSummary, summary)
+			require.Equal(t, tt.wantContent, content)
+			require.Equal(t, "opaque", item.EncryptedContent)
+			require.Equal(t, "native", item.ProviderExtra)
+			require.Equal(t, tt.fragments, reasoning.Summary)
+			require.Equal(t, tt.fragments, reasoning.Content)
+		})
+	}
 }
 
 func TestCodecOrdinaryToolHistoryPreservesNativeReasoning(t *testing.T) {

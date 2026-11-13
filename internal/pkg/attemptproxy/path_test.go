@@ -59,3 +59,13 @@ func TestProviderPathAllowedRejectsUntrustedPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiProviderPathWithQuery(t *testing.T) {
+	for _, path := range []string{"/v1/models/gemini:generateContent", "/v1beta/models/gemini:streamGenerateContent?alt=sse&custom=a%2Fb&custom=c"} {
+		require.True(t, ProviderPathAllowed(http.MethodPost, path))
+	}
+	for _, path := range []string{"/v1beta/models/gemini:countTokens", "/v1beta/models/gemini:generateContent?key=secret", "/v1beta/models/gemini:generateContent?KEY=secret", "/v1beta/models/gemini:generateContent?%6bey=secret", "/v1beta/models/gemini:generateContent#fragment"} {
+		require.False(t, ProviderPathAllowed(http.MethodPost, path))
+	}
+	require.False(t, ProviderPathAllowed(http.MethodGet, "/v1beta/models/gemini:generateContent"))
+}

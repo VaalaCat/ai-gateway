@@ -18,8 +18,9 @@ type Request struct {
 	ReasoningEffort   string      `json:"reasoning_effort,omitempty"`
 	// ReasoningContext 是请求指定的思考上下文模式；为空表示请求不发送，服务端按默认（auto）处理。
 	ReasoningContext ReasoningContext `json:"reasoning_context,omitempty"`
-	ThinkingEnabled  bool             `json:"thinking_enabled,omitempty"`
-	ThinkingBudget   int              `json:"thinking_budget,omitempty"`
+	ThinkingEnabled  *bool            `json:"thinking_enabled,omitempty"`
+	ThinkingBudget   *int             `json:"thinking_budget,omitempty"`
+	IncludeThoughts  *bool            `json:"include_thoughts,omitempty"`
 	Store            *bool            `json:"store,omitempty"`
 
 	// Sampling / generation parameters

@@ -105,6 +105,22 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 						continue
 					}
 
+					if peek.Type == "image_generation_call" {
+						var item respOutputItem
+						if json.Unmarshal(rawItem, &item) == nil {
+							// 1. 先输出图片之前已经收集的工具轮次。
+							if len(assistantTurn.toolCalls) > 0 {
+								flushAssistantTurn()
+							}
+							// 2. 图片与后续文本按原始输出项顺序收集。
+							image := imageContentFromOutput(item)
+							image.RawJSON = append(json.RawMessage(nil), rawItem...)
+							assistantTurn.content = append(assistantTurn.content, image)
+							assistantTurn.hasMessage = true
+						}
+						continue
+					}
+
 					if peek.Type == "reasoning" {
 						var item respOutputItem
 						if err := json.Unmarshal(rawItem, &item); err == nil {
@@ -179,7 +195,8 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 										_ = json.Unmarshal(rawBlock, &block)
 										image := ir.ContentBlock{
 											Type: ir.ContentTypeImage, MediaURL: block.ImageURL,
-											RawJSON: append(json.RawMessage(nil), rawBlock...),
+											ProviderData: block.ProviderData,
+											RawJSON:      append(json.RawMessage(nil), rawBlock...),
 										}
 										if strings.HasPrefix(block.ImageURL, "data:") {
 											if commaIndex := strings.Index(block.ImageURL, ","); commaIndex > len("data:") {
@@ -198,6 +215,9 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 										// Unknown content block type: preserve raw JSON.
 										msg.Content = append(msg.Content, ir.ContentBlock{RawJSON: rawBlock})
 									}
+								}
+								for i := range msg.Content {
+									msg.Content[i].Metadata = map[string]any{"explicit_content_order": true}
 								}
 							}
 						}
@@ -580,8 +600,8 @@ func (c *handler) decodeStream(resp *http.Response, ch chan<- ir.Event) {
 
 	scanner := bufio.NewScanner(resp.Body)
 	// response.completed carries the full response object which can exceed
-	// the default 64 KB scanner buffer for long outputs.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// the default 64 KB scanner buffer for long outputs and full image results.
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	var currentEvent string
 	var sentDone bool
 	var emittedError *ir.ErrorPayload

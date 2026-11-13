@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1329,5 +1331,92 @@ func TestMaybeForceReconnect(t *testing.T) {
 	// nil client 容错
 	if got := s.maybeForceReconnect(nil, 5, 3); got != 5 {
 		t.Fatalf("nil client must be noop, got=%d", got)
+	}
+}
+
+func TestGeminiNativeRoutesExecuteWholeRelay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, embedded := range []bool{false, true} {
+		name := "standalone"
+		if embedded {
+			name = "embedded"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := genericAPITestConfig(t)
+			var srv *Server
+			var router *gin.Engine
+			var err error
+			if embedded {
+				srv, err = NewEmbedded(cfg, zap.NewNop(), &enrollment.Credentials{AgentID: "gemini-test", Secret: "secret"})
+				require.NoError(t, err)
+				router = gin.New()
+				srv.MountRoutes(router)
+			} else {
+				require.NoError(t, os.WriteFile(cfg.Agent.CredentialsFile, []byte(`{"agent_id":"gemini-test","secret":"secret"}`), 0600))
+				srv, err = New(cfg, zap.NewNop())
+				require.NoError(t, err)
+				router = srv.Router
+			}
+			t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
+			srv.Store.SetToken(&models.Token{ID: 21, Key: "gateway-key", Status: consts.StatusEnabled, ExpiredAt: -1})
+			response := `{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1,"totalTokenCount":3}}`
+			var upstreamCalls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamCalls.Add(1)
+				require.Contains(t, r.URL.Path, "/models/upstream-model:")
+				require.Empty(t, r.URL.Query().Get("key"))
+				require.Equal(t, "preserved", r.URL.Query().Get("custom"))
+				require.Equal(t, "upstream-key", r.Header.Get("x-goog-api-key"))
+				require.Empty(t, r.Header.Get("Authorization"))
+				var body strings.Builder
+				_, err := io.Copy(&body, r.Body)
+				require.NoError(t, err)
+				require.Equal(t, " {\"contents\":[],\"unknown\":true} ", body.String())
+				if r.URL.Query().Get("alt") == "sse" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: "+response+"\n\n")
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, response)
+				}
+			}))
+			defer upstream.Close()
+			srv.Store.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 7, Type: consts.ChannelTypeGemini, Status: consts.StatusEnabled, Weight: 1, BaseURL: upstream.URL, Endpoints: `{"generate_content":"/v1beta/models/{model}:{action}"}`}, Key: "upstream-key", ModelMapping: `{"gemini-test":"upstream-model"}`, Models: "gemini-test", Free: true})
+			srv.Store.RebuildModelIndex()
+			for _, tc := range []struct {
+				path, header, token string
+				stream              bool
+			}{
+				{"/v1beta/models/gemini-test:generateContent?custom=preserved&key=gateway-key", "", "", false},
+				{"/v1/models/gemini-test:streamGenerateContent?custom=preserved&alt=sse", "x-goog-api-key", "gateway-key", true},
+				{"/v1beta/models/gemini-test:generateContent?custom=preserved", "Authorization", "Bearer gateway-key", false},
+			} {
+				req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(" {\"contents\":[],\"unknown\":true} "))
+				if tc.header != "" {
+					req.Header.Set(tc.header, tc.token)
+				}
+				out := httptest.NewRecorder()
+				router.ServeHTTP(out, req)
+				require.Equal(t, 200, out.Code, out.Body.String())
+				want := response
+				if tc.stream {
+					want = "data: " + want + "\n\n"
+				}
+				require.Equal(t, want, out.Body.String())
+			}
+			// 1. 有效凭证和可路由的 Chat 主体不能把未知动作转进 legacy。
+			callsBefore := upstreamCalls.Load()
+			for _, version := range []string{"v1", "v1beta"} {
+				for _, action := range []string{"countTokens", "unknown"} {
+					request := httptest.NewRequest(http.MethodPost, "/"+version+"/models/gemini-test:"+action,
+						strings.NewReader(`{"model":"gemini-test","messages":[{"role":"user","content":"hi"}]}`))
+					request.Header.Set("Authorization", "Bearer gateway-key")
+					out := httptest.NewRecorder()
+					router.ServeHTTP(out, request)
+					require.Equal(t, http.StatusNotFound, out.Code, version+"/"+action)
+					require.Equal(t, callsBefore, upstreamCalls.Load(), "unknown action must not call upstream")
+				}
+			}
+		})
 	}
 }

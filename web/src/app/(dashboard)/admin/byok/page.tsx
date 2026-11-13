@@ -122,6 +122,7 @@ function AdminBYOKPageInner() {
       { key: "chat_completions", label: tByok("endpointChat") },
       { key: "responses", label: tByok("endpointResp") },
       { key: "messages", label: tByok("endpointClaude") },
+      { key: "generate_content", label: tByok("endpointGemini") },
     ];
 
     return (

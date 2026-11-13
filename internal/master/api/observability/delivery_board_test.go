@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -20,7 +21,7 @@ func TestGetDeliveryBoardAggregates(t *testing.T) {
 
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a", "uid-b"} },
-		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallContext: func(_ context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			if method != consts.RPCAgentUsageQueue {
 				t.Fatalf("unexpected method %s", method)
 			}
@@ -69,7 +70,7 @@ func TestGetDeliveryBoard_NoOnlineAgents(t *testing.T) {
 	appCtx := newTestContext(t, setupTestDB(t))
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return nil },
-		HubCall:           func(string, string, any, time.Duration) (json.RawMessage, error) { return nil, nil },
+		HubCallContext:    func(context.Context, string, string, any, time.Duration) (json.RawMessage, error) { return nil, nil },
 	}
 	resp, err := h.GetDeliveryBoard(appCtx, api.EmptyRequest{})
 	if err != nil || len(resp.Agents) != 0 || len(resp.FailedAgents) != 0 {
@@ -86,7 +87,7 @@ func TestGetDeliveryBoard_SortedByAgentID(t *testing.T) {
 
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return []string{"uid-b", "uid-a"} },
-		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallContext: func(_ context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			return json.RawMessage(`{"store_len":0,"store_bytes":0,"retry_len":0,"retry_bytes":0,
 				"oldest_ts":0,"last_success_at":0,"last_error":"","inflight":0,"items":[]}`), nil
 		},
@@ -110,7 +111,7 @@ func TestGetDeliveryBoard_NullItemsNormalizedToEmpty(t *testing.T) {
 
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a"} },
-		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallContext: func(_ context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			// store 有积压但旁路为空:agent 侧 QueueSnapshot.Items 为 nil,
 			// marshal 后 items 字段是 null
 			return json.RawMessage(`{"store_len":5,"store_bytes":100,"retry_len":0,"retry_bytes":0,

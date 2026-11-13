@@ -38,6 +38,9 @@ var readOnlyChannelPatchFields = map[string]struct{}{
 }
 
 var channelPatchFieldRegistry = map[string]channelPatchField{
+	"auth": buildChannelPatchField(decodeChannelPatchAuth, func(channel *models.Channel, value datatypes.JSONType[models.ChannelAuth]) {
+		channel.Auth = value
+	}),
 	"status": buildStatusChannelPatchField(),
 	"public_display_name": buildChannelPatchField(decodeChannelPatchPublicDisplayName, func(channel *models.Channel, value string) {
 		channel.PublicDisplayName = value
@@ -237,12 +240,17 @@ func validateFinalChannel(channel *models.Channel) error {
 	if err := channel.Affinity.Data().Validate(); err != nil {
 		return err
 	}
+	if err := models.ValidateChannelAuth(channel.Auth.Data()); err != nil {
+		return err
+	}
 	return models.ValidateToolCompatibility(channel.OtherSettings)
 }
 
 // behavior change: mutable patch values are copied at every ownership boundary.
 func cloneChannelPatchValue(value any) any {
 	switch value := value.(type) {
+	case datatypes.JSONType[models.ChannelAuth]:
+		return datatypes.NewJSONType(value.Data().Clone())
 	case datatypes.JSONType[models.ChannelResilience]:
 		data := value.Data()
 		data.MaxRetries = cloneChannelPatchPointer(data.MaxRetries)
@@ -622,4 +630,27 @@ func rejectUnsafeChannelPatchJSONIntegers(rawValue any) error {
 		}
 	}
 	return nil
+}
+
+// decodeChannelPatchAuth 解析并校验完整认证替换值。
+func decodeChannelPatchAuth(rawValue any) (datatypes.JSONType[models.ChannelAuth], error) {
+	// 1. 将输入解码成认证对象；解码失败只返回固定文本。
+	if rawValue == nil {
+		return datatypes.JSONType[models.ChannelAuth]{}, models.ErrUpstreamAuthValue
+	}
+	encoded, err := json.Marshal(rawValue)
+	if err != nil {
+		return datatypes.JSONType[models.ChannelAuth]{}, models.ErrUpstreamAuthValue
+	}
+	var auth models.ChannelAuth
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&auth); err != nil {
+		return datatypes.JSONType[models.ChannelAuth]{}, models.ErrUpstreamAuthValue
+	}
+	// 2. 校验头名、值模板与协议键。
+	if err := models.ValidateChannelAuth(auth); err != nil {
+		return datatypes.JSONType[models.ChannelAuth]{}, err
+	}
+	return datatypes.NewJSONType(auth), nil
 }

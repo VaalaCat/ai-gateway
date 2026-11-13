@@ -60,6 +60,7 @@ const INVOCATION_ENDPOINTS: MarketplaceEndpoint[] = [
   "chat_completions",
   "responses",
   "messages",
+  "generate_content",
 ];
 
 type OfferMetric = (offer: MarketplaceModelOfferDetail) => number | null | undefined;

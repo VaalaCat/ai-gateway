@@ -16,11 +16,17 @@ type UpstreamError struct {
 	Body              []byte      // 上游 response body,可能为空
 	ProviderErrorType string      // body 解析出的 error.type 字段,空表示未识别
 	Header            http.Header // 上游响应 header，用于 writeResponse 透传给客户端（可为 nil）
+	MaskedBody        *string     // 脱敏后的错误文本；Body 保留上游原始响应。
 }
 
-// Error 实现 error 接口。日志友好,展示 status + 部分 body。
+// Error 展示状态码和截断后的脱敏错误文本。
 func (e *UpstreamError) Error() string {
+	// 1. 优先使用采集时脱敏的文本。
 	body := string(e.Body)
+	if e.MaskedBody != nil {
+		body = *e.MaskedBody
+	}
+	// 2. 截断文本并附加上游状态码。
 	if len(body) > 256 {
 		body = body[:256] + "..."
 	}

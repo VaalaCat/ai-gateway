@@ -94,6 +94,7 @@ const ENDPOINT_TYPES = [
   { value: API_TYPES.CHAT_COMPLETION, labelKey: "chatCompletion" },
   { value: API_TYPES.RESPONSES, labelKey: "responsesApi" },
   { value: "anthropic", labelKey: "claudeMessages" },
+  { value: API_TYPES.GEMINI, labelKey: "apiTypeGemini" },
 ] as const;
 
 type EndpointLabelKey = (typeof ENDPOINT_TYPES)[number]["labelKey"];

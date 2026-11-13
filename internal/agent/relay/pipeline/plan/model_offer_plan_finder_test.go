@@ -380,3 +380,20 @@ func attemptModesByKey(attempts []state.Attempt) map[string]state.RelayMode {
 func stringInt(value int) string     { return strconv.Itoa(value) }
 func stringInt64(value int64) string { return strconv.FormatInt(value, 10) }
 func stringUint(value uint) string   { return strconv.FormatUint(uint64(value), 10) }
+
+func TestModelOfferGeminiOnlyAdvertisesNativeGemini(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		channel *models.Channel
+		want    bool
+	}{
+		{"openai", &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeOpenAI}}, false},
+		{"legacy gemini", &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeGemini, UseLegacyAdaptor: true}}, false},
+		{"native gemini", &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeGemini}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			offer := offerCandidateFromScored("model", ScoredCandidate{Channel: tc.channel}, []llmkit.Protocol{llmkit.ProtocolGemini})
+			require.Equal(t, tc.want, len(offer.Modes) > 0)
+		})
+	}
+}

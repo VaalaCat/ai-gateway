@@ -27,11 +27,11 @@ func (h *Handler) Update(c *app.Context, req UpdateRequest) (models.Channel, err
 
 	patch, err := ParseChannelPatch(req.Fields)
 	if err != nil {
-		return models.Channel{}, api.BadRequestError(err.Error(), err)
+		return models.Channel{}, channelInputAPIError(err)
 	}
 	candidate := *existing
 	if err := patch.Apply(&candidate); err != nil {
-		return models.Channel{}, api.BadRequestError(err.Error(), err)
+		return models.Channel{}, channelInputAPIError(err)
 	}
 	if err := m.Channel().Update(existing.ID, patch.Assignments()); err != nil {
 		return models.Channel{}, api.InternalError("update channel failed", err)

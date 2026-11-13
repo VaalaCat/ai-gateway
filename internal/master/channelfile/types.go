@@ -41,6 +41,7 @@ func NewEnvelope[T any](kind Kind, now time.Time, channels []T) Envelope[T] {
 }
 
 type AdminChannel struct {
+	Auth                models.ChannelAuth       `json:"auth"`
 	Name                string                   `json:"name"`
 	PublicDisplayName   string                   `json:"public_display_name"`
 	Status              int                      `json:"status"`
@@ -79,6 +80,7 @@ type AdminChannel struct {
 }
 
 type BYOKChannel struct {
+	Auth                models.ChannelAuth     `json:"auth"`
 	Name                string                 `json:"name"`
 	Status              int                    `json:"status"`
 	Type                int                    `json:"type"`

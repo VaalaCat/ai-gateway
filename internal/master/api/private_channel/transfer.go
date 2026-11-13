@@ -212,7 +212,7 @@ func privateChannelToFile(channel models.PrivateChannel, cipher *byokcrypto.Ciph
 		ParamOverride: channel.ParamOverride, Setting: channel.Setting, Tag: channel.Tag,
 		Remark: channel.Remark, TestModel: channel.TestModel, AutoBan: channel.AutoBan,
 		StatusCodeMapping: channel.StatusCodeMapping, OtherSettings: channel.OtherSettings,
-		Affinity: channel.Affinity.Data(),
+		Affinity: channel.Affinity.Data(), Auth: channel.Auth.Data().Clone(),
 	}, nil
 }
 
@@ -277,7 +277,7 @@ func (h *Handler) previewPrivateChannelImport(
 
 func privateFileToCreateInput(file channelfile.BYOKChannel, name string) PrivateChannelCreateInput {
 	return PrivateChannelCreateInput{
-		Name: name, Status: file.Status, Type: file.Type, Key: file.Key, BaseURL: file.BaseURL,
+		Auth: file.Auth.Clone(), Name: name, Status: file.Status, Type: file.Type, Key: file.Key, BaseURL: file.BaseURL,
 		Models: append([]string(nil), file.Models...), ModelMapping: cloneMapping(file.ModelMapping),
 		Weight: file.Weight, Priority: file.Priority, SupportedAPITypes: file.SupportedAPITypes,
 		Endpoints: file.Endpoints, PassthroughEnabled: file.PassthroughEnabled,

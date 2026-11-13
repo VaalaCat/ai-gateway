@@ -1,6 +1,18 @@
 package sync
 
 import (
+	"context"
+	"fmt"
+	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
+	"github.com/VaalaCat/ai-gateway/internal/master/controlrpc"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"time"
+
 	gosync "sync"
 	"testing"
 
@@ -162,4 +174,89 @@ func TestFailPendingForConn_Idempotent(t *testing.T) {
 func TestFailPendingForConn_EmptyMap(t *testing.T) { // boundary
 	h := &Hub{pending: make(map[string]pendingCall)}
 	h.failPendingForConn(&ws.Conn{}) // 空表不 panic
+}
+
+func TestCallSessionContextRealWebSocket(t *testing.T) {
+	for _, scenario := range []string{"success", "timeout", "cancel", "disconnect", "replaced"} {
+		t.Run(scenario, func(t *testing.T) {
+			h := NewHub(nil, zap.NewNop(), nil, nil, nil, HubOptions{})
+			ready := make(chan *ws.Conn, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := ws.Upgrade(w, r, zap.NewNop())
+				if err != nil {
+					return
+				}
+				ready <- conn
+				defer conn.Close()
+				defer h.failPendingForConn(conn)
+				for {
+					_, response, err := conn.ReadMessage()
+					if err != nil {
+						return
+					}
+					if response != nil {
+						h.deliverPendingResponse(conn, fmt.Sprint(*response.ID), response)
+					}
+				}
+			}))
+			defer server.Close()
+			client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			require.NoError(t, err)
+			defer client.Close()
+			conn := <-ready
+			generation, _, _ := h.installControlSession("node", conn, "")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, err := h.CallSessionContext(ctx, "node", generation, "agent.inflight", nil, 100*time.Millisecond)
+				done <- err
+			}()
+			var request jsonrpc.Request
+			require.NoError(t, client.ReadJSON(&request))
+			switch scenario {
+			case "success":
+				response, err := jsonrpc.NewResponse(request.ID, []any{})
+				require.NoError(t, err)
+				require.NoError(t, client.WriteJSON(response))
+			case "cancel":
+				cancel()
+			case "disconnect":
+				client.Close()
+			case "replaced":
+				h.installControlSession("node", conn, "")
+				_, err := h.CallSessionContext(ctx, "node", generation, "agent.inflight", nil, time.Second)
+				require.ErrorIs(t, err, connectivity.ErrConnectionGenerationChanged)
+				client.Close()
+			}
+			select {
+			case err := <-done:
+				switch scenario {
+				case "success":
+					require.NoError(t, err)
+				case "timeout":
+					require.ErrorIs(t, err, context.DeadlineExceeded)
+				case "cancel":
+					require.ErrorIs(t, err, context.Canceled)
+				case "disconnect", "replaced":
+					require.ErrorIs(t, err, controlrpc.ErrDisconnected)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("RPC did not return within its budget")
+			}
+			h.pendingMu.Lock()
+			require.Empty(t, h.pending)
+			h.pendingMu.Unlock()
+			if scenario == "cancel" || scenario == "timeout" {
+				// 2. 迟到响应已无等待者，同一连接仍能接受后续关键消息。
+				response, err := jsonrpc.NewResponse(request.ID, []any{})
+				require.NoError(t, err)
+				require.NoError(t, client.WriteJSON(response))
+				require.NoError(t, conn.WriteJSON(map[string]string{"method": "still-alive"}))
+				var received map[string]any
+				require.NoError(t, client.ReadJSON(&received))
+				require.Equal(t, "still-alive", received["method"])
+			}
+		})
+	}
 }

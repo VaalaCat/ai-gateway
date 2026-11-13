@@ -67,6 +67,11 @@ func (doer *attemptHTTPDoer) Do(request *http.Request) (*http.Response, error) {
 	}
 
 	upstream.ForwardClientHeaders(request.Header, doer.inboundHeaders(), doer.crossProtocol())
+	if err := upstream.ApplyChannelAuth(request, doer.attempt.Channel, doer.protocol); err != nil {
+		doer.recorder.WithOutbound(request, body, doer.attempt.Channel)
+		doer.recorder.WithFail(trace.StageUpstreamDispatch, err)
+		return nil, err
+	}
 	body = doer.applyOverrides(request, body)
 
 	body, rejected, result := scripthook.RunUpstreamScriptsWithUpstreamHeaders(
@@ -87,12 +92,18 @@ func (doer *attemptHTTPDoer) Do(request *http.Request) (*http.Response, error) {
 	doer.recorder.WithStage(trace.StageUpstreamDispatch)
 
 	client := upstream.BuildHTTPClient(doer.transportPool(), doer.attempt.Channel)
+	if doer.relay != nil {
+		doer.relay.Inflight.ObserveUpstreamBytes(0)
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		doer.recorder.WithFail(trace.StageUpstreamDispatch, err)
 		return response, fmt.Errorf("upstream request failed: %w", err)
 	}
 
+	if doer.relay != nil {
+		response.Body = doer.relay.Inflight.WrapUpstreamBody(response.Body)
+	}
 	doer.recorder.WithUpstreamStatus(response)
 	wrapResponseBodyForTrace(doer.recorder, response)
 	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
@@ -116,11 +127,13 @@ func (doer *attemptHTTPDoer) Do(request *http.Request) (*http.Response, error) {
 		}
 	}
 
+	maskedBody := doer.recorder.MaskText(string(capture.BoundedHead()))
 	upstreamErr := &common.UpstreamError{
 		Status:            response.StatusCode,
 		Body:              capture.BoundedHead(),
-		ProviderErrorType: common.ParseProviderErrorType(capture.Head),
+		ProviderErrorType: doer.recorder.MaskText(common.ParseProviderErrorType(capture.Head)),
 		Header:            response.Header.Clone(),
+		MaskedBody:        &maskedBody,
 	}
 	doer.recorder.WithFail(trace.StageUpstreamStatus, upstreamErr)
 	return nil, &llmkit.Error{

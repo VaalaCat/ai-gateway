@@ -8,6 +8,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 	"go.uber.org/zap"
 )
 
@@ -15,30 +16,35 @@ const (
 	EndpointKeyChatCompletions = "chat_completions"
 	EndpointKeyResponses       = "responses"
 	EndpointKeyMessages        = "messages"
+	EndpointKeyGenerateContent = "generate_content"
 )
 
 var defaultEndpointPaths = map[llmkit.Protocol]string{
 	llmkit.ProtocolOpenAIChat:      "/v1/chat/completions",
 	llmkit.ProtocolOpenAIResponses: "/v1/responses",
 	llmkit.ProtocolClaudeMessages:  "/v1/messages",
+	llmkit.ProtocolGemini:          endpoint.DefaultGeminiPath,
 }
 
 var endpointKeyToProtocol = map[string]llmkit.Protocol{
 	EndpointKeyChatCompletions: llmkit.ProtocolOpenAIChat,
 	EndpointKeyResponses:       llmkit.ProtocolOpenAIResponses,
 	EndpointKeyMessages:        llmkit.ProtocolClaudeMessages,
+	EndpointKeyGenerateContent: llmkit.ProtocolGemini,
 }
 
 var fallbackPriority = []llmkit.Protocol{
 	llmkit.ProtocolOpenAIResponses,
 	llmkit.ProtocolOpenAIChat,
 	llmkit.ProtocolClaudeMessages,
+	llmkit.ProtocolGemini,
 }
 
 var apiTypeToProtocol = map[string]llmkit.Protocol{
 	consts.APITypeChatCompletion: llmkit.ProtocolOpenAIChat,
 	consts.APITypeResponses:      llmkit.ProtocolOpenAIResponses,
 	consts.APITypeClaude:         llmkit.ProtocolClaudeMessages,
+	consts.APITypeGemini:         llmkit.ProtocolGemini,
 }
 
 func DefaultEndpointPath(protocol llmkit.Protocol) string {
@@ -46,6 +52,9 @@ func DefaultEndpointPath(protocol llmkit.Protocol) string {
 }
 
 func PathToProtocol(path string) llmkit.Protocol {
+	if _, _, ok := endpoint.ParseGeminiPath(path); ok {
+		return llmkit.ProtocolGemini
+	}
 	switch path {
 	case consts.RouteChatCompletions:
 		return llmkit.ProtocolOpenAIChat
@@ -71,7 +80,7 @@ func ChannelTypeToProtocol(channelType int) llmkit.Protocol {
 
 func IsSupportedProtocol(protocol llmkit.Protocol) bool {
 	switch protocol {
-	case llmkit.ProtocolOpenAIChat, llmkit.ProtocolOpenAIResponses, llmkit.ProtocolClaudeMessages:
+	case llmkit.ProtocolOpenAIChat, llmkit.ProtocolOpenAIResponses, llmkit.ProtocolClaudeMessages, llmkit.ProtocolGemini:
 		return true
 	default:
 		return false

@@ -1,6 +1,7 @@
 package attemptproxy
 
 import (
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 	"net/http"
 	"net/url"
 	"strings"
@@ -8,7 +9,21 @@ import (
 
 func ProviderPathAllowed(method, path string) bool {
 	parsed, err := url.ParseRequestURI(path)
-	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != path {
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Fragment != "" || parsed.RawPath != "" {
+		return false
+	}
+	if method == http.MethodPost {
+		if _, _, ok := endpoint.ParseGeminiPath(parsed.Path); ok {
+			// 1. 原生生成参数通过现有 RequestPath 携带，客户端凭证不能进入隧道元数据。
+			for name := range parsed.Query() {
+				if strings.EqualFold(name, "key") {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	if parsed.RawQuery != "" || parsed.Path != path {
 		return false
 	}
 	if method == http.MethodGet {

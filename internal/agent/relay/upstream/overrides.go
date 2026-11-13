@@ -96,10 +96,9 @@ func isValidOverrideProtocolKey(p llmkit.Protocol) bool {
 }
 
 // isValidOverrideProtocolValue accepts the codec-supported outbound protocols.
-// Same set as keys for now; kept as a separate function so future expansion
-// (e.g., outbound-only protocols) does not affect inbound validation.
+// Gemini 仅作为可转换的出站目标，原生入站不参加跨协议覆盖。
 func isValidOverrideProtocolValue(p llmkit.Protocol) bool {
-	return isValidOverrideProtocolKey(p)
+	return p == llmkit.ProtocolGemini || isValidOverrideProtocolKey(p)
 }
 
 // modelOverrideRule represents a single per-model protocol override rule

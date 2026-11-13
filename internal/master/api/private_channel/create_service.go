@@ -43,12 +43,13 @@ type PrivateChannelCreateInput struct {
 	PassthroughEnabled  bool
 	UseLegacyAdaptor    bool
 	SystemPromptInInput bool
+	Auth                models.ChannelAuth
 	Affinity            models.ChannelAffinity
 }
 
 func buildPrivateChannelCreateInput(req CreateRequest) PrivateChannelCreateInput {
 	input := PrivateChannelCreateInput{
-		Name: req.Name, Status: 1, Type: req.Type, Key: req.Key, BaseURL: req.BaseURL,
+		Auth: req.Auth.Clone(), Name: req.Name, Status: 1, Type: req.Type, Key: req.Key, BaseURL: req.BaseURL,
 		Models: append([]string(nil), req.Models...), ModelMapping: cloneMapping(req.ModelMapping),
 		Weight: req.Weight, Priority: req.Priority, SupportedAPITypes: req.SupportedAPITypes,
 		Endpoints: req.Endpoints, Organization: req.Organization, APIVersion: req.ApiVersion,
@@ -159,7 +160,7 @@ func validatePrivateChannelInput(
 
 func privateInputToMap(input PrivateChannelCreateInput) map[string]any {
 	return map[string]any{
-		"name": input.Name, "key": input.Key, "base_url": input.BaseURL,
+		"auth": input.Auth, "name": input.Name, "key": input.Key, "base_url": input.BaseURL,
 		"supported_api_types": input.SupportedAPITypes, "endpoints": input.Endpoints,
 		"organization": input.Organization, "api_version": input.APIVersion,
 		"system_prompt": input.SystemPrompt, "role_mapping": input.RoleMapping,
@@ -185,6 +186,7 @@ func buildPrivateChannel(ownerID uint, input PrivateChannelCreateInput, sealed [
 			Remark: input.Remark, TestModel: input.TestModel, AutoBan: input.AutoBan,
 			StatusCodeMapping: input.StatusCodeMapping, OtherSettings: input.OtherSettings,
 			Affinity: datatypes.NewJSONType(input.Affinity),
+			Auth:     datatypes.NewJSONType(input.Auth.Clone()),
 		},
 		OwnerID: ownerID, KeyCipher: sealed, KeyLast4: byokcrypto.Last4(input.Key),
 		Models:       datatypes.JSONSlice[string](append([]string(nil), input.Models...)),

@@ -607,3 +607,40 @@ func TestTokenAuth_PropagatesTraceMode(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiTokenAuthInputsAndQueryRemoval(t *testing.T) {
+	store := cache.NewStore(nil, config.AgentCacheConfig{})
+	store.SetToken(&models.Token{ID: 1, Key: "gateway-key", Status: 1, ExpiredAt: -1})
+	for _, tc := range []struct {
+		name, path, authorization, googleKey string
+		status                               int
+	}{
+		{"bearer", "/v1beta/models/gemini:generateContent?key=unused&KEY=other-secret&alt=sse", "Bearer gateway-key", "", 200},
+		{"header", "/v1/models/gemini:streamGenerateContent?key=unused", "", "gateway-key", 200},
+		{"query", "/v1beta/models/gemini:generateContent?key=gateway-key&alt=sse", "", "", 200},
+		{"wrong bearer no fallback", "/v1beta/models/gemini:generateContent?key=gateway-key", "Bearer wrong-key", "gateway-key", 401},
+		{"unrelated endpoint", "/v1/chat/completions?key=gateway-key", "", "gateway-key", 401},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := gin.New()
+			router.Use(TokenAuth(store))
+			router.POST("/v1beta/models/:modelAction", func(c *gin.Context) { c.Status(200) })
+			router.POST("/v1/models/:modelAction", func(c *gin.Context) { c.Status(200) })
+			router.POST("/v1/chat/completions", func(c *gin.Context) { c.Status(200) })
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req.Header.Set("Authorization", tc.authorization)
+			req.Header.Set("x-goog-api-key", tc.googleKey)
+			out := httptest.NewRecorder()
+			router.ServeHTTP(out, req)
+			if out.Code != tc.status {
+				t.Fatalf("got %d want %d", out.Code, tc.status)
+			}
+			if out.Code == 200 && req.Header.Get("Authorization") != "Bearer gateway-key" {
+				t.Fatal("verified gateway credential not normalized for remote Agent")
+			}
+			if tc.name != "unrelated endpoint" && (req.URL.Query().Has("key") || strings.Contains(strings.ToLower(req.RequestURI), "key=")) {
+				t.Fatal("query key retained")
+			}
+		})
+	}
+}

@@ -63,6 +63,7 @@ const INVOCATION_ENDPOINTS: MarketplaceEndpoint[] = [
   "chat_completions",
   "responses",
   "messages",
+  "generate_content",
 ];
 
 function parsePositiveTokenId(value: string | null) {

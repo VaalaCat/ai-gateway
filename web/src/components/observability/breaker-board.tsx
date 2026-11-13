@@ -8,8 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EntityLabel } from "@/components/business/entity-label";
 import { breakerDotClass, breakerAccentClass } from "@/components/business/attempt-state";
-import { useBreakerBoard } from "@/lib/api/observability";
-import type { ChannelBreakerRow, AgentBreakerCell } from "@/lib/types";
+import type { ChannelBreakerRow, AgentBreakerCell, BreakerBoardResponse } from "@/lib/types";
 
 // StateBadge 把熔断状态映射成着色徽章:open=红,half-open=黄,closed=绿。
 function StateBadge({ state }: { state: string }) {
@@ -55,9 +54,8 @@ function rowKey(r: ChannelBreakerRow) {
   return `${r.source}:${r.channel_id}`;
 }
 
-export function BreakerBoard() {
+export function BreakerBoard({ data, incomplete = false }: { data: BreakerBoardResponse; incomplete?: boolean }) {
   const t = useTranslations("monitoring");
-  const { data, isLoading } = useBreakerBoard();
   const [showAll, setShowAll] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -74,12 +72,8 @@ export function BreakerBoard() {
 
   return (
     <div className="space-y-3">
+      {incomplete && <p className="text-sm text-muted-foreground">{t("refresh.currentOnly")}</p>}
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs text-muted-foreground">
-          {data?.failed_agents?.length
-            ? t("breaker.failedAgents", { n: data.failed_agents.length })
-            : ""}
-        </span>
         <Button
           variant="ghost"
           size="sm"
@@ -90,9 +84,9 @@ export function BreakerBoard() {
         </Button>
       </div>
 
-      {!isLoading && rows.length === 0 && (
+      {rows.length === 0 && (
         <p className="rounded-md border p-6 text-center text-sm text-muted-foreground">
-          {t("breaker.allHealthy")}
+          {t(incomplete ? "refresh.noCurrentData" : "breaker.allHealthy")}
         </p>
       )}
 

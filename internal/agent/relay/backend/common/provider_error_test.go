@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,4 +58,15 @@ func TestUpstreamError_Error(t *testing.T) {
 	}
 	longErr := &UpstreamError{Status: 500, Body: longBody}
 	require.Contains(t, longErr.Error(), "...")
+}
+
+func TestUpstreamErrorUsesMaskedBody(t *testing.T) {
+	for _, maskedBody := range []string{"", "authentication failed: ***", strings.Repeat("x", 250) + "***"} {
+		t.Run(fmt.Sprintf("masked-length-%d", len(maskedBody)), func(t *testing.T) {
+			upstreamErr := &UpstreamError{Status: 401, Body: []byte("original-secret"), MaskedBody: &maskedBody}
+			require.NotContains(t, upstreamErr.Error(), "original-secret")
+			require.NotContains(t, fmt.Sprintf("%+v", upstreamErr), "original-secret")
+			require.Equal(t, "original-secret", string(upstreamErr.Body))
+		})
+	}
 }

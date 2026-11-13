@@ -950,3 +950,23 @@ func TestClientCallMergesMessageRoles(t *testing.T) {
 		})
 	}
 }
+
+func TestCloneRequestCopiesImageProviderDataAndThinkingControls(t *testing.T) {
+	enabled, budget, include := false, 0, false
+	request := Request{ThinkingEnabled: &enabled, ThinkingBudget: &budget, IncludeThoughts: &include, Messages: []Message{{Role: RoleAssistant, Content: []ContentBlock{{Type: ContentTypeImage, ProviderData: &ProviderData{Protocol: ProtocolGemini, Models: []string{"m"}, Fields: map[string]json.RawMessage{"thoughtSignature": json.RawMessage(`"original"`)}}, Metadata: map[string]any{"explicit_content_order": true}}}}}}
+	cloned := cloneRequest(request)
+	*cloned.ThinkingEnabled = true
+	*cloned.ThinkingBudget = 1024
+	*cloned.IncludeThoughts = true
+	block := &cloned.Messages[0].Content[0]
+	block.ProviderData.Models[0] = "changed"
+	block.ProviderData.Fields["thoughtSignature"][1] = 'X'
+	block.Metadata["explicit_content_order"] = false
+	if *request.ThinkingEnabled || *request.ThinkingBudget != 0 || *request.IncludeThoughts {
+		t.Fatal("thinking fields share pointers")
+	}
+	original := request.Messages[0].Content[0]
+	if original.ProviderData.Models[0] != "m" || string(original.ProviderData.Fields["thoughtSignature"]) != `"original"` || original.Metadata["explicit_content_order"] != true {
+		t.Fatalf("caller-owned image mutated: %+v", original)
+	}
+}

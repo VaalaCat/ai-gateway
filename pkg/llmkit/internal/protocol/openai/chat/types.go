@@ -1,6 +1,9 @@
 package chat
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
+)
 
 // ---------------------------------------------------------------------------
 // Wire types for JSON (de)serialization
@@ -36,6 +39,7 @@ type oaiRequest struct {
 
 // oaiMessage represents an OpenAI message. Content can be a string or array.
 type oaiMessage struct {
+	Images           []oaiImage      `json:"images,omitempty"`
 	Role             string          `json:"role"`
 	Content          json.RawMessage `json:"content,omitempty"`
 	ToolCalls        []oaiToolCall   `json:"tool_calls,omitempty"`
@@ -45,9 +49,10 @@ type oaiMessage struct {
 }
 
 type oaiContentBlock struct {
-	Type     string       `json:"type"`
-	Text     string       `json:"text,omitempty"`
-	ImageURL *oaiImageURL `json:"image_url,omitempty"`
+	ProviderData *ir.ProviderData `json:"provider_data,omitempty"`
+	Type         string           `json:"type"`
+	Text         string           `json:"text,omitempty"`
+	ImageURL     *oaiImageURL     `json:"image_url,omitempty"`
 }
 
 type oaiImageURL struct {
@@ -122,6 +127,7 @@ type oaiChoice struct {
 }
 
 type oaiRespMsg struct {
+	Images           []oaiImage    `json:"images,omitempty"`
 	Role             string        `json:"role"`
 	Content          string        `json:"content,omitempty"`
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
@@ -131,6 +137,7 @@ type oaiRespMsg struct {
 }
 
 type oaiRespDelta struct {
+	Images           []oaiImage    `json:"images,omitempty"`
 	Role             string        `json:"role,omitempty"`
 	Content          string        `json:"content,omitempty"`
 	ReasoningContent string        `json:"reasoning_content,omitempty"`
@@ -165,4 +172,12 @@ type oaiErrorBody struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    any    `json:"code"`
+}
+
+// oaiImage 是 Chat 响应或历史中的完整图片项。
+type oaiImage struct {
+	Index        int              `json:"index"`
+	Type         string           `json:"type"`
+	ImageURL     *oaiImageURL     `json:"image_url"`
+	ProviderData *ir.ProviderData `json:"provider_data,omitempty"`
 }

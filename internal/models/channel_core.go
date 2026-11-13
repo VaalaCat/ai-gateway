@@ -27,6 +27,7 @@ type ChannelCore struct {
 	Priority            int                                     `gorm:"default:0" json:"priority"`
 	SupportedAPITypes   string                                  `gorm:"type:text" json:"supported_api_types"`
 	Endpoints           string                                  `gorm:"type:text" json:"endpoints"`
+	Auth                datatypes.JSONType[ChannelAuth]         `gorm:"type:text;not null;default:'{}'" json:"auth"`
 	PassthroughEnabled  bool                                    `gorm:"default:false" json:"passthrough_enabled"`
 	UseLegacyAdaptor    bool                                    `gorm:"default:false" json:"use_legacy_adaptor"`
 	Organization        string                                  `gorm:"size:128" json:"organization"`

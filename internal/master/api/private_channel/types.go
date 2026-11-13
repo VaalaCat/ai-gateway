@@ -11,6 +11,7 @@ import (
 // effectively unlimited but a single channel record should never carry 4KB of
 // JSON snippets. Patch path enforces the same caps via validateFieldLengthsCtx.
 type CreateRequest struct {
+	Auth                models.ChannelAuth      `json:"auth"`
 	Name                string                  `json:"name" binding:"required,max=64"`
 	Type                int                     `json:"type" binding:"required"`
 	Key                 string                  `json:"key" binding:"required,max=4096"`
@@ -61,6 +62,7 @@ type ListRequest struct {
 
 // DetailResponse intentionally never exposes plaintext Key — only last4.
 type DetailResponse struct {
+	Auth                models.ChannelAuth         `json:"auth"`
 	ID                  uint                       `json:"id"`
 	OwnerID             uint                       `json:"owner_id"`
 	Name                string                     `json:"name"`
@@ -98,6 +100,7 @@ type DetailResponse struct {
 
 func toDetailResponse(pc *models.PrivateChannel) DetailResponse {
 	return DetailResponse{
+		Auth:                pc.Auth.Data().Clone(),
 		ID:                  pc.ID,
 		OwnerID:             pc.OwnerID,
 		Name:                pc.Name,

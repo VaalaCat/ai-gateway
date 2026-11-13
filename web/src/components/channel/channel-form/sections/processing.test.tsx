@@ -22,6 +22,29 @@ beforeAll(() => {
   HTMLElement.prototype.releasePointerCapture ??= () => {};
 });
 
+it("explains Gemini inbound passthrough while keeping outgoing conversion configurable", () => {
+  render(<ProcessingSection form={{ ...emptyForm, endpoints: JSON.stringify({ generate_content: "/v1beta/models/{model}:{action}" }) }} setForm={vi.fn()} />);
+  expect(screen.getByText("geminiPassthroughHint")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "dataflowStep.role_mapping" })).toBeEnabled();
+  expect(screen.getByRole("checkbox", { name: "apiTypeGemini" })).toBeChecked();
+});
+
+it.each([
+  { endpoints: { messages: "/v1/messages" }, warns: false },
+  { endpoints: { chat_completions: "/v1/chat/completions" }, warns: false },
+  { endpoints: { responses: "/v1/responses" }, warns: true },
+])("allows thinking rules for supported endpoints: $endpoints", async ({ endpoints, warns }) => {
+  const user = userEvent.setup();
+  const setForm = vi.fn();
+  render(<ProcessingSection form={{ ...emptyForm, endpoints: JSON.stringify(endpoints) }} setForm={setForm} />);
+  await user.click(screen.getByRole("button", { name: "dataflowStep.thinking_passthrough" }));
+  expect(!!screen.queryByText("thinkingPassthroughUnsupportedProtocol")).toBe(warns);
+  await user.click(screen.getByRole("button", { name: "+ thinkingPassthroughAddRule" }));
+  expect(JSON.parse(setForm.mock.calls[0][0].other_settings).model_thinking_passthrough).toEqual([
+    { model_pattern: "", send_back_thinking: false },
+  ]);
+});
+
 function ToolCompatibilityForm({ initialSettings = JSON.stringify({ custom_setting: "keep" }) }: { initialSettings?: string }) {
   const [form, setForm] = useState({
     ...emptyForm,

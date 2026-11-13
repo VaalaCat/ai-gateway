@@ -11,8 +11,7 @@ import { AgentConnectionStatus } from "@/components/business/agent-connection-st
 import { CacheStatsTable } from "@/components/business/cache-stats-table";
 import { CopyableText } from "@/components/business/copyable-text";
 import { DateCell } from "@/components/business/date-cell";
-import { InflightTable } from "@/components/business/inflight-table";
-import { InflightBlockDetail } from "@/components/observability/inflight-block-detail";
+import { InflightRequests } from "@/components/observability/inflight-requests";
 import { PageHeader } from "@/components/layout/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -32,11 +31,10 @@ import {
   useAgentGoroutines,
   useAgentInflight,
   useFullSyncAgents,
-  useInterruptInflight,
 } from "@/lib/api/agents";
 import type { GoroutineDump } from "@/lib/api/agents";
 import { formatErrorToast } from "@/lib/api/error-toast";
-import type { AgentAddress, AgentDetail, GlobalInflightRow } from "@/lib/types";
+import type { AgentAddress, AgentDetail } from "@/lib/types";
 import { formatDuration, formatUptime } from "@/lib/utils/format";
 import { useAgentConnections } from "@/lib/hooks/use-agent-connections";
 import { routeTargetsPageMatchesSnapshot } from "@/lib/agent-connection-snapshot";
@@ -84,12 +82,11 @@ function GoroutineDumpDialog({ open, onOpenChange, data }: {
 function InflightSection({ agentId, agentName }: { agentId: number; agentName: string }) {
   const t = useTranslations("agents");
   const tc = useTranslations("common");
-  const { data: rows = [], isFetching, refetch } = useAgentInflight(agentId);
+  const [paused, setPaused] = useState(false);
+  const query = useAgentInflight(agentId, { paused });
   const goroutines = useAgentGoroutines();
-  const interrupt = useInterruptInflight();
   const [dumpOpen, setDumpOpen] = useState(false);
   const [dumpData, setDumpData] = useState<GoroutineDump | null>(null);
-  const [selected, setSelected] = useState<GlobalInflightRow | null>(null);
 
   const loadDump = async () => {
     try {
@@ -101,35 +98,19 @@ function InflightSection({ agentId, agentName }: { agentId: number; agentName: s
   };
 
   return (
-    <section className="rounded-md border">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
-        <h2 className="text-sm font-medium">{t("inflightTitle")}</h2>
-        <div className="flex items-center gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
-            {isFetching ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
-            {t("inflightRefresh")}
-          </Button>
-          <Button type="button" variant="outline" size="sm" onClick={() => void loadDump()} disabled={goroutines.isPending}>
-            {goroutines.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
-            {goroutines.isPending ? t("goroutineDumping") : t("goroutineDump")}
-          </Button>
-        </div>
+    <section className="flex min-w-0 flex-col gap-3 rounded-md border p-3">
+      <InflightRequests
+        title={t("inflightTitle")}
+        data={query.data ? { requests: query.data.map((row) => ({ ...row, agent_id: agentId, agent_name: agentName })), failed_agents: [], successful_agent_ids: [agentId] } : undefined}
+        dataUpdatedAt={query.dataUpdatedAt} error={query.error} isFetching={query.isFetching}
+        paused={paused} onPausedChange={setPaused} onRefresh={query.refetch}
+      />
+      <div>
+        <Button type="button" variant="outline" size="sm" onClick={() => void loadDump()} disabled={goroutines.isPending}>
+          {goroutines.isPending ? <LoaderCircle data-icon="inline-start" className="animate-spin" /> : <RefreshCw data-icon="inline-start" />}
+          {goroutines.isPending ? t("goroutineDumping") : t("goroutineDump")}
+        </Button>
       </div>
-      <div className="border-t">
-        <InflightTable
-          rows={rows}
-          emptyText={t("inflightEmpty")}
-          onSelectRow={(row) => setSelected({ ...row, agent_id: agentId, agent_name: agentName } as GlobalInflightRow)}
-          onInterrupt={(row) => interrupt.mutate(
-            { agent_id: agentId, id: row.id },
-            {
-              onSuccess: () => toast.success(t("inflightInterrupted")),
-              onError: (error) => toast.error(formatErrorToast(error, tc("error"))),
-            },
-          )}
-        />
-      </div>
-      <InflightBlockDetail row={selected} onClose={() => setSelected(null)} />
       <GoroutineDumpDialog open={dumpOpen} onOpenChange={setDumpOpen} data={dumpData} />
     </section>
   );

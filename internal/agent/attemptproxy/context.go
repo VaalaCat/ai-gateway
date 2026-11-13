@@ -3,6 +3,7 @@ package attemptproxy
 import (
 	"errors"
 	"fmt"
+	"net/url"
 
 	"github.com/gin-gonic/gin"
 
@@ -44,14 +45,23 @@ func (b *contextBuilder) Build(c *gin.Context, meta attemptwire.AttemptProxyMeta
 	// The internal endpoint owns authentication, but the shared relay builder and
 	// all provider backends must observe the original provider path.
 	requestURL := c.Request.URL
-	endpointPath, endpointRawPath := requestURL.Path, requestURL.RawPath
-	requestURL.Path = meta.RequestPath
-	requestURL.RawPath = meta.RequestPath
+	endpointPath, endpointRawPath, endpointQuery := requestURL.Path, requestURL.RawPath, requestURL.RawQuery
+	endpointRequestURI := c.Request.RequestURI
+	providerURL, err := url.ParseRequestURI(meta.RequestPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: invalid provider URL", ErrContextBuildRejected)
+	}
+	requestURL.Path = providerURL.Path
+	requestURL.RawPath = providerURL.Path
+	requestURL.RawQuery = providerURL.RawQuery
+	c.Request.RequestURI = providerURL.RequestURI()
 	rctx := relay.NewContext(c, b.agent)
 	release := func() {
 		relay.CloseContext(rctx)
 		requestURL.Path = endpointPath
 		requestURL.RawPath = endpointRawPath
+		requestURL.RawQuery = endpointQuery
+		c.Request.RequestURI = endpointRequestURI
 	}
 	if err := ctxbuild.Build(rctx); err != nil {
 		release()

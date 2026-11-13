@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +50,7 @@ type Recorder struct {
 	inboundHeaders http.Header
 	inboundBody    []byte
 	inboundSeen    int64
+	inboundSecrets []string
 
 	outboundPath    string
 	outboundHeaders http.Header
@@ -64,6 +66,8 @@ type Recorder struct {
 
 	channelKey     string
 	channelBaseURL string
+	authHeaders    map[string]bool
+	authSecrets    []string
 
 	failStage Stage
 	stageHook func(Stage) // 可选:每次 WithStage 时回调(供 in-flight 追踪)
@@ -105,14 +109,28 @@ func (r *Recorder) WithInbound(req *http.Request, body []byte) *Recorder {
 	if req != nil {
 		r.inboundPath = req.URL.Path
 		r.inboundHeaders = cloneHeader(req.Header)
+		r.inboundSecrets = nil
+		for name, values := range req.Header {
+			if sensitiveHeaderKeys[strings.ToLower(name)] {
+				for _, value := range values {
+					r.inboundSecrets = append(r.inboundSecrets, value)
+					if strings.HasPrefix(value, "Bearer ") {
+						r.inboundSecrets = append(r.inboundSecrets, strings.TrimPrefix(value, "Bearer "))
+					}
+				}
+			}
+		}
+		for _, value := range req.URL.Query()["key"] {
+			r.inboundSecrets = append(r.inboundSecrets, value, url.QueryEscape(value))
+		}
 	}
 	r.inboundBody, r.inboundSeen = boundedTail(body, r.bufferHardLimit())
 	return r
 }
 
-// WithOutbound 记录 gateway → upstream 请求信息，并捕获 channel 密钥以供
-// Finalize 时统一脱敏。
+// WithOutbound 记录上游请求，并捕获本次渠道的敏感头名和敏感值。
 func (r *Recorder) WithOutbound(req *http.Request, body []byte, ch *models.Channel) *Recorder {
+	// 1. 保存出站路径、请求头和请求体。
 	if r == nil {
 		return nil
 	}
@@ -121,11 +139,60 @@ func (r *Recorder) WithOutbound(req *http.Request, body []byte, ch *models.Chann
 		r.outboundHeaders = cloneHeader(req.Header)
 	}
 	r.outboundBody, r.outboundSeen = boundedTail(body, r.bufferHardLimit())
+	// 2. 收集认证配置、展开值和最终请求头值。
 	if ch != nil {
 		r.channelKey = ch.Key
 		r.channelBaseURL = ch.GetBaseURL()
+		auth := ch.Auth.Data()
+		authTypes := make([]models.AuthType, 0, len(auth.Protocols)+1)
+		if auth.Default != nil {
+			authTypes = append(authTypes, *auth.Default)
+		}
+		for _, authType := range auth.Protocols {
+			authTypes = append(authTypes, authType)
+		}
+		r.authHeaders = make(map[string]bool, len(authTypes))
+		r.authSecrets = nil
+		for _, authType := range authTypes {
+			r.authHeaders[strings.ToLower(authType.Header)] = true
+			r.authSecrets = append(r.authSecrets, strings.ReplaceAll(authType.Value, "${CHANNEL_KEY}", ch.Key))
+		}
+		if req != nil {
+			for name, values := range req.Header {
+				if r.authHeaders[strings.ToLower(name)] {
+					r.authSecrets = append(r.authSecrets, values...)
+				}
+			}
+		}
 	}
 	return r
+}
+
+// MaskText 使用本次渠道的敏感值处理错误文本。
+func (r *Recorder) MaskText(text string) string {
+	// 1. 收集渠道密钥与认证值并执行文本脱敏。
+	if r == nil {
+		return maskText(text, nil)
+	}
+	return maskText(text, r.sensitiveValues())
+}
+
+// MaskError 脱敏错误文本并保留原始错误链。
+func (r *Recorder) MaskError(err error) error {
+	// 1. 保存脱敏文本与原始错误。
+	if err == nil {
+		return nil
+	}
+	return &maskedError{message: r.MaskText(err.Error()), cause: err}
+}
+
+// sensitiveValues 按值长度排列本次渠道的全部敏感值。
+func (r *Recorder) sensitiveValues() []string {
+	// 1. 合并认证值、渠道密钥与地址，并先处理较长的完整值。
+	secrets := append(channelSecrets(r.channelKey, r.channelBaseURL), r.authSecrets...)
+	secrets = append(secrets, r.inboundSecrets...)
+	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	return secrets
 }
 
 // WithUpstreamStatus 记录上游响应 status 与 headers。注意上游 body 由
@@ -338,6 +405,8 @@ func (r *Recorder) ResetAttempt() {
 	r.responseHeaders = nil
 	r.upstreamBody.Reset()
 	r.clientBody.Reset()
+	r.authHeaders = nil
+	r.authSecrets = nil
 }
 
 // buildSummary 构建不含持久化 payload 的轻量 attempt 摘要。
@@ -358,10 +427,10 @@ func (r *Recorder) effectiveMode() CaptureMode {
 
 func (r *Recorder) fillHeaders(rec *TraceRecord, secrets []string) {
 	rec.InboundPath = r.inboundPath
-	rec.InboundHeaders = http.Header(maskHeaders(r.inboundHeaders, secrets))
+	rec.InboundHeaders = http.Header(maskHeaders(r.inboundHeaders, secrets, r.authHeaders))
 	rec.OutboundPath = r.outboundPath
-	rec.OutboundHeaders = http.Header(maskHeaders(r.outboundHeaders, secrets))
-	rec.ResponseHeaders = http.Header(maskHeaders(r.responseHeaders, secrets))
+	rec.OutboundHeaders = http.Header(maskHeaders(r.outboundHeaders, secrets, r.authHeaders))
+	rec.ResponseHeaders = http.Header(maskHeaders(r.responseHeaders, secrets, r.authHeaders))
 }
 
 func (r *Recorder) fillBodies(rec *TraceRecord, secrets []string) {
@@ -452,7 +521,7 @@ func (r *Recorder) safeClientResponseBody() (body string, ok bool) {
 	if limit <= 0 {
 		limit = defaultTraceMaxBodySize
 	}
-	return r.clientResponseBody(channelSecrets(r.channelKey, r.channelBaseURL), limit), true
+	return r.clientResponseBody(r.sensitiveValues(), limit), true
 }
 
 // BuildRemoteFailureBodyFallback returns the bounded, masked target bodies
@@ -471,7 +540,7 @@ func (r *Recorder) BuildRemoteFailureBodyFallback() (rec *TraceRecord) {
 	if limit <= 0 {
 		limit = defaultTraceMaxBodySize
 	}
-	secrets := channelSecrets(r.channelKey, r.channelBaseURL)
+	secrets := r.sensitiveValues()
 	rec.InboundBody = truncateBodyWithLimit(maskTextPreservingLength(string(r.inboundBody), secrets), limit)
 	rec.OutboundBody = truncateBodyWithLimit(maskTextPreservingLength(string(r.outboundBody), secrets), limit)
 	rec.UpstreamBody = truncateBodyWithLimit(maskTextPreservingLength(r.upstreamBody.String(), secrets), limit)
@@ -490,7 +559,7 @@ func (r *Recorder) buildTraceRecord() *TraceRecord {
 	if mode == CaptureOff {
 		return rec
 	}
-	secrets := channelSecrets(r.channelKey, r.channelBaseURL)
+	secrets := r.sensitiveValues()
 	r.fillHeaders(rec, secrets)
 	if mode == CaptureFull {
 		r.fillBodies(rec, secrets)

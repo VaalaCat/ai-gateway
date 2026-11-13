@@ -9,6 +9,7 @@ type Message = ir.Message
 type ContentBlock = ir.ContentBlock
 type Tool = ir.Tool
 type ToolCall = ir.ToolCall
+type ProviderData = ir.ProviderData
 type ToolCallProviderData = ir.ToolCallProviderData
 type ToolChoice = ir.ToolChoice
 type Event = ir.Event
@@ -58,6 +59,7 @@ const (
 
 	EventStreamStart            = ir.EventStreamStart
 	EventContentDelta           = ir.EventContentDelta
+	EventContentBlock           = ir.EventContentBlock
 	EventToolCallDelta          = ir.EventToolCallDelta
 	EventThinkingDelta          = ir.EventThinkingDelta
 	EventUsage                  = ir.EventUsage

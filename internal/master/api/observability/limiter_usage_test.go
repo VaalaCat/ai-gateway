@@ -1,8 +1,12 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,7 +50,7 @@ func TestLimiterUsage_AggregatesAcrossAgents(t *testing.T) {
 
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a", "uid-b"} },
-		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallContext: func(_ context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			return json.Marshal([]protocol.LimiterBucketStat{
 				{LimiterID: 7, Bucket: "u:1", Metric: "concurrency", Occupied: 1, Capacity: 5},
 			})
@@ -79,7 +83,7 @@ func TestLimiterUsage_NoOnlineAgents(t *testing.T) {
 	ctx := newTestContext(t, setupTestDB(t))
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return nil },
-		HubCall:           func(string, string, any, time.Duration) (json.RawMessage, error) { return nil, nil },
+		HubCallContext:    func(context.Context, string, string, any, time.Duration) (json.RawMessage, error) { return nil, nil },
 	}
 	resp, err := h.GetLimiterUsage(ctx, api.EmptyRequest{})
 	if err != nil || len(resp.Buckets) != 0 || len(resp.FailedAgents) != 0 {
@@ -95,7 +99,7 @@ func TestLimiterUsage_IsolatesNodeFailure(t *testing.T) {
 
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a", "uid-b"} },
-		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallContext: func(_ context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			if agentID == "uid-a" {
 				return json.Marshal([]protocol.LimiterBucketStat{
 					{LimiterID: 7, Bucket: "u:1", Metric: "concurrency", Occupied: 3, Capacity: 5},
@@ -158,5 +162,83 @@ func TestSortLimiterResponse_Deterministic(t *testing.T) {
 	}
 	if resp.FailedAgents[0].AgentID != 4 || resp.FailedAgents[1].AgentID != 9 {
 		t.Fatalf("FailedAgents not sorted by AgentID: %+v", resp.FailedAgents)
+	}
+}
+
+func TestDiagnosticBoardsCancellationAndPartialResults(t *testing.T) {
+	for _, board := range []string{"limiter", "breaker", "delivery"} {
+		for _, canceled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/canceled=%v", board, canceled), func(t *testing.T) {
+				db := setupTestDB(t)
+				for _, uid := range []string{"success", "failed"} {
+					if err := db.Create(&models.Agent{AgentID: uid, Name: uid, Status: 1}).Error; err != nil {
+						t.Fatal(err)
+					}
+				}
+				appCtx := newTestContext(t, db)
+				ctx, cancel := context.WithCancel(appCtx.RequestContext())
+				defer cancel()
+				appCtx.Request = appCtx.Request.WithContext(ctx)
+				entered := make(chan struct{}, 1)
+				h := &Handler{
+					GetOnlineAgentIDs: func() []string { return []string{"success", "failed"} },
+					HubCallContext: func(ctx context.Context, uid, _ string, _ any, timeout time.Duration) (json.RawMessage, error) {
+						deadline, ok := ctx.Deadline()
+						if !ok || time.Until(deadline) > 10*time.Second || timeout != api.DiagnosticNodeTimeout {
+							return nil, errors.New("missing node budget")
+						}
+						if uid == "success" {
+							if board == "delivery" {
+								return json.RawMessage(`{"items":[]}`), nil
+							}
+							return json.RawMessage(`[]`), nil
+						}
+						entered <- struct{}{}
+						if canceled {
+							<-ctx.Done()
+							return nil, ctx.Err()
+						}
+						return nil, fmt.Errorf("Authorization: Bearer private: %w", context.DeadlineExceeded)
+					},
+				}
+				type outcome struct {
+					successful []uint
+					failed     []FailedAgent
+					err        error
+				}
+				done := make(chan outcome, 1)
+				go func() {
+					switch board {
+					case "limiter":
+						r, e := h.GetLimiterUsage(appCtx, api.EmptyRequest{})
+						done <- outcome{r.SuccessfulAgentIDs, r.FailedAgents, e}
+					case "breaker":
+						r, e := h.GetBreakerBoard(appCtx, api.EmptyRequest{})
+						done <- outcome{r.SuccessfulAgentIDs, r.FailedAgents, e}
+					case "delivery":
+						r, e := h.GetDeliveryBoard(appCtx, api.EmptyRequest{})
+						done <- outcome{r.SuccessfulAgentIDs, r.FailedAgents, e}
+					}
+				}()
+				<-entered
+				if canceled {
+					cancel()
+				}
+				select {
+				case result := <-done:
+					if canceled {
+						if result.err == nil || result.err.(*api.APIError).Code != "request_canceled" {
+							t.Fatalf("cancel: %v", result.err)
+						}
+						return
+					}
+					if result.err != nil || len(result.successful) != 1 || len(result.failed) != 1 || result.failed[0].Code != "rpc_timeout" || strings.Contains(result.failed[0].Error, "private") {
+						t.Fatalf("partial result: %+v", result)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("board ignored cancellation")
+				}
+			})
+		}
 	}
 }

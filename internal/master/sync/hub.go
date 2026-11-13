@@ -21,6 +21,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
+	"github.com/VaalaCat/ai-gateway/internal/master/controlrpc"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentauth"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
@@ -1277,6 +1278,23 @@ func (h *Hub) Call(agentID string, method string, params any, timeout time.Durat
 	return h.callConn(agentID, conn, method, params, timeout)
 }
 
+// CallContext 查询当前控制连接并在调用预算内等待响应。
+func (h *Hub) CallContext(ctx context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	// 1. 固定当前连接代次。
+	h.mu.RLock()
+	current := h.sessions[agentID]
+	var generation uint64
+	if current != nil {
+		generation = current.generation
+	}
+	h.mu.RUnlock()
+	if generation == 0 {
+		return nil, controlrpc.ErrDisconnected
+	}
+	// 2. 在固定代次上发送请求。
+	return h.CallSessionContext(ctx, agentID, generation, method, params, timeout)
+}
+
 func (h *Hub) CallSession(agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 	h.mu.RLock()
 	current := h.sessions[agentID]
@@ -1289,6 +1307,7 @@ func (h *Hub) CallSession(agentID string, generation uint64, method string, para
 	return h.callConn(agentID, conn, method, params, timeout)
 }
 
+// CallSessionContext 在固定连接代次上发送 RPC，并等待响应或调用取消。
 func (h *Hub) CallSessionContext(ctx context.Context, agentID string, generation uint64, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 	if ctx == nil {
 		return nil, errors.New("agent session call: nil context")
@@ -1308,8 +1327,13 @@ func (h *Hub) callConn(agentID string, conn *ws.Conn, method string, params any,
 	return h.callConnContext(nil, agentID, conn, method, params, timeout)
 }
 
+// callConnContext 登记等待者、发送请求并收取响应，结束后移除等待者。
 func (h *Hub) callConnContext(ctx context.Context, agentID string, conn *ws.Conn, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	// 1. 将发送和响应等待计入调用预算。
 	if ctx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 		if err := context.Cause(ctx); err != nil {
 			return nil, err
 		}
@@ -1320,6 +1344,7 @@ func (h *Hub) callConnContext(ctx context.Context, agentID string, conn *ws.Conn
 		return nil, err
 	}
 
+	// 2. 登记本次请求的响应等待者。
 	ch := make(chan *jsonrpc.Response, 1)
 	key := strconv.FormatInt(id, 10)
 	pc := pendingCall{ch: ch, conn: conn}
@@ -1328,30 +1353,47 @@ func (h *Hub) callConnContext(ctx context.Context, agentID string, conn *ws.Conn
 	h.pendingMu.Unlock()
 	defer h.claimPendingCall(key, pc)
 
-	err = conn.WriteJSON(req)
+	// 3. 发送请求，诊断取消不关闭共享连接。
+	if ctx == nil {
+		err = conn.WriteJSON(req)
+	} else {
+		err = conn.WriteJSONContext(ctx, req)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("send to agent %s failed: %w", agentID, err)
+		if ctx != nil && ctx.Err() != nil {
+			return nil, context.Cause(ctx)
+		}
+		select {
+		case <-conn.Done():
+			return nil, fmt.Errorf("%w: %v", controlrpc.ErrDisconnected, err)
+		default:
+		}
+		return nil, fmt.Errorf("%w: agent %s: %w", controlrpc.ErrSendFailed, agentID, err)
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+	// 4. 接收响应、断连通知或调用超时。
 	var ctxDone <-chan struct{}
+	var timeoutDone <-chan time.Time
 	if ctx != nil {
 		ctxDone = ctx.Done()
+	} else {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutDone = timer.C
 	}
 	var resp *jsonrpc.Response
 	select {
 	case resp = <-ch:
 	case <-ctxDone:
 		return nil, context.Cause(ctx)
-	case <-timer.C:
+	case <-timeoutDone:
 		if h.claimPendingCall(key, pc) {
-			return nil, fmt.Errorf("agent %s rpc timeout after %s", agentID, timeout)
+			return nil, fmt.Errorf("agent %s rpc timeout after %s: %w", agentID, timeout, context.DeadlineExceeded)
 		}
 		resp = <-ch
 	}
 	if resp == nil {
-		return nil, fmt.Errorf("agent %s disconnected during call", agentID)
+		return nil, fmt.Errorf("agent %s disconnected during call: %w", agentID, controlrpc.ErrDisconnected)
 	}
 	if resp.Error != nil {
 		return nil, fmt.Errorf("agent rpc error %d: %s", resp.Error.Code, resp.Error.Message)

@@ -105,6 +105,9 @@ export function ProcessingSection({ form, setForm, channelId, scriptsHref, hidde
 
   return (
     <div className="space-y-1">
+      {channelProtocols(form.endpoints).gemini && (
+        <p className="pb-2 text-xs text-muted-foreground">{t("geminiPassthroughHint")}</p>
+      )}
       {data?.resolved_protocol && (
         <p className="text-xs text-muted-foreground pb-2">{t("dataflowResolvedProtocol", { protocol: data.resolved_protocol })}</p>
       )}
@@ -219,8 +222,8 @@ function ThinkingRulesEditor({ form, setForm }: { form: ChannelForm; setForm: (n
   const rules = otherSettings.model_thinking_passthrough ?? [];
   return (
     <div className="space-y-3">
-      {!protos.openaiChat && (
-        <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-200">{t("thinkingPassthroughOnlyOpenAIChat")}</div>
+      {!protos.openaiChat && !protos.claude && (
+        <div className="rounded-md border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-700 dark:text-yellow-200">{t("thinkingPassthroughUnsupportedProtocol")}</div>
       )}
       {rules.map((rule, idx) => (
         <ThinkingPassthroughCard

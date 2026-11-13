@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	sourceauth "github.com/VaalaCat/ai-gateway/internal/agent/auth"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -640,4 +642,134 @@ func encodeTunnelServerMetadata[T any](t *testing.T, limits wire.Limits, value T
 	payload, err := wire.EncodeMetadata(value, limits.MaxMetadataBytes)
 	require.NoError(t, err)
 	return payload
+}
+
+func TestGeminiSourceCredentialsReachBoundTargetAttempt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := " {\"contents\":[],\"unknown\":true} "
+	response := "data: " + `{"candidates":[{"content":{"parts":[{"text":"remote"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":4,"candidatesTokenCount":2}}` + "\n\n"
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1beta/models/upstream-model:streamGenerateContent", r.URL.Path)
+		require.Equal(t, "sse", r.URL.Query().Get("alt"))
+		require.Equal(t, []string{"a/b", "c"}, r.URL.Query()["custom"])
+		require.False(t, r.URL.Query().Has("key"))
+		require.Equal(t, "provider-key", r.Header.Get("x-goog-api-key"))
+		require.Empty(t, r.Header.Get("Authorization"))
+		data, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, body, string(data))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, response)
+	}))
+	defer provider.Close()
+	target, err := NewEmbedded(genericAPITestConfig(t), zap.NewNop(), &enrollment.Credentials{AgentID: "target-a", Secret: "secret"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, target.Shutdown(context.Background())) })
+	target.Store.SetToken(&models.Token{ID: 1, Key: "gateway-key", Status: 1, ExpiredAt: -1})
+	target.Store.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 7, Type: consts.ChannelTypeGemini, BaseURL: provider.URL, Status: 1, Weight: 1}, ModelMapping: `{"gemini-test":"upstream-model"}`, Key: "provider-key", Models: "gemini-test"})
+	target.Store.RebuildModelIndex()
+	targetRouter := gin.New()
+	target.MountRoutes(targetRouter)
+	source := gin.New()
+	source.POST("/v1beta/models/:modelAction", sourceauth.TokenAuth(target.Store), func(c *gin.Context) {
+		require.Equal(t, "Bearer gateway-key", c.GetHeader("Authorization"))
+		require.Empty(t, c.Query("key"))
+		meta := attemptwire.AttemptProxyMeta{Attempt: attemptwire.BoundAttempt{Channel: attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7}, RealModel: "gemini-test", Mode: attemptwire.ModePassthrough}, RequestPath: c.Request.URL.RequestURI()}
+		require.True(t, attemptwire.ProviderPathAllowed(http.MethodPost, meta.RequestPath))
+		req := httptest.NewRequest(http.MethodPost, attemptwire.EndpointPath, c.Request.Body)
+		req.Header = c.Request.Header.Clone()
+		identity := agentproxy.IngressMeta{Kind: agentproxy.IngressKindRelayTunnel, SourceAgentID: "source-a", StreamID: wire.StreamID{93}, Hop: 1, Attempt: &meta}
+		result := &serverTunnelAttemptResultWriter{}
+		req = req.WithContext(attemptwire.WithAttemptResultWriter(agentproxy.WithIngressMeta(req.Context(), identity), result))
+		targetRouter.ServeHTTP(c.Writer, req)
+		require.NotNil(t, result.result)
+		require.Equal(t, attemptwire.ResultSucceeded, result.result.Kind)
+		require.Equal(t, 6, result.result.PromptTokens)
+		require.Equal(t, 2, result.result.CompletionTokens)
+	})
+	for _, tc := range []struct{ name, header, value, query string }{
+		{"bearer", "Authorization", "Bearer gateway-key", ""}, {"header", "x-goog-api-key", "gateway-key", ""}, {"query", "", "", "&key=gateway-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-test:streamGenerateContent?alt=sse&custom=a%2Fb&custom=c"+tc.query, strings.NewReader(body))
+			if tc.header != "" {
+				req.Header.Set(tc.header, tc.value)
+			}
+			out := httptest.NewRecorder()
+			source.ServeHTTP(out, req)
+			require.Equal(t, 200, out.Code, out.Body.String())
+			require.Equal(t, response, out.Body.String())
+		})
+	}
+}
+
+func TestGeminiTunnelOpenPreservesNativeRequestQuery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := " {\"contents\":[],\"opaque\":true} "
+	response := "data: " + `{"candidates":[{"content":{"parts":[{"text":"tunnel"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2}}` + "\n\n"
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "sse", r.URL.Query().Get("alt"))
+		require.Equal(t, []string{"a/b", "c"}, r.URL.Query()["custom"])
+		require.Empty(t, r.URL.Query().Get("key"))
+		require.Equal(t, "provider-key", r.Header.Get("x-goog-api-key"))
+		require.Empty(t, r.Header.Get("Authorization"))
+		data, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.Equal(t, body, string(data))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, response)
+	}))
+	defer provider.Close()
+	target, err := NewEmbedded(genericAPITestConfig(t), zap.NewNop(), &enrollment.Credentials{AgentID: "target-a", Secret: "secret"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, target.Shutdown(context.Background())) })
+	for _, agentID := range []string{"source-a", "target-a"} {
+		target.Store.SetAgent(&models.Agent{AgentID: agentID, Status: consts.StatusEnabled, DirectInboundEnabled: true, DirectOutboundEnabled: true, RelayInboundEnabled: true, RelayOutboundEnabled: true})
+	}
+	target.Store.SetToken(&models.Token{ID: 1, Key: "gateway-key", Status: 1, ExpiredAt: -1})
+	target.Store.SetChannel(&models.Channel{ChannelCore: models.ChannelCore{ID: 7, Type: consts.ChannelTypeGemini, BaseURL: provider.URL, Status: 1, Weight: 1}, Key: "provider-key", Models: "gemini"})
+	target.Store.RebuildModelIndex()
+	router := gin.New()
+	target.MountRoutes(router)
+	conn, peer := tunnelServerWebSocketPair(t)
+	limits := wire.Limits{MaxMetadataBytes: 64 * 1024, MaxDataBytes: 64 * 1024, InitialStreamWindow: 256 * 1024, MaxQueuedSessionBytes: 1024 * 1024, MaxConcurrentStreams: 4}
+	session := agenttunnel.NewSession(conn, 1, limits, agenttunnel.SessionOptions{Direction: agenttunnel.SessionDirectionRelay, TargetHandler: target.NewTunnelTargetHandler(router)})
+	done := make(chan struct{})
+	go func() { defer close(done); _ = session.Run(t.Context()) }()
+	t.Cleanup(func() { session.Cancel(context.Canceled); <-done })
+	meta := attemptwire.AttemptProxyMeta{Attempt: attemptwire.BoundAttempt{Channel: attemptwire.ChannelRef{Source: attemptwire.SourceAdmin, ID: 7}, RealModel: "gemini", Mode: attemptwire.ModePassthrough}, RequestPath: "/v1beta/models/gemini:streamGenerateContent?alt=sse&custom=a%2Fb&custom=c"}
+	id := wire.StreamID{94}
+	writeTunnelServerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameOpen, StreamID: id, Sequence: 1, Payload: encodeTunnelServerMetadata(t, limits, wire.Open{Method: http.MethodPost, Path: attemptwire.EndpointPath, BodyLength: int64(len(body)), SourceAgentID: "source-a", TargetAgentID: "target-a", Hop: 1, ResponseWindow: limits.InitialStreamWindow, Attempt: &meta, Header: map[string][]string{"Authorization": {"Bearer gateway-key"}, "Content-Type": {"application/json"}}})})
+	ready := readTunnelServerFrame(t, peer, limits)
+	require.Equal(t, wire.FrameReady, ready.Type, string(ready.Payload))
+	writeTunnelServerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameCommit, StreamID: id, Sequence: 2})
+	require.Equal(t, wire.FrameCommitted, readTunnelServerFrame(t, peer, limits).Type)
+	writeTunnelServerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameRequestData, StreamID: id, Sequence: 3, Payload: []byte(body)})
+	writeTunnelServerFrame(t, peer, limits, wire.Frame{Version: wire.ProtocolVersion, Type: wire.FrameRequestEnd, StreamID: id, Sequence: 4})
+	var received strings.Builder
+	var result *attemptwire.AttemptProxyResult
+	for {
+		frame := readTunnelServerFrame(t, peer, limits)
+		switch frame.Type {
+		case wire.FrameHeaders:
+			var header wire.Headers
+			require.NoError(t, wire.DecodeMetadata(frame.Payload, &header, limits.MaxMetadataBytes))
+			require.Equal(t, 200, header.StatusCode)
+		case wire.FrameResponseData:
+			received.Write(frame.Payload)
+		case wire.FrameWindowUpdate:
+		case wire.FrameAttemptResult:
+			got, err := attemptwire.DecodeResultJSON(frame.Payload)
+			require.NoError(t, err)
+			result = &got
+		case wire.FrameEnd:
+			require.Equal(t, response, received.String())
+			require.NotNil(t, result)
+			require.Equal(t, attemptwire.ResultSucceeded, result.Kind)
+			require.Equal(t, 10, result.PromptTokens)
+			return
+		default:
+			t.Fatalf("unexpected frame %v: %s", frame.Type, frame.Payload)
+		}
+	}
 }

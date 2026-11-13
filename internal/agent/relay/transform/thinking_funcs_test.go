@@ -15,6 +15,10 @@ func TestApplyThinkingPassthrough_AddsPlaceholder(t *testing.T) {
 	if msgs[0].Content[0].Type != llmkit.ContentTypeThinking {
 		t.Fatalf("first block type = %q, want thinking placeholder", msgs[0].Content[0].Type)
 	}
+	reasoning := msgs[0].Content[0].Reasoning
+	if reasoning == nil || len(reasoning.Content) != 1 || reasoning.Content[0] != "" {
+		t.Fatalf("placeholder reasoning = %#v, want one empty content string", reasoning)
+	}
 }
 
 func TestApplyThinkingStrip_RemovesThinking(t *testing.T) {

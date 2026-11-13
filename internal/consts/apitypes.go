@@ -5,6 +5,7 @@ const (
 	APITypeChatCompletion = "chat-completion"
 	APITypeResponses      = "responses"
 	APITypeClaude         = "claude"
+	APITypeGemini         = "gemini"
 )
 
 // Finish reason values (normalized across protocols).

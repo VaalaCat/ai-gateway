@@ -2,15 +2,16 @@ package consts
 
 // HTTP header names.
 const (
-	HeaderAuthorization    = "Authorization"
-	HeaderContentType      = "Content-Type"
-	HeaderConnection       = "Connection"
-	HeaderCacheControl     = "Cache-Control"
-	HeaderSessionID        = "Session-Id"
-	HeaderHost             = "Host"
-	HeaderOpenAIOrg        = "OpenAI-Organization"
-	HeaderXAPIKey          = "x-api-key"
-	HeaderAnthropicVersion = "anthropic-version"
+	HeaderAuthorization       = "Authorization"
+	HeaderContentType         = "Content-Type"
+	HeaderConnection          = "Connection"
+	HeaderCacheControl        = "Cache-Control"
+	HeaderSessionID           = "Session-Id"
+	HeaderClaudeCodeSessionID = "X-Claude-Code-Session-Id"
+	HeaderHost                = "Host"
+	HeaderOpenAIOrg           = "OpenAI-Organization"
+	HeaderXAPIKey             = "x-api-key"
+	HeaderAnthropicVersion    = "anthropic-version"
 
 	// X-Vaala-* custom headers
 	HeaderXRequestID          = "X-Vaala-Request-ID"

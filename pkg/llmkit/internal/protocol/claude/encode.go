@@ -70,13 +70,15 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		}
 	}
 
-	// C5: thinking config encode. A positive budget keeps the legacy enabled+budget_tokens form for older
-	// models and compatible endpoints; otherwise thinking is adaptive. Effort is independent of thinking.
-	if req.ThinkingEnabled {
+	// 显式预算使用 enabled，未指定预算使用 adaptive；独立保留关闭状态与 effort。
+	if req.ThinkingEnabled != nil && *req.ThinkingEnabled {
 		raw.Thinking = &claudeThinking{Type: "adaptive"}
-		if req.ThinkingBudget > 0 {
+		if req.ThinkingBudget != nil {
 			raw.Thinking = &claudeThinking{Type: "enabled", BudgetTokens: req.ThinkingBudget}
 		}
+	}
+	if req.ThinkingEnabled != nil && !*req.ThinkingEnabled {
+		raw.Thinking = &claudeThinking{Type: "disabled"}
 	}
 	if req.ReasoningEffort != "" {
 		raw.OutputConfig = &claudeOutputConfig{Effort: req.ReasoningEffort}
@@ -84,7 +86,6 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 
 	// Extract system messages → top-level system field
 	var systemParts []string
-	var messages []ir.Message
 	for _, m := range req.Messages {
 		if m.Role == ir.RoleSystem || m.Role == ir.RoleDeveloper {
 			for _, cb := range m.Content {
@@ -92,8 +93,6 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 					systemParts = append(systemParts, cb.Text)
 				}
 			}
-		} else {
-			messages = append(messages, m)
 		}
 	}
 	if len(systemParts) > 0 {
@@ -102,7 +101,11 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 	}
 
 	// Messages
-	for _, m := range messages {
+	var toolResults []claudeContentBlock
+	for i, m := range req.Messages {
+		if m.Role == ir.RoleSystem || m.Role == ir.RoleDeveloper {
+			continue
+		}
 		// Skip RawJSON-only messages from other protocols (cross-protocol conversion)
 		if m.RawJSON != nil && m.Role == "" {
 			continue
@@ -113,7 +116,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 		}
 
 		if m.Role == ir.RoleTool {
-			// Tool result message → user message with tool_result content block
+			// 1. 按原顺序收集连续工具结果，在最后一条生成 user 消息。
 			var resultText string
 			for _, cb := range m.Content {
 				if cb.Type == ir.ContentTypeText {
@@ -128,7 +131,12 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 				contentBytes, _ := json.Marshal(resultText)
 				block.Content = contentBytes
 			}
-			b, _ := json.Marshal([]claudeContentBlock{block})
+			toolResults = append(toolResults, block)
+			if i+1 < len(req.Messages) && req.Messages[i+1].Role == ir.RoleTool {
+				continue
+			}
+			b, _ := json.Marshal(toolResults)
+			toolResults = nil
 			cm.Content = b
 			cm.Role = "user"
 		} else {
@@ -137,7 +145,7 @@ func (c *handler) encodeHTTPRequest(req *ir.Request, cfg *channelConfig) (*http.
 			var rawBlocks []json.RawMessage
 			hasRawJSON := false
 			for _, cb := range filtered {
-				if cb.RawJSON != nil {
+				if cb.RawJSON != nil && cb.Type != ir.ContentTypeImage {
 					rawBlocks = append(rawBlocks, cb.RawJSON)
 					hasRawJSON = true
 				} else {
@@ -293,6 +301,8 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 	stopReason := consts.ClaudeStopEndTurn
 	sawToolCall := false
 	structuredReasoning := false
+	toolBlocks := map[string]int{}
+	toolCalls := map[string]ir.StreamingToolCall{}
 
 	for ev := range events {
 		// Read finish reason at top of loop before switch
@@ -301,6 +311,40 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 		}
 
 		switch ev.Type {
+		case ir.EventContentBlock:
+			if ev.ContentBlock == nil {
+				continue
+			}
+			if ev.ContentBlock.Type != ir.ContentTypeText {
+				return fmt.Errorf("unsupported_response_content: upstream response content cannot be represented in the client protocol")
+			}
+			block, _ := json.Marshal(claudeRespContent{Type: "text", Text: ev.ContentBlock.Text})
+			contentBlocks = append(contentBlocks, block)
+		case ir.EventToolCallStart, ir.EventToolCallArgumentsDelta, ir.EventToolCallEnd:
+			if ev.ToolCall == nil {
+				continue
+			}
+			call := toolCalls[ev.ToolCall.CallID]
+			index, exists := toolBlocks[ev.ToolCall.CallID]
+			if !exists {
+				index = len(contentBlocks)
+				toolBlocks[ev.ToolCall.CallID] = index
+				contentBlocks = append(contentBlocks, nil)
+				call.CallID = ev.ToolCall.CallID
+			}
+			if ev.ToolCall.Name != "" {
+				call.Name = ev.ToolCall.Name
+			}
+			if ev.Type == ir.EventToolCallArgumentsDelta {
+				call.Arguments += ev.ToolCall.Arguments
+			} else if ev.ToolCall.Arguments != "" {
+				call.Arguments = ev.ToolCall.Arguments
+			}
+			toolCalls[call.CallID] = call
+			var input any
+			_ = json.Unmarshal([]byte(call.Arguments), &input)
+			contentBlocks[index], _ = json.Marshal(claudeRespContent{Type: "tool_use", ID: call.CallID, Name: call.Name, Input: input})
+			sawToolCall = true
 		case ir.EventContentDelta:
 			if ev.Delta != nil {
 				block, _ := json.Marshal(claudeRespContent{
@@ -325,6 +369,10 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 			if ev.Delta != nil && ev.Delta.ToolCall != nil {
 				sawToolCall = true
 				tc := ev.Delta.ToolCall
+				if _, exists := toolBlocks[tc.ID]; exists {
+					continue
+				}
+				toolBlocks[tc.ID] = len(contentBlocks)
 				var input any
 				if tc.Arguments != "" {
 					_ = json.Unmarshal([]byte(tc.Arguments), &input)
@@ -519,6 +567,19 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 				return err
 			}
 
+		case ir.EventContentBlock:
+			if ev.ContentBlock == nil {
+				continue
+			}
+			if ev.ContentBlock.Type != ir.ContentTypeText {
+				err := fmt.Errorf("unsupported_response_content: upstream response content cannot be represented in the client protocol")
+				if writeErr := writeSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": "unsupported_response_content", "message": err.Error()}}); writeErr != nil {
+					return writeErr
+				}
+				return err
+			}
+			ev.Delta = &ir.DeltaPayload{ContentType: ir.ContentTypeText, Text: ev.ContentBlock.Text}
+			fallthrough
 		case ir.EventContentDelta:
 			if ev.Delta != nil {
 				// C3/C4: state machine — if block open and type != "text", close it

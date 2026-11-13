@@ -35,7 +35,7 @@ type claudeToolChoice struct {
 // claudeThinking represents the thinking configuration in Claude's API.
 type claudeThinking struct {
 	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	BudgetTokens *int   `json:"budget_tokens,omitempty"`
 }
 
 // claudeOutputConfig represents the output_config field in Claude's API; Effort controls how many tokens the model spends.

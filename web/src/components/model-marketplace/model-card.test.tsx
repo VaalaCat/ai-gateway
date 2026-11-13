@@ -364,6 +364,13 @@ describe("real model marketplace card", () => {
     expect(within(card).queryByText("endpoint.chat_completions") !== null).toBe(invocation);
     expect(within(card).queryByText("endpoint.models") !== null).toBe(discovery);
   });
+
+  it("shows Gemini as an invocation endpoint", () => {
+    render(<ModelCard model={realModel([offer("Gemini", ["generate_content"])])} />);
+    const card = screen.getByRole("article", { name: "Model A" });
+    expect(within(card).getByText("endpoint.generate_content")).toBeInTheDocument();
+    expect(within(card).queryByText("modelDiscoveryLabel")).not.toBeInTheDocument();
+  });
 });
 
 describe("routing model marketplace card", () => {

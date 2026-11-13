@@ -1,13 +1,16 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/controlrpc"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/sourcegraph/conc/pool"
@@ -46,24 +49,35 @@ type ChannelBreakerRow struct {
 }
 
 type BreakerBoardResponse struct {
-	Channels     []ChannelBreakerRow `json:"channels"`
-	FailedAgents []FailedAgent       `json:"failed_agents"`
+	Channels           []ChannelBreakerRow `json:"channels"`
+	FailedAgents       []FailedAgent       `json:"failed_agents"`
+	SuccessfulAgentIDs []uint              `json:"successful_agent_ids"`
 }
 
 // GetBreakerBoard 扇出 agent.breakers 到所有在线 agent,按 (source, channel_id) 聚合成
 // 渠道行(含各 agent 明细 + 最坏状态 + 异常 agent 数),并确定性排序。
 func (h *Handler) GetBreakerBoard(c *app.Context, _ api.EmptyRequest) (BreakerBoardResponse, error) {
-	resp := BreakerBoardResponse{Channels: []ChannelBreakerRow{}, FailedAgents: []FailedAgent{}}
-	if h.HubCall == nil || h.GetOnlineAgentIDs == nil {
+	resp := BreakerBoardResponse{Channels: []ChannelBreakerRow{}, FailedAgents: []FailedAgent{}, SuccessfulAgentIDs: []uint{}}
+	if h.HubCallContext == nil || h.GetOnlineAgentIDs == nil {
 		return resp, api.InternalError("hub not available", nil)
+	}
+	// 1. 为查询、排队和节点 RPC 共用本次聚合预算。
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(c.RequestContext(), api.DiagnosticAggregateTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentBreakers, started, err)
 	}
 	ids := h.GetOnlineAgentIDs()
 	if len(ids) == 0 {
 		return resp, nil
 	}
-	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, ctx))
 	agents, err := q.Agent().ListByAgentIDs(ids)
 	if err != nil {
+		if ctx.Err() != nil {
+			return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentBreakers, started, ctx.Err())
+		}
 		return resp, api.InternalError("list agents failed", err)
 	}
 	byUID := map[string]models.Agent{}
@@ -79,13 +93,24 @@ func (h *Handler) GetBreakerBoard(c *app.Context, _ api.EmptyRequest) (BreakerBo
 	for _, uid := range ids {
 		ag := byUID[uid]
 		p.Go(func() nodeRes {
-			raw, err := h.HubCall(uid, consts.RPCAgentBreakers, nil, 5*time.Second)
+			if ag.ID == 0 {
+				return nodeRes{failed: &FailedAgent{Code: "agent_operation_failed", Error: "agent not found", ElapsedMs: time.Since(started).Milliseconds()}}
+			}
+			nodeCtx, cancelNode := context.WithTimeout(ctx, api.DiagnosticNodeTimeout)
+			defer cancelNode()
+			var raw json.RawMessage
+			err := nodeCtx.Err()
+			if err == nil {
+				raw, err = h.HubCallContext(nodeCtx, uid, consts.RPCAgentBreakers, nil, api.DiagnosticNodeTimeout)
+			}
 			if err != nil {
-				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: err.Error()}}
+				failure := api.DiagnosticError(c.Logger, uid, consts.RPCAgentBreakers, started, err)
+				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: failure.Message, Code: failure.Code, ElapsedMs: time.Since(started).Milliseconds()}}
 			}
 			var rows []agentBreaker
 			if err := json.Unmarshal(raw, &rows); err != nil {
-				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: "decode: " + err.Error()}}
+				failure := api.DiagnosticError(c.Logger, uid, consts.RPCAgentBreakers, started, fmt.Errorf("%w: %v", controlrpc.ErrInvalidResponse, err))
+				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: failure.Message, Code: failure.Code, ElapsedMs: time.Since(started).Milliseconds()}}
 			}
 			return nodeRes{rows: rows, ag: ag}
 		})
@@ -100,6 +125,7 @@ func (h *Handler) GetBreakerBoard(c *app.Context, _ api.EmptyRequest) (BreakerBo
 			resp.FailedAgents = append(resp.FailedAgents, *r.failed)
 			continue
 		}
+		resp.SuccessfulAgentIDs = append(resp.SuccessfulAgentIDs, r.ag.ID)
 		for _, b := range r.rows {
 			k := key{b.Source, b.ChannelID}
 			cur, ok := agg[k]
@@ -120,6 +146,9 @@ func (h *Handler) GetBreakerBoard(c *app.Context, _ api.EmptyRequest) (BreakerBo
 		resp.Channels = append(resp.Channels, *row)
 	}
 	sortBreakerBoard(&resp)
+	if err := c.RequestContext().Err(); err == context.Canceled {
+		return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentBreakers, started, err)
+	}
 	return resp, nil
 }
 
@@ -162,6 +191,7 @@ func sortBreakerBoard(resp *BreakerBoardResponse) {
 		ag := resp.Channels[i].Agents
 		sort.Slice(ag, func(x, y int) bool { return ag[x].AgentID < ag[y].AgentID })
 	}
+	sort.Slice(resp.SuccessfulAgentIDs, func(i, j int) bool { return resp.SuccessfulAgentIDs[i] < resp.SuccessfulAgentIDs[j] })
 	sort.Slice(resp.FailedAgents, func(i, j int) bool {
 		return resp.FailedAgents[i].AgentID < resp.FailedAgents[j].AgentID
 	})

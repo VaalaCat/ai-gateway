@@ -54,6 +54,7 @@ describe("deliveryRiskSummary", () => {
   // trace slimming instead of presenting both as Generic API totals.
   it("sums shared Agent drops and API-only slim counters with the Master log backlog", () => {
     const data = {
+      successful_agent_ids: [1, 2],
       agents: [
         agent({ agent_id: 1, shared_usage_dropped: 2, api_trace_slimmed: 3 }),
         agent({ agent_id: 2, agent_name: "agent-b", shared_usage_dropped: 5, api_trace_slimmed: 7 }),
@@ -82,6 +83,7 @@ describe("deliveryRiskSummary", () => {
 
   it("keeps healthy zero values stable", () => {
     expect(deliveryRiskSummary({
+      successful_agent_ids: [],
       agents: [],
       failed_agents: [],
       log_backlog: {

@@ -160,8 +160,8 @@ func TestEncodeRequest_ThinkingConfig(t *testing.T) {
 		Model:           "claude-sonnet-4-20250514",
 		MaxTokens:       16000,
 		Messages:        []ir.Message{ir.TextMessage(ir.RoleUser, "think about this")},
-		ThinkingEnabled: true,
-		ThinkingBudget:  10000,
+		ThinkingEnabled: thinkingTestPointer(true),
+		ThinkingBudget:  thinkingTestPointer(10000),
 	}
 	cfg := &channelConfig{
 		BaseURL: "https://api.anthropic.com",
@@ -1082,9 +1082,15 @@ func TestEncodeRequest_ReasoningControls(t *testing.T) {
 				Model:           "claude-opus",
 				MaxTokens:       32000,
 				Messages:        []ir.Message{ir.TextMessage(ir.RoleUser, "hi")},
-				ThinkingEnabled: tt.thinking,
-				ThinkingBudget:  tt.budget,
+				ThinkingEnabled: nil,
+				ThinkingBudget:  nil,
 				ReasoningEffort: tt.effort,
+			}
+			if tt.thinking {
+				req.ThinkingEnabled = &tt.thinking
+			}
+			if tt.budget != 0 {
+				req.ThinkingBudget = &tt.budget
 			}
 			httpReq, err := (&handler{}).encodeHTTPRequest(req, &channelConfig{BaseURL: "https://api.anthropic.com", APIKey: "sk-test", Model: "claude-opus"})
 			if err != nil {
@@ -1110,6 +1116,35 @@ func TestEncodeRequest_ReasoningControls(t *testing.T) {
 				}
 			} else if !reflect.DeepEqual(outputConfig, map[string]any{"effort": tt.wantEffort}) {
 				t.Fatalf("output_config = %v, want effort %q", outputConfig, tt.wantEffort)
+			}
+		})
+	}
+}
+
+func thinkingTestPointer[T any](value T) *T { return &value }
+
+func TestEncodeExplicitThinkingZeroAndDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled *bool
+		budget  *int
+		want    string
+	}{
+		{"disabled", thinkingTestPointer(false), nil, `"type":"disabled"`},
+		{"zero", thinkingTestPointer(true), thinkingTestPointer(0), `"budget_tokens":0`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, err := (&handler{}).encodeHTTPRequest(&ir.Request{Model: "m", ThinkingEnabled: tc.enabled, ThinkingBudget: tc.budget}, &channelConfig{BaseURL: "https://example.invalid", Model: "m"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer request.Body.Close()
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(body), tc.want) {
+				t.Fatalf("explicit thinking value changed: %s", body)
 			}
 		})
 	}

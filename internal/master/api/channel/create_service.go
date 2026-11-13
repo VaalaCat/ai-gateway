@@ -49,6 +49,7 @@ type AdminChannelCreateInput struct {
 	PriceRatio          float64
 	Free                bool
 	Limit               models.ChannelLimit
+	Auth                models.ChannelAuth
 	Affinity            models.ChannelAffinity
 }
 
@@ -61,7 +62,7 @@ func buildAdminChannelCreateInput(req CreateRequest) (AdminChannelCreateInput, e
 		}
 	}
 	input := AdminChannelCreateInput{
-		Name: req.Name, PublicDisplayName: req.PublicDisplayName, Status: 1, Type: req.Type, Key: req.Key, BaseURL: req.BaseURL,
+		Auth: req.Auth.Clone(), Name: req.Name, PublicDisplayName: req.PublicDisplayName, Status: 1, Type: req.Type, Key: req.Key, BaseURL: req.BaseURL,
 		Models: modelsList, ModelMapping: mapping, Weight: req.Weight, Priority: req.Priority,
 		UseLegacyAdaptor: req.UseLegacyAdaptor, SupportedAPITypes: req.SupportedAPITypes,
 		Endpoints: req.Endpoints, PassthroughEnabled: req.PassthroughEnabled,
@@ -105,7 +106,7 @@ func prepareAdminChannels(inputs []AdminChannelCreateInput) ([]models.Channel, e
 	for i := range inputs {
 		channel, err := buildAdminChannel(inputs[i])
 		if err != nil {
-			return nil, api.BadRequestError(fmt.Sprintf("channel %d: %v", i, err), err)
+			return nil, channelInputAPIError(fmt.Errorf("channel %d: %w", i, err))
 		}
 		channels = append(channels, channel)
 	}
@@ -113,6 +114,9 @@ func prepareAdminChannels(inputs []AdminChannelCreateInput) ([]models.Channel, e
 }
 
 func buildAdminChannel(input AdminChannelCreateInput) (models.Channel, error) {
+	if err := models.ValidateChannelAuth(input.Auth); err != nil {
+		return models.Channel{}, err
+	}
 	if input.Name == "" {
 		return models.Channel{}, fmt.Errorf("name is required")
 	}
@@ -164,6 +168,7 @@ func buildAdminChannel(input AdminChannelCreateInput) (models.Channel, error) {
 			Remark: input.Remark, TestModel: input.TestModel, AutoBan: input.AutoBan,
 			StatusCodeMapping: input.StatusCodeMapping, OtherSettings: input.OtherSettings,
 			Affinity: datatypes.NewJSONType(input.Affinity),
+			Auth:     datatypes.NewJSONType(input.Auth.Clone()),
 		},
 		PublicDisplayName: publicDisplayName,
 		Key:               input.Key, Models: strings.Join(input.Models, ","), ModelMapping: string(mapping),

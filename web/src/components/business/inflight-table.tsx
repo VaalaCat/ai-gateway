@@ -1,189 +1,102 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { useMemo } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
+import type { ColumnDef } from "@tanstack/react-table";
 import { useTranslations } from "next-intl";
-
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { DataTable } from "@/components/data-table/data-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { CopyableText } from "@/components/business/copyable-text";
+import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { EntityLabel } from "@/components/business/entity-label";
-import { AttemptDots } from "@/components/business/attempt-dots";
-import { FallbackChainInline } from "@/components/business/attempt-state";
-import type { InflightSnapshot } from "@/lib/types";
-
-export interface InflightRow extends InflightSnapshot {
-  agent_id?: number;
-  agent_name?: string;
-}
+import { ModelName } from "@/components/business/model-name";
+import { InflightRequestDetail } from "@/components/observability/inflight-request-detail";
+import { CopyableText } from "@/components/business/copyable-text";
+import { DurationCell } from "@/components/business/duration-cell";
+import { formatDuration, formatFileSize, formatDate } from "@/lib/utils/format";
+import { inflightChannel, inflightKey, type ObservedInflightRequest } from "@/lib/inflight";
 
 interface InflightTableProps {
-  rows: InflightRow[];
+  requests: ObservedInflightRequest[];
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
+  onInterrupt: (key: string) => void;
+  interruptPending: boolean;
+  cancellationRequested: ReadonlySet<string>;
+  unconfirmedInterrupts: Readonly<Record<string, number>>;
+  stale: boolean;
+  paused: boolean;
   showAgent?: boolean;
-  onInterrupt?: (row: InflightRow) => void;
-  onSelectRow?: (row: InflightRow) => void;
   emptyText: string;
 }
 
-export function InflightTable({ rows, showAgent, onInterrupt, onSelectRow, emptyText }: InflightTableProps) {
-  const t = useTranslations("agents");
-  const [target, setTarget] = useState<InflightRow | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const toggleExpand = (k: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(k)) next.delete(k);
-      else next.add(k);
-      return next;
-    });
-  const colCount = 8 + (showAgent ? 1 : 0) + (onInterrupt ? 1 : 0);
+/** 使用用量日志的表格展示单行请求和单条行内详情。 */
+export function InflightTable({ requests, selectedKey, onSelect, onInterrupt, interruptPending, cancellationRequested, unconfirmedInterrupts, stale, paused, showAgent, emptyText }: InflightTableProps) {
+  const t = useTranslations("inflight");
+  const to = useTranslations("observability");
+  const tl = useTranslations("logs");
+  const ts = useTranslations("common.relayStage");
 
-  if (rows.length === 0) {
-    return <p className="text-xs text-muted-foreground px-4 py-3">{emptyText}</p>;
-  }
+  // 1. 每个字段占一列，渠道编号不随名称截断。
+  const columns = useMemo<ColumnDef<ObservedInflightRequest>[]>(() => [
+    { id: "expand", header: "", enableHiding: false,
+      meta: { cellClassName: "sticky left-0 bg-background", headerClassName: "sticky left-0 bg-background" },
+      cell: ({ row }) => <Button variant="ghost" size="icon" className="size-6" data-testid={`inflight-row-${inflightKey(row.original.row)}`} aria-expanded={row.getIsExpanded()}
+        aria-label={t(row.getIsExpanded() ? "collapseRequest" : "expandRequest", { id: row.original.row.req_id || row.original.row.id })}
+        onClick={() => row.toggleExpanded()}>{row.getIsExpanded() ? <ChevronDown /> : <ChevronRight />}</Button>,
+    },
+    { id: "user", header: tl("userId"), cell: ({ row }) => row.original.row.view.user_id > 0 ? <EntityLabel entity="user" scope="all" id={row.original.row.view.user_id} nameClassName="max-w-24 truncate" /> : "—" },
+    { id: "channel", header: to("detailChannel"), cell: ({ row }) => {
+      const channel = inflightChannel(row.original.row);
+      if (!channel.id) return <span className="text-xs text-muted-foreground">{t("channelPending")}</span>;
+      return <span className="inline-flex items-center gap-1">
+        {channel.private ? <Badge variant="secondary">{tl("byokBadge")}</Badge> : null}
+        <EntityLabel entity={channel.private ? "byok-channel" : "channel"} scope="all" id={channel.id} snapshotName={channel.name} nameClassName="max-w-[120px] truncate" />
+      </span>;
+    } },
+    { id: "model", header: to("detailModel"), cell: ({ row }) => <span className="block max-w-[180px] truncate" title={row.original.row.view.model_name}>
+      <ModelName name={row.original.row.view.model_name || "—"} className="max-w-[180px] [&>span]:min-w-0 [&>span]:truncate" />
+    </span> },
+    { id: "stage", header: to("stage"), cell: ({ row }) => {
+      const request = row.original;
+      const stageKey = `stages.${request.row.stage}`;
+      const label = request.status === "departed" ? t("departed") : stale || request.status === "stale" ? t("stale") : ts.has(request.row.stage) ? ts(request.row.stage) : t.has(stageKey) ? t(stageKey) : request.row.stage || "—";
+      return <span className="inline-flex items-center gap-1" title={t("observedAt", { time: formatDate(request.observedAt / 1000) })}>
+        {request.status !== "current" || stale ? <Badge variant="outline">{label}</Badge> : <span className="text-xs">{label}</span>}
+        {request.row.queued_ms > 0 ? <span className="text-xs tabular-nums text-muted-foreground">{formatDuration(request.row.queued_ms)}</span> : null}
+      </span>;
+    } },
+    { id: "bytes", header: t("clientProgress"), cell: ({ row }) => <span className="font-mono text-xs tabular-nums">{row.original.row.progress?.client_body_bytes == null ? "—" : formatFileSize(row.original.row.progress.client_body_bytes)}</span> },
+    { id: "idle", header: t("idleColumn"), cell: ({ row }) => <span className="text-xs tabular-nums">{row.original.row.progress?.client_idle_ms == null ? "—" : formatDuration(row.original.row.progress.client_idle_ms)}</span> },
+    { id: "elapsed", header: to("detailElapsed"), cell: ({ row }) => <DurationCell ms={row.original.row.elapsed_ms} /> },
+    ...(showAgent ? [{ id: "agent", header: to("detailAgent"), cell: ({ row }: { row: { original: ObservedInflightRequest } }) => <EntityLabel entity="agent" id={row.original.row.view.route_source_agent_id} snapshotName={row.original.row.agent_name} showId={false} nameClassName="max-w-[100px] truncate" /> }] : []),
+    { id: "request_id", header: t("requestId"), cell: ({ row }) => <span className="inline-flex items-center" data-row-interaction>
+      <CopyableText text={row.original.row.req_id} display={row.original.row.req_id.length > 18 ? `${row.original.row.req_id.slice(0, 14)}…` : row.original.row.req_id || "—"} revealable />
+    </span> },
+    { id: "actions", header: t("actions"), enableHiding: false,
+      meta: { cellClassName: "sticky right-0 bg-background text-right", headerClassName: "sticky right-0 bg-background text-right" },
+      cell: ({ row }) => {
+        const request = row.original;
+        const key = inflightKey(request.row);
+        const cancelling = cancellationRequested.has(key);
+        const unconfirmed = (unconfirmedInterrupts[key] ?? -1) >= request.observedAt;
+        return <Button variant="outline" size="xs" disabled={interruptPending || stale || paused || request.status !== "current" || cancelling || unconfirmed} onClick={() => onInterrupt(key)}>{t(unconfirmed ? "interruptUnconfirmed" : cancelling ? "cancelling" : "interrupt")}</Button>;
+      },
+    },
+  ], [t, to, tl, ts, showAgent, stale, paused, interruptPending, cancellationRequested, unconfirmedInterrupts, onInterrupt]);
 
-  return (
-    <>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            {showAgent && <TableHead className="h-8">{t("inflightColNode")}</TableHead>}
-            <TableHead className="h-8">{t("inflightColModel")}</TableHead>
-            <TableHead className="h-8">{t("inflightColChannel")}</TableHead>
-            <TableHead className="h-8">{t("inflightColStage")}</TableHead>
-            <TableHead className="h-8">{t("inflightColRetry")}</TableHead>
-            <TableHead className="h-8">{t("inflightColQueue")}</TableHead>
-            <TableHead className="h-8">{t("inflightColElapsed")}</TableHead>
-            <TableHead className="h-8">{t("inflightColStream")}</TableHead>
-            <TableHead className="h-8">{t("inflightColReqId")}</TableHead>
-            {onInterrupt && <TableHead className="h-8">{t("inflightColActions")}</TableHead>}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => {
-            const elapsedSec = (row.elapsed_ms / 1000).toFixed(1);
-            const isSlow = row.elapsed_ms > 60000;
-            const rowKey = `${row.agent_id ?? 0}-${row.id}`;
-            const isExpanded = expanded.has(rowKey);
-            const hasChain =
-              (row.view.fallback_chain?.length ?? 0) > 0 || !!row.current_attempt;
-            return (
-              <Fragment key={rowKey}>
-              <TableRow
-                className={onSelectRow ? "cursor-pointer hover:bg-muted/30" : undefined}
-                onClick={onSelectRow ? () => onSelectRow(row) : undefined}
-              >
-                {showAgent && <TableCell className="py-1.5">{row.agent_name}</TableCell>}
-                <TableCell className="py-1.5">{row.view.model_name}</TableCell>
-                <TableCell className="py-1.5">
-                  <EntityLabel entity="channel" id={row.view.channel_id} />
-                </TableCell>
-                <TableCell className="py-1.5">{row.stage}</TableCell>
-                <TableCell className="py-1.5" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    type="button"
-                    className="flex items-center gap-1 cursor-pointer disabled:cursor-default"
-                    disabled={!hasChain}
-                    aria-expanded={isExpanded}
-                    onClick={() => toggleExpand(rowKey)}
-                  >
-                    <AttemptDots chain={row.view.fallback_chain} pending={row.current_attempt} />
-                  </button>
-                </TableCell>
-                <TableCell className="py-1.5">
-                  {row.queued_ms > 0 ? (
-                    <Badge variant="outline" className="text-xs px-1.5 py-0 border-amber-500/60 text-amber-600">
-                      {t("inflightQueuedFor", { s: (row.queued_ms / 1000).toFixed(1) })}
-                      {row.queued_reason ? ` · ${row.queued_reason}` : ""}
-                    </Badge>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                </TableCell>
-                <TableCell className="py-1.5">
-                  {isSlow ? (
-                    <span className="text-destructive font-medium">
-                      {elapsedSec}s ({t("inflightSlowHint")})
-                    </span>
-                  ) : (
-                    <span>{elapsedSec}s</span>
-                  )}
-                </TableCell>
-                <TableCell className="py-1.5">
-                  {row.view.is_stream ? (
-                    <Badge variant="secondary" className="text-xs px-1.5 py-0">
-                      {t("inflightStreamYes")}
-                    </Badge>
-                  ) : (
-                    <span className="text-muted-foreground">{t("inflightStreamNo")}</span>
-                  )}
-                </TableCell>
-                <TableCell className="py-1.5 font-mono" onClick={(e) => e.stopPropagation()}>
-                  <CopyableText text={row.req_id} />
-                </TableCell>
-                {onInterrupt && (
-                  <TableCell className="py-1.5" onClick={(e) => e.stopPropagation()}>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 text-xs text-destructive"
-                      onClick={() => setTarget(row)}
-                    >
-                      {t("inflightInterrupt")}
-                    </Button>
-                  </TableCell>
-                )}
-              </TableRow>
-              {isExpanded && hasChain && (
-                <TableRow className="bg-muted/20 hover:bg-muted/20">
-                  <TableCell colSpan={colCount} className="py-2 pl-10">
-                    <FallbackChainInline
-                      chain={row.view.fallback_chain}
-                      pending={row.current_attempt}
-                    />
-                  </TableCell>
-                </TableRow>
-              )}
-              </Fragment>
-            );
-          })}
-        </TableBody>
-      </Table>
-
-      <AlertDialog open={target !== null} onOpenChange={(o) => { if (!o) setTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("inflightInterruptConfirmTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>{t("inflightInterruptConfirmDesc")}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t("inflightInterruptCancel")}</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => { if (target) onInterrupt?.(target); setTarget(null); }}
-            >
-              {t("inflightInterrupt")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </>
-  );
+  // 2. 复用日志表格的单行密度、列显隐、键盘与选择文本处理。
+  if (requests.length === 0) return <Empty><EmptyHeader><EmptyTitle>{emptyText}</EmptyTitle></EmptyHeader></Empty>;
+  return <DataTable columns={columns} data={requests} showFooter={false}
+    defaultColumnVisibility={{ request_id: false }} storageKey="inflight-columns"
+    getRowId={(request) => inflightKey(request.row)}
+    expandedState={selectedKey ? { [selectedKey]: true } : {}}
+    onExpandedStateChange={(next) => {
+      const key = next === true ? null : Object.keys(next).find((key) => next[key] && key !== selectedKey) ?? Object.keys(next).find((key) => next[key]) ?? null;
+      if (key && key !== selectedKey) onSelect(key);
+      else if (!key && selectedKey) onSelect(selectedKey);
+    }}
+    expandedRowWidth="viewport"
+    renderExpandedRow={({ original }) => <InflightRequestDetail key={inflightKey(original.row)} request={original} stale={stale || original.status === "stale"} />}
+  />;
 }

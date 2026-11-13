@@ -26,17 +26,17 @@ func ProjectInflightEntry(rctx *state.RelayContext) protocol.UsageLogEntry {
 }
 
 // projectEntry 是 final usage 与 inflight 两个消费者共享的纯投影实现。
-func projectEntry(rctx *state.RelayContext, includeAutoDisableTriggers bool) protocol.UsageLogEntry {
+func projectEntry(rctx *state.RelayContext, final bool) protocol.UsageLogEntry {
 	if rctx == nil || rctx.State == nil {
 		return protocol.UsageLogEntry{}
 	}
 	e := projectBase(rctx)
 	projectAgentRoute(&e, rctx)
 	projectByPhase(&e, rctx)
-	if includeAutoDisableTriggers {
+	if final {
 		projectAutoDisableTriggers(&e, rctx.State.AutoDisableTriggers)
+		attachTraceData(&e, rctx.State.Recorder)
 	}
-	attachTraceData(&e, rctx.State.Recorder)
 	if rl := rctx.State.RateLimit; rl != nil {
 		e.RateLimitDecision = rl.Decision
 		e.RateLimitWaitMs = rl.WaitMs

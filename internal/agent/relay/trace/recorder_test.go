@@ -22,7 +22,91 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	"gorm.io/datatypes"
 )
+
+func TestRecorderChannelAuthMasking(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		finalValue string
+	}{
+		{name: "literal", value: "literal-auth-secret", finalValue: "literal-auth-secret"},
+		{name: "variable", value: "Signed prefix-${CHANNEL_KEY}-suffix", finalValue: "Signed prefix-selected-channel-key-suffix"},
+		{name: "script changes value", value: "literal-auth-secret", finalValue: "script-auth-secret"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			expanded := strings.ReplaceAll(test.value, "${CHANNEL_KEY}", "selected-channel-key")
+			body := []byte("echo " + expanded + " " + test.finalValue)
+			channel := &models.Channel{ChannelCore: models.ChannelCore{Auth: datatypes.NewJSONType(models.ChannelAuth{
+				Default:   &models.AuthType{Header: "X-Custom-Auth", Value: test.value},
+				Protocols: map[string]models.AuthType{"responses": {Header: "X-Other-Auth", Value: "other-protocol-secret"}},
+			})}, Key: "selected-channel-key"}
+			for _, mode := range []CaptureMode{CaptureFull, CaptureHeaders} {
+				r := NewRecorder(mode, 4096)
+				request := httptest.NewRequest(http.MethodPost, "/api/v3/messages", nil)
+				request.Header["x-CUSTOM-auth"] = []string{test.finalValue, "second-unrecognized-secret"}
+				request.Header.Set("X-Other-Auth", "script-overrode-unused-protocol")
+				r.WithInbound(request, body).WithOutbound(request, body, channel).WithPassthrough()
+				r.WithUpstreamStatus(&http.Response{StatusCode: http.StatusOK, Header: request.Header.Clone()})
+				r.SetUpstreamBody(body)
+				r.clientBody.Write(body)
+				if mode == CaptureHeaders {
+					fallback := r.BuildRemoteFailureBodyFallback()
+					require.NotNil(t, fallback)
+					raw, err := json.Marshal(fallback)
+					require.NoError(t, err)
+					for _, secret := range []string{expanded, test.finalValue, channel.Key} {
+						require.NotContains(t, string(raw), secret, "remote failure fallback must be masked")
+					}
+				}
+				r.WithFail(StageUpstreamStatus, errors.New("upstream failed"))
+				record := r.Finalize()
+				require.Equal(t, []string{"***"}, record.OutboundHeaders["x-CUSTOM-auth"])
+				require.Equal(t, "***", record.OutboundHeaders.Get("X-Other-Auth"))
+				require.Equal(t, []string{"***"}, record.InboundHeaders["x-CUSTOM-auth"])
+				require.Equal(t, []string{"***"}, record.ResponseHeaders["x-CUSTOM-auth"])
+				raw, err := json.Marshal(record)
+				require.NoError(t, err)
+				for _, secret := range []string{expanded, test.finalValue, channel.Key, "second-unrecognized-secret", "script-overrode-unused-protocol"} {
+					require.NotContains(t, string(raw), secret, "persisted/exported trace must be masked")
+				}
+			}
+		})
+	}
+}
+
+func TestRecorderMaskErrorPreservesCause(t *testing.T) {
+	r := NewRecorder(CaptureFull, 4096)
+	channel := &models.Channel{ChannelCore: models.ChannelCore{Auth: datatypes.NewJSONType(models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Auth", Value: "literal-auth-secret"}})}}
+	r.WithOutbound(nil, nil, channel)
+	cause := &http.ProtocolError{ErrorString: "echo literal-auth-secret"}
+	err := r.MaskError(cause)
+	require.Equal(t, "echo ***", err.Error())
+	require.ErrorIs(t, err, cause)
+	var protocolErr *http.ProtocolError
+	require.ErrorAs(t, err, &protocolErr)
+	require.Same(t, cause, protocolErr)
+	require.Nil(t, r.MaskError(nil))
+}
+
+func TestRecorderResetAttemptClearsCustomAuthMasking(t *testing.T) {
+	r := NewRecorder(CaptureFull, 4096)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request.Header.Set("X-Custom-Auth", "first-secret")
+	channel := &models.Channel{ChannelCore: models.ChannelCore{Auth: datatypes.NewJSONType(models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Auth", Value: "first-secret"}})}}
+	r.WithOutbound(request, []byte("first-secret"), channel)
+	r.SnapshotAttempt()
+	r.ResetAttempt()
+	request.Header.Set("X-Custom-Auth", "ordinary-value")
+	r.WithOutbound(request, []byte("first-secret is ordinary text now"), &models.Channel{})
+	record := r.Finalize()
+	require.Equal(t, "ordinary-value", record.OutboundHeaders.Get("X-Custom-Auth"))
+	require.Equal(t, "first-secret is ordinary text now", record.OutboundBody)
+	require.Equal(t, "***", r.attempts[0].OutboundHeaders.Get("X-Custom-Auth"))
+	require.NotContains(t, r.attempts[0].OutboundBody, "first-secret")
+}
 
 func TestLLMRecorderBehaviorMatchesBeforeExtraction(t *testing.T) {
 	r := NewRecorder(CaptureFull, 8)
@@ -1290,4 +1374,14 @@ func TestTraceRecordHasNoFailErr(t *testing.T) {
 			t.Fatalf("FailErr was reintroduced; intentionally removed because MarshalJSON never exported it")
 		}
 	}
+}
+
+func TestRecorderGeminiClientCredentialsAreMasked(t *testing.T) {
+	rec := NewRecorder(CaptureFull, 4096)
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/test:generateContent?key=client-query-secret", nil)
+	req.Header.Set("x-goog-api-key", "client-header-secret")
+	rec.WithInbound(req, nil)
+	require.NotContains(t, rec.MaskText("client-query-secret client-header-secret https://example.test/a?key=other-secret&alt=sse"), "secret")
+	rec.ResetAttempt()
+	require.NotContains(t, rec.MaskText("client-query-secret client-header-secret"), "secret")
 }

@@ -25,6 +25,7 @@ export interface ChannelForm {
   status_code_mapping: string;
   param_override: string;
   header_override: string;
+  auth: string;
   other_settings: string;
   supported_api_types: string;
   endpoints: string;
@@ -65,6 +66,7 @@ export const emptyForm: ChannelForm = {
   status_code_mapping: "",
   param_override: "",
   header_override: "",
+  auth: "",
   other_settings: "",
   supported_api_types: "",
   endpoints: "",
@@ -86,6 +88,7 @@ export interface EndpointConfig {
   chat_completions?: string;
   responses?: string;
   messages?: string;
+  generate_content?: string;
   models?: string;
 }
 
@@ -93,6 +96,7 @@ export const ENDPOINT_DEFAULTS: Record<string, string> = {
   chat_completions: "/v1/chat/completions",
   responses: "/v1/responses",
   messages: "/v1/messages",
+  generate_content: "/v1beta/models/{model}:{action}",
   models: "/v1/models",
 };
 
@@ -100,11 +104,13 @@ export const ENDPOINT_OPTIONS = [
   { key: "chat_completions" as const, labelKey: "apiTypeChatCompletion" as const, default: "/v1/chat/completions" },
   { key: "responses" as const, labelKey: "apiTypeResponses" as const, default: "/v1/responses" },
   { key: "messages" as const, labelKey: "apiTypeClaude" as const, default: "/v1/messages" },
+  { key: "generate_content" as const, labelKey: "apiTypeGemini" as const, default: "/v1beta/models/{model}:{action}" },
   { key: "models" as const, labelKey: "apiTypeModels" as const, default: "/v1/models" },
 ];
 
 export type ChannelProtocols = {
   claude: boolean;
+  gemini: boolean;
   openaiChat: boolean;
   openaiResponses: boolean;
 };

@@ -2,15 +2,63 @@ package backend
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/legacy"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/native"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/passthrough"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 )
+
+func TestDispatcherTransferProgressWithoutTrace(t *testing.T) {
+	for _, mode := range []state.RelayMode{state.ModeNative, state.ModePassthrough, state.ModeLegacy} {
+		t.Run(string(mode), func(t *testing.T) {
+			payload := fmt.Sprintf(`{"id":"reply","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`, strings.Repeat("answer", 1000))
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(payload))
+			}))
+			defer server.Close()
+			registry := inflight.NewRegistry(nil, 0)
+			entry := registry.Track(inflight.Meta{})
+			entry.SetCurrentAttempt(&inflight.AttemptInProgress{Seq: 1})
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			requestBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+			context.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(requestBody)))
+			context.Request.Header.Set("Content-Type", "application/json")
+			context.Writer = entry.WrapClientWriter(context.Writer)
+			relay := &state.RelayContext{
+				Context: context, Inflight: entry,
+				Input: state.RelayInput{Body: requestBody, Model: "gpt-4o", InboundProto: llmkit.ProtocolOpenAIChat, StartTime: time.Now()},
+				State: &state.RelayState{Recorder: trace.NewRecorder(trace.CaptureOff, 32)},
+			}
+			channel := &models.Channel{ChannelCore: models.ChannelCore{ID: 1, Type: consts.ChannelTypeOpenAI, BaseURL: server.URL}, Key: "test-key"}
+			result := NewDispatcher(nil).Dispatch(relay, state.Attempt{Channel: channel, RealModel: "gpt-4o", Mode: mode})
+			require.NoError(t, result.Err)
+			snapshot := registry.Snapshot()[0]
+			require.NotNil(t, snapshot.Progress.UpstreamBodyBytes)
+			require.EqualValues(t, len(payload), *snapshot.Progress.UpstreamBodyBytes)
+			require.EqualValues(t, recorder.Body.Len(), *snapshot.Progress.ClientBodyBytes)
+			require.Equal(t, snapshot.Progress, *snapshot.AttemptProgress)
+			require.NotNil(t, snapshot.Progress.UpstreamIdleMs)
+			require.NotNil(t, snapshot.Progress.ClientIdleMs)
+			require.Less(t, len(relay.State.Recorder.UpstreamBodyBytes()), len(payload))
+		})
+	}
+}
 
 // TestAttemptPlanZero：零值 plan 必须可读：空 slice / 空字符串 / 空 trace。
 func TestAttemptPlanZero(t *testing.T) {
@@ -142,6 +190,26 @@ func TestDispatcherFinalizesTokenCounts(t *testing.T) {
 	}
 	if fake.callCount != 1 {
 		t.Errorf("backend should be called exactly once, got %d", fake.callCount)
+	}
+}
+
+// TestDispatcherPreservesFullyCachedInput 验证缓存输入不被本地文本估算重复记入普通输入。
+func TestDispatcherPreservesFullyCachedInput(t *testing.T) {
+	// 1. 上游报告全部输入来自缓存，完成文本仍有独立输出计数。
+	for _, counts := range []state.AttemptResult{
+		{CacheReadTokens: 100, CompletionTokens: 5, ResponseText: "answer"},
+		{CacheReadTokens: 100},
+		{CacheWriteTokens: 100, CompletionTokens: 5},
+	} {
+		d := &Dispatcher{Backends: map[state.RelayMode]Backend{state.ModeNative: &fakeBackend{result: counts}}}
+		rctx := &state.RelayContext{Input: state.RelayInput{
+			Body: []byte(`{"model":"gemini","messages":[{"role":"user","content":"a cached prompt with nonempty text"}]}`),
+		}}
+		result := d.Dispatch(rctx, state.Attempt{Mode: state.ModeNative, RealModel: "gemini"})
+		// 2. 只保留上游缓存桶，普通输入不补估算值。
+		if result.PromptTokens != 0 || result.CacheReadTokens != counts.CacheReadTokens || result.CacheWriteTokens != counts.CacheWriteTokens || result.CompletionTokens != counts.CompletionTokens || result.TokenSource == "none" {
+			t.Fatalf("fully cached result changed: %+v", result)
+		}
 	}
 }
 

@@ -46,6 +46,7 @@ type ListRequest struct {
 }
 
 type CreateRequest struct {
+	Auth                models.ChannelAuth        `json:"auth"`
 	Name                string                    `json:"name" binding:"required"`
 	PublicDisplayName   string                    `json:"public_display_name"`
 	Type                int                       `json:"type"`

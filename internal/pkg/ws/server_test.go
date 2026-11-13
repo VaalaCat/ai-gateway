@@ -1,7 +1,9 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -173,3 +175,41 @@ func TestConn_PingIsSentPeriodically(t *testing.T) {
 
 // 防止 unused import 警告（json 引入但未使用时编译会报错）
 var _ = json.Marshal
+
+func TestWriteJSONContextQueueDeadlineDoesNotCloseConnection(t *testing.T) {
+	oldSize := SendQueueSize
+	SendQueueSize = 1
+	defer func() { SendQueueSize = oldSize }()
+	conn, client, _ := upgradeForTest(t)
+	shrinkSocketBuffers(t, conn, client)
+	// 1. 用真实连接填满发送队列，客户端暂不读取。
+	for i := 0; i < 100; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		err := conn.WriteJSONContext(ctx, bigPayload(1<<20))
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			select {
+			case <-conn.Done():
+				t.Fatal("diagnostic timeout closed the shared control connection")
+			default:
+			}
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatal("queue did not fill")
+}
+
+func TestWriteJSONContextCanceledRequestIsNotEnqueued(t *testing.T) {
+	conn, _, _ := upgradeForTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := conn.WriteJSONContext(ctx, map[string]string{"method": "agent.inflight"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want cancellation", err)
+	}
+	if len(conn.sendQueue) != 0 {
+		t.Fatal("canceled request entered the queue")
+	}
+}

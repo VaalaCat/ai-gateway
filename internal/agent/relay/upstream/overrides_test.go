@@ -38,7 +38,7 @@ func TestParseProtocolOverride(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid keys/values dropped",
+			name: "gemini outbound accepted but inbound is passthrough only",
 			in: map[string]any{
 				"gemini":      "claude",
 				"openai_chat": "gemini",
@@ -46,7 +46,8 @@ func TestParseProtocolOverride(t *testing.T) {
 				"claude":      "openai_chat",
 			},
 			want: map[llmkit.Protocol]llmkit.Protocol{
-				llmkit.ProtocolClaude: llmkit.ProtocolOpenAIChat,
+				llmkit.ProtocolClaude:     llmkit.ProtocolOpenAIChat,
+				llmkit.ProtocolOpenAIChat: llmkit.ProtocolGemini,
 			},
 		},
 		{

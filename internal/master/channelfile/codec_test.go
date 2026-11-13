@@ -1,10 +1,12 @@
 package channelfile
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -157,5 +159,31 @@ func assertChannelFileErrorCode[T any](
 	var fileErr *Error
 	if !errors.As(err, &fileErr) || fileErr.Code != want {
 		t.Fatalf("err = %v, want code %q", err, want)
+	}
+}
+
+// TestChannelAuthCrossKindRoundTrip 验证导入导出和管理员/BYOK 互转保留认证。
+func TestChannelAuthCrossKindRoundTrip(t *testing.T) {
+	// 1. 从管理员渠道文件转成 BYOK。
+	body := `{"schema_version":1,"kind":"admin_channels","exported_at":"2026-07-16T00:00:00Z","channels":[{"name":"auth","auth":{"default":{"header":"Authorization","value":"Bearer ${CHANNEL_KEY}"},"protocols":{"messages":{"header":"X-Token","value":"${CHANNEL_KEY}"}}}}]}`
+	byok, err := DecodeBYOKChannelImport(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := byok.Channels[0].Auth.Clone()
+	if auth.Default == nil || auth.Default.Value != "Bearer ${CHANNEL_KEY}" || auth.Protocols["messages"].Header != "X-Token" {
+		t.Fatal("auth lost converting to BYOK")
+	}
+	// 2. 编码 BYOK 后转回管理员渠道。
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, byok); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := DecodeAdminChannelImport(&encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(admin.Channels[0].Auth, auth) {
+		t.Fatal("auth lost converting to admin")
 	}
 }

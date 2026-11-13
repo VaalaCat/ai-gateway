@@ -73,7 +73,7 @@ var requestStepFactories = map[string]stepFactory{
 		return &StepThinkingPassthrough{rules: context.thinking}
 	},
 	"thinking_strip": func(context *buildContext) Step {
-		if !context.thinkingEnabled {
+		if context.proto != llmkit.ProtocolOpenAIChat {
 			return nil
 		}
 		return &StepThinkingStrip{rules: context.thinking}
@@ -160,9 +160,9 @@ func newBuildContext(ch *models.Channel, protocol llmkit.Protocol, deps StepDeps
 	context.modelMap = parseModelMapping(ch.ModelMapping)
 	context.roleRules = transform.ParseRoleMapping(context.cfg.RoleMapping)
 	context.toolCompatibilityRules = upstream.NewToolCompatibilityRules(ch)
-	if protocol == llmkit.ProtocolOpenAIChat {
+	if protocol == llmkit.ProtocolOpenAIChat || protocol == llmkit.ProtocolClaudeMessages {
 		context.thinking = upstream.NewThinkingRules(ch)
-		context.thinkingEnabled = true
+		context.thinkingEnabled = protocol == llmkit.ProtocolOpenAIChat || context.thinking.Len() > 0
 	}
 	return context
 }

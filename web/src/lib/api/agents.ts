@@ -9,6 +9,7 @@ import {
   type QueryKey,
 } from "@tanstack/react-query";
 import { api, ApiError, buildQuery } from "./client";
+import { monitoringSignal } from "./monitoring";
 import type {
   AgentListItem,
   AgentOperation,
@@ -26,7 +27,6 @@ import type {
   PaginatedResponse,
   PaginatedParams,
   InflightSnapshot,
-  AllInflightResponse,
 } from "@/lib/types";
 
 export type { InflightSnapshot, GlobalInflightRow, AllInflightResponse } from "@/lib/types";
@@ -143,22 +143,15 @@ export function patchAgent(id: number, patch: AgentPatch, signal?: AbortSignal) 
   });
 }
 
-export function useAllAgentsInflight() {
-  return useQuery({
-    queryKey: ["agents", "inflight-all"],
-    queryFn: () => api.get<AllInflightResponse>(`/admin/agents/inflight/all`),
-    refetchInterval: 5000,
-  });
-}
-
 export function useInterruptInflight() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: { agent_id: number; id: number }) =>
-      api.post<{ interrupted: boolean }>(`/admin/agents/inflight/interrupt`, body),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ["agents", "inflight-all"] });
-      queryClient.invalidateQueries({ queryKey: ["agents", variables.agent_id, "inflight"] });
+      api.post<{ interrupted: boolean }>(`/admin/agents/inflight/interrupt`, body, { signal: monitoringSignal() }),
+    retry: false,
+    onSettled: (_data, _error, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["observability", "inflight-all"], refetchType: "none" });
+      queryClient.invalidateQueries({ queryKey: ["agents", variables.agent_id, "inflight"], refetchType: "none" });
     },
   });
 }
@@ -429,12 +422,18 @@ export function useFullSyncAgents() {
   });
 }
 
-export function useAgentInflight(id: number) {
+export function useAgentInflight(id: number, options: { paused?: boolean } = {}) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (options.paused) void queryClient.cancelQueries({ queryKey: ["agents", id, "inflight"], exact: true });
+  }, [id, options.paused, queryClient]);
   return useQuery({
     queryKey: ["agents", id, "inflight"],
-    queryFn: () => api.get<InflightSnapshot[]>(`/admin/agents/inflight?id=${id}`),
-    enabled: !!id,
-    refetchInterval: 5000,
+    queryFn: ({ signal }) => api.get<InflightSnapshot[]>(`/admin/agents/inflight?id=${id}`, { signal: monitoringSignal(signal) }),
+    enabled: !!id && !options.paused,
+    refetchInterval: options.paused ? false : 5000,
+    refetchOnWindowFocus: !options.paused,
+    retry: false,
   });
 }
 

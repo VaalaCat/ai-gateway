@@ -6,6 +6,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"gorm.io/datatypes"
 )
 
 // ProjectPrivateChannelToChannel 把 SyncedPrivateChannel（含 plaintext key）
@@ -19,6 +20,7 @@ import (
 func ProjectPrivateChannelToChannel(pc *protocol.SyncedPrivateChannel) *models.Channel {
 	return &models.Channel{
 		ChannelCore: models.ChannelCore{
+			Auth:                datatypes.NewJSONType(pc.Auth.Data().Clone()),
 			ID:                  pc.ID,
 			Name:                pc.Name,
 			Type:                pc.Type,

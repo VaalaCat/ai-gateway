@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
@@ -78,5 +79,22 @@ func TestProjectPrivateChannel_NoHeaderOverrideField(t *testing.T) {
 	if ch.HeaderOverride != "" || ch.ProxyURL != "" {
 		t.Fatalf("HeaderOverride / ProxyURL must remain empty: HO=%q PU=%q",
 			ch.HeaderOverride, ch.ProxyURL)
+	}
+}
+
+// TestProjectPrivateChannelAuth 验证执行渠道保留认证且修改不污染同步配置。
+func TestProjectPrivateChannelAuth(t *testing.T) {
+	// 1. 转换完整认证设置。
+	auth := models.ChannelAuth{Default: &models.AuthType{Header: "Authorization", Value: "Bearer ${CHANNEL_KEY}"}, Protocols: map[string]models.AuthType{"messages": {Header: "X-Token", Value: "${CHANNEL_KEY}"}}}
+	pc := &protocol.SyncedPrivateChannel{ChannelCore: models.ChannelCore{Auth: datatypes.NewJSONType(auth)}}
+	channel := ProjectPrivateChannelToChannel(pc)
+	if !reflect.DeepEqual(channel.Auth.Data(), auth) {
+		t.Fatal("auth lost in execution channel")
+	}
+	// 2. 修改转换结果不修改同步来源。
+	channel.Auth.Data().Default.Value = "changed"
+	delete(channel.Auth.Data().Protocols, "messages")
+	if !reflect.DeepEqual(pc.Auth.Data(), auth) {
+		t.Fatal("auth shared with source")
 	}
 }

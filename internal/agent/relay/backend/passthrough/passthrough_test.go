@@ -1,6 +1,7 @@
 package passthrough
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,14 +18,17 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/script"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/config"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	"gorm.io/datatypes"
 )
 
 // ==================== Task 12 baseline case ====================
@@ -557,14 +562,14 @@ func TestBackend_StreamResponse_LlamaTimingsCacheNotSubtracted(t *testing.T) {
 // 透明解压后这两个 header 已不再代表实际响应体形态，转发给 client 会让解码失败。
 func TestBackend_ResponseDropsContentEncoding(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Manually claim gzip even though body is raw — emulates a Transport-decompressed
-		// passthrough where upstream Content-Encoding header survives if not filtered.
+		// 1. 发送真实 gzip 数据，Transport 解压后转发正文。
 		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Content-Length", "999")
 		w.Header().Set("X-Trace-Id", "abc")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"hello":"world"}`))
+		compressed := gzip.NewWriter(w)
+		_, _ = compressed.Write([]byte(`{"hello":"world"}`))
+		_ = compressed.Close()
 	}))
 	defer upstream.Close()
 
@@ -577,6 +582,7 @@ func TestBackend_ResponseDropsContentEncoding(t *testing.T) {
 	if got.Err != nil {
 		t.Fatalf("unexpected Err: %v", got.Err)
 	}
+	require.Equal(t, `{"hello":"world"}`, w.Body.String())
 	// Content-Encoding 必须被剥除 — 否则客户端会按 gzip 解压一段裸 JSON，崩。
 	if enc := w.Header().Get("Content-Encoding"); enc != "" {
 		t.Errorf("Content-Encoding should be stripped, got %q", enc)
@@ -912,5 +918,196 @@ func TestHandlePassthroughError_400_NoProviderType(t *testing.T) {
 	}
 	if upErr.ProviderErrorType != "" {
 		t.Errorf("ProviderErrorType 应为空(无 error.type 字段), got %q", upErr.ProviderErrorType)
+	}
+}
+
+func TestBackendChannelAuth(t *testing.T) {
+	tests := []struct {
+		name      string
+		auth      models.ChannelAuth
+		key       string
+		override  string
+		script    string
+		wantAuth  string
+		wantToken string
+		wantCode  string
+	}{
+		{name: "unconfigured keeps bearer", key: "selected-key", wantAuth: "Bearer selected-key"},
+		{name: "custom header", key: "selected-key", auth: models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Token", Value: "Token ${CHANNEL_KEY}"}}, wantToken: "Token selected-key"},
+		{name: "protocol pair overrides default", key: "selected-key", auth: models.ChannelAuth{Default: &models.AuthType{Header: "Authorization", Value: "Bearer ${CHANNEL_KEY}"}, Protocols: map[string]models.AuthType{"chat_completions": {Header: "X-Custom-Token", Value: "literal-secret"}}}, wantToken: "literal-secret"},
+		{name: "ordinary override wins", auth: models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Token", Value: "literal-secret"}}, override: `{"X-Custom-Token":"override-secret"}`, wantToken: "override-secret"},
+		{name: "script wins", auth: models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Token", Value: "literal-secret"}}, override: `{"X-Custom-Token":"override-secret"}`, script: `function onUpstreamRequest(ctx) { ctx.setHeader("X-Custom-Token", "script-secret"); }`, wantToken: "script-secret"},
+		{name: "script removes auth", auth: models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Token", Value: "literal-secret"}}, script: `function onUpstreamRequest(ctx) { ctx.removeHeader("X-Custom-Token"); }`},
+		{name: "missing key stops dispatch", auth: models.ChannelAuth{Default: &models.AuthType{Header: "X-Custom-Token", Value: "${CHANNEL_KEY}"}}, wantCode: "upstream_auth_key_missing"},
+		{name: "invalid persistence stops dispatch", auth: models.ChannelAuth{Default: &models.AuthType{Header: "Content-Type", Value: "secret-value"}}, wantCode: "invalid_upstream_auth"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			var gotHeader http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				gotHeader = request.Header.Clone()
+				_, _ = io.WriteString(writer, `{}`)
+			}))
+			t.Cleanup(server.Close)
+			channel := makeChannel(server.URL)
+			channel.Key = test.key
+			channel.Auth = datatypes.NewJSONType(test.auth)
+			channel.HeaderOverride = test.override
+			rctx, _ := newPassthroughTestCtx(t, []byte(`{"model":"gpt-4o","messages":[]}`), false)
+			rctx.Context.Request.Header.Set("Authorization", "Bearer gateway-client-secret")
+			rctx.Context.Request.Header.Set("X-Api-Key", "gateway-client-secret")
+			if test.script != "" {
+				rctx.Agent = newScriptTestAgent(t, test.script)
+			}
+			result := (&Backend{Agent: rctx.Agent}).Relay(rctx, state.Attempt{Channel: channel, RealModel: "gpt-4o"})
+			if test.wantCode != "" {
+				var authErr *upstream.ChannelAuthError
+				require.ErrorAs(t, result.Err, &authErr)
+				require.Equal(t, test.wantCode, authErr.Code)
+				require.Zero(t, requests.Load())
+				require.Equal(t, trace.StageUpstreamDispatch, rctx.State.Recorder.Finalize().FailStage)
+				return
+			}
+			require.NoError(t, result.Err)
+			require.EqualValues(t, 1, requests.Load())
+			require.Equal(t, test.wantAuth, gotHeader.Get("Authorization"))
+			require.Equal(t, test.wantToken, gotHeader.Get("X-Custom-Token"))
+			require.Empty(t, gotHeader.Get("X-Api-Key"))
+		})
+	}
+}
+
+func TestGeminiNativePassthroughPreservesBodyQueryAndLargeUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, responseType string
+		stream                   bool
+	}{
+		{"json", "/v1beta/models/client:generateContent?key=client-secret&custom=value", "application/json", false},
+		{"sse", "/v1/models/client:streamGenerateContent?alt=sse&key=client-secret&custom=value", "text/event-stream", true},
+		{"array", "/v1beta/models/client:streamGenerateContent?key=client-secret&custom=value", "application/json", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(" {\"contents\":[],\"unknown\":true} \n")
+			result := `{"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":40,"candidatesTokenCount":10,"thoughtsTokenCount":2},"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"` + strings.Repeat("A", 2*1024*1024) + `"}}]},"finishReason":"STOP"}]}`
+			switch tc.name {
+			case "sse":
+				result = "data: " + result + "\n\n"
+			case "array":
+				result = "[" + result + "]"
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.Equal(t, body, got)
+				require.Contains(t, r.URL.Path, "/models/mapped:")
+				require.Equal(t, "value", r.URL.Query().Get("custom"))
+				require.Empty(t, r.URL.Query().Get("key"))
+				if tc.name == "sse" {
+					require.Equal(t, "sse", r.URL.Query().Get("alt"))
+				} else {
+					require.Empty(t, r.URL.Query().Get("alt"))
+				}
+				require.Equal(t, "channel-key", r.Header.Get("x-goog-api-key"))
+				require.Empty(t, r.Header.Get("Authorization"))
+				require.Empty(t, r.Header.Get("x-api-key"))
+				w.Header().Set("Content-Type", tc.responseType)
+				_, _ = io.WriteString(w, result)
+			}))
+			defer srv.Close()
+			ch := makeChannel(srv.URL)
+			ch.Type = consts.ChannelTypeGemini
+			ch.Key = "channel-key"
+			ch.ModelMapping = `{"client":"mapped"}`
+			ch.Endpoints = `{"generate_content":"/v1beta/models/{model}:{action}"}`
+			relay, out := newPassthroughTestCtx(t, body, tc.stream)
+			relay.Input.InboundProto = llmkit.ProtocolGemini
+			relay.Input.Model = "client"
+			relay.Context.Request = httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(string(body)))
+			relay.Context.Request.Header.Set("Authorization", "Bearer client-secret")
+			relay.Context.Request.Header.Set("x-goog-api-key", "other-client-secret")
+			got := (&Backend{}).Relay(relay, state.Attempt{Channel: ch, RealModel: "client"})
+			require.NoError(t, got.Err)
+			require.Equal(t, result, out.Body.String())
+			require.Equal(t, 60, got.PromptTokens)
+			require.Equal(t, 12, got.CompletionTokens)
+			require.Equal(t, 40, got.CacheReadTokens)
+			require.Less(t, len(relay.State.Recorder.UpstreamBodyBytes()), len(result))
+		})
+	}
+}
+
+func TestGeminiNativePassthroughDoesNotValidateJSON(t *testing.T) {
+	body := []byte("not a JSON request")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ := io.ReadAll(r.Body)
+		require.Equal(t, body, got)
+		w.WriteHeader(400)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid JSON"}}`)
+	}))
+	defer srv.Close()
+	ch := makeChannel(srv.URL)
+	ch.Type = consts.ChannelTypeGemini
+	ch.Endpoints = `{"generate_content":"/v1beta/models/{model}:{action}"}`
+	relay, _ := newPassthroughTestCtx(t, body, false)
+	relay.Input.InboundProto = llmkit.ProtocolGemini
+	relay.Context.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/model:generateContent", strings.NewReader(string(body)))
+	got := (&Backend{}).Relay(relay, state.Attempt{Channel: ch, RealModel: "model"})
+	require.Error(t, got.Err)
+	var upstreamErr *common.UpstreamError
+	require.ErrorAs(t, got.Err, &upstreamErr)
+	require.Equal(t, 400, upstreamErr.Status)
+}
+
+func TestGeminiNativePassthroughReportsInterruptedResponse(t *testing.T) {
+	for _, response := range []string{
+		`data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}` + "\n\n",
+		`data: {"error":{"code":429,"message":"upstream refused"}}` + "\n\n",
+		`{"candidates":[{"content":{"parts":[{"text":"unfinished`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, response)
+		}))
+		ch := makeChannel(srv.URL)
+		ch.Type = consts.ChannelTypeGemini
+		relay, out := newPassthroughTestCtx(t, []byte(`{}`), true)
+		relay.Input.InboundProto = llmkit.ProtocolGemini
+		relay.Context.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini:streamGenerateContent?alt=sse", strings.NewReader(`{}`))
+		got := (&Backend{}).Relay(relay, state.Attempt{Channel: ch, RealModel: "gemini"})
+		require.Error(t, got.Err)
+		require.True(t, got.Written)
+		require.Equal(t, response, out.Body.String())
+		srv.Close()
+	}
+}
+
+func TestGeminiNativePassthroughCancellation(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	ch := makeChannel(srv.URL)
+	ch.Type = consts.ChannelTypeGemini
+	relay, _ := newPassthroughTestCtx(t, []byte(`{}`), true)
+	relay.Input.InboundProto = llmkit.ProtocolGemini
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	relay.Context.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini:streamGenerateContent?alt=sse", strings.NewReader(`{}`)).WithContext(ctx)
+	done := make(chan state.AttemptResult, 1)
+	go func() { done <- (&Backend{}).Relay(relay, state.Attempt{Channel: ch, RealModel: "gemini"}) }()
+	<-started
+	cancel()
+	select {
+	case got := <-done:
+		require.ErrorIs(t, got.Err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("request did not cancel")
 	}
 }

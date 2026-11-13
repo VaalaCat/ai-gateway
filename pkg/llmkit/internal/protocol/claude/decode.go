@@ -56,9 +56,18 @@ func (c *handler) decodeHTTPRequest(r *http.Request) (*ir.Request, error) {
 	}
 
 	// C5: thinking config decode
-	if raw.Thinking != nil && (raw.Thinking.Type == "enabled" || raw.Thinking.Type == "adaptive") {
-		req.ThinkingEnabled = true
-		req.ThinkingBudget = raw.Thinking.BudgetTokens
+	if raw.Thinking != nil {
+		switch raw.Thinking.Type {
+		case "enabled", "adaptive":
+			enabled := true
+			req.ThinkingEnabled = &enabled
+			if raw.Thinking.Type == "enabled" {
+				req.ThinkingBudget = raw.Thinking.BudgetTokens
+			}
+		case "disabled":
+			enabled := false
+			req.ThinkingEnabled = &enabled
+		}
 	}
 	if raw.OutputConfig != nil {
 		req.ReasoningEffort = raw.OutputConfig.Effort

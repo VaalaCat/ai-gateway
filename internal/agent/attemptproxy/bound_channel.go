@@ -77,6 +77,9 @@ func (f *channelFinder) Find(input BoundChannelInput) (state.Attempt, error) {
 	if err != nil {
 		return state.Attempt{}, err
 	}
+	if input.InboundProtocol == llmkit.ProtocolGemini && !executionmode.SupportsGeminiPassthrough(channel, input.Attempt.RealModel) {
+		return state.Attempt{}, boundChannelError(boundModeMismatch)
+	}
 	if executionmode.ForChannel(channel, input.Attempt.RealModel, input.InboundProtocol, input.ToolCalls) != input.Attempt.Mode {
 		return state.Attempt{}, boundChannelError(boundModeMismatch)
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 )
 
 // computeRequestID 取请求 ID：优先用 X-Request-Id 头，缺省回退到时间戳。
@@ -58,6 +59,10 @@ func Build(rctx *state.RelayContext) error {
 		}
 	}
 	rctx.Input.InboundProto = protocolconfig.PathToProtocol(rctx.Context.Request.URL.Path)
+	path := rctx.Context.Request.URL.Path
+	if (strings.HasPrefix(path, "/v1beta/models/") || strings.HasPrefix(path, "/v1/models/")) && rctx.Input.InboundProto != llmkit.ProtocolGemini {
+		return fmt.Errorf("%w: invalid Gemini endpoint or action", state.ErrInvalidBody)
+	}
 	if rctx.Context.Request.Method == http.MethodGet {
 		return nil
 	}
@@ -111,29 +116,35 @@ func Build(rctx *state.RelayContext) error {
 		rctx.Input.Body = body
 		rec.WithInbound(rctx.Context.Request, body)
 
-		var req struct {
-			Model  string `json:"model"`
-			Stream *bool  `json:"stream,omitempty"`
-		}
-		if err := json.Unmarshal(body, &req); err != nil {
-			wrapped := fmt.Errorf("%w: %v", state.ErrInvalidBody, err)
-			rec.WithFail(trace.StageInboundDecode, wrapped)
-			return wrapped
-		}
-		if req.Model == "" {
-			rec.WithFail(trace.StageInboundDecode, state.ErrModelRequired)
-			return state.ErrModelRequired
-		}
-		if protocolconfig.IsSupportedProtocol(rctx.Input.InboundProto) {
-			info, err := llmkit.InspectToolCallRequest(rctx.Input.InboundProto, body)
-			if err != nil {
-				rec.WithFail(trace.StageInboundDecode, err)
-				return err
+		if model, stream, ok := endpoint.ParseGeminiPath(rctx.Context.Request.URL.Path); ok {
+			// 1. 原生生成请求只从路径读取路由信息，主体原样保留。
+			rctx.Input.Model = model
+			rctx.Input.IsStream = stream
+		} else {
+			var req struct {
+				Model  string `json:"model"`
+				Stream *bool  `json:"stream,omitempty"`
 			}
-			rctx.Input.ToolCalls = info
+			if err := json.Unmarshal(body, &req); err != nil {
+				wrapped := fmt.Errorf("%w: %v", state.ErrInvalidBody, err)
+				rec.WithFail(trace.StageInboundDecode, wrapped)
+				return wrapped
+			}
+			if req.Model == "" {
+				rec.WithFail(trace.StageInboundDecode, state.ErrModelRequired)
+				return state.ErrModelRequired
+			}
+			if protocolconfig.IsSupportedProtocol(rctx.Input.InboundProto) {
+				info, err := llmkit.InspectToolCallRequest(rctx.Input.InboundProto, body)
+				if err != nil {
+					rec.WithFail(trace.StageInboundDecode, err)
+					return err
+				}
+				rctx.Input.ToolCalls = info
+			}
+			rctx.Input.Model = req.Model
+			rctx.Input.IsStream = req.Stream != nil && *req.Stream
 		}
-		rctx.Input.Model = req.Model
-		rctx.Input.IsStream = req.Stream != nil && *req.Stream
 	}
 
 	if s := rctx.Context.GetHeader(consts.HeaderXChannelID); s != "" {

@@ -3,7 +3,9 @@ package exec
 import (
 	"context"
 	"errors"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
@@ -102,7 +104,20 @@ func (e *remoteExecutor) Execute(
 	if err != nil {
 		return remoteExecutionRejected(target.AgentID, err)
 	}
+	rctx.Inflight.MarkUpstreamUnreported()
 	meta := attemptwire.AttemptProxyMeta{Attempt: bound, RequestPath: request.URL.Path}
+	if _, _, ok := endpoint.ParseGeminiPath(request.URL.Path); ok {
+		// 1. 通过现有元数据携带生成参数，清除入站查询凭证。
+		providerURL := *request.URL
+		query := providerURL.Query()
+		for name := range query {
+			if strings.EqualFold(name, "key") {
+				query.Del(name)
+			}
+		}
+		providerURL.RawQuery = query.Encode()
+		meta.RequestPath = providerURL.RequestURI()
+	}
 	if target.Kind != AttemptTargetRemote || target.AgentID == "" || meta.Validate() != nil ||
 		!attemptwire.ProviderPathAllowed(http.MethodPost, meta.RequestPath) {
 		return remoteExecutionRejected(target.AgentID, errors.New("remote attempt input invalid"))

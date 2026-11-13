@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
+	"gorm.io/datatypes"
 )
 
 func TestStoreAgentCapabilitiesAreBoundedDefensiveAndSeparateFromAgentModel(t *testing.T) {
@@ -846,5 +848,67 @@ func TestStore_HasRealModel(t *testing.T) {
 	}
 	if s.HasRealModel("nonexistent") {
 		t.Error("unknown name must be false")
+	}
+}
+
+// TestStoreChannelAuthIsolation 验证管理员缓存的入口和读取结果隔离认证配置。
+func TestStoreChannelAuthIsolation(t *testing.T) {
+	// 1. 分别通过 Set、全量同步和推送写入渠道。
+	for _, method := range []string{"set", "load", "push"} {
+		t.Run(method, func(t *testing.T) {
+			s := NewStore(nil, config.AgentCacheConfig{})
+			defer s.Close()
+			auth := models.ChannelAuth{Default: &models.AuthType{Header: "Authorization", Value: "Bearer ${CHANNEL_KEY}"}, Protocols: map[string]models.AuthType{"messages": {Header: "X-Token", Value: "${CHANNEL_KEY}"}}}
+			channel := models.Channel{ChannelCore: models.ChannelCore{ID: 1, Status: 1, Auth: datatypes.NewJSONType(auth)}, Models: "gpt-4o"}
+			want := auth.Clone()
+			switch method {
+			case "set":
+				s.SetChannel(&channel)
+			case "load":
+				s.LoadChannels([]models.Channel{channel})
+			case "push":
+				data, err := json.Marshal(channel)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.HandleSyncEvent(events.EntityChannel, events.ActionUpdate, data)
+			}
+			s.RebuildModelIndex()
+			// 2. 修改输入与读取结果不会污染缓存或派生索引。
+			auth.Default.Value = "input changed"
+			delete(auth.Protocols, "messages")
+			for _, got := range []*models.Channel{s.GetChannel(1), s.GetChannelsForModel("gpt-4o")[0]} {
+				if !reflect.DeepEqual(got.Auth.Data(), want) {
+					t.Fatal("auth lost in cache")
+				}
+				got.Auth.Data().Default.Value = "output changed"
+				delete(got.Auth.Data().Protocols, "messages")
+			}
+			if !reflect.DeepEqual(s.GetChannel(1).Auth.Data(), want) {
+				t.Fatal("auth shared with cache")
+			}
+		})
+	}
+}
+
+// TestStorePrivateChannelAuthIsolation 验证 BYOK 缓存的认证读取副本。
+func TestStorePrivateChannelAuthIsolation(t *testing.T) {
+	// 1. 写入私有渠道后修改输入。
+	s := NewStore(nil, config.AgentCacheConfig{})
+	defer s.Close()
+	auth := models.ChannelAuth{Default: &models.AuthType{Header: "Authorization", Value: "Bearer ${CHANNEL_KEY}"}, Protocols: map[string]models.AuthType{"messages": {Header: "X-Token", Value: "${CHANNEL_KEY}"}}}
+	want := auth.Clone()
+	s.OverrideVisiblePrivateChannels(1, []protocol.SyncedPrivateChannel{{ChannelCore: models.ChannelCore{ID: 1, Status: 1, Auth: datatypes.NewJSONType(auth)}, Models: []string{"gpt-4o"}}})
+	auth.Default.Value = "input changed"
+	delete(auth.Protocols, "messages")
+	// 2. 修改读取结果后，再次读取仍保留原文。
+	got := s.GetVisiblePrivateChannelsForUser(1, "gpt-4o")[0]
+	if !reflect.DeepEqual(got.Auth.Data(), want) {
+		t.Fatal("auth lost in private cache")
+	}
+	got.Auth.Data().Default.Value = "output changed"
+	delete(got.Auth.Data().Protocols, "messages")
+	if !reflect.DeepEqual(s.GetVisiblePrivateChannelsForUser(1, "gpt-4o")[0].Auth.Data(), want) {
+		t.Fatal("auth shared with private cache")
 	}
 }

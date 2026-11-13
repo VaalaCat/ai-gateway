@@ -50,6 +50,18 @@ export interface Token {
   allowed_channel_ids?: number[];
 }
 
+export interface AuthType {
+  header: string;
+  value: string;
+}
+
+export type ChannelAuthProtocol = "chat_completions" | "responses" | "messages" | "generate_content";
+
+export interface ChannelAuth {
+  default?: AuthType | null;
+  protocols?: Partial<Record<ChannelAuthProtocol, AuthType>>;
+}
+
 export interface Channel {
   id: number;
   name: string;
@@ -72,6 +84,7 @@ export interface Channel {
   status_code_mapping: string;
   param_override: string;
   header_override: string;
+  auth?: ChannelAuth;
   other_settings: string;
   supported_api_types: string;
   endpoints: string;
@@ -113,6 +126,7 @@ export interface Channel {
 }
 
 export interface BatchEditableChannelFields {
+  auth: ChannelAuth;
   status: number;
   public_display_name: string;
   type: number;
@@ -194,15 +208,15 @@ export interface ChannelOtherSettings {
   aws_key_type?: string;
   builtin_tool_fallback?: BuiltinToolFallbackPolicy;
   protocol_override?: {
-    openai_chat?: 'openai_chat' | 'openai_responses' | 'claude' | 'auto';
-    openai_responses?: 'openai_chat' | 'openai_responses' | 'claude' | 'auto';
-    claude?: 'openai_chat' | 'openai_responses' | 'claude' | 'auto';
+    openai_chat?: 'openai_chat' | 'openai_responses' | 'claude' | 'gemini' | 'auto';
+    openai_responses?: 'openai_chat' | 'openai_responses' | 'claude' | 'gemini' | 'auto';
+    claude?: 'openai_chat' | 'openai_responses' | 'claude' | 'gemini' | 'auto';
   };
   model_protocol_override?: Array<{
     model: string;
     overrides: Partial<Record<
       'openai_chat' | 'openai_responses' | 'claude' | '*',
-      'openai_chat' | 'openai_responses' | 'claude' | 'auto'
+      'openai_chat' | 'openai_responses' | 'claude' | 'gemini' | 'auto'
     >>;
   }>;
   model_thinking_passthrough?: Array<{
@@ -1365,6 +1379,7 @@ export interface LimiterBinding {
 }
 
 export interface UsageView {
+  route_source_agent_id?: string;
   user_id: number;
   token_name?: string;
   channel_id: number;
@@ -1401,6 +1416,21 @@ export interface AttemptInProgress {
   real_model: string;
 }
 
+export interface InflightProgress {
+  upstream_body_bytes: number | null;
+  client_body_bytes: number | null;
+  upstream_idle_ms: number | null;
+  client_idle_ms: number | null;
+}
+
+export interface FailedAgent {
+  agent_id: number;
+  agent_name: string;
+  error: string;
+  code?: string;
+  elapsed_ms?: number;
+}
+
 export interface InflightSnapshot {
   id: number;
   req_id: string;
@@ -1410,6 +1440,8 @@ export interface InflightSnapshot {
   queued_ms: number;
   queued_reason: string;
   current_attempt?: AttemptInProgress;
+  progress?: InflightProgress;
+  attempt_progress?: InflightProgress;
 }
 export interface GlobalInflightRow extends InflightSnapshot {
   agent_id: number;
@@ -1417,7 +1449,8 @@ export interface GlobalInflightRow extends InflightSnapshot {
 }
 export interface AllInflightResponse {
   requests: GlobalInflightRow[];
-  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+  failed_agents: FailedAgent[];
+  successful_agent_ids: number[];
 }
 export interface LimiterBucketRow {
   limiter_id: number;
@@ -1433,7 +1466,8 @@ export interface LimiterBucketRow {
 }
 export interface LimiterUsageResponse {
   buckets: LimiterBucketRow[];
-  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+  failed_agents: FailedAgent[];
+  successful_agent_ids: number[];
 }
 export interface AgentBreakerCell {
   agent_id: number;
@@ -1454,7 +1488,8 @@ export interface ChannelBreakerRow {
 }
 export interface BreakerBoardResponse {
   channels: ChannelBreakerRow[];
-  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+  failed_agents: FailedAgent[];
+  successful_agent_ids: number[];
 }
 export interface AgentHealthRow {
   agent_id: string;
@@ -1503,7 +1538,8 @@ export interface LogBacklog {
 }
 export interface DeliveryBoardResponse {
   agents: AgentQueueRow[];
-  failed_agents: { agent_id: number; agent_name: string; error: string }[];
+  failed_agents: FailedAgent[];
+  successful_agent_ids: number[];
   log_backlog: LogBacklog;
 }
 export interface DeliveryOpRequest {

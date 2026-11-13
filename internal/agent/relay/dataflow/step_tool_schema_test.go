@@ -92,3 +92,42 @@ func TestToolCompatibilityOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestToolCompatibilityMatchesOriginalAndMappedModelInRuleOrder(t *testing.T) {
+	for _, test := range []struct {
+		name, rules string
+		wantSchema  bool
+	}{
+		{"original", `[{"model_pattern":"^gemini-","profile":"gemini_compat"}]`, true},
+		{"mapped", `[{"model_pattern":"^ep-","profile":"gemini_compat"}]`, true},
+		{"original_none_first", `[{"model_pattern":"^gemini-","profile":"none"},{"model_pattern":"^ep-","profile":"gemini_compat"}]`, false},
+		{"mapped_none_first", `[{"model_pattern":"^ep-","profile":"none"},{"model_pattern":"^gemini-","profile":"gemini_compat"}]`, false},
+		{"mapped_compat_first", `[{"model_pattern":"^ep-","profile":"gemini_compat"},{"model_pattern":"^gemini-","profile":"none"}]`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// 1. 配置从公开模型名到 ep 模型的映射及按序执行的工具规则。
+			ch := &models.Channel{
+				ChannelCore:  models.ChannelCore{OtherSettings: `{"model_tool_schema_compatibility":` + test.rules + `}`},
+				ModelMapping: `{"gemini-model":"ep-20260611"}`,
+			}
+			strict := true
+			original := llmkit.Request{Model: "gemini-model", Tools: []llmkit.Tool{{
+				Type: "function", Name: "read", Strict: &strict,
+				InputSchema: map[string]any{"type": "number", "exclusiveMinimum": 0},
+			}}}
+
+			// 2. 运行真实请求步骤，核对转换结果与原请求。
+			for _, protocol := range []llmkit.Protocol{llmkit.ProtocolOpenAIChat, llmkit.ProtocolOpenAIResponses, llmkit.ProtocolClaudeMessages} {
+				working := original
+				flow := BuildChannelRequestFlow(ch, protocol, StepDeps{})
+				require.NoError(t, flow.Run(context.Background(), &Pass{Original: &original, Working: &working}))
+				require.Equal(t, "ep-20260611", working.Model)
+				require.Equal(t, test.wantSchema, working.Tools[0].Strict == nil)
+				_, hasExclusiveMinimum := working.Tools[0].InputSchema.(map[string]any)["exclusiveMinimum"]
+				require.Equal(t, !test.wantSchema, hasExclusiveMinimum)
+				require.NotNil(t, original.Tools[0].Strict)
+				require.Contains(t, original.Tools[0].InputSchema, "exclusiveMinimum")
+			}
+		})
+	}
+}

@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { ChannelFormAdapter } from "./adapter";
 import { useChannelForm, ChannelFormMode } from "./use-channel-form";
 import { isSectionAllHidden, type SectionId } from "./section-visibility";
@@ -70,6 +71,7 @@ export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps
   if (state.form.use_legacy_adaptor) {
     return (
       <div className="space-y-4">
+        <Alert><AlertDescription>{t("upstreamAuthLegacyWarning")}</AlertDescription></Alert>
         <div className="overflow-hidden rounded-lg border bg-background shadow-sm">
           <div className="p-6">
             <LegacyChannelForm form={state.form} setForm={state.setForm} channelTypes={channelTypes} showStatus={mode.kind === "edit"} nameReadOnlyInEdit={mode.kind === "edit" && adapter.nameReadOnlyInEdit} agentId={agentId} channelId={mode.kind === "edit" ? mode.id : undefined} />

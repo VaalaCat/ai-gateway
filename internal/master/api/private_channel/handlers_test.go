@@ -1174,3 +1174,42 @@ func TestPortalTest_JoinUpstreamURL_RejectsMaliciousEndpoint(t *testing.T) {
 		})
 	}
 }
+
+// TestPrivateChannelAuthLifecycle 验证 BYOK 认证保存、保留、替换和清空。
+func TestPrivateChannelAuthLifecycle(t *testing.T) {
+	// 1. 创建认证并核对响应和数据库。
+	h, ctx, db := newHandlerTestCtx(t)
+	auth := models.ChannelAuth{Default: &models.AuthType{Header: "Authorization", Value: "Bearer ${CHANNEL_KEY}"}, Protocols: map[string]models.AuthType{"messages": {Header: "X-Token", Value: "${CHANNEL_KEY}"}}}
+	created, err := h.Create(ctx, CreateRequest{Name: "auth-channel", Type: 1, Key: "sk-test", BaseURL: "https://api.openai.com", Models: []string{"gpt-4o"}, Auth: auth})
+	require.NoError(t, err)
+	require.Equal(t, auth, created.Value.Auth)
+	id := strconv.Itoa(int(created.Value.ID))
+	got, err := h.PortalUpdate(ctx, UpdateRequest{ID: id, Fields: map[string]any{"remark": "preserve auth"}})
+	require.NoError(t, err)
+	require.Equal(t, auth, got.Auth)
+	var row models.PrivateChannel
+	require.NoError(t, db.First(&row, got.ID).Error)
+	require.Equal(t, auth, row.Auth.Data())
+	// 2. 导出、复制再创建仍保留变量原文。
+	file, err := privateChannelToFile(row, h.Provider.GetCipher())
+	require.NoError(t, err)
+	copies, err := createPrivateChannels(ctx, h.Provider, PrivateChannelOwner{UserID: 1, GroupID: 1}, []PrivateChannelCreateInput{privateFileToCreateInput(file, "auth-copy")})
+	require.NoError(t, err)
+	require.Equal(t, auth, copies[0].Auth.Data())
+	// 3. 整份替换会删除原协议覆盖；空对象清空。
+	replacement := models.ChannelAuth{Default: &models.AuthType{Header: "X-New-Token", Value: "literal"}}
+	got, err = h.PortalUpdate(ctx, UpdateRequest{ID: id, Fields: map[string]any{"auth": replacement}})
+	require.NoError(t, err)
+	require.Equal(t, replacement, got.Auth)
+	got, err = h.PortalUpdate(ctx, UpdateRequest{ID: id, Fields: map[string]any{"auth": map[string]any{}}})
+	require.NoError(t, err)
+	require.Equal(t, models.ChannelAuth{}, got.Auth)
+	// 4. 非法认证不会写入，也不回显秘密。
+	_, err = h.PortalUpdate(ctx, UpdateRequest{ID: id, Fields: map[string]any{"auth": map[string]any{"default": map[string]any{"header": "Host", "value": "literal-secret"}}}})
+	apiErr := assertAPIStatus(t, err, http.StatusBadRequest)
+	require.Equal(t, "invalid_upstream_auth", apiErr.Code)
+	require.NotContains(t, apiErr.Error(), "literal-secret")
+	_, err = h.Create(ctx, CreateRequest{Name: "invalid-auth", Type: 1, Key: "sk-test", Models: []string{"gpt-4o"}, Auth: models.ChannelAuth{Default: &models.AuthType{Header: "X-Token", Value: "literal-secret\r\n"}}})
+	apiErr = assertAPIStatus(t, err, http.StatusBadRequest)
+	require.Equal(t, "invalid_upstream_auth", apiErr.Code)
+}

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/dao"
@@ -235,5 +236,47 @@ func TestPrivateChannelsVisibleFetch_AllUndecryptableReturnsNotFound(t *testing.
 	}
 	if found {
 		t.Fatal("expected found=false when all channels are undecryptable")
+	}
+}
+
+// TestPrivateChannelAuthSync 验证持久化配置通过主节点同步仍保留原文。
+func TestPrivateChannelAuthSync(t *testing.T) {
+	// 1. 保存包含认证配置的私有渠道。
+	cipher := newTestCipher(t)
+	a, q := setupPrivChanDB(t)
+	if err := a.db.Create(&models.User{ID: 1, GroupID: 1, Username: "auth-user"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := cipher.Seal("sk-secret", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := models.ChannelAuth{Default: &models.AuthType{Header: "Authorization", Value: "Bearer ${CHANNEL_KEY}"}, Protocols: map[string]models.AuthType{"messages": {Header: "X-Token", Value: "${CHANNEL_KEY}"}}}
+	pc := &models.PrivateChannel{ChannelCore: models.ChannelCore{Auth: datatypes.NewJSONType(auth)}, OwnerID: 1, Name: "auth-channel", Status: 1, KeyCipher: sealed, Models: datatypes.JSONSlice[string]{"gpt-4o"}}
+	if err := a.db.Create(pc).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 2. Fetch 的 JSON 载荷保留整体和协议认证。
+	h := &privateChannelsVisibleFetchHandler{cipher: cipher}
+	data, _, found, err := h.Fetch(context.Background(), q, "1")
+	if err != nil || !found {
+		t.Fatalf("fetch: found=%v err=%v", found, err)
+	}
+	var set protocol.VisiblePrivateChannelSet
+	if err := json.Unmarshal(data, &set); err != nil {
+		t.Fatal(err)
+	}
+	if len(set.Channels) != 1 || !reflect.DeepEqual(auth, set.Channels[0].Auth.Data()) {
+		t.Fatal("auth lost in sync")
+	}
+	// 3. 转换结果中的指针和 map 不修改数据库对象。
+	synced, err := h.project(pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	synced.Auth.Data().Default.Value = "changed"
+	delete(synced.Auth.Data().Protocols, "messages")
+	if !reflect.DeepEqual(pc.Auth.Data(), auth) {
+		t.Fatal("auth shared across sync projection")
 	}
 }

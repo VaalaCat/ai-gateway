@@ -12,6 +12,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/metrics"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	"go.uber.org/zap"
+	"gorm.io/datatypes"
 )
 
 // privateChannelsVisibleFetchHandler 处理 agent LRU miss 时的私有 channel 拉取。
@@ -86,6 +87,7 @@ func (h *privateChannelsVisibleFetchHandler) project(pc *models.PrivateChannel) 
 	}
 	return &protocol.SyncedPrivateChannel{
 		ChannelCore: models.ChannelCore{
+			Auth:                datatypes.NewJSONType(pc.Auth.Data().Clone()),
 			ID:                  pc.ID,
 			Name:                pc.Name,
 			Type:                pc.Type,

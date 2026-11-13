@@ -62,13 +62,14 @@ func TextMessage(role Role, text string) Message {
 
 // ContentBlock is a single piece of typed content within a message.
 type ContentBlock struct {
-	Type      ContentType       `json:"type"`
-	Text      string            `json:"text,omitempty"`
-	MediaURL  string            `json:"media_url,omitempty"`
-	MediaB64  string            `json:"media_b64,omitempty"`
-	MimeType  string            `json:"mime_type,omitempty"`
-	Metadata  map[string]any    `json:"metadata,omitempty"`
-	Reasoning *ReasoningContent `json:"reasoning,omitempty"`
+	Type         ContentType       `json:"type"`
+	Text         string            `json:"text,omitempty"`
+	MediaURL     string            `json:"media_url,omitempty"`
+	MediaB64     string            `json:"media_b64,omitempty"`
+	MimeType     string            `json:"mime_type,omitempty"`
+	Metadata     map[string]any    `json:"metadata,omitempty"`
+	Reasoning    *ReasoningContent `json:"reasoning,omitempty"`
+	ProviderData *ProviderData     `json:"provider_data,omitempty"`
 
 	// RawJSON preserves the original JSON for unknown content block types.
 	// When set, the encoder should emit this JSON as-is instead of

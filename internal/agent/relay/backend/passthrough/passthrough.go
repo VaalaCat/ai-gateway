@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/scripthook"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/executionmode"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -18,6 +22,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -44,6 +49,9 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	rec := rctx.State.Recorder
 
 	logger := b.logger()
+	if inboundProto == llmkit.ProtocolGemini && !executionmode.SupportsGeminiPassthrough(ch, modelName) {
+		return state.AttemptResult{Err: fmt.Errorf("Gemini inbound requests require a Gemini upstream")}
+	}
 
 	// Bind upstream calls to the client request context so that client
 	// disconnection cancels the upstream HTTP call immediately.
@@ -68,16 +76,24 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 
 	upstreamModel := state.ApplyModelMapping(ch, modelName)
 
-	newBody, err := buildPassthroughBody(bodyBytes, ch, modelName, upstreamModel)
+	newBody := bodyBytes
+	if inboundProto != llmkit.ProtocolGemini {
+		var err error
+		newBody, err = buildPassthroughBody(bodyBytes, ch, modelName, upstreamModel)
+		if err != nil {
+			return state.AttemptResult{Err: err}
+		}
+	}
+
+	upstreamReq, err := buildPassthroughRequest(c.Request, ch, inboundProto, newBody, upstreamModel)
 	if err != nil {
 		return state.AttemptResult{Err: err}
 	}
 
-	upstreamReq, err := buildPassthroughRequest(c.Request, ch, inboundProto, newBody)
-	if err != nil {
+	if err := upstream.ApplyChannelAuth(upstreamReq, ch, inboundProto); err != nil {
+		rec.WithOutbound(upstreamReq, newBody, ch).WithFail(trace.StageUpstreamDispatch, err)
 		return state.AttemptResult{Err: err}
 	}
-
 	newBody = applyPassthroughOverrides(upstreamReq, newBody, ch, logger)
 
 	newBody, rejected, rejRes := scripthook.RunUpstreamScripts(b.Agent, c, rctx, a, inboundProto, upstreamReq, newBody)
@@ -87,21 +103,43 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 
 	rec.WithOutbound(upstreamReq, newBody, ch)
 
+	rctx.Inflight.ObserveUpstreamBytes(0)
 	resp, err := b.dispatchUpstream(ctx, upstreamReq, ch, rec)
 	if err != nil {
 		return state.AttemptResult{Err: err}
 	}
 
+	resp.Body = rctx.Inflight.WrapUpstreamBody(resp.Body)
 	if result, handled := handlePassthroughErrorStatus(rec, resp, c.Writer, upstreamModel); handled {
 		return result
 	}
 
-	streamPassthroughResponse(c, rec, resp)
-
-	promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, responseText := extractPassthroughUsage(rec.UpstreamBodyBytes(), isStream)
+	var observer *upstream.GeminiUsageObserver
+	var streamErr error
+	if inboundProto == llmkit.ProtocolGemini {
+		observer = &upstream.GeminiUsageObserver{Stream: isStream}
+		streamErr = streamPassthroughResponse(c, rec, resp, observer)
+		if streamErr == nil {
+			streamErr = observer.Finish()
+		}
+	} else {
+		streamErr = streamPassthroughResponse(c, rec, resp)
+	}
+	if streamErr != nil {
+		streamErr = rec.MaskError(streamErr)
+		rec.WithFail(trace.StageUpstreamDecode, streamErr)
+	}
+	promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, responseText := 0, 0, 0, 0, ""
+	if observer != nil {
+		promptTokens, completionTokens = observer.Usage.PromptTokens, observer.Usage.CompletionTokens
+		cacheReadTokens, cacheWriteTokens = observer.Usage.CacheReadTokens, observer.Usage.CacheWriteTokens
+	} else {
+		promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, responseText = extractPassthroughUsage(rec.UpstreamBodyBytes(), isStream)
+	}
 
 	return state.AttemptResult{
 		Written:          true,
+		Err:              streamErr,
 		UpstreamModel:    upstreamModel,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
@@ -143,7 +181,7 @@ func extractPassthroughUsage(body []byte, isStream bool) (promptTokens, completi
 //   - 修改 resp.Body（wrap 成 TeeReader），并 defer 关闭它。
 //   - 修改 c.Writer（wrap 成 Recorder-tracked writer）。
 //   - 写出 response header + status code，触发 client 端连接的 commit。
-func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.Response) {
+func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.Response, observers ...io.Writer) error {
 	rec.WithUpstreamStatus(resp)
 	resp.Body = rec.WrapUpstreamBody(resp)
 	defer resp.Body.Close()
@@ -160,13 +198,25 @@ func streamPassthroughResponse(c *gin.Context, rec *trace.Recorder, resp *http.R
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			c.Writer.Write(buf[:n])
+			for _, observer := range observers {
+				_, _ = observer.Write(buf[:n])
+			}
+			written, err := c.Writer.Write(buf[:n])
+			if err != nil {
+				return err
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
 			if canFlush {
 				flusher.Flush()
 			}
 		}
 		if readErr != nil {
-			break
+			if readErr == io.EOF {
+				return c.Request.Context().Err()
+			}
+			return readErr
 		}
 	}
 }
@@ -196,11 +246,13 @@ func handlePassthroughErrorStatus(rec *trace.Recorder, resp *http.Response, _w g
 		return state.AttemptResult{UpstreamModel: upstreamModel, Err: wrapped}, true
 	}
 	body := capture.BoundedHead()
+	maskedBody := rec.MaskText(string(body))
 	upErr := &common.UpstreamError{
 		Status:            resp.StatusCode,
 		Body:              body,
-		ProviderErrorType: common.ParseProviderErrorType(capture.Head),
+		ProviderErrorType: rec.MaskText(common.ParseProviderErrorType(capture.Head)),
 		Header:            resp.Header.Clone(),
+		MaskedBody:        &maskedBody,
 	}
 	rec.WithFail(trace.StageUpstreamStatus, upErr)
 	return state.AttemptResult{
@@ -257,11 +309,45 @@ func applyPassthroughOverrides(upstreamReq *http.Request, newBody []byte, ch *mo
 // buildPassthroughRequest 根据原始 *http.Request + channel 配置 + 新 body 构造上行 HTTP 请求。
 // 处理：endpoint 解析 / URL 拼接 / 经 upstream.ForwardClientHeaders 诚实透传客户端 header
 // (剥离受管头) / Authorization 覆盖 / Organization。
-func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundProto llmkit.Protocol, newBody []byte) (*http.Request, error) {
+func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundProto llmkit.Protocol, newBody []byte, mappedModels ...string) (*http.Request, error) {
 	// Build upstream URL: prefer Endpoints config path, fallback to original request path
 	endpointPath := protocolconfig.ResolveEndpointPath(ch.Endpoints, inboundProto)
 	if endpointPath == "" {
 		endpointPath = origReq.URL.Path
+	}
+	if inboundProto == llmkit.ProtocolGemini {
+		model, stream, ok := endpoint.ParseGeminiPath(origReq.URL.Path)
+		if !ok {
+			return nil, fmt.Errorf("invalid Gemini endpoint or action")
+		}
+		if len(mappedModels) > 0 {
+			model = mappedModels[0]
+		}
+		action := "generateContent"
+		if stream {
+			action = "streamGenerateContent"
+		}
+		var err error
+		endpointPath, err = endpoint.GeminiPath(endpointPath, model, action)
+		if err != nil {
+			return nil, err
+		}
+		pathURL, err := url.Parse(endpointPath)
+		if err != nil {
+			return nil, err
+		}
+		query := pathURL.Query()
+		for name, values := range origReq.URL.Query() {
+			query[name] = append([]string(nil), values...)
+		}
+		// 1. 原生流保留客户端 alt；调用方凭证不进入上游 URL。
+		for name := range query {
+			if strings.EqualFold(name, "key") {
+				query.Del(name)
+			}
+		}
+		pathURL.RawQuery = query.Encode()
+		endpointPath = pathURL.String()
 	}
 	upstreamURL, err := protocolconfig.JoinUpstreamURL(ch.GetBaseURL(), endpointPath)
 	if err != nil {
@@ -278,7 +364,11 @@ func buildPassthroughRequest(origReq *http.Request, ch *models.Channel, inboundP
 	// 让 Go Transport 注入 gzip 并透明解压,usage 抽取依赖明文 body。
 	// passthrough 恒同协议(pipeline/plan/mode.go 选取前提),故 crossProtocol=false。
 	upstream.ForwardClientHeaders(upstreamReq.Header, origReq.Header, false)
-	upstreamReq.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+ch.Key)
+	if inboundProto == llmkit.ProtocolGemini {
+		upstreamReq.Header.Set("x-goog-api-key", ch.Key)
+	} else {
+		upstreamReq.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+ch.Key)
+	}
 	upstreamReq.Header.Set(consts.HeaderContentType, consts.ContentTypeJSON)
 	if ch.Organization != "" {
 		upstreamReq.Header.Set(consts.HeaderOpenAIOrg, ch.Organization)

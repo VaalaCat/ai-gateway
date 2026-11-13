@@ -16,6 +16,8 @@ func TestNormalizeEndpointType(t *testing.T) {
 		{"chat_completions", EndpointKeyChatCompletions, llmkit.ProtocolOpenAIChat, true},
 		{"responses", EndpointKeyResponses, llmkit.ProtocolOpenAIResponses, true},
 		{"messages", EndpointKeyMessages, llmkit.ProtocolClaudeMessages, true},
+		{"gemini", EndpointKeyGenerateContent, llmkit.ProtocolGemini, true},
+		{"generate_content", EndpointKeyGenerateContent, llmkit.ProtocolGemini, true},
 		{"anthropic", EndpointKeyMessages, llmkit.ProtocolClaudeMessages, true},
 		{"chat-completion", EndpointKeyChatCompletions, llmkit.ProtocolOpenAIChat, true},
 		{"", "", llmkit.ProtocolUnknown, false},
@@ -86,6 +88,23 @@ func TestBuildConnectivityTestRequest(t *testing.T) {
 	}
 	if _, _, err := BuildConnectivityTestRequest("", "", "embeddings", "m", false); err == nil {
 		t.Error("embeddings should error")
+	}
+}
+
+func TestGeminiConnectivityRequest(t *testing.T) {
+	// 1. Gemini 连通性测试通过原生路径携带模型与流式动作。
+	for _, stream := range []bool{false, true} {
+		path, body, err := BuildRelayConnectivityTestRequest(llmkit.ProtocolGemini, "gemini-flash", stream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "/v1beta/models/gemini-flash:generateContent"
+		if stream {
+			want = "/v1beta/models/gemini-flash:streamGenerateContent?alt=sse"
+		}
+		if path != want || body["contents"] == nil || body["model"] != nil || body["stream"] != nil {
+			t.Fatalf("path=%s body=%#v", path, body)
+		}
 	}
 }
 

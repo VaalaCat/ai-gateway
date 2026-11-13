@@ -1299,3 +1299,22 @@ func (r *readSpyCloser) Read([]byte) (int, error) {
 }
 
 func (*readSpyCloser) Close() error { return nil }
+
+func TestBuildGeminiRequestUsesPathWithoutParsingBody(t *testing.T) {
+	for _, tc := range []struct {
+		path   string
+		stream bool
+	}{
+		{"/v1beta/models/gemini-image:generateContent", false}, {"/v1/models/gemini-image:streamGenerateContent", true},
+	} {
+		c := newGinCtxForTest(nil)
+		body := "not JSON but passed to upstream"
+		c.Request = httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
+		relay := newTestRelayCtx(t, c)
+		require.NoError(t, Build(relay))
+		require.Equal(t, "gemini-image", relay.Input.Model)
+		require.Equal(t, tc.stream, relay.Input.IsStream)
+		require.Equal(t, body, string(relay.Input.Body))
+		require.Equal(t, "gemini", string(relay.Input.InboundProto))
+	}
+}

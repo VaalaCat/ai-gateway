@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/firstresponse"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/pipeline/publish"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
@@ -26,6 +27,44 @@ import (
 	attemptwire "github.com/VaalaCat/ai-gateway/internal/pkg/attemptproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 )
+
+func TestRemoteAttemptTransferReportsOnlyClientBytes(t *testing.T) {
+	for _, directPath := range []bool{false, true} {
+		t.Run(map[bool]string{false: "relay", true: "direct"}[directPath], func(t *testing.T) {
+			rctx, response := newRemoteAttemptContext(t, context.Background(), 38)
+			registry := inflight.NewRegistry(nil, 0)
+			rctx.Inflight = registry.Track(inflight.Meta{})
+			rctx.Inflight.SetCurrentAttempt(&inflight.AttemptInProgress{Seq: 1})
+			rctx.Inflight.ObserveUpstreamBytes(7)
+			rctx.Writer = rctx.Inflight.WrapClientWriter(rctx.Writer)
+			result := &attemptwire.AttemptProxyResult{
+				Kind: attemptwire.ResultSucceeded, ProviderResultKnown: true, ProviderDispatched: true,
+				Dispatches: 1, ResponseStarted: true, Written: true,
+			}
+			respond := func(writer http.ResponseWriter) {
+				writer.Header().Set(attemptwire.HeaderMode, attemptwire.ModeResponse)
+				writer.WriteHeader(http.StatusOK)
+				_, _ = writer.Write([]byte("remote reply"))
+			}
+			direct := &remoteDirectStub{forward: func(_ context.Context, _ agentproxy.DirectRequest, writer http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+				respond(writer)
+				return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true, AttemptResult: result}
+			}}
+			relay := &remoteRelayLinkStub{stream: &remoteRelayStreamStub{commit: tunnel.Committed, respond: respond, copyResult: result, dispatchProvider: true}}
+			executor := NewRemoteAttemptExecutor(RemoteAttemptExecutorOptions{
+				SourceAgentID: "source", Direct: direct, Relay: relay, Targets: enabledRemoteTargets("target"),
+				DirectOutboundEnabled: func() bool { return directPath }, RelayOutboundEnabled: func() bool { return !directPath },
+			})
+			outcome := executor.Execute(rctx, AttemptTarget{AgentID: "target", Kind: AttemptTargetRemote}, 38, validRemoteBoundAttempt())
+			require.NoError(t, outcome.Result.Err)
+			snapshot := registry.Snapshot()[0]
+			require.Nil(t, snapshot.Progress.UpstreamBodyBytes)
+			require.Nil(t, snapshot.AttemptProgress.UpstreamBodyBytes)
+			require.EqualValues(t, len("remote reply"), *snapshot.Progress.ClientBodyBytes)
+			require.EqualValues(t, response.Body.Len(), *snapshot.AttemptProgress.ClientBodyBytes)
+		})
+	}
+}
 
 type remoteTargetsStub struct {
 	snapshots map[string]RemoteTargetSnapshot
@@ -1270,4 +1309,21 @@ func canceledRemoteContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	return ctx, cancel
+}
+
+func TestGeminiRemoteAttemptPreservesQueryWithoutClientKey(t *testing.T) {
+	rctx, _ := newRemoteAttemptContext(t, context.Background(), 0)
+	rctx.Request.URL.Path = "/v1beta/models/gemini:streamGenerateContent"
+	rctx.Request.URL.RawQuery = "alt=sse&custom=a%2Fb&custom=c&key=client-secret"
+	direct := &remoteDirectStub{forward: func(_ context.Context, req agentproxy.DirectRequest, dst http.ResponseWriter) agentproxy.AttemptTransportOutcome {
+		require.Equal(t, "/v1beta/models/gemini:streamGenerateContent?alt=sse&custom=a%2Fb&custom=c", req.Attempt.RequestPath)
+		require.NotContains(t, req.Attempt.RequestPath, "secret")
+		writeRemoteResponse(t, dst, http.StatusOK, []byte("data: {}\n\n"), attemptwire.AttemptProxyResult{Kind: attemptwire.ResultSucceeded, ProviderDispatched: true, ProviderResultKnown: true, ResponseStarted: true})
+		return agentproxy.AttemptTransportOutcome{Commit: tunnel.Committed, ResponseStarted: true}
+	}}
+	bound := validRemoteBoundAttempt()
+	bound.Mode = attemptwire.ModePassthrough
+	outcome := newRemoteExecutorForTest(enabledRemoteTargets("target-a"), direct, &remoteRelayLinkStub{}).Execute(rctx, AttemptTarget{AgentID: "target-a", Kind: AttemptTargetRemote}, 42, bound)
+	require.Equal(t, AttemptSucceeded, outcome.Kind)
+	require.Equal(t, 1, direct.calls)
 }

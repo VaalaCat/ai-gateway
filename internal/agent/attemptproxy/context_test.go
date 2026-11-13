@@ -205,3 +205,22 @@ func (b *contextReplayBody) Close() error {
 	b.closes.Add(1)
 	return nil
 }
+
+func TestGeminiContextRestoresQueryAndOpaqueBody(t *testing.T) {
+	body := []byte(" {\"contents\":[],\"unknown\":true} ")
+	c, _ := newAttemptTestContext(http.MethodPost, attemptwire.EndpointPath, body)
+	meta := validAttemptMeta("/v1beta/models/gemini:streamGenerateContent?alt=sse&custom=a%2Fb&custom=c")
+	meta.Attempt.Mode = attemptwire.ModePassthrough
+	relay, release, err := NewContextBuilder(&contextAgent{bodyStore: &contextMemoryStore{}}).Build(c, meta)
+	require.NoError(t, err)
+	require.Equal(t, "/v1beta/models/gemini:streamGenerateContent", relay.Request.URL.Path)
+	require.Equal(t, "sse", relay.Request.URL.Query().Get("alt"))
+	require.Equal(t, []string{"a/b", "c"}, relay.Request.URL.Query()["custom"])
+	require.Equal(t, body, relay.Input.Body)
+	require.Equal(t, meta.RequestPath, c.Request.RequestURI)
+	require.True(t, relay.Input.IsStream)
+	release()
+	require.Equal(t, attemptwire.EndpointPath, c.Request.URL.Path)
+	require.Empty(t, c.Request.URL.RawQuery)
+	require.Equal(t, attemptwire.EndpointPath, c.Request.RequestURI)
+}

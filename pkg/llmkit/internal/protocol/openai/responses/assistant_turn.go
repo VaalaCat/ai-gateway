@@ -20,7 +20,7 @@ func (turn *responsesAssistantTurn) addReasoning(block ir.ContentBlock) bool {
 }
 
 func (turn *responsesAssistantTurn) addMessage(content []ir.ContentBlock) bool {
-	if turn.hasMessage {
+	if turn.hasMessage && (len(turn.content) == 0 || turn.content[len(turn.content)-1].Type != ir.ContentTypeImage) {
 		return false
 	}
 	turn.content = append(turn.content, content...)

@@ -1,6 +1,10 @@
 package responses
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
+)
 
 // ---------------------------------------------------------------------------
 // Wire types for JSON (de)serialization — OpenAI Responses API
@@ -51,9 +55,10 @@ type respFunctionCallInput struct {
 }
 
 type respInputContentBlock struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
+	Type         string           `json:"type"`
+	Text         string           `json:"text,omitempty"`
+	ImageURL     string           `json:"image_url,omitempty"`
+	ProviderData *ir.ProviderData `json:"provider_data,omitempty"`
 }
 
 type respTool struct {
@@ -114,6 +119,9 @@ type respOutputItem struct {
 	Arguments        string             `json:"arguments,omitempty"`
 	Input            string             `json:"input,omitempty"`
 	EncryptedContent string             `json:"encrypted_content,omitempty"`
+	Result           string             `json:"result,omitempty"`
+	OutputFormat     string             `json:"output_format,omitempty"`
+	ProviderData     *ir.ProviderData   `json:"provider_data,omitempty"`
 }
 
 // respFunctionCallOutputInput represents a function_call_output input item.

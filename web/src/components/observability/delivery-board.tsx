@@ -34,7 +34,7 @@ import {
 import { CopyableText } from "@/components/business/copyable-text";
 import { EntityLabel } from "@/components/business/entity-label";
 import { queueAccentClass, queueHealth } from "@/components/business/attempt-state";
-import { useDeliveryBoard, useDeliveryOp } from "@/lib/api/observability";
+import { useDeliveryOp } from "@/lib/api/observability";
 import { formatDuration, formatFileSize, formatRelativeTime } from "@/lib/utils/format";
 import { formatErrorToast } from "@/lib/api/error-toast";
 import type { AgentQueueRow, DeliveryBoardResponse, DeliveryOpRequest, DeliveryQueueItem } from "@/lib/types";
@@ -201,10 +201,9 @@ function rowKey(r: AgentQueueRow) {
   return String(r.agent_id);
 }
 
-export function DeliveryBoard() {
+export function DeliveryBoard({ data, dataUpdatedAt, incomplete = false }: { data: DeliveryBoardResponse; dataUpdatedAt: number; incomplete?: boolean }) {
   const t = useTranslations("monitoring");
   const tc = useTranslations("common");
-  const { data, isLoading, dataUpdatedAt } = useDeliveryBoard();
   const op = useDeliveryOp();
   const [showAll, setShowAll] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -232,13 +231,16 @@ export function DeliveryBoard() {
 
   return (
     <div className="space-y-3">
+      {incomplete && <p className="text-sm text-muted-foreground">{t("refresh.currentOnly")}</p>}
       <div className="flex flex-wrap gap-2" aria-label={t("delivery.healthSummary")}>
+        {data.successful_agent_ids.length > 0 && <>
 		<Badge variant={risk.sharedUsageDropped > 0 ? "destructive" : "outline"}>
 		  {t("delivery.usageDropped", { n: risk.sharedUsageDropped })}
         </Badge>
 		<Badge variant={risk.apiTraceSlimmed > 0 ? "secondary" : "outline"}>
 		  {t("delivery.traceSlimmed", { n: risk.apiTraceSlimmed })}
         </Badge>
+        </>}
         <Badge
           variant={risk.logDropped > 0 || !risk.logReady ? "destructive" : risk.logQueued > 0 ? "secondary" : "outline"}
         >
@@ -247,11 +249,6 @@ export function DeliveryBoard() {
         </Badge>
       </div>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs text-muted-foreground">
-          {data?.failed_agents?.length
-            ? t("delivery.failedAgents", { n: data.failed_agents.length })
-            : ""}
-        </span>
         <Button
           variant="ghost"
           size="sm"
@@ -262,9 +259,9 @@ export function DeliveryBoard() {
         </Button>
       </div>
 
-      {!isLoading && rows.length === 0 && (
+      {rows.length === 0 && (
         <p className="rounded-md border p-6 text-center text-sm text-muted-foreground">
-          {t("delivery.allClear")}
+          {t(incomplete ? "refresh.noCurrentData" : "delivery.allClear")}
         </p>
       )}
 

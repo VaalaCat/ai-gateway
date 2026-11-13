@@ -13,6 +13,10 @@ interface EntityLabelProps {
   /** 用于需要父 Service 限定的日志快照 adapter。 */
   apiServiceId?: number;
   className?: string;
+  /** 已记录的实体名称；编号和悬浮详情仍使用对应实体。 */
+  snapshotName?: string;
+  /** 只限制名称的宽度，保留编号。 */
+  nameClassName?: string;
   /** 名字后是否附灰色 #id(默认 true)。value-即-label 的实体(如 model)自动不显示。 */
   showId?: boolean;
   /** 悬浮展开实体富卡片(名字+#id+复制+关键字段)。默认 true；仅对注册了 body 的实体且数据就绪时生效。 */
@@ -25,6 +29,8 @@ export function EntityLabel({
   scope = "self",
   apiServiceId,
   className,
+  snapshotName,
+  nameClassName,
   showId = true,
   hover = true,
 }: EntityLabelProps) {
@@ -33,23 +39,23 @@ export function EntityLabel({
   const one = adapter.useOne(idStr, { scope, apiServiceId });
 
   if (!idStr) {
-    return <span className={cn("text-muted-foreground", className)}>-</span>;
+    return <span className={cn(!snapshotName && "text-muted-foreground", nameClassName, className)}>{snapshotName || "-"}</span>;
   }
 
   const resolved = one.data ? adapter.getLabel(one.data) : undefined;
-  const label = resolved ?? adapter.labelForValue?.(idStr);
+  const label = snapshotName || resolved || adapter.labelForValue?.(idStr);
   // label 来自 labelForValue 说明 value 本身即名字(如 model_name),不再追加 #id
-  const isValueLabel = !resolved && label != null;
+  const isValueLabel = !snapshotName && !resolved && label != null;
 
   if (!label) {
     return <span className={cn("text-muted-foreground", className)}>#{idStr}</span>;
   }
 
   const inner = (
-    <span className={className}>
-      {label}
+    <span className={cn(nameClassName && "inline-flex max-w-full items-center", className)}>
+      {nameClassName ? <span className={nameClassName} title={label}>{label}</span> : label}
       {showId && !isValueLabel && (
-        <span className="text-muted-foreground ml-1">#{idStr}</span>
+        <span className="text-muted-foreground ml-1 shrink-0">#{idStr}</span>
       )}
     </span>
   );

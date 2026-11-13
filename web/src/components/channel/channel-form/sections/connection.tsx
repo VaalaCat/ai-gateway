@@ -15,6 +15,7 @@ import {
 import { FieldTip } from "@/components/business/field-tip";
 import { ChannelForm } from "../types";
 import type { ChannelOtherSettings } from "../types";
+import { UpstreamAuthEditor } from "../upstream-auth-editor";
 import {
   channelProtocols,
   parseOtherSettings,
@@ -39,6 +40,9 @@ export function ConnectionSection({ form, setForm, hiddenFields }: ConnectionSec
 
   return (
     <div className="flex flex-col gap-8">
+      {!hiddenFields?.has("auth") && (
+        <UpstreamAuthEditor value={form.auth} onChange={(auth) => setForm({ ...form, auth })} />
+      )}
       <FieldSet>
         <FieldLegend>{t("upstreamProviderParameters")}</FieldLegend>
         <FieldDescription>{t("upstreamProviderParametersDesc")}</FieldDescription>

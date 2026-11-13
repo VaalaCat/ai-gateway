@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -182,6 +183,29 @@ func (c *Conn) WriteJSON(v any) error {
 		}
 		c.Close()
 		return errSendQueueFull
+	}
+}
+
+// WriteJSONContext 在调用预算内等待消息入队，取消只结束本次发送。
+func (c *Conn) WriteJSONContext(ctx context.Context, v any) error {
+	// 1. 检查取消并编码消息。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	// 2. 等待队列、连接关闭或调用取消。
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closed:
+		return errClosedConn
+	case <-c.sendDone:
+		return errClosedConn
+	case c.sendQueue <- data:
+		return nil
 	}
 }
 

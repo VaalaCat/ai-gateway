@@ -172,6 +172,7 @@ function BYOKPageInner() {
       { key: "chat_completions", label: t("endpointChat") },
       { key: "responses", label: t("endpointResp") },
       { key: "messages", label: t("endpointClaude") },
+          { key: "generate_content", label: t("endpointGemini") },
     ];
 
     return (

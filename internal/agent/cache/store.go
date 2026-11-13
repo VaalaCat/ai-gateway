@@ -421,9 +421,10 @@ func (s *Store) SetUserQuota(id uint, quota int64) {
 
 func (s *Store) GetChannel(id uint) *models.Channel {
 	v, _ := s.channels.Peek(id)
-	return v
+	return cloneChannel(v)
 }
 func (s *Store) SetChannel(ch *models.Channel) {
+	ch = cloneChannel(ch)
 	old, _ := s.channels.Peek(ch.ID)
 	s.channels.Set(ch.ID, ch)
 	s.emitChannelChange(old, ch)
@@ -530,7 +531,7 @@ func (s *Store) LoadTokens(tokens []models.Token) {
 }
 func (s *Store) LoadChannels(channels []models.Channel) {
 	for i := range channels {
-		s.channels.Set(channels[i].ID, &channels[i])
+		s.channels.Set(channels[i].ID, cloneChannel(&channels[i]))
 	}
 }
 func (s *Store) LoadModelConfigs(configs []models.ModelConfig) {
@@ -650,7 +651,11 @@ func (s *Store) GetChannelsForModel(model string) []*models.Channel {
 	if !ok {
 		return nil
 	}
-	return v
+	channels := make([]*models.Channel, len(v))
+	for i := range v {
+		channels[i] = cloneChannel(v[i])
+	}
+	return channels
 }
 
 // HasRealModel 判断 name 是否有 channel 支撑的真实模型（不含 routing）。
@@ -1294,7 +1299,7 @@ func (s *Store) GetVisiblePrivateChannelsForUser(userID uint, model string) []*p
 		if !modelInList(model, set.Channels[i].Models) {
 			continue
 		}
-		out = append(out, &set.Channels[i])
+		out = append(out, cloneSyncedPrivateChannel(&set.Channels[i]))
 	}
 	return out
 }
@@ -1347,9 +1352,13 @@ func (s *Store) OverrideVisiblePrivateChannels(userID uint, channels []protocol.
 	if !testing.Testing() {
 		panic("cache.Store.OverrideVisiblePrivateChannels called outside test context")
 	}
+	clonedChannels := make([]protocol.SyncedPrivateChannel, len(channels))
+	for i := range channels {
+		clonedChannels[i] = *cloneSyncedPrivateChannel(&channels[i])
+	}
 	s.visiblePrivateChannels.Set(userID, &protocol.VisiblePrivateChannelSet{
 		UserID:   userID,
-		Channels: channels,
+		Channels: clonedChannels,
 	})
 }
 
@@ -1388,7 +1397,7 @@ func (s *Store) emitChannelChange(old, new *models.Channel) {
 	fns := s.onChannelChange
 	s.mu.Unlock()
 	for _, fn := range fns {
-		fn(old, new)
+		fn(cloneChannel(old), cloneChannel(new))
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/executionmode"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -104,11 +105,10 @@ func (f *ModelOfferPlanFinder) Find(ctx context.Context, query ModelOfferPlanQue
 		}
 		result.addDropBlock(dropCode)
 		for _, candidate := range filtered {
-			result.Candidates = append(result.Candidates, offerCandidateFromScored(
-				realModel,
-				candidate,
-				query.InboundProtocols,
-			))
+			offer := offerCandidateFromScored(realModel, candidate, query.InboundProtocols)
+			if len(query.InboundProtocols) == 0 || len(offer.Modes) > 0 {
+				result.Candidates = append(result.Candidates, offer)
+			}
 		}
 	}
 
@@ -169,6 +169,9 @@ func offerCandidateFromScored(
 	}
 	picker := defaultModePicker{}
 	for _, inboundProtocol := range protocols {
+		if inboundProtocol == llmkit.ProtocolGemini && !executionmode.SupportsGeminiPassthrough(candidate.Channel, realModel) {
+			continue
+		}
 		result.Modes = append(result.Modes, ModelOfferCandidateMode{
 			Protocol: inboundProtocol,
 			Mode:     picker.Pick(candidate.Channel, realModel, inboundProtocol, llmkit.ToolCallRequestInfo{}),

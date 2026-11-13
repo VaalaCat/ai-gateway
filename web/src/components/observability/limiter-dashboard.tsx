@@ -23,8 +23,7 @@ import {
 import { EntityLabel } from "@/components/business/entity-label";
 import { cn } from "@/lib/utils";
 import { parseBucket } from "@/lib/observability";
-import { useLimiterUsage } from "@/lib/api/observability";
-import type { LimiterBucketRow } from "@/lib/types";
+import type { LimiterBucketRow, LimiterUsageResponse } from "@/lib/types";
 
 // 饱和度条配色复用 cache-stats-table 的 UtilCell 语义。
 function barColor(ratio: number): string {
@@ -268,9 +267,9 @@ function ByResource({ buckets }: { buckets: LimiterBucketRow[] }) {
   );
 }
 
-export function LimiterDashboard() {
+export function LimiterDashboard({ data, incomplete = false }: { data: LimiterUsageResponse; incomplete?: boolean }) {
   const t = useTranslations("observability");
-  const { data } = useLimiterUsage();
+  const monitoring = useTranslations("monitoring");
   const buckets = useMemo(() => data?.buckets ?? [], [data?.buckets]);
 
   const totals = useMemo(() => {
@@ -285,10 +284,13 @@ export function LimiterDashboard() {
     return { occupied, capacity, waiters };
   }, [buckets]);
 
-  const failedAgents = data?.failed_agents ?? [];
+  if (incomplete && data.successful_agent_ids.length === 0) {
+    return <p className="text-sm text-muted-foreground">{monitoring("refresh.noCurrentData")}</p>;
+  }
 
   return (
     <div className="space-y-4">
+      {incomplete && <p className="text-sm text-muted-foreground">{monitoring("refresh.currentOnly")}</p>}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">{t("limiter.clusterTitle")}</CardTitle>
@@ -314,11 +316,6 @@ export function LimiterDashboard() {
             </div>
           </div>
           <p className="text-xs text-muted-foreground">{t("limiter.localSumNote")}</p>
-          {failedAgents.length > 0 && (
-            <p className="text-xs text-amber-600 dark:text-amber-400">
-              {t("failedAgents", { n: failedAgents.length })}
-            </p>
-          )}
         </CardContent>
       </Card>
 

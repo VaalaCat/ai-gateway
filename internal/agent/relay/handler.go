@@ -197,6 +197,7 @@ func (h *Handler) Relay(c *gin.Context) {
 			Cancel:    cancel,
 		})
 		defer rctx.Inflight.Done()
+		c.Writer = rctx.Inflight.WrapClientWriter(c.Writer)
 		rctx.State.Recorder.SetStageHook(func(s trace.Stage) {
 			rctx.Inflight.SetStage(string(s))
 		})

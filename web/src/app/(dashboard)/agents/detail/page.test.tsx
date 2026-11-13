@@ -29,8 +29,7 @@ vi.mock("@/components/business/agent-connections-panel", () => ({
   AgentConnectionsPanel: ({ snapshot, stale, initialRouteTargetsPage, routeTargetsCurrent, refreshing }: { snapshot: AgentDetail["connection"]; stale: boolean; initialRouteTargetsPage?: AgentDetail["route_targets"]; routeTargetsCurrent: boolean; refreshing: boolean }) => <div>Authoritative connection panel: {snapshot.control.state}; stale={String(stale)}; direct={initialRouteTargetsPage?.snapshot_seq ?? "none"}; targets-current={String(routeTargetsCurrent)}; refreshing={String(refreshing)}</div>,
 }));
 vi.mock("@/components/business/cache-stats-table", () => ({ CacheStatsTable: () => <div>Cache stats</div> }));
-vi.mock("@/components/business/inflight-table", () => ({ InflightTable: () => <div>Inflight rows</div> }));
-vi.mock("@/components/observability/inflight-block-detail", () => ({ InflightBlockDetail: () => null }));
+vi.mock("@/components/observability/inflight-requests", () => ({ InflightRequests: () => <div>Inflight rows</div> }));
 
 const detail: AgentDetail = {
   id: 7, agent_id: "agent-a", name: "Agent A", status: 1, tags: "edge", proxy_url: "", relay_mode: "inherit", relay_uri: "", direct_inbound_enabled: true, direct_outbound_enabled: true, relay_inbound_enabled: true, relay_outbound_enabled: true, last_seen: 1, created_at: 1, http_addresses: "[]",

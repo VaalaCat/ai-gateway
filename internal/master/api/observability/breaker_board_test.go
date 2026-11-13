@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ func TestBreakerBoard_AggregatesAcrossAgents(t *testing.T) {
 
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a", "uid-b"} },
-		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallContext: func(_ context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			// 同一渠道 admin/7:edge-a 上 open,edge-b 上 closed
 			st := "closed"
 			if agentID == "uid-a" {
@@ -60,7 +61,7 @@ func TestBreakerBoard_IsolatesNodeFailure(t *testing.T) {
 
 	h := &Handler{
 		GetOnlineAgentIDs: func() []string { return []string{"uid-a", "uid-b"} },
-		HubCall: func(agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
+		HubCallContext: func(_ context.Context, agentID, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 			if agentID == "uid-a" {
 				return json.Marshal([]map[string]any{
 					{"source": "admin", "channel_id": 7, "state": "open"},

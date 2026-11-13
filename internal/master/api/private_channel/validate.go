@@ -1,8 +1,10 @@
 package private_channel
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
+	"gorm.io/datatypes"
 )
 
 // ValidatorCtx carries everything a BYOK validator needs. Create-path callers
@@ -53,6 +56,7 @@ var byokValidators = []validatorFn{
 	validateNameUniquenessCtx,
 	validateBaseURLAllowlistCtx,
 	validateEndpointsCtx,
+	validateChannelAuthCtx,
 	validateToolCompatibilityCtx,
 	validateModelsNonEmptyCtx,
 	validateModelsSubsetOfModelConfigsCtx,
@@ -476,6 +480,7 @@ func mappingFromAny(v any) map[string]string {
 // shared validator registry consumes.
 func createRequestToMap(req *CreateRequest) map[string]any {
 	return map[string]any{
+		"auth":                req.Auth,
 		"name":                req.Name,
 		"key":                 req.Key,
 		"base_url":            req.BaseURL,
@@ -523,5 +528,36 @@ func validateModelsNonEmptyCtx(c ValidatorCtx) error {
 	if len(stringSliceFromAny(c.Req["models"])) == 0 {
 		return api.BadRequestError("models must not be empty", nil)
 	}
+	return nil
+}
+
+// validateChannelAuthCtx 校验创建或更新的整份认证配置并转换为 JSON 列。
+func validateChannelAuthCtx(c ValidatorCtx) error {
+	// 1. 只处理本次提交的认证设置。
+	if !c.IsDirty("auth") {
+		return nil
+	}
+	raw, present := c.Req["auth"]
+	if !present {
+		return nil
+	}
+	if raw == nil {
+		return api.ErrorWithCode(http.StatusBadRequest, "invalid_upstream_auth", models.ErrUpstreamAuthValue.Error(), nil)
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return api.ErrorWithCode(http.StatusBadRequest, "invalid_upstream_auth", models.ErrUpstreamAuthValue.Error(), nil)
+	}
+	var auth models.ChannelAuth
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&auth); err != nil {
+		return api.ErrorWithCode(http.StatusBadRequest, "invalid_upstream_auth", models.ErrUpstreamAuthValue.Error(), nil)
+	}
+	// 2. 校验认证配置后写入强类型 JSON 值。
+	if err := models.ValidateChannelAuth(auth); err != nil {
+		return api.ErrorWithCode(http.StatusBadRequest, "invalid_upstream_auth", err.Error(), nil)
+	}
+	c.Req["auth"] = datatypes.NewJSONType(auth)
 	return nil
 }

@@ -618,11 +618,12 @@ func (s *Server) setupRoutes() {
 		Connections:          s.Connections,
 		ControlSessions:      s.Hub,
 		Operations:           s.Operations,
-		HubCallSession:       s.Hub.CallSession,
+		HubCallSession:       s.Hub.CallSessionContext,
 		Hub:                  s.Hub,
 	}
 	obsH := &apiobservability.Handler{
 		HubCall:           s.Hub.Call,
+		HubCallContext:    s.Hub.CallContext,
 		GetOnlineAgentIDs: s.Hub.GetOnlineAgentIDs,
 		LogBacklogSnapshot: func() apimonitoring.LogBacklog {
 			return apimonitoring.LogBacklogFrom(s.LogDeliveryWorker.Status())

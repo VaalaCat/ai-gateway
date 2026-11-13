@@ -40,7 +40,7 @@ func (b *Backend) Relay(rctx *state.RelayContext, a state.Attempt) state.Attempt
 	if provider, ok := b.Agent.(interface{ GetLegacyTransportOwner() *newapi.TransportOwner }); ok {
 		owner = provider.GetLegacyTransportOwner()
 	}
-	lr := newapi.RelayWithOwner(owner, c, ch, bodyBytes, modelName, isStream, relayMode, true, b.logger())
+	lr := newapi.RelayWithOwner(owner, c, ch, bodyBytes, modelName, isStream, relayMode, true, b.logger(), rctx.Inflight)
 
 	result := state.AttemptResult{
 		PromptTokens:     lr.PromptTokens,

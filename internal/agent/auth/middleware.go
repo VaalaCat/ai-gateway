@@ -12,6 +12,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/utils"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 	"github.com/gin-gonic/gin"
 )
 
@@ -34,6 +35,21 @@ func TokenAuth(store *cache.Store) gin.HandlerFunc {
 func TokenAuthWithFailureWriter(store *cache.Store, failureWriter TokenAuthFailureWriter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := extractAPIKey(c)
+		// 1. Gemini 查询凭证只用于本地鉴权，后续转发与日志不保留原值。
+		if _, _, ok := endpoint.ParseGeminiPath(c.Request.URL.Path); ok {
+			query := c.Request.URL.Query()
+			changed := false
+			for name := range query {
+				if strings.EqualFold(name, "key") {
+					query.Del(name)
+					changed = true
+				}
+			}
+			if changed {
+				c.Request.URL.RawQuery = query.Encode()
+				c.Request.RequestURI = c.Request.URL.RequestURI()
+			}
+		}
 		if key == "" {
 			writeFailure(c, failureWriter, TokenAuthFailure{Status: http.StatusUnauthorized, Code: "missing_api_key", Message: consts.ErrMissingAPIKey})
 			return
@@ -113,6 +129,10 @@ func TokenAuthWithFailureWriter(store *cache.Store, failureWriter TokenAuthFailu
 		}
 		// === 查链结束 ===
 
+		if _, _, ok := endpoint.ParseGeminiPath(c.Request.URL.Path); ok {
+			// 2. 已验证的入口凭证统一为 Bearer，供目标 Agent 再鉴权。
+			c.Request.Header.Set(consts.HeaderAuthorization, consts.BearerPrefix+key)
+		}
 		c.Set(consts.CtxKeyUserInfo, userInfo)
 		c.Next()
 	}
@@ -146,6 +166,12 @@ func extractAPIKey(c *gin.Context) string {
 			return strings.TrimSpace(strings.TrimPrefix(authHeader, consts.BearerPrefix))
 		}
 		return ""
+	}
+	if _, _, ok := endpoint.ParseGeminiPath(c.Request.URL.Path); ok {
+		if key := strings.TrimSpace(c.GetHeader("x-goog-api-key")); key != "" {
+			return key
+		}
+		return strings.TrimSpace(c.Request.URL.Query().Get("key"))
 	}
 	return strings.TrimSpace(c.GetHeader(consts.HeaderXAPIKey))
 }

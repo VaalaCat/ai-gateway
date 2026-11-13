@@ -24,6 +24,7 @@ export function isStageConfigured(id: SectionId, form: ChannelForm): boolean {
       const otherSettings = parseOtherSettings(form.other_settings);
       return !!(
         form.organization ||
+        form.auth ||
         form.api_version ||
         form.proxy_url ||
         form.disable_keepalive ||

@@ -71,6 +71,9 @@ export function ChannelEndpointsEditor({
                   placeholder={option.default}
                   className="font-mono text-xs"
                 />
+                {option.key === "generate_content" ? (
+                  <FieldDescription>{t("geminiEndpointHint", { model: "{model}", action: "{action}" })}</FieldDescription>
+                ) : null}
                 {fullURL ? (
                   <FieldDescription className="break-all font-mono">→ {fullURL}</FieldDescription>
                 ) : null}

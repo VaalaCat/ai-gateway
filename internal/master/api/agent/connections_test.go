@@ -96,7 +96,7 @@ func (o apiHandlerControlOperator) CallSessionContext(ctx context.Context, agent
 	if o.handler.HubCallSession == nil {
 		return nil, errors.New("hub call session is not available")
 	}
-	return o.handler.HubCallSession(agentID, generation, method, params, timeout)
+	return o.handler.HubCallSession(ctx, agentID, generation, method, params, timeout)
 }
 
 func attachTestOperations(handler *Handler, ctx *app.Context) {
@@ -390,7 +390,7 @@ func TestOperationGuardFullSyncPreauthorizesDeduplicatesAndUsesLease(t *testing.
 			Where("agent_id = ?", ids[1]).Update("status", consts.StatusDisabled).Error)
 		h.GetOnlineAgentIDs = func() []string { return append([]string{}, ids...) }
 		var calls atomic.Int32
-		h.HubCallSession = func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+		h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 			calls.Add(1)
 			return json.RawMessage(`{"version":1,"duration_ms":1}`), nil
 		}
@@ -408,7 +408,7 @@ func TestOperationGuardFullSyncPreauthorizesDeduplicatesAndUsesLease(t *testing.
 		h.GetOnlineAgentIDs = func() []string { return nil }
 		gotGenerations := make(map[string]uint64)
 		var mu sync.Mutex
-		h.HubCallSession = func(agentID string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+		h.HubCallSession = func(_ context.Context, agentID string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
 			mu.Lock()
 			gotGenerations[agentID] = generation
 			mu.Unlock()
@@ -438,7 +438,7 @@ func TestOperationGuardFullSyncConcurrencyIsBoundedAndOrdered(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32
 	var calls atomic.Int32
-	h.HubCallSession = func(agentID string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+	h.HubCallSession = func(_ context.Context, agentID string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
 		calls.Add(1)
 		current := active.Add(1)
 		for {
@@ -504,7 +504,7 @@ func TestOperationGuardFullSyncOrdinaryFailuresStayIsolatedAndRedacted(t *testin
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h, ctx, ids, _ := newFullSyncFixture(t, 1)
-			h.HubCallSession = func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 				return tt.raw, tt.err
 			}
 
@@ -524,7 +524,7 @@ func TestOperationGuardFullSyncStaleGenerationIsTopLevelAfterWorkersConverge(t *
 	release := make(chan struct{})
 	var arrived atomic.Int32
 	var finished atomic.Int32
-	h.HubCallSession = func(agentID string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+	h.HubCallSession = func(_ context.Context, agentID string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
 		if arrived.Add(1) == int32(len(ids)) {
 			close(release)
 		}
@@ -551,7 +551,7 @@ func TestOperationGuardFullSyncCancellationDuringCallReturnsTopLevelError(t *tes
 	ctx.Request = ctx.Request.WithContext(requestCtx)
 	started := make(chan struct{})
 	release := make(chan struct{})
-	h.HubCallSession = func(_ string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+	h.HubCallSession = func(_ context.Context, _ string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
 		close(started)
 		<-release
 		return json.Marshal(protocol.ForceFullSyncResponse{Version: int64(generation)})
@@ -602,7 +602,7 @@ func TestOperationGuardInterruptAuthorizesAndUsesLease(t *testing.T) {
 		var gotGeneration uint64
 		var gotMethod string
 		var gotParams any
-		h.HubCallSession = func(_ string, generation uint64, method string, params any, _ time.Duration) (json.RawMessage, error) {
+		h.HubCallSession = func(_ context.Context, _ string, generation uint64, method string, params any, _ time.Duration) (json.RawMessage, error) {
 			gotGeneration, gotMethod, gotParams = generation, method, params
 			return json.RawMessage(`{"interrupted":true}`), nil
 		}
@@ -619,7 +619,7 @@ func TestOperationGuardInterruptAuthorizesAndUsesLease(t *testing.T) {
 		t.Run("denied", func(t *testing.T) {
 			h, ctx, agent, _ := newInterruptFixture(t, consts.StatusDisabled)
 			var calls atomic.Int32
-			h.HubCallSession = func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 				calls.Add(1)
 				return json.RawMessage(`{"interrupted":true}`), nil
 			}
@@ -635,7 +635,7 @@ func TestOperationGuardInterruptAuthorizesAndUsesLease(t *testing.T) {
 			cancel()
 			ctx.Request = ctx.Request.WithContext(requestCtx)
 			var calls atomic.Int32
-			h.HubCallSession = func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 				calls.Add(1)
 				return json.RawMessage(`{"interrupted":true}`), nil
 			}
@@ -648,7 +648,7 @@ func TestOperationGuardInterruptAuthorizesAndUsesLease(t *testing.T) {
 
 	t.Run("generation race is a stable conflict", func(t *testing.T) {
 		h, ctx, agent, control := newInterruptFixture(t, consts.StatusEnabled)
-		h.HubCallSession = func(_ string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
+		h.HubCallSession = func(_ context.Context, _ string, generation uint64, _ string, _ any, _ time.Duration) (json.RawMessage, error) {
 			control.facts[agent.AgentID] = connectivity.ControlSessionFact{Generation: generation + 1}
 			return nil, fmt.Errorf("private interrupt detail: %w", connectivity.ErrConnectionGenerationChanged)
 		}
@@ -695,7 +695,7 @@ func TestConnectionSnapshotDiagnosticsUseCurrentGenerationWithoutOperationAuthor
 		var generations []uint64
 		var methods []string
 		var mu sync.Mutex
-		h.HubCallSession = func(_ string, generation uint64, method string, _ any, _ time.Duration) (json.RawMessage, error) {
+		h.HubCallSession = func(_ context.Context, _ string, generation uint64, method string, _ any, _ time.Duration) (json.RawMessage, error) {
 			mu.Lock()
 			generations = append(generations, generation)
 			methods = append(methods, method)
@@ -716,7 +716,7 @@ func TestConnectionSnapshotDiagnosticsUseCurrentGenerationWithoutOperationAuthor
 	t.Run("fresh last seen cannot replace a current session", func(t *testing.T) {
 		h, ctx, agent := newDiagnosticFixture(t, false)
 		var calls atomic.Int32
-		h.HubCallSession = func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+		h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 			calls.Add(1)
 			return json.RawMessage(`[]`), nil
 		}
@@ -730,7 +730,7 @@ func TestConnectionSnapshotDiagnosticsUseCurrentGenerationWithoutOperationAuthor
 	t.Run("stale generation is stable and canceled request performs no rpc", func(t *testing.T) {
 		t.Run("stale", func(t *testing.T) {
 			h, ctx, agent := newDiagnosticFixture(t, true)
-			h.HubCallSession = func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 				return nil, fmt.Errorf("private diagnostic detail: %w", connectivity.ErrConnectionGenerationChanged)
 			}
 			_, err := h.GetGoroutines(ctx, AgentIDQuery{ID: strconv.Itoa(int(agent.ID))})
@@ -745,7 +745,7 @@ func TestConnectionSnapshotDiagnosticsUseCurrentGenerationWithoutOperationAuthor
 			cancel()
 			ctx.Request = ctx.Request.WithContext(requestCtx)
 			var calls atomic.Int32
-			h.HubCallSession = func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			h.HubCallSession = func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 				calls.Add(1)
 				return json.RawMessage(`[]`), nil
 			}

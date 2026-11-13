@@ -56,6 +56,7 @@ func (backend *Backend) Relay(relay *state.RelayContext, attempt state.Attempt) 
 	}
 	gated, gateErr := gateResponsesPreamble(ctx, events, request.Stream, target.Protocol)
 	if gateErr != nil {
+		gateErr = relay.State.Recorder.MaskError(gateErr)
 		relay.State.Recorder.WithFail(trace.StageUpstreamDecode, gateErr)
 		return state.AttemptResult{UpstreamModel: target.Model, Err: gateErr}
 	}
@@ -137,7 +138,7 @@ func (backend *Backend) buildCallOptions(
 	config *upstream.ChannelConfig,
 	mappedModel string,
 ) llmkit.CallOptions {
-	compatibility := upstream.NewToolCompatibilityRules(attempt.Channel).Match(mappedModel)
+	compatibility := upstream.NewToolCompatibilityRules(attempt.Channel).Match(attempt.RealModel, mappedModel)
 	policy := llmkit.NormalizeBuiltinToolFallback(config.BuiltinToolFallback)
 	return llmkit.CallOptions{
 		HTTPClient: &attemptHTTPDoer{
@@ -201,10 +202,10 @@ func (backend *Backend) writeClientResponse(
 	if err != nil {
 		cancel()
 		snapshot := monitor.FinalSnapshot()
-		wrapped := fmt.Errorf("encode response: %w", err)
+		wrapped := relay.State.Recorder.MaskError(fmt.Errorf("encode response: %w", err))
 		relay.State.Recorder.WithFail(trace.StageClientEncode, wrapped)
 		if backend.logger() != nil {
-			backend.logger().Warn("failed to encode response to client", zap.Error(err))
+			backend.logger().Warn("failed to encode response to client", zap.Error(wrapped))
 		}
 		return buildAttemptResult(snapshot, upstreamModel, relay.Context.Writer.Written(), wrapped)
 	}
@@ -278,7 +279,7 @@ func projectAttemptResult(recorder *trace.Recorder, upstreamModel string, callEr
 	if errors.As(callErr, &providerErr) {
 		return state.AttemptResult{UpstreamModel: upstreamModel, Err: providerErr}
 	}
-	return state.AttemptResult{UpstreamModel: upstreamModel, Err: callErr}
+	return state.AttemptResult{UpstreamModel: upstreamModel, Err: recorder.MaskError(callErr)}
 }
 
 func traceStage(stage llmkit.ErrorStage) trace.Stage {

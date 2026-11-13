@@ -3,6 +3,7 @@ import type { UseQueryOptions } from "@tanstack/react-query";
 import { api, buildQuery } from "./client";
 import type {
   ChannelDisableState,
+  ChannelAuth,
   ChannelTestResponse,
   PaginatedResponse,
   PaginatedParams,
@@ -11,6 +12,7 @@ import type {
 // === Types ===
 
 export interface BYOKChannelDetail {
+  auth?: ChannelAuth;
   id: number;
   owner_id: number;
   name: string;
@@ -49,6 +51,7 @@ export interface BYOKChannelDetail {
 }
 
 export interface BYOKCreateRequest {
+  auth?: ChannelAuth;
   name: string;
   type: number;
   key: string;

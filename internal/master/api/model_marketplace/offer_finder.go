@@ -41,6 +41,7 @@ const (
 	EndpointChatCompletions SupportedEndpoint = "chat_completions"
 	EndpointResponses       SupportedEndpoint = "responses"
 	EndpointMessages        SupportedEndpoint = "messages"
+	EndpointGenerateContent SupportedEndpoint = "generate_content"
 	EndpointModels          SupportedEndpoint = "models"
 )
 
@@ -383,6 +384,7 @@ var supportedEndpointRegistry = []struct {
 	{key: "chat_completions", endpoint: EndpointChatCompletions},
 	{key: "responses", endpoint: EndpointResponses},
 	{key: "messages", endpoint: EndpointMessages},
+	{key: "generate_content", endpoint: EndpointGenerateContent},
 	{key: "models", endpoint: EndpointModels},
 }
 

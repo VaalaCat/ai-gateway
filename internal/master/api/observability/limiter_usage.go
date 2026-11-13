@@ -1,13 +1,16 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/master/controlrpc"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -29,28 +32,42 @@ type AgentBucket struct {
 }
 
 type LimiterUsageResponse struct {
-	Buckets      []LimiterBucketRow `json:"buckets"`
-	FailedAgents []FailedAgent      `json:"failed_agents"`
+	Buckets            []LimiterBucketRow `json:"buckets"`
+	FailedAgents       []FailedAgent      `json:"failed_agents"`
+	SuccessfulAgentIDs []uint             `json:"successful_agent_ids"`
 }
 
 type FailedAgent struct {
 	AgentID   uint   `json:"agent_id"`
 	AgentName string `json:"agent_name"`
 	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
+	ElapsedMs int64  `json:"elapsed_ms"`
 }
 
+// GetLimiterUsage 在聚合预算内读取节点限流占用，并合并成功结果与失败节点。
 func (h *Handler) GetLimiterUsage(c *app.Context, _ api.EmptyRequest) (LimiterUsageResponse, error) {
-	resp := LimiterUsageResponse{Buckets: []LimiterBucketRow{}, FailedAgents: []FailedAgent{}}
-	if h.HubCall == nil || h.GetOnlineAgentIDs == nil {
+	resp := LimiterUsageResponse{Buckets: []LimiterBucketRow{}, FailedAgents: []FailedAgent{}, SuccessfulAgentIDs: []uint{}}
+	if h.HubCallContext == nil || h.GetOnlineAgentIDs == nil {
 		return resp, api.InternalError("hub not available", nil)
+	}
+	// 1. 为查询、排队和节点 RPC 共用本次聚合预算。
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(c.RequestContext(), api.DiagnosticAggregateTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentLimiterUsage, started, err)
 	}
 	ids := h.GetOnlineAgentIDs()
 	if len(ids) == 0 {
 		return resp, nil
 	}
-	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, ctx))
 	agents, err := q.Agent().ListByAgentIDs(ids)
 	if err != nil {
+		if ctx.Err() != nil {
+			return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentLimiterUsage, started, ctx.Err())
+		}
 		return resp, api.InternalError("list agents failed", err)
 	}
 	byUID := map[string]models.Agent{}
@@ -66,13 +83,24 @@ func (h *Handler) GetLimiterUsage(c *app.Context, _ api.EmptyRequest) (LimiterUs
 	for _, uid := range ids {
 		ag := byUID[uid]
 		p.Go(func() nodeRes {
-			raw, err := h.HubCall(uid, consts.RPCAgentLimiterUsage, nil, 5*time.Second)
+			if ag.ID == 0 {
+				return nodeRes{failed: &FailedAgent{Code: "agent_operation_failed", Error: "agent not found", ElapsedMs: time.Since(started).Milliseconds()}}
+			}
+			nodeCtx, cancelNode := context.WithTimeout(ctx, api.DiagnosticNodeTimeout)
+			defer cancelNode()
+			var raw json.RawMessage
+			err := nodeCtx.Err()
+			if err == nil {
+				raw, err = h.HubCallContext(nodeCtx, uid, consts.RPCAgentLimiterUsage, nil, api.DiagnosticNodeTimeout)
+			}
 			if err != nil {
-				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: err.Error()}}
+				failure := api.DiagnosticError(c.Logger, uid, consts.RPCAgentLimiterUsage, started, err)
+				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: failure.Message, Code: failure.Code, ElapsedMs: time.Since(started).Milliseconds()}}
 			}
 			var rows []protocol.LimiterBucketStat
 			if err := json.Unmarshal(raw, &rows); err != nil {
-				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: "decode: " + err.Error()}}
+				failure := api.DiagnosticError(c.Logger, uid, consts.RPCAgentLimiterUsage, started, fmt.Errorf("%w: %v", controlrpc.ErrInvalidResponse, err))
+				return nodeRes{ag: ag, failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: failure.Message, Code: failure.Code, ElapsedMs: time.Since(started).Milliseconds()}}
 			}
 			return nodeRes{rows: rows, ag: ag}
 		})
@@ -87,6 +115,7 @@ func (h *Handler) GetLimiterUsage(c *app.Context, _ api.EmptyRequest) (LimiterUs
 			resp.FailedAgents = append(resp.FailedAgents, *r.failed)
 			continue
 		}
+		resp.SuccessfulAgentIDs = append(resp.SuccessfulAgentIDs, r.ag.ID)
 		for _, row := range r.rows {
 			k := key{row.LimiterID, row.Bucket}
 			cur, ok := agg[k]
@@ -110,6 +139,9 @@ func (h *Handler) GetLimiterUsage(c *app.Context, _ api.EmptyRequest) (LimiterUs
 		resp.Buckets = append(resp.Buckets, *v)
 	}
 	sortLimiterResponse(&resp)
+	if err := c.RequestContext().Err(); err == context.Canceled {
+		return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentLimiterUsage, started, err)
+	}
 	return resp, nil
 }
 
@@ -128,6 +160,7 @@ func sortLimiterResponse(resp *LimiterUsageResponse) {
 		pa := resp.Buckets[i].PerAgent
 		sort.Slice(pa, func(x, y int) bool { return pa[x].AgentID < pa[y].AgentID })
 	}
+	sort.Slice(resp.SuccessfulAgentIDs, func(i, j int) bool { return resp.SuccessfulAgentIDs[i] < resp.SuccessfulAgentIDs[j] })
 	sort.Slice(resp.FailedAgents, func(i, j int) bool {
 		return resp.FailedAgents[i].AgentID < resp.FailedAgents[j].AgentID
 	})

@@ -300,6 +300,9 @@ func cloneRequest(request Request) Request {
 	cloned.TopP = clonePointer(request.TopP)
 	cloned.ParallelToolCalls = clonePointer(request.ParallelToolCalls)
 	cloned.Store = clonePointer(request.Store)
+	cloned.ThinkingEnabled = clonePointer(request.ThinkingEnabled)
+	cloned.ThinkingBudget = clonePointer(request.ThinkingBudget)
+	cloned.IncludeThoughts = clonePointer(request.IncludeThoughts)
 	cloned.FrequencyPenalty = clonePointer(request.FrequencyPenalty)
 	cloned.PresencePenalty = clonePointer(request.PresencePenalty)
 	cloned.Seed = clonePointer(request.Seed)
@@ -345,12 +348,13 @@ func cloneMessages(messages []Message) []Message {
 			cloned[index].Content = make([]ContentBlock, len(message.Content))
 			for contentIndex, content := range message.Content {
 				cloned[index].Content[contentIndex] = content
+				cloned[index].Content[contentIndex].ProviderData = convert.CloneToolCallProviderData(content.ProviderData)
 				cloned[index].Content[contentIndex].Metadata = cloneStringAnyMap(content.Metadata)
 				cloned[index].Content[contentIndex].RawJSON = append([]byte(nil), content.RawJSON...)
 				if content.Reasoning != nil {
 					reasoning := *content.Reasoning
-					reasoning.Summary = append([]string(nil), content.Reasoning.Summary...)
-					reasoning.Content = append([]string(nil), content.Reasoning.Content...)
+					reasoning.Summary = slices.Clone(content.Reasoning.Summary)
+					reasoning.Content = slices.Clone(content.Reasoning.Content)
 					reasoning.RawJSON = append([]byte(nil), content.Reasoning.RawJSON...)
 					cloned[index].Content[contentIndex].Reasoning = &reasoning
 				}

@@ -66,7 +66,7 @@ func TestConnectionSnapshotConsumersUseRequestContextBuilds(t *testing.T) {
 		h := &Handler{
 			Connections:       connections,
 			GetOnlineAgentIDs: func() []string { return []string{source.AgentID} },
-			HubCallSession: func(string, uint64, string, any, time.Duration) (json.RawMessage, error) {
+			HubCallSession: func(context.Context, string, uint64, string, any, time.Duration) (json.RawMessage, error) {
 				rpcCalls.Add(1)
 				return json.RawMessage(`[]`), nil
 			},

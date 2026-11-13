@@ -5,7 +5,7 @@ import { api, buildQuery } from "./client";
 export type ModelMarketplaceRole = "user" | "admin";
 export type ModelMarketplaceKind = "" | "real" | "routing";
 export type MarketplaceHealthStatus = "operational" | "degraded" | "outage" | "unknown";
-export type MarketplaceEndpoint = "chat_completions" | "responses" | "messages" | "models";
+export type MarketplaceEndpoint = "chat_completions" | "responses" | "messages" | "generate_content" | "models";
 export type MarketplaceOfferKind = "platform" | "private";
 export type MarketplaceOfferOwnership = "platform" | "owned" | "shared";
 export type MarketplacePriceAccuracy = "exact" | "reference";

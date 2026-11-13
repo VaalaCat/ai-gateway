@@ -20,6 +20,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/resilience"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/state"
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/trace"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
@@ -80,6 +81,29 @@ func makeNativeChannel(baseURL string) *models.Channel {
 }
 
 // ==================== Tests ====================
+
+func TestBuildCallOptionsMatchesBothModelNames(t *testing.T) {
+	// 1. 配置同时可能命中映射前后名称的签名规则。
+	for _, tc := range []struct {
+		name  string
+		rules string
+		want  llmkit.ToolSignatureFallback
+	}{
+		{"original", `[{"model_pattern":"^gemini-","profile":"none","signature_fallback":"gemini"}]`, llmkit.ToolSignatureFallbackGemini},
+		{"mapped", `[{"model_pattern":"^ep-123$","profile":"none","signature_fallback":"gemini"}]`, llmkit.ToolSignatureFallbackGemini},
+		{"first none", `[{"model_pattern":"^ep-123$","profile":"none","signature_fallback":"none"},{"model_pattern":"^gemini-","profile":"none","signature_fallback":"gemini"}]`, llmkit.ToolSignatureFallbackNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := &models.Channel{ChannelCore: models.ChannelCore{OtherSettings: `{"model_tool_schema_compatibility":` + tc.rules + `}`}}
+			// 2. 签名兜底与工具定义转换采用相同的首条规则。
+			relay, _ := newNativeTestCtx(t, []byte(`{"model":"gemini-test","messages":[]}`), llmkit.ProtocolClaudeMessages, false)
+			options := (&Backend{}).buildCallOptions(relay, state.Attempt{Channel: ch, RealModel: "gemini-test"}, llmkit.ProtocolClaudeMessages, llmkit.ProtocolOpenAIChat, &upstream.ChannelConfig{}, "ep-123")
+			if options.Conversion.ToolSignatureFallback != tc.want {
+				t.Fatalf("signature fallback = %q, want %q", options.Conversion.ToolSignatureFallback, tc.want)
+			}
+		})
+	}
+}
 
 type recordingLLMKitClient struct {
 	calls   int

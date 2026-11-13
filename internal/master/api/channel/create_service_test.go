@@ -3,9 +3,11 @@ package channel
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/events"
 	"github.com/stretchr/testify/require"
@@ -154,4 +156,49 @@ func TestPrepareAdminChannels(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestAdminChannelAuthLifecycle 验证认证创建、更新、复制、批量和清空。
+func TestAdminChannelAuthLifecycle(t *testing.T) {
+	// 1. 创建并读取变量原文。
+	db := setupTestDB(t)
+	ctx, _ := newBatchEditTestContext(t, db, zap.NewNop())
+	h := &Handler{}
+	auth := models.ChannelAuth{Default: &models.AuthType{Header: "Authorization", Value: "Bearer ${CHANNEL_KEY}"}, Protocols: map[string]models.AuthType{"messages": {Header: "X-Custom-Token", Value: "${CHANNEL_KEY}"}}}
+	created, err := h.Create(ctx, CreateRequest{Name: "auth-channel", Auth: auth})
+	require.NoError(t, err)
+	id := strconv.Itoa(int(created.Value.ID))
+	require.Equal(t, auth, created.Value.Auth.Data())
+	got, err := h.Update(ctx, UpdateRequest{ID: id, Fields: map[string]any{"remark": "unchanged auth"}})
+	require.NoError(t, err)
+	require.Equal(t, auth, got.Auth.Data())
+	// 2. 导出再导入，创建独立副本。
+	file, err := adminChannelToFile(got)
+	require.NoError(t, err)
+	copies, err := createAdminChannels(ctx, []AdminChannelCreateInput{adminFileToCreateInput(file, "auth-copy")})
+	require.NoError(t, err)
+	require.Equal(t, auth, copies[0].Auth.Data())
+	// 3. 批量替换整份认证，再清空单个渠道。
+	replacement := models.ChannelAuth{Default: &models.AuthType{Header: "X-New-Token", Value: "new-literal"}}
+	_, err = h.BatchEdit(ctx, BatchEditRequest{IDs: []int64{int64(got.ID), int64(copies[0].ID)}, Fields: map[string]any{"auth": replacement}})
+	require.NoError(t, err)
+	var rows []models.Channel
+	require.NoError(t, db.Order("id").Find(&rows).Error)
+	for _, row := range rows {
+		require.Equal(t, replacement, row.Auth.Data())
+	}
+	got, err = h.Update(ctx, UpdateRequest{ID: id, Fields: map[string]any{"auth": map[string]any{}}})
+	require.NoError(t, err)
+	require.Equal(t, models.ChannelAuth{}, got.Auth.Data())
+	// 4. 非法配置返回 400 和安全错误码。
+	_, err = h.Update(ctx, UpdateRequest{ID: id, Fields: map[string]any{"auth": map[string]any{"default": map[string]any{"header": "Host", "value": "literal-secret"}}}})
+	var apiErr *api.APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusBadRequest, apiErr.Status)
+	require.Equal(t, "invalid_upstream_auth", apiErr.Code)
+	require.NotContains(t, apiErr.Error(), "literal-secret")
+	_, err = h.Create(ctx, CreateRequest{Name: "invalid-auth", Auth: models.ChannelAuth{Default: &models.AuthType{Header: "X-Token", Value: "literal-secret\r\n"}}})
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, "invalid_upstream_auth", apiErr.Code)
+	require.NotContains(t, apiErr.Error(), "literal-secret")
 }

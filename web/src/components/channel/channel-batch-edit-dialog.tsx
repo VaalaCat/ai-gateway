@@ -36,11 +36,14 @@ import {
   type BatchFieldMessageKey,
 } from "./batch-edit-runtime-message-keys";
 import { AffinitySection } from "./channel-form/sections/affinity";
+import { UpstreamAuthEditor } from "./channel-form/upstream-auth-editor";
 import { ResilienceSection } from "./channel-form/sections/resilience";
 import { ChannelEndpointsEditor } from "./channel-form/channel-endpoints-editor";
 import { emptyForm, type ChannelForm } from "./channel-form/types";
 import {
   parseAffinity,
+  parseChannelAuth,
+  getChannelAuthValidationError,
   parseLimit,
   parseResilience,
   getPublicDisplayNameValidationError,
@@ -70,6 +73,7 @@ type BatchFieldControl<K extends BatchEditableKey> =
   : K extends "affinity" ? "affinity"
   : K extends "resilience" ? "resilience"
   : K extends "endpoints" ? "endpoints"
+  : K extends "auth" ? "auth"
   : BatchEditableChannelFields[K] extends boolean ? "switch"
   : BatchEditableChannelFields[K] extends number ? "number"
   : K extends "remark" | "system_prompt" | "param_override" | "header_override" | "setting" | "other_settings" | "status_code_mapping" ? "textarea"
@@ -127,6 +131,7 @@ const batchFieldRegistry = [
   batchField("setting", "setting", "batchEditGroupProcessing", "textarea", String),
   batchField("other_settings", "otherSettings", "batchEditGroupProcessing", "textarea", String),
   batchField("proxy_url", "proxy", "batchEditGroupConnection", "input", String),
+  batchField("auth", "upstreamAuth", "batchEditGroupConnection", "auth", parseChannelAuth),
   batchField("organization", "organization", "batchEditGroupConnection", "input", String),
   batchField("api_version", "apiVersion", "batchEditGroupConnection", "input", String),
   batchField("disable_keepalive", "disableKeepalive", "batchEditGroupConnection", "switch", Boolean),
@@ -274,6 +279,11 @@ export function ChannelBatchEditDialog({
       setError(t(normalizedPublicDisplayName.error));
       return;
     }
+    const authError = state.auth.enabled && getChannelAuthValidationError(state.auth.value);
+    if (authError) {
+      setError(t(authError));
+      return;
+    }
     const requestFields = {
       ...fields,
       ...(normalizedPublicDisplayName && { public_display_name: normalizedPublicDisplayName.value }),
@@ -356,7 +366,7 @@ function BatchField({
   const selected = state[field.key].enabled;
   const checkboxID = `batch-edit-${field.key}`;
   const editorLabelID = `batch-edit-${field.key}-editor-label`;
-  const spansBothColumns = ["modelMapping", "roleMapping", "limit", "affinity", "resilience", "endpoints"].includes(field.control);
+  const spansBothColumns = ["modelMapping", "roleMapping", "limit", "affinity", "resilience", "endpoints", "auth"].includes(field.control);
   return (
     <Field
       orientation="horizontal"
@@ -433,6 +443,8 @@ function renderFieldControl<K extends BatchEditableKey>(
   }
 
   switch (field.control) {
+    case "auth":
+      return enabled ? <UpstreamAuthEditor value={form.auth} onChange={(value) => setValue(key, value as BatchFormValue<K>)} /> : null;
     case "status":
       return <StatusSelect value={form.status} showLabel={false} labelledBy={editorLabelledBy} onChange={(value) => setValue(key, value as BatchFormValue<K>)} />;
     case "modelMapping":

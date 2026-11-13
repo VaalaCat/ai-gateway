@@ -7,7 +7,7 @@ import {
 } from "@/lib/api/channels";
 import type { Channel } from "@/lib/types";
 import type { ChannelFormAdapter } from "../adapter";
-import { mapChannelToForm, sanitizeOtherSettingsForSubmit, parseResilience, serializeChannelLimitForPayload, parseAffinity } from "../utils";
+import { mapChannelToForm, sanitizeOtherSettingsForSubmit, parseResilience, serializeChannelLimitForPayload, parseAffinity, parseChannelAuth } from "../utils";
 import type { ChannelForm } from "../types";
 
 function buildPayload(
@@ -44,6 +44,7 @@ function buildPayload(
     status_code_mapping: form.status_code_mapping,
     param_override: form.param_override,
     header_override: form.header_override,
+    auth: parseChannelAuth(form.auth),
     other_settings: otherSettings,
     supported_api_types: form.supported_api_types,
     endpoints: form.endpoints,

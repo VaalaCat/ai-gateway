@@ -46,16 +46,17 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
   // ── protocol-override helpers ──
   const protos = channelProtocols(form.endpoints);
   const enabledCount =
-    (protos.openaiChat ? 1 : 0) + (protos.openaiResponses ? 1 : 0) + (protos.claude ? 1 : 0);
+    (protos.openaiChat ? 1 : 0) + (protos.openaiResponses ? 1 : 0) + (protos.claude ? 1 : 0) + (protos.gemini ? 1 : 0);
 
   const enabledOutbounds: Array<{
-    value: "openai_chat" | "openai_responses" | "claude";
+    value: "openai_chat" | "openai_responses" | "claude" | "gemini";
     label: string;
   }> = [];
   if (protos.openaiChat) enabledOutbounds.push({ value: "openai_chat", label: "openai_chat" });
   if (protos.openaiResponses)
     enabledOutbounds.push({ value: "openai_responses", label: "openai_responses" });
   if (protos.claude) enabledOutbounds.push({ value: "claude", label: "claude" });
+  if (protos.gemini) enabledOutbounds.push({ value: "gemini", label: "Gemini" });
 
   const overrideMap = otherSettings.protocol_override || {};
 
@@ -71,7 +72,7 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
             if (v === "auto" || v === inbound) {
               delete next[inbound];
             } else {
-              next[inbound] = v as "openai_chat" | "openai_responses" | "claude";
+              next[inbound] = v as "openai_chat" | "openai_responses" | "claude" | "gemini";
             }
             updateOtherSettings({
               protocol_override: Object.keys(next).length === 0 ? undefined : next,

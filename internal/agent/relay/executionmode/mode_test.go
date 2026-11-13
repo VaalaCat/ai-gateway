@@ -98,6 +98,32 @@ func TestForChannelPreservesExecutionModeParity(t *testing.T) {
 	}
 }
 
+func TestMappedModelRulesSelectNative(t *testing.T) {
+	// 1. 构造支持直通的 Claude 渠道，按规则选择是否执行转换。
+	cases := []struct {
+		name     string
+		settings string
+		want     attemptproxy.ExecutionMode
+	}{
+		{"thinking original", `{"model_thinking_passthrough":[{"model_pattern":"^deepseek-","send_back_thinking":true}]}`, attemptproxy.ModeNative},
+		{"thinking mapped", `{"model_thinking_passthrough":[{"model_pattern":"^ep-123$","send_back_thinking":true}]}`, attemptproxy.ModeNative},
+		{"thinking first disabled", `{"model_thinking_passthrough":[{"model_pattern":"^ep-123$","send_back_thinking":false},{"model_pattern":"^deepseek-","send_back_thinking":true}]}`, attemptproxy.ModePassthrough},
+		{"schema original", `{"model_tool_schema_compatibility":[{"model_pattern":"^deepseek-","profile":"gemini_compat"}]}`, attemptproxy.ModeNative},
+		{"schema first none", `{"model_tool_schema_compatibility":[{"model_pattern":"^ep-123$","profile":"none"},{"model_pattern":"^deepseek-","profile":"gemini_compat"}]}`, attemptproxy.ModePassthrough},
+		{"no rules", "", attemptproxy.ModePassthrough},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := &models.Channel{
+				ChannelCore:  models.ChannelCore{Type: consts.ChannelTypeAnthropic, PassthroughEnabled: true, OtherSettings: tc.settings},
+				ModelMapping: `{"deepseek-v4.1-flash":"ep-123"}`,
+			}
+			// 2. 工具历史需要回填或改写时进入 Native，首条关闭规则保留直通。
+			require.Equal(t, tc.want, ForChannel(ch, "deepseek-v4.1-flash", llmkit.ProtocolClaudeMessages, llmkit.ToolCallRequestInfo{HasToolHistory: true}))
+		})
+	}
+}
+
 func TestForChannelPreservesPassthroughCombinations(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -209,4 +235,10 @@ func TestForChannelSignatureFallbackFollowsToolCallRule(t *testing.T) {
 			require.Equal(t, tt.want, ForChannel(ch, "gemini-3", llmkit.ProtocolOpenAIChat, tt.info))
 		})
 	}
+}
+
+func TestGeminiNativeInboundAlwaysPassthrough(t *testing.T) {
+	ch := &models.Channel{ChannelCore: models.ChannelCore{Type: consts.ChannelTypeGemini, PassthroughEnabled: false, OtherSettings: `{"model_tool_schema_compatibility":[{"model_pattern":".*","profile":"gemini_compat"}]}`}}
+	got := ForChannel(ch, "gemini", llmkit.ProtocolGemini, llmkit.ToolCallRequestInfo{HasPackedToolCallID: true, HasToolHistory: true, HasTools: true})
+	require.Equal(t, attemptproxy.ModePassthrough, got)
 }

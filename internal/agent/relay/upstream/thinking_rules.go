@@ -19,6 +19,12 @@ type ThinkingRules struct {
 	rules []thinkingPassthroughRule
 }
 
+// Len 返回已解析的 thinking 规则数量。
+func (t ThinkingRules) Len() int {
+	// 1. 读取已编译规则的数量。
+	return len(t.rules)
+}
+
 // NewThinkingRules 从 channel 的 OtherSettings 解析出 thinking 规则。
 func NewThinkingRules(ch *models.Channel) ThinkingRules {
 	if ch == nil || ch.OtherSettings == "" {
@@ -35,12 +41,14 @@ func NewThinkingRules(ch *models.Channel) ThinkingRules {
 	return ThinkingRules{rules: parseModelThinkingPassthrough(rawTP, ch.ID)}
 }
 
-// SendBack 返回 model 命中的首条规则的 send_back_thinking;无命中返回 false。
-// 与原 BuildChannelConfig 里"首个 pattern 命中即 break"语义一致。
-func (t ThinkingRules) SendBack(model string) bool {
+// SendBack 返回任一模型名命中的首条规则的 send_back_thinking；未命中返回 false。
+func (t ThinkingRules) SendBack(modelNames ...string) bool {
+	// 1. 按配置顺序匹配规则，每条规则检查映射前后的模型名。
 	for _, r := range t.rules {
-		if r.pattern.MatchString(model) {
-			return r.sendBackThinking
+		for _, modelName := range modelNames {
+			if r.pattern.MatchString(modelName) {
+				return r.sendBackThinking
+			}
 		}
 	}
 	return false

@@ -108,3 +108,17 @@ func TestDropEmptyTextBlocks(t *testing.T) {
 		}
 	})
 }
+
+func TestNormalizeToolSequenceKeepsImagesAndSignedEmptyText(t *testing.T) {
+	data := &ir.ProviderData{Protocol: ir.ProtocolGemini, Fields: map[string]json.RawMessage{"thoughtSignature": json.RawMessage(`"sig"`)}}
+	blocks := []ir.ContentBlock{{Type: ir.ContentTypeImage, MediaB64: "eA==", MimeType: "image/png", ProviderData: data}, {Type: ir.ContentTypeText, ProviderData: data}}
+	messages := []ir.Message{{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{{ID: "call-1", Name: "f"}}}, {Role: ir.RoleAssistant, Content: blocks}, {Role: ir.RoleTool, ToolCallID: "call-1"}}
+	got := NormalizeAssistantToolCallSequence(messages)
+	if len(got) != 2 || !reflect.DeepEqual(blocks, got[0].Content) {
+		t.Fatalf("content lost during normalization: %+v", got)
+	}
+	filtered := DropEmptyTextBlocks(got[0].Content)
+	if !reflect.DeepEqual(blocks, filtered) {
+		t.Fatal("signature-only content was dropped")
+	}
+}

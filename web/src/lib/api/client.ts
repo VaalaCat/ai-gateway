@@ -83,8 +83,8 @@ class ApiClient {
     return res.json();
   }
 
-  get<T>(path: string): Promise<T> {
-    return this.request<T>(path);
+  get<T>(path: string, options: Omit<RequestInit, "method" | "body"> = {}): Promise<T> {
+    return this.request<T>(path, options);
   }
 
   post<T>(path: string, body: unknown, options: Omit<RequestInit, "method" | "body"> = {}): Promise<T> {

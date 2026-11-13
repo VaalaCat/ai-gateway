@@ -53,6 +53,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	pkgtunnel "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sourcegraph/conc"
@@ -274,7 +275,21 @@ func (s *Server) setupRoutes() {
 	v1.POST("/audio/transcriptions", runtime.relayHandler.Relay)
 	v1.POST("/audio/translations", runtime.relayHandler.Relay)
 	v1.POST("/audio/speech", runtime.relayHandler.Relay)
+	v1.POST("/models/:modelAction", requireGeminiGenerationAction, runtime.relayHandler.Relay)
+	v1beta := s.Router.Group("/v1beta")
+	v1beta.Use(ginutil.RecordRequestStart(), auth.TokenAuth(s.Store))
+	v1beta.POST("/models/:modelAction", requireGeminiGenerationAction, runtime.relayHandler.Relay)
 	s.registerGenericAPIRoutes(s.Router)
+}
+
+// requireGeminiGenerationAction 只把已注册的生成动作交给 Relay。
+func requireGeminiGenerationAction(c *gin.Context) {
+	// 1. 未实现的动作按不存在的路由返回，不进入协议协商。
+	if _, _, ok := endpoint.ParseGeminiPath(c.Request.URL.Path); !ok {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	c.Next()
 }
 
 func (s *Server) setupMetricsRoute() {
@@ -564,6 +579,10 @@ func (s *Server) MountRoutes(router *gin.Engine) {
 	v1.POST("/audio/transcriptions", runtime.relayHandler.Relay)
 	v1.POST("/audio/translations", runtime.relayHandler.Relay)
 	v1.POST("/audio/speech", runtime.relayHandler.Relay)
+	v1.POST("/models/:modelAction", requireGeminiGenerationAction, runtime.relayHandler.Relay)
+	v1beta := router.Group("/v1beta")
+	v1beta.Use(ginutil.RecordRequestStart(), auth.TokenAuth(s.Store))
+	v1beta.POST("/models/:modelAction", requireGeminiGenerationAction, runtime.relayHandler.Relay)
 	s.registerGenericAPIRoutes(router)
 }
 

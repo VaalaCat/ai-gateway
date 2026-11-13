@@ -55,6 +55,39 @@ describe("ChannelBatchEditDialog", () => {
     mutation.isPending = false;
   });
 
+  it("saves only selected upstream authentication and rejects incomplete entries", async () => {
+    Element.prototype.scrollIntoView ??= () => {};
+    HTMLElement.prototype.hasPointerCapture ??= () => false;
+    HTMLElement.prototype.setPointerCapture ??= () => {};
+    HTMLElement.prototype.releasePointerCapture ??= () => {};
+    mutation.mutateAsync.mockResolvedValueOnce({ updated_count: 2, updated_ids: [1, 2] });
+    const user = userEvent.setup();
+    render(<ChannelBatchEditDialog ids={[1, 2]} open onOpenChange={vi.fn()} onSucceeded={vi.fn()} />);
+    await user.click(screen.getByLabelText("修改此字段：upstreamAuth"));
+    await user.click(screen.getByRole("combobox", { name: "upstreamAuthDefault" }));
+    await user.click(screen.getByRole("option", { name: "upstreamAuthCustom" }));
+    fireEvent.change(screen.getByLabelText("Header · upstreamAuthDefault"), { target: { value: "Authorization" } });
+    await user.click(screen.getByRole("button", { name: "应用到 2 个渠道" }));
+    expect(mutation.mutateAsync).not.toHaveBeenCalled();
+    expect(screen.getAllByText("upstreamAuthIncomplete").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("Value · upstreamAuthDefault"), { target: { value: "Bearer ${CHANNEL_KEY}" } });
+    await user.click(screen.getByRole("button", { name: "应用到 2 个渠道" }));
+    expect(mutation.mutateAsync).toHaveBeenCalledWith({
+      ids: [1, 2],
+      fields: { auth: { default: { header: "Authorization", value: "Bearer ${CHANNEL_KEY}" } } },
+    });
+  });
+
+  it("sends an explicit empty auth object to restore authentication defaults in batch", async () => {
+    mutation.mutateAsync.mockResolvedValueOnce({ updated_count: 1, updated_ids: [1] });
+    const user = userEvent.setup();
+    render(<ChannelBatchEditDialog ids={[1]} open onOpenChange={vi.fn()} onSucceeded={vi.fn()} />);
+    await user.click(screen.getByLabelText("修改此字段：upstreamAuth"));
+    await user.click(screen.getByRole("button", { name: "应用到 1 个渠道" }));
+    expect(mutation.mutateAsync).toHaveBeenCalledWith({ ids: [1], fields: { auth: {} } });
+  });
+
   it("submits an explicitly selected false boolean", async () => {
     mutation.mutateAsync.mockResolvedValueOnce({ updated_count: 2, updated_ids: [1, 2] });
     const user = userEvent.setup();
@@ -402,6 +435,19 @@ describe("ChannelBatchEditDialog", () => {
     expect(mutation.mutateAsync).toHaveBeenCalledWith({
       ids: [1, 2],
       fields: { endpoints: "{\"chat_completions\":\"/v1/chat/completions\"}" },
+    });
+  });
+
+  it("serializes the Gemini endpoint template during batch editing", async () => {
+    mutation.mutateAsync.mockResolvedValueOnce({ updated_count: 2, updated_ids: [1, 2] });
+    const user = userEvent.setup();
+    render(<ChannelBatchEditDialog ids={[1, 2]} open onOpenChange={vi.fn()} onSucceeded={vi.fn()} />);
+    await user.click(screen.getByLabelText("修改此字段：端点配置"));
+    await user.click(within(screen.getByRole("group", { name: "端点配置" })).getByRole("checkbox", { name: "apiTypeGemini" }));
+    await user.click(screen.getByRole("button", { name: "应用到 2 个渠道" }));
+    expect(mutation.mutateAsync).toHaveBeenCalledWith({
+      ids: [1, 2],
+      fields: { endpoints: JSON.stringify({ generate_content: "/v1beta/models/{model}:{action}" }) },
     });
   });
 

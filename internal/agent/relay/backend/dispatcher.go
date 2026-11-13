@@ -43,7 +43,16 @@ func (d *Dispatcher) Dispatch(rctx *state.RelayContext, a state.Attempt) state.A
 		return state.AttemptResult{Err: fmt.Errorf("no backend for mode %q", string(a.Mode))}
 	}
 	raw := backend.Relay(rctx, a)
-	final := upstream.FinalizeTokenCounts(rctx.Input.Body, raw.PromptTokens, raw.CompletionTokens, raw.ResponseText, a.RealModel)
+	// 1. 缓存占满输入时保留非缓存桶的零值，仅继续估算缺失的输出。
+	estimateBody := rctx.Input.Body
+	cacheReported := raw.CacheReadTokens > 0 || raw.CacheWriteTokens > 0
+	if raw.PromptTokens == 0 && cacheReported {
+		estimateBody = nil
+	}
+	final := upstream.FinalizeTokenCounts(estimateBody, raw.PromptTokens, raw.CompletionTokens, raw.ResponseText, a.RealModel)
+	if final.Source == upstream.TokenSourceNone && cacheReported {
+		final.Source = upstream.TokenSourceProvider
+	}
 	raw.PromptTokens = final.PromptTokens
 	raw.CompletionTokens = final.CompletionTokens
 	raw.TokenSource = string(final.Source)

@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/dao"
 	"github.com/VaalaCat/ai-gateway/internal/master/api"
 	"github.com/VaalaCat/ai-gateway/internal/master/connectivity"
+	"github.com/VaalaCat/ai-gateway/internal/master/controlrpc"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
@@ -29,17 +32,21 @@ type FailedAgent struct {
 	AgentID   uint   `json:"agent_id"`
 	AgentName string `json:"agent_name"`
 	Error     string `json:"error"`
+	Code      string `json:"code,omitempty"`
+	ElapsedMs int64  `json:"elapsed_ms"`
 }
 
 // AllInflightResponse 是 GetAllInflight 的响应体。
 type AllInflightResponse struct {
-	Requests     []GlobalInflightRow `json:"requests"`
-	FailedAgents []FailedAgent       `json:"failed_agents"`
+	Requests           []GlobalInflightRow `json:"requests"`
+	FailedAgents       []FailedAgent       `json:"failed_agents"`
+	SuccessfulAgentIDs []uint              `json:"successful_agent_ids"`
 }
 
 type nodeResult struct {
-	rows   []GlobalInflightRow
-	failed *FailedAgent
+	agentID uint
+	rows    []GlobalInflightRow
+	failed  *FailedAgent
 }
 
 // GetAllInflight 并发拉取所有在线节点的 agent.inflight，合并成扁平列表；
@@ -48,22 +55,31 @@ func (h *Handler) GetAllInflight(c *app.Context, _ api.EmptyRequest) (AllInfligh
 	if h.Connections == nil || h.HubCallSession == nil || h.GetOnlineAgentIDs == nil {
 		return AllInflightResponse{}, api.InternalError("connection service not available", nil)
 	}
-	if apiErr := requestContextAPIError(c); apiErr != nil {
-		return AllInflightResponse{}, apiErr
+	if err := c.RequestContext().Err(); err != nil {
+		return AllInflightResponse{}, api.DiagnosticError(c.Logger, "", consts.RPCAgentInflight, time.Now(), err)
 	}
 	resp := AllInflightResponse{
-		Requests:     []GlobalInflightRow{},
-		FailedAgents: []FailedAgent{},
+		Requests:           []GlobalInflightRow{},
+		FailedAgents:       []FailedAgent{},
+		SuccessfulAgentIDs: []uint{},
 	}
+
+	// 1. 为查询、排队和所有节点共用聚合预算。
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(c.RequestContext(), api.DiagnosticAggregateTimeout)
+	defer cancel()
 
 	ids := stableUniqueAgentIDs(h.GetOnlineAgentIDs())
 	if len(ids) == 0 {
 		return resp, nil
 	}
 
-	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
+	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, ctx))
 	agents, err := q.Agent().ListByAgentIDs(ids)
 	if err != nil {
+		if ctx.Err() != nil {
+			return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentInflight, started, ctx.Err())
+		}
 		return AllInflightResponse{}, api.InternalError("list agents failed", err)
 	}
 
@@ -72,8 +88,11 @@ func (h *Handler) GetAllInflight(c *app.Context, _ api.EmptyRequest) (AllInfligh
 		byUID[a.AgentID] = a
 	}
 	h.enrichLastSeen(agents)
-	batch, err := h.Connections.BuildManyContext(c.RequestContext(), agents)
+	batch, err := h.Connections.BuildManyContext(ctx, agents)
 	if err != nil {
+		if ctx.Err() != nil {
+			return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentInflight, started, ctx.Err())
+		}
 		if apiErr := requestContextAPIError(c); apiErr != nil {
 			return AllInflightResponse{}, apiErr
 		}
@@ -98,51 +117,38 @@ func (h *Handler) GetAllInflight(c *app.Context, _ api.EmptyRequest) (AllInfligh
 				uid := ids[index]
 				ag, ok := byUID[uid]
 				if !ok {
-					results[index] = nodeResult{failed: &FailedAgent{Error: "agent_not_found"}}
+					results[index] = nodeResult{failed: &FailedAgent{Error: "agent_not_found", Code: "agent_operation_failed"}}
 					continue
 				}
 				snapshot, ok := batch.Items[uid]
 				if !ok {
 					results[index] = nodeResult{failed: &FailedAgent{
-						AgentID: ag.ID, AgentName: ag.Name, Error: "connection_snapshot_unavailable",
+						AgentID: ag.ID, AgentName: ag.Name, Error: "connection_snapshot_unavailable", Code: "agent_operation_failed",
 					}}
 					continue
+				}
+				fail := func(err error) nodeResult {
+					failure := api.DiagnosticError(c.Logger, uid, consts.RPCAgentInflight, started, err)
+					return nodeResult{failed: &FailedAgent{AgentID: ag.ID, AgentName: ag.Name, Error: failure.Message, Code: failure.Code, ElapsedMs: time.Since(started).Milliseconds()}}
 				}
 				if snapshot.Control.State != "connected" || snapshot.Control.SessionGeneration == 0 {
-					results[index] = nodeResult{failed: &FailedAgent{
-						AgentID: ag.ID, AgentName: ag.Name, Error: connectivity.DenialControlDisconnected,
-					}}
+					results[index] = fail(controlrpc.ErrDisconnected)
 					continue
 				}
-				if apiErr := requestContextAPIError(c); apiErr != nil {
-					results[index] = nodeResult{failed: &FailedAgent{
-						AgentID: ag.ID, AgentName: ag.Name, Error: apiErr.Code,
-					}}
-					continue
+				nodeCtx, cancelNode := context.WithTimeout(ctx, api.DiagnosticNodeTimeout)
+				var raw json.RawMessage
+				err := nodeCtx.Err()
+				if err == nil {
+					raw, err = h.HubCallSession(nodeCtx, uid, snapshot.Control.SessionGeneration, consts.RPCAgentInflight, nil, api.DiagnosticNodeTimeout)
 				}
-
-				raw, err := h.HubCallSession(uid, snapshot.Control.SessionGeneration, consts.RPCAgentInflight, nil, 5*time.Second)
+				cancelNode()
 				if err != nil {
-					message := err.Error()
-					if errors.Is(err, connectivity.ErrConnectionGenerationChanged) {
-						message = connectivity.ErrorCodeConnectionGenerationChanged
-					} else {
-						message = agentOperationFailedMessage
-					}
-					results[index] = nodeResult{failed: &FailedAgent{
-						AgentID:   ag.ID,
-						AgentName: ag.Name,
-						Error:     message,
-					}}
+					results[index] = fail(err)
 					continue
 				}
 				var snaps []inflight.Snapshot
 				if err := json.Unmarshal(raw, &snaps); err != nil {
-					results[index] = nodeResult{failed: &FailedAgent{
-						AgentID:   ag.ID,
-						AgentName: ag.Name,
-						Error:     invalidAgentResponseMessage,
-					}}
+					results[index] = fail(fmt.Errorf("%w: %v", controlrpc.ErrInvalidResponse, err))
 					continue
 				}
 				rows := make([]GlobalInflightRow, 0, len(snaps))
@@ -153,7 +159,7 @@ func (h *Handler) GetAllInflight(c *app.Context, _ api.EmptyRequest) (AllInfligh
 						AgentName: ag.Name,
 					})
 				}
-				results[index] = nodeResult{rows: rows}
+				results[index] = nodeResult{rows: rows, agentID: ag.ID}
 			}
 		}()
 	}
@@ -162,13 +168,15 @@ func (h *Handler) GetAllInflight(c *app.Context, _ api.EmptyRequest) (AllInfligh
 	}
 	close(jobs)
 	workers.Wait()
-	if apiErr := requestContextAPIError(c); apiErr != nil {
-		return AllInflightResponse{}, apiErr
+	if c.RequestContext().Err() == context.Canceled {
+		return resp, api.DiagnosticError(c.Logger, "", consts.RPCAgentInflight, started, context.Canceled)
 	}
 
 	for _, r := range results {
 		if r.failed != nil {
 			resp.FailedAgents = append(resp.FailedAgents, *r.failed)
+		} else {
+			resp.SuccessfulAgentIDs = append(resp.SuccessfulAgentIDs, r.agentID)
 		}
 		resp.Requests = append(resp.Requests, r.rows...)
 	}
@@ -191,21 +199,30 @@ func (h *Handler) Interrupt(c *app.Context, req InterruptRequest) (InterruptResp
 	if h.Operations == nil {
 		return InterruptResponse{}, api.InternalError("connection service not available", nil)
 	}
-	if apiErr := requestContextAPIError(c); apiErr != nil {
-		return InterruptResponse{}, apiErr
+	if err := c.RequestContext().Err(); err != nil {
+		return InterruptResponse{}, api.DiagnosticError(c.Logger, "", consts.RPCAgentInterrupt, time.Now(), err)
 	}
 	q := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext()))
 	ag, err := q.Agent().GetByID(req.AgentID)
 	if err != nil {
 		return InterruptResponse{}, api.NotFoundError("agent not found")
 	}
-	if apiErr := requestContextAPIError(c); apiErr != nil {
-		return InterruptResponse{}, apiErr
+	if err := c.RequestContext().Err(); err != nil {
+		return InterruptResponse{}, api.DiagnosticError(c.Logger, "", consts.RPCAgentInterrupt, time.Now(), err)
 	}
+	// 1. 发出中断命令，等待节点确认。
+	started := time.Now()
 	interrupted, err := h.Operations.Interrupt(c.RequestContext(), protocol.OperationRequest{
 		AgentID: ag.AgentID, RequestID: strconv.FormatInt(req.ID, 10),
 	})
+	// 2. 超时或取消仅表示未收到确认，权限与代次错误沿用操作分类。
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			failure := api.DiagnosticError(c.Logger, ag.AgentID, consts.RPCAgentInterrupt, started, err)
+			failure.Message = "the interrupt result could not be confirmed; refresh the request status"
+			failure.Details = map[string]any{"operation": connectivity.OperationInterrupt}
+			return InterruptResponse{}, failure
+		}
 		return InterruptResponse{}, operationAPIError(err, connectivity.OperationInterrupt)
 	}
 	return InterruptResponse{Interrupted: interrupted}, nil

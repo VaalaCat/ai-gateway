@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
@@ -200,6 +202,111 @@ func TestEncodeRequest_URLAndHeaders(t *testing.T) {
 	// Should have 1 message (user only, system extracted)
 	if len(msgs) != 1 {
 		t.Errorf("expected 1 message in body, got %d", len(msgs))
+	}
+}
+
+func TestEncodeRequest_ConsecutiveToolResults(t *testing.T) {
+	// 1. 构造两次并行调用和对应结果。
+	assistant := ir.Message{
+		Role: ir.RoleAssistant,
+		ToolCalls: []ir.ToolCall{
+			{
+				ID:        "call_1",
+				Name:      "first",
+				Arguments: `{}`,
+			},
+			{
+				ID:        "call_2",
+				Name:      "second",
+				Arguments: `{}`,
+			},
+		},
+	}
+	firstResult := ir.TextMessage(ir.RoleTool, "first result")
+	firstResult.ToolCallID = "call_1"
+	secondResult := ir.TextMessage(ir.RoleTool, "second result")
+	secondResult.ToolCallID = "call_2"
+	const assistantJSON = `{"role":"assistant","content":[
+		{"type":"tool_use","id":"call_1","name":"first","input":{}},
+		{"type":"tool_use","id":"call_2","name":"second","input":{}}
+	]}`
+	const firstResultJSON = `{"type":"tool_result","tool_use_id":"call_1","content":"first result"}`
+	const secondResultJSON = `{"type":"tool_result","tool_use_id":"call_2","content":"second result"}`
+	const bothResultsJSON = `{"role":"user","content":[` + firstResultJSON + `,` + secondResultJSON + `]}`
+	const firstResultMessageJSON = `{"role":"user","content":[` + firstResultJSON + `]}`
+	const secondResultMessageJSON = `{"role":"user","content":[` + secondResultJSON + `]}`
+	const userJSON = `{"role":"user","content":"continue"}`
+	cases := []struct {
+		name     string
+		messages []ir.Message
+		want     string
+	}{
+		{
+			name:     "parallel results share one user message",
+			messages: []ir.Message{assistant, firstResult, secondResult},
+			want:     `[` + assistantJSON + `,` + bothResultsJSON + `]`,
+		},
+		{
+			name: "single result",
+			messages: []ir.Message{
+				{
+					Role:      ir.RoleAssistant,
+					ToolCalls: assistant.ToolCalls[:1],
+				},
+				firstResult,
+			},
+			want: `[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"first","input":{}}]},` + firstResultMessageJSON + `]`,
+		},
+		{
+			name:     "following user text stays after results",
+			messages: []ir.Message{assistant, firstResult, secondResult, ir.TextMessage(ir.RoleUser, "continue")},
+			want:     `[` + assistantJSON + `,` + bothResultsJSON + `,` + userJSON + `]`,
+		},
+		{
+			name:     "assistant separates rounds",
+			messages: []ir.Message{assistant, firstResult, secondResult, assistant, firstResult, secondResult},
+			want:     `[` + assistantJSON + `,` + bothResultsJSON + `,` + assistantJSON + `,` + bothResultsJSON + `]`,
+		},
+		{
+			name:     "missing result is not fabricated",
+			messages: []ir.Message{assistant, firstResult},
+			want:     `[` + assistantJSON + `,` + firstResultMessageJSON + `]`,
+		},
+		{
+			name:     "result order stays unchanged",
+			messages: []ir.Message{assistant, secondResult, firstResult},
+			want:     `[` + assistantJSON + `,{"role":"user","content":[` + secondResultJSON + `,` + firstResultJSON + `]}]`,
+		},
+		{
+			name:     "user text separates results",
+			messages: []ir.Message{assistant, firstResult, ir.TextMessage(ir.RoleUser, "continue"), secondResult},
+			want:     `[` + assistantJSON + `,` + firstResultMessageJSON + `,` + userJSON + `,` + secondResultMessageJSON + `]`,
+		},
+		{
+			name:     "extracted system message separates results",
+			messages: []ir.Message{assistant, firstResult, ir.TextMessage(ir.RoleSystem, "system"), secondResult},
+			want:     `[` + assistantJSON + `,` + firstResultMessageJSON + `,` + secondResultMessageJSON + `]`,
+		},
+	}
+
+	// 2. 检查编码后的完整消息列表，包括结果 ID、内容和顺序。
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request, err := (&handler{}).encodeHTTPRequest(&ir.Request{
+				MaxTokens: 1024,
+				Messages:  tc.messages,
+			}, &channelConfig{
+				BaseURL: "https://api.anthropic.com",
+				Model:   "claude-test",
+			})
+			require.NoError(t, err)
+			defer request.Body.Close()
+			var body struct {
+				Messages json.RawMessage `json:"messages"`
+			}
+			require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
+			require.JSONEq(t, tc.want, string(body.Messages))
+		})
 	}
 }
 

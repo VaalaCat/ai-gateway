@@ -232,11 +232,11 @@ func TestDecodeRequest_ThinkingConfig(t *testing.T) {
 	}
 
 	// The fixture has "thinking": {"type": "enabled", "budget_tokens": 10000}
-	if !req.ThinkingEnabled {
+	if req.ThinkingEnabled == nil || !*req.ThinkingEnabled {
 		t.Error("ThinkingEnabled should be true")
 	}
-	if req.ThinkingBudget != 10000 {
-		t.Errorf("ThinkingBudget = %d, want 10000", req.ThinkingBudget)
+	if req.ThinkingBudget == nil || *req.ThinkingBudget != 10000 {
+		t.Errorf("ThinkingBudget = %v, want 10000", req.ThinkingBudget)
 	}
 }
 
@@ -628,9 +628,41 @@ func TestDecodeRequest_ReasoningControls(t *testing.T) {
 			if err != nil {
 				t.Fatalf("decodeHTTPRequest: %v", err)
 			}
-			if req.ThinkingEnabled != tt.wantThinking || req.ThinkingBudget != tt.wantBudget || req.ReasoningEffort != tt.wantEffort {
+			thinking := req.ThinkingEnabled != nil && *req.ThinkingEnabled
+			budget := 0
+			if req.ThinkingBudget != nil {
+				budget = *req.ThinkingBudget
+			}
+			if thinking != tt.wantThinking || budget != tt.wantBudget || req.ReasoningEffort != tt.wantEffort {
 				t.Fatalf("thinking=%v budget=%d effort=%q, want %v %d %q",
-					req.ThinkingEnabled, req.ThinkingBudget, req.ReasoningEffort, tt.wantThinking, tt.wantBudget, tt.wantEffort)
+					thinking, budget, req.ReasoningEffort, tt.wantThinking, tt.wantBudget, tt.wantEffort)
+			}
+		})
+	}
+}
+
+func TestThinkingControlPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, thinking  string
+		enabled, budget bool
+	}{
+		{"absent", "", false, false},
+		{"disabled", `,"thinking":{"type":"disabled"}`, true, false},
+		{"adaptive", `,"thinking":{"type":"adaptive"}`, true, false},
+		{"zero", `,"thinking":{"type":"enabled","budget_tokens":0}`, true, true},
+		{"budget absent", `,"thinking":{"type":"enabled"}`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"model":"m","messages":[]` + tc.thinking + `}`)
+			req, err := (&handler{}).decodeHTTPRequest(makeHTTPRequest(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (req.ThinkingEnabled != nil) != tc.enabled || (req.ThinkingBudget != nil) != tc.budget {
+				t.Fatalf("presence wrong: %+v", req)
+			}
+			if tc.name == "disabled" && *req.ThinkingEnabled {
+				t.Fatal("disabled decoded as enabled")
 			}
 		})
 	}

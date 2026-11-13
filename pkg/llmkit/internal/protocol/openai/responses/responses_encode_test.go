@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol"
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol/gemini"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
@@ -1371,5 +1374,382 @@ func TestResponsesEncodeRequest_ReasoningConfig(t *testing.T) {
 				t.Fatalf("reasoning = %#v, want %#v", got, tt.wantReasoning)
 			}
 		})
+	}
+}
+
+// TestResponsesImagesRoundTrip 覆盖图文混合图片响应及再次作为输入提交。
+func TestResponsesImagesRoundTrip(t *testing.T) {
+	// 1. 两张不同格式、不同签名的图片与文本交错到达。
+	first := &ir.ContentBlock{Type: ir.ContentTypeImage, MimeType: "image/webp", MediaB64: "Zmlyc3Q=", ProviderData: &ir.ProviderData{Protocol: ir.ProtocolGemini, Models: []string{"image-model"}, Fields: map[string]json.RawMessage{"thoughtSignature": json.RawMessage(`"sig-first"`)}}}
+	second := &ir.ContentBlock{Type: ir.ContentTypeImage, MimeType: "image/jpeg", MediaB64: "c2Vjb25k", ProviderData: &ir.ProviderData{Protocol: ir.ProtocolGemini, Models: []string{"image-model"}, Fields: map[string]json.RawMessage{"thoughtSignature": json.RawMessage(`"sig-second"`)}}}
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "json", true: "sse"}[stream], func(t *testing.T) {
+			events := []ir.Event{
+				{Type: ir.EventStreamStart, Model: "image-model"},
+				{Type: ir.EventContentDelta, Delta: &ir.DeltaPayload{Text: "第一段"}},
+				{Type: ir.EventContentBlock, ContentBlock: first},
+				{Type: ir.EventContentDelta, Delta: &ir.DeltaPayload{Text: "第二段"}},
+				{Type: ir.EventContentBlock, ContentBlock: second},
+				{Type: ir.EventUsage, Usage: &ir.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30}},
+				{Type: ir.EventDone},
+			}
+			ch := make(chan ir.Event, len(events))
+			for _, event := range events {
+				ch <- event
+			}
+			close(ch)
+			w := httptest.NewRecorder()
+			if err := (&handler{}).encodeHTTPResponse(ch, w, stream); err != nil {
+				t.Fatal(err)
+			}
+			var output []respOutputItem
+			if stream {
+				added := map[int]respOutputItem{}
+				done := map[int]respOutputItem{}
+				sequence := -1
+				for _, frame := range parseSSE(w.Body.Bytes()) {
+					if strings.Contains(frame.Event, "partial_image") {
+						t.Fatal("fabricated partial image event")
+					}
+					var wire struct {
+						respStreamEvent
+						Delta json.RawMessage `json:"delta"`
+					}
+					if err := json.Unmarshal([]byte(frame.Data), &wire); err != nil {
+						t.Fatal(err)
+					}
+					if wire.SequenceNumber <= sequence {
+						t.Fatalf("non-increasing sequence: %s", frame.Data)
+					}
+					sequence = wire.SequenceNumber
+					switch frame.Event {
+					case "response.output_item.added":
+						if _, ok := added[*wire.OutputIndex]; ok {
+							t.Fatalf("duplicate added: %s", frame.Data)
+						}
+						added[*wire.OutputIndex] = *wire.Item
+					case "response.output_item.done":
+						if _, ok := done[*wire.OutputIndex]; ok {
+							t.Fatalf("duplicate done: %s", frame.Data)
+						}
+						done[*wire.OutputIndex] = *wire.Item
+					case "response.completed":
+						output = wire.Response.Output
+					}
+				}
+				if len(added) != 4 || len(done) != 4 {
+					t.Fatalf("item lifecycle: added=%#v done=%#v", added, done)
+				}
+				for i := range output {
+					if added[i].ID != done[i].ID || done[i].ID != output[i].ID {
+						t.Fatalf("unstable item ID at %d", i)
+					}
+					if output[i].Type == "image_generation_call" && (added[i].Result != "" || done[i].Status != "completed") {
+						t.Fatalf("image lifecycle: %#v / %#v", added[i], done[i])
+					}
+				}
+			} else {
+				var response respResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				output = response.Output
+			}
+			if len(output) != 4 {
+				t.Fatalf("output = %#v", output)
+			}
+			if output[0].Type != "message" || output[0].Content[0].Text != "第一段" || output[1].Type != "image_generation_call" || output[2].Content[0].Text != "第二段" || output[3].Type != "image_generation_call" {
+				t.Fatalf("lost image/text order: %#v", output)
+			}
+			for i, image := range []*ir.ContentBlock{first, second} {
+				item := output[i*2+1]
+				if item.Result != image.MediaB64 || item.OutputFormat != strings.TrimPrefix(image.MimeType, "image/") || !reflect.DeepEqual(item.ProviderData, image.ProviderData) {
+					t.Fatalf("image changed: %#v", item)
+				}
+			}
+
+			// 2. 客户端原样带回输出项，图片变为带签名的 assistant 历史。
+			input, _ := json.Marshal(map[string]any{"model": "image-model", "input": output})
+			request, err := (&handler{}).decodeHTTPRequest(httptest.NewRequest("POST", "/v1/responses", bytes.NewReader(input)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(request.Messages) != 1 || request.Messages[0].Role != ir.RoleAssistant || len(request.Messages[0].Content) != 4 {
+				t.Fatalf("decoded history = %#v", request.Messages)
+			}
+			for i, image := range []*ir.ContentBlock{first, second} {
+				block := request.Messages[0].Content[i*2+1]
+				if block.Type != ir.ContentTypeImage || block.MediaB64 != image.MediaB64 || block.MimeType != image.MimeType || !reflect.DeepEqual(block.ProviderData, image.ProviderData) {
+					t.Fatalf("image history changed: %#v", block)
+				}
+			}
+			// 3. 再编码 Responses 时图片仍是顶层项，不混入 message.content。
+			reencoded := encodeResponsesRequestBody(t, request)
+			items := reencoded["input"].([]any)
+			if len(items) != 4 || items[1].(map[string]any)["type"] != "image_generation_call" || items[3].(map[string]any)["type"] != "image_generation_call" {
+				t.Fatalf("reencoded = %#v", reencoded)
+			}
+		})
+	}
+}
+
+func TestResponsesImagesAndParallelToolsKeepOutputIndices(t *testing.T) {
+	// 1. 工具参数尚未结束时到达图片，图片占用独立输出项。
+	events := []ir.Event{
+		{Type: ir.EventStreamStart},
+		{Type: ir.EventToolCallStart, ToolCall: &ir.StreamingToolCall{CallID: "call_a", Name: "read"}},
+		{Type: ir.EventContentBlock, ContentBlock: &ir.ContentBlock{Type: ir.ContentTypeImage, MimeType: "image/png", MediaB64: "YWJj"}},
+		{Type: ir.EventToolCallStart, ToolCall: &ir.StreamingToolCall{CallID: "call_b", Name: "read"}},
+		{Type: ir.EventToolCallArgumentsDelta, ToolCall: &ir.StreamingToolCall{CallID: "call_a", Arguments: `{}`}},
+		{Type: ir.EventToolCallEnd, ToolCall: &ir.StreamingToolCall{CallID: "call_b", Arguments: `{"b":1}`}},
+		{Type: ir.EventToolCallEnd, ToolCall: &ir.StreamingToolCall{CallID: "call_a", Arguments: `{}`}},
+		{Type: ir.EventDone},
+	}
+	for _, stream := range []bool{false, true} {
+		ch := make(chan ir.Event, len(events))
+		for _, event := range events {
+			ch <- event
+		}
+		close(ch)
+		w := httptest.NewRecorder()
+		if err := (&handler{}).encodeHTTPResponse(ch, w, stream); err != nil {
+			t.Fatal(err)
+		}
+		var output []respOutputItem
+		if stream {
+			for _, frame := range parseSSE(w.Body.Bytes()) {
+				if frame.Event == "response.completed" {
+					var wire respStreamEvent
+					if err := json.Unmarshal([]byte(frame.Data), &wire); err != nil {
+						t.Fatal(err)
+					}
+					output = wire.Response.Output
+				}
+			}
+		} else {
+			var wire respResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &wire); err != nil {
+				t.Fatal(err)
+			}
+			output = wire.Output
+		}
+		if len(output) != 3 || output[0].CallID != "call_a" || output[0].Arguments != `{}` || output[1].Type != "image_generation_call" || output[2].CallID != "call_b" || output[2].Arguments != `{"b":1}` {
+			t.Fatalf("stream=%v output=%#v", stream, output)
+		}
+	}
+}
+
+// TestResponsesHandlerRequiresInlineGeneratedImage 校验公开响应入口不把图片 URI 编成成功空图。
+func TestResponsesHandlerRequiresInlineGeneratedImage(t *testing.T) {
+	// 1. 同时覆盖远端文件 URI、无数据图片及可直接转换的内联图片。
+	for _, test := range []struct {
+		name       string
+		block      ir.ContentBlock
+		wantResult string
+	}{
+		{name: "https URI", block: ir.ContentBlock{MediaURL: "https://example.invalid/generated.webp?secret=do-not-log"}},
+		{name: "gs URI", block: ir.ContentBlock{MediaURL: "gs://bucket/generated.webp"}},
+		{name: "empty image", block: ir.ContentBlock{}},
+		{name: "empty data URI", block: ir.ContentBlock{MediaURL: "data:image/webp;base64,"}},
+		{name: "non base64 data URI", block: ir.ContentBlock{MediaURL: "data:image/svg+xml,<svg/>"}},
+		{name: "base64 data URI", block: ir.ContentBlock{MediaURL: "data:image/webp;base64,YWJj"}, wantResult: "YWJj"},
+		{name: "inline base64", block: ir.ContentBlock{MimeType: "image/webp", MediaB64: "YWJj"}, wantResult: "YWJj"},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(test.name+map[bool]string{false: "/json", true: "/sse"}[stream], func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				image := test.block
+				image.Type = ir.ContentTypeImage
+				events := make(chan ir.Event, 4)
+				events <- ir.Event{Type: ir.EventStreamStart}
+				events <- ir.Event{Type: ir.EventContentDelta, Delta: &ir.DeltaPayload{Text: "before image"}}
+				events <- ir.Event{Type: ir.EventContentBlock, ContentBlock: &image}
+				events <- ir.Event{Type: ir.EventDone}
+				close(events)
+				chunks, err := NewHandler().EncodeResponse(ctx, protocol.EncodeResponseInput{Protocol: ir.ProtocolOpenAIResponses, Events: events, Stream: stream})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body bytes.Buffer
+				var encodeErr error
+				for chunk := range chunks {
+					body.Write(chunk.Data)
+					if chunk.Err != nil {
+						encodeErr = chunk.Err
+					}
+				}
+				// 2. URI-only 图片产生可识别转换错误，不产生图片成功项或 response.completed。
+				if test.wantResult == "" {
+					if encodeErr == nil || !strings.Contains(encodeErr.Error(), "unsupported_response_content") {
+						t.Fatalf("encode error = %v, body = %s", encodeErr, body.String())
+					}
+					if strings.Contains(encodeErr.Error(), "do-not-log") || strings.Contains(body.String(), "do-not-log") {
+						t.Fatal("URI query leaked into error")
+					}
+					if !stream {
+						if body.Len() != 0 {
+							t.Fatalf("JSON wrote success bytes: %s", body.String())
+						}
+						return
+					}
+					var errorFrames int
+					for _, frame := range parseSSE(body.Bytes()) {
+						if frame.Event == "response.completed" || strings.Contains(frame.Data, `"type":"image_generation_call"`) {
+							t.Fatalf("unsupported image reported success: %s", frame.Data)
+						}
+						if frame.Event == "error" {
+							var payload map[string]any
+							if err := json.Unmarshal([]byte(frame.Data), &payload); err != nil {
+								t.Fatal(err)
+							}
+							if payload["code"] != "unsupported_response_content" {
+								t.Fatalf("error = %#v", payload)
+							}
+							errorFrames++
+						}
+					}
+					if errorFrames != 1 {
+						t.Fatalf("error frames = %d", errorFrames)
+					}
+					return
+				}
+				// 3. 内联图片继续正常输出 result 和真实格式。
+				if encodeErr != nil {
+					t.Fatal(encodeErr)
+				}
+				var response respResponse
+				if stream {
+					for _, frame := range parseSSE(body.Bytes()) {
+						if frame.Event == "response.completed" {
+							var completed struct {
+								Response respResponse `json:"response"`
+							}
+							if err := json.Unmarshal([]byte(frame.Data), &completed); err != nil {
+								t.Fatal(err)
+							}
+							response = completed.Response
+						}
+					}
+				} else if err := json.Unmarshal(body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				if len(response.Output) != 2 || response.Output[1].Result != test.wantResult || response.Output[1].OutputFormat != "webp" {
+					t.Fatalf("response = %#v", response)
+				}
+			})
+		}
+	}
+}
+
+// TestResponsesHandlerTextToolTextOrder 保留工具调用两侧文本的输出顺序与签名。
+func TestResponsesHandlerTextToolTextOrder(t *testing.T) {
+	// 1. 工具前后的文本分别成为输出项，调用签名通过现有 ID 包装带回。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	data := &ir.ProviderData{Protocol: ir.ProtocolGemini, Models: []string{"gemini-model"}, Fields: map[string]json.RawMessage{"thoughtSignature": json.RawMessage(`"tool-signature"`)}}
+	events := make(chan ir.Event, 7)
+	events <- ir.Event{Type: ir.EventStreamStart}
+	events <- ir.Event{Type: ir.EventContentDelta, Delta: &ir.DeltaPayload{Text: "before tool"}}
+	events <- ir.Event{Type: ir.EventToolCallStart, ToolCall: &ir.StreamingToolCall{CallID: "call_read", Name: "read", ProviderData: data}}
+	events <- ir.Event{Type: ir.EventToolCallArgumentsDelta, ToolCall: &ir.StreamingToolCall{CallID: "call_read", Arguments: `{"path":"a"}`}}
+	events <- ir.Event{Type: ir.EventToolCallEnd, ToolCall: &ir.StreamingToolCall{CallID: "call_read", Arguments: `{"path":"a"}`, ProviderData: data}}
+	events <- ir.Event{Type: ir.EventContentDelta, Delta: &ir.DeltaPayload{Text: "after tool"}}
+	events <- ir.Event{Type: ir.EventDone}
+	close(events)
+	chunks, err := NewHandler().EncodeResponse(ctx, protocol.EncodeResponseInput{Protocol: ir.ProtocolOpenAIResponses, Stream: true, Events: convert.PackToolCallEvents(ctx, events)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	for chunk := range chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+		body.Write(chunk.Data)
+	}
+	var output []respOutputItem
+	var lifecycle []string
+	for _, frame := range parseSSE(body.Bytes()) {
+		switch frame.Event {
+		case "response.output_item.added", "response.output_item.done":
+			var wire respStreamEvent
+			if err := json.Unmarshal([]byte(frame.Data), &wire); err != nil {
+				t.Fatal(err)
+			}
+			lifecycle = append(lifecycle, frame.Event+":"+wire.Item.Type)
+		case "response.completed":
+			var wire respStreamEvent
+			if err := json.Unmarshal([]byte(frame.Data), &wire); err != nil {
+				t.Fatal(err)
+			}
+			output = wire.Response.Output
+		}
+	}
+	wantLifecycle := []string{
+		"response.output_item.added:message", "response.output_item.done:message",
+		"response.output_item.added:function_call", "response.output_item.done:function_call",
+		"response.output_item.added:message", "response.output_item.done:message",
+	}
+	if !reflect.DeepEqual(lifecycle, wantLifecycle) {
+		t.Fatalf("lifecycle = %#v", lifecycle)
+	}
+	if len(output) != 3 || output[0].Content[0].Text != "before tool" || output[1].Type != "function_call" || output[2].Content[0].Text != "after tool" {
+		t.Fatalf("output = %#v", output)
+	}
+	if output[0].ID == output[2].ID {
+		t.Fatal("text items share ID")
+	}
+	callID, unpacked := convert.UnpackToolCallID(output[1].CallID)
+	if callID != "call_read" || !reflect.DeepEqual(unpacked, data) {
+		t.Fatalf("tool signature = %q %#v", callID, unpacked)
+	}
+
+	// 2. 通过公开请求解码入口读回完整输出，再恢复 Gemini 的原始工具签名。
+	requestBody, _ := json.Marshal(map[string]any{"model": "gemini-model", "input": output})
+	request, err := NewHandler().DecodeRequest(protocol.DecodeRequestInput{Method: "POST", Path: "/v1/responses", Body: requestBody})
+	if err != nil {
+		t.Fatal(err)
+	}
+	convert.PrepareToolCallsForUpstream(request, ir.ProtocolGemini, "gemini-model", "")
+	encoded, _, err := gemini.NewHandler().EncodeRequest(protocol.EncodeRequestInput{Request: request, Target: protocol.Target{Protocol: ir.ProtocolGemini, Model: "gemini-model"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var geminiBody struct {
+		Contents []struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				Text         string `json:"text"`
+				FunctionCall *struct {
+					ID   string          `json:"id"`
+					Name string          `json:"name"`
+					Args json.RawMessage `json:"args"`
+				} `json:"functionCall"`
+				ThoughtSignature string `json:"thoughtSignature"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(encoded.Body, &geminiBody); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, content := range geminiBody.Contents {
+		if content.Role != "model" {
+			t.Fatalf("unexpected role: %s", content.Role)
+		}
+		for _, part := range content.Parts {
+			if part.FunctionCall != nil {
+				if part.FunctionCall.ID != "call_read" || part.FunctionCall.Name != "read" || string(part.FunctionCall.Args) != `{"path":"a"}` || part.ThoughtSignature != "tool-signature" {
+					t.Fatalf("tool part = %#v", part)
+				}
+				order = append(order, "call:read")
+			} else {
+				order = append(order, part.Text)
+			}
+		}
+	}
+	if !reflect.DeepEqual(order, []string{"before tool", "call:read", "after tool"}) {
+		t.Fatalf("Gemini order = %#v; body=%s", order, encoded.Body)
 	}
 }

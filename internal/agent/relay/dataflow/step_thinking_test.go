@@ -64,3 +64,35 @@ func TestStepThinkingStrip_RemovesReasoningOnlyAssistantShell(t *testing.T) {
 		t.Fatalf("message count = %d, want reasoning-only assistant shell removed", len(p.Working.Messages))
 	}
 }
+
+func TestStepThinkingStripMatchesOriginalAndMappedModelInRuleOrder(t *testing.T) {
+	for _, test := range []struct {
+		name, rules   string
+		wantPreserved bool
+	}{
+		{"original", `[{"model_pattern":"^claude-","send_back_thinking":true}]`, true},
+		{"mapped", `[{"model_pattern":"^ep-","send_back_thinking":true}]`, true},
+		{"original_false_first", `[{"model_pattern":"^claude-","send_back_thinking":false},{"model_pattern":"^ep-","send_back_thinking":true}]`, false},
+		{"mapped_false_first", `[{"model_pattern":"^ep-","send_back_thinking":false},{"model_pattern":"^claude-","send_back_thinking":true}]`, false},
+		{"mapped_true_first", `[{"model_pattern":"^ep-","send_back_thinking":true},{"model_pattern":"^claude-","send_back_thinking":false}]`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ch := &models.Channel{
+				ChannelCore:  models.ChannelCore{OtherSettings: `{"model_thinking_passthrough":` + test.rules + `}`},
+				ModelMapping: `{"claude-model":"ep-20260611"}`,
+			}
+			request := &llmkit.Request{Model: "claude-model", Messages: []llmkit.Message{{
+				Role:    llmkit.RoleAssistant,
+				Content: []llmkit.ContentBlock{{Type: llmkit.ContentTypeThinking, Text: "real reasoning"}},
+			}}}
+			pass := &Pass{Original: CloneRequest(request), Working: request}
+			flow := BuildChannelRequestFlow(ch, llmkit.ProtocolOpenAIChat, StepDeps{})
+			if err := flow.Run(context.Background(), pass); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(pass.Working.Messages) > 0; got != test.wantPreserved {
+				t.Fatalf("thinking message preserved = %v, want %v", got, test.wantPreserved)
+			}
+		})
+	}
+}

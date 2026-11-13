@@ -201,8 +201,8 @@ func upstreamToolCall(rawID string, data *ir.ToolCallProviderData, targetProtoco
 	case last < 0:
 		// 使用者自带，目标协议对得上就照写。
 		return rawID, nativeToolCallProviderData(data, targetProtocol)
-	case data.Models[last] != targetModel:
-		// 这一层记的模型和本次发给上游的模型对不上，签名不能用。
+	case data.Models[last] != targetModel && (data.Protocol != ir.ProtocolGemini || targetProtocol != ir.ProtocolGemini):
+		// 非 Gemini 原生回传仍按本层模型匹配；Gemini 签名交给上游判断。
 		return rawID, nil
 	case last > 0:
 		// 取走本层的记录后还有剩，下一跳是另一层网关，整包往下传。

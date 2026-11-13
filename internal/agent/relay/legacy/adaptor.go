@@ -11,6 +11,7 @@ import (
 	"time"
 
 	backendcommon "github.com/VaalaCat/ai-gateway/internal/agent/relay/backend/common"
+	"github.com/VaalaCat/ai-gateway/internal/agent/relay/inflight"
 	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -67,6 +68,7 @@ type traceCollector struct {
 	outboundBodySeen int64
 	respBodyBuf      *tailCapture
 	resp             *http.Response
+	progress         *inflight.Entry
 }
 
 func newTraceCollector(enabled bool) *traceCollector {
@@ -130,8 +132,11 @@ func Relay(c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName strin
 	return RelayWithOwner(nil, c, ch, bodyBytes, modelName, isStream, relayMode, traceEnabled, logger)
 }
 
-func RelayWithOwner(owner *TransportOwner, c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName string, isStream bool, relayMode int, traceEnabled bool, logger *zap.Logger) RelayResult {
+func RelayWithOwner(owner *TransportOwner, c *gin.Context, ch *models.Channel, bodyBytes []byte, modelName string, isStream bool, relayMode int, traceEnabled bool, logger *zap.Logger, progress ...*inflight.Entry) RelayResult {
 	tc := newTraceCollector(traceEnabled)
+	if len(progress) > 0 {
+		tc.progress = progress[0]
+	}
 	if isMultipartAudioMode(relayMode) {
 		return relayMultipartAudio(owner, c, ch, modelName, relayMode, tc)
 	}
@@ -240,6 +245,7 @@ func relayPreparedRequest(
 	}
 
 	// DoRequest
+	tc.progress.ObserveUpstreamBytes(0)
 	respAny, doErr := adaptor.DoRequest(c, info, requestBody)
 	if doErr != nil {
 		return RelayResult{Err: doErr, Trace: tc.build()}
@@ -248,6 +254,12 @@ func relayPreparedRequest(
 	httpResp, ok := respAny.(*http.Response)
 	if !ok || httpResp == nil {
 		return RelayResult{Err: fmt.Errorf("unexpected DoRequest response type")}
+	}
+	// 1. 区分实际 HTTP 正文与 adaptor 返回的无正文占位响应。
+	if httpResp.Body == nil {
+		tc.progress.MarkUpstreamUnreported()
+	} else {
+		httpResp.Body = tc.progress.WrapUpstreamBody(httpResp.Body)
 	}
 	tc.setResponse(httpResp)
 

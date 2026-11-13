@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 
 // Handler 持有扇出可观测 RPC 所需的 Hub 依赖（与 master/api/agent.Handler 同源装配）。
 type Handler struct {
+	HubCallContext     func(context.Context, string, string, any, time.Duration) (json.RawMessage, error)
 	HubCall            func(agentID string, method string, params any, timeout time.Duration) (json.RawMessage, error)
 	GetOnlineAgentIDs  func() []string
 	LogBacklogSnapshot func() monitoring.LogBacklog

@@ -25,15 +25,15 @@ type ChannelBatchEditor struct {
 func (h *Handler) BatchEdit(c *app.Context, req BatchEditRequest) (BatchEditResponse, error) {
 	ids, err := normalizeBatchEditRequestIDs(req.IDs)
 	if err != nil {
-		return BatchEditResponse{}, api.BadRequestError(err.Error(), err)
+		return BatchEditResponse{}, channelInputAPIError(err)
 	}
 	patch, err := ParseChannelPatch(req.Fields)
 	if err != nil {
-		return BatchEditResponse{}, api.BadRequestError(err.Error(), err)
+		return BatchEditResponse{}, channelInputAPIError(err)
 	}
 	if patch.Empty() {
 		err := newChannelBatchInputError("fields cannot be empty", nil)
-		return BatchEditResponse{}, api.BadRequestError(err.Error(), err)
+		return BatchEditResponse{}, channelInputAPIError(err)
 	}
 
 	editor := ChannelBatchEditor{Bus: c.GetBus(), Logger: c.Logger}
@@ -199,7 +199,7 @@ func channelBatchEditAPIError(err error) error {
 	}
 	var inputErr *channelBatchInputError
 	if errors.As(err, &inputErr) {
-		return api.BadRequestError(err.Error(), err)
+		return channelInputAPIError(err)
 	}
 	var missingErr *channelBatchMissingError
 	if errors.As(err, &missingErr) {
