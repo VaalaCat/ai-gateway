@@ -78,10 +78,10 @@ it("ignores a stale preview response after a newer form request succeeds", async
 
 const invalidMemberCases: [string, RoutingFormValues["members"]][] = [
   ["empty members", []],
-  ["missing ref", [{ ref: "", priority: 0, weight: 1 }]],
+  ["missing ref", [{ kind: "model", ref: "", priority: 0, weight: 1 }]],
   ["mixed valid and missing refs", [
-    { ref: "valid", priority: 0, weight: 1 },
-    { ref: "", priority: 1, weight: 1 },
+    { kind: "model", ref: "valid", priority: 0, weight: 1 },
+    { kind: "model", ref: "", priority: 1, weight: 1 },
   ]],
 ];
 
@@ -194,7 +194,7 @@ it("finishes a current manual refresh and shows its result", async () => {
   mocks.mutateAsync
     .mockResolvedValueOnce(preview("initial"))
     .mockReturnValueOnce(manual.promise);
-  const form = formFor([{ ref: "initial", priority: 0, weight: 1 }]);
+  const form = formFor([{ kind: "model", ref: "initial", priority: 0, weight: 1 }]);
   render(<PreviewPanel form={form} />);
   await waitFor(() => expect(screen.getAllByTestId("preview")[0]).toHaveTextContent("initial"));
 

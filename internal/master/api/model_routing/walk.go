@@ -19,10 +19,11 @@ const (
 type RoutingWalkIssue string
 
 const (
-	RoutingWalkIssueCycle    RoutingWalkIssue = "cycle"
-	RoutingWalkIssueMaxDepth RoutingWalkIssue = "max_depth"
-	RoutingWalkIssueDisabled RoutingWalkIssue = "disabled"
-	RoutingWalkIssueNotFound RoutingWalkIssue = "not_found"
+	RoutingWalkIssueCycle       RoutingWalkIssue = "cycle"
+	RoutingWalkIssueMaxDepth    RoutingWalkIssue = "max_depth"
+	RoutingWalkIssueDisabled    RoutingWalkIssue = "disabled"
+	RoutingWalkIssueNotFound    RoutingWalkIssue = "not_found"
+	RoutingWalkIssueInvalidKind RoutingWalkIssue = "invalid_kind"
 )
 
 // RoutingWalkNode is the shared internal traversal result. It deliberately
@@ -135,6 +136,20 @@ func walkRoutingMember(
 	node := RoutingWalkNode{
 		Ref: member.Ref, Priority: member.Priority, Weight: member.Weight, EffectivePercent: effectivePercent,
 	}
+	if member.Kind == models.RoutingMemberModel {
+		if targets.HasRealModel(member.Ref) {
+			node.Kind = RoutingWalkNodeModel
+		} else {
+			node.Kind = RoutingWalkNodeInvalid
+			node.Issue = RoutingWalkIssueNotFound
+		}
+		return node, nil
+	}
+	if member.Kind != models.RoutingMemberRouting {
+		node.Kind = RoutingWalkNodeInvalid
+		node.Issue = RoutingWalkIssueInvalidKind
+		return node, nil
+	}
 	route, found, err := targets.FindEnabledRouting(member.Ref)
 	if err != nil {
 		return RoutingWalkNode{}, err
@@ -153,10 +168,6 @@ func walkRoutingMember(
 		node.Issue = RoutingWalkIssueDisabled
 		return node, nil
 	}
-	if targets.HasRealModel(member.Ref) {
-		node.Kind = RoutingWalkNodeModel
-		return node, nil
-	}
 	node.Kind = RoutingWalkNodeInvalid
 	node.Issue = RoutingWalkIssueNotFound
 	return node, nil
@@ -170,10 +181,6 @@ func walkEnabledRouting(
 	depth int,
 ) (RoutingWalkNode, error) {
 	if visited[route.Key] {
-		if targets.HasRealModel(node.Ref) {
-			node.Kind = RoutingWalkNodeModel
-			return node, nil
-		}
 		node.Kind = RoutingWalkNodeRouting
 		node.RouteKey = route.Key
 		node.Issue = RoutingWalkIssueCycle

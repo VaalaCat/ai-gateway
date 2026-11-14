@@ -19,8 +19,9 @@ import { cn } from "@/lib/utils";
 
 export interface RefComboboxProps {
   value: string;
-  onChange: (v: string) => void;
-  alreadyAdded?: string[];
+  kind: "model" | "routing";
+  onChange: (v: string, kind: "model" | "routing") => void;
+  alreadyAdded?: { ref: string; kind: "model" | "routing" }[];
   excludeSelf?: string;
   hideRoutings?: boolean;
   apiMode?: "admin" | "user";
@@ -30,6 +31,7 @@ export interface RefComboboxProps {
 
 export function RefCombobox({
   value,
+  kind,
   onChange,
   alreadyAdded = [],
   excludeSelf,
@@ -50,12 +52,10 @@ export function RefCombobox({
   const data = useTokenCandidates ? userQuery.data : adminQuery.data;
 
   const routings = (data?.global_routings ?? []).filter((n) => n !== excludeSelf);
-  // 非自身路由名不混进 Models 组：同名时 off-path 解析为路由（见后端规则）。
-  // excludeSelf 已从 routings 排除，故编辑路由 X 时同名真实模型 X 仍保留在 Models 组。
-  const models = (data?.models ?? []).filter((n) => !routings.includes(n));
-
-  const isAlreadyAdded = (n: string) => alreadyAdded.includes(n) && n !== value;
-  const kindOf = (n: string) => (routings.includes(n) ? "routing" : "model");
+  const models = data?.models ?? [];
+  const isAlreadyAdded = (ref: string, candidateKind: "model" | "routing") =>
+    alreadyAdded.some((m) => m.ref === ref && m.kind === candidateKind) &&
+    !(ref === value && candidateKind === kind);
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -72,7 +72,7 @@ export function RefCombobox({
             <span className="flex items-center gap-2 truncate">
               <span className="truncate">{value}</span>
               <Badge variant="outline" className="text-xs shrink-0">
-                {kindOf(value) === "routing" ? t("refKindRouting") : t("refKindModel")}
+                {kind === "routing" ? t("refKindRouting") : t("refKindModel")}
               </Badge>
             </span>
           ) : (
@@ -99,17 +99,18 @@ export function RefCombobox({
                 {models.map((n) => (
                   <CommandItem
                     key={`m-${n}`}
-                    value={n}
-                    disabled={isAlreadyAdded(n)}
+                    value={`model:${n}`}
+                    keywords={[n]}
+                    disabled={isAlreadyAdded(n, "model")}
                     onSelect={() => {
-                      onChange(n);
+                      onChange(n, "model");
                       setOpen(false);
                     }}
                   >
                     <Check
                       className={cn(
                         "size-4 mr-2",
-                        n === value ? "opacity-100" : "opacity-0"
+                        n === value && kind === "model" ? "opacity-100" : "opacity-0"
                       )}
                     />
                     <span className="flex-1 truncate">{n}</span>
@@ -118,7 +119,7 @@ export function RefCombobox({
                         {t("refUnderlyingModel")}
                       </Badge>
                     )}
-                    {isAlreadyAdded(n) && (
+                    {isAlreadyAdded(n, "model") && (
                       <span className="ml-2 text-xs text-muted-foreground">
                         {t("refAlreadyAdded")}
                       </span>
@@ -132,24 +133,25 @@ export function RefCombobox({
                 {routings.map((n) => (
                   <CommandItem
                     key={`r-${n}`}
-                    value={n}
-                    disabled={isAlreadyAdded(n)}
+                    value={`routing:${n}`}
+                    keywords={[n]}
+                    disabled={isAlreadyAdded(n, "routing")}
                     onSelect={() => {
-                      onChange(n);
+                      onChange(n, "routing");
                       setOpen(false);
                     }}
                   >
                     <Check
                       className={cn(
                         "size-4 mr-2",
-                        n === value ? "opacity-100" : "opacity-0"
+                        n === value && kind === "routing" ? "opacity-100" : "opacity-0"
                       )}
                     />
                     <span className="flex-1 truncate">{n}</span>
                     <Badge variant="outline" className="ml-2 text-xs">
                       {t("refKindRoutingShort")}
                     </Badge>
-                    {isAlreadyAdded(n) && (
+                    {isAlreadyAdded(n, "routing") && (
                       <span className="ml-2 text-xs text-muted-foreground">
                         {t("refAlreadyAdded")}
                       </span>

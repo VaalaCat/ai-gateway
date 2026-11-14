@@ -47,7 +47,7 @@ func TestCreate_Success(t *testing.T) {
 
 	id := createRouting(t, srv, jwt, map[string]any{
 		"name": "test-create", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	if id == 0 {
 		t.Fatal("expected non-zero id")
@@ -60,7 +60,7 @@ func TestCreate_InvalidRef_StructuredError(t *testing.T) {
 	// 不 seedChannel，ref 不存在
 	raw, _ := json.Marshal(map[string]any{
 		"name": "bad-ref", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "nonexistent-model", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "nonexistent-model", "priority": 0, "weight": 1}},
 	})
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("POST", "/api/admin/model-routings", bytes.NewReader(raw))
@@ -89,18 +89,18 @@ func TestCreate_CycleDetected_409Or400(t *testing.T) {
 	// 创建 A 引用 gpt-4o
 	idA := createRouting(t, srv, jwt, map[string]any{
 		"name": "route-A", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 
 	// 创建 B 引用 A（正常）
 	_ = createRouting(t, srv, jwt, map[string]any{
 		"name": "route-B", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "route-A", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "routing", "ref": "route-A", "priority": 0, "weight": 1}},
 	})
 
 	// 更新 A 引用 B → cycle
 	code, resp := updateRouting(t, srv, jwt, idA, map[string]any{
-		"members": []map[string]any{{"ref": "route-B", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "routing", "ref": "route-B", "priority": 0, "weight": 1}},
 	})
 	if code != http.StatusBadRequest && code != http.StatusConflict {
 		t.Fatalf("expected 400 or 409 for cycle, got %d: %v", code, resp)
@@ -119,7 +119,7 @@ func TestUpdate_Success(t *testing.T) {
 
 	id := createRouting(t, srv, jwt, map[string]any{
 		"name": "upd-test", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 
 	code, resp := updateRouting(t, srv, jwt, id, map[string]any{
@@ -150,7 +150,7 @@ func TestUpdate_CannotChangeScope(t *testing.T) {
 
 	id := createRouting(t, srv, jwt, map[string]any{
 		"name": "scope-test", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 
 	// scope 字段在 DAO Update 的 allowed map 中被忽略，应该静默成功
@@ -180,7 +180,7 @@ func TestDelete_Success(t *testing.T) {
 
 	id := createRouting(t, srv, jwt, map[string]any{
 		"name": "del-test", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 
 	code, resp := deleteRouting(t, srv, jwt, id)
@@ -206,13 +206,13 @@ func TestDelete_Referenced_409(t *testing.T) {
 	// 创建 B（被引用）
 	idB := createRouting(t, srv, jwt, map[string]any{
 		"name": "route-B2", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 
 	// 创建 A 引用 B
 	_ = createRouting(t, srv, jwt, map[string]any{
 		"name": "route-A2", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "route-B2", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "routing", "ref": "route-B2", "priority": 0, "weight": 1}},
 	})
 
 	// 删 B → 409 + code=referenced_by

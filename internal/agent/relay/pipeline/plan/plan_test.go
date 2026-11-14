@@ -268,8 +268,8 @@ func TestPlanner_RoutingFallback_AllMembersEmpty_Returns502Sentinel(t *testing.T
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "A", Priority: 5, Weight: 1},
-					{Ref: "B", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "A", Priority: 5, Weight: 1},
+					{Kind: "model", Ref: "B", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -315,7 +315,7 @@ func TestPlanner_TracePropagatedToPlan(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "real-A", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "real-A", Priority: 1, Weight: 1},
 				},
 			},
 		},
@@ -350,7 +350,7 @@ func TestPlanner_RoutingResolvedLogEmitted(t *testing.T) {
 			"smart": {
 				ID: 1, Name: "smart", Scope: "global", Enabled: true,
 				Members: []protocol.RoutingMember{
-					{Ref: "real-A", Priority: 1, Weight: 1},
+					{Kind: "model", Ref: "real-A", Priority: 1, Weight: 1},
 				},
 			},
 		},

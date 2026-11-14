@@ -446,11 +446,8 @@ func (f marketplaceRoutingTargetFinder) FindEnabledRouting(ref string) (routinga
 }
 
 func (f marketplaceRoutingTargetFinder) FindDisabledRouting(ref string) (routingapi.RoutingWalkRoute, bool, error) {
-	// behavior change: runtime omits disabled globals from its routing cache, so
-	// a same-name real model remains a valid destination in marketplace walks.
-	if _, realModelExists := f.realModels[ref]; realModelExists {
-		return routingapi.RoutingWalkRoute{}, false, nil
-	}
+	// Only explicit routing members reach this lookup. A same-name real model
+	// must not hide the disabled routing's identity or diagnostics.
 	route, ok := f.disabled[ref]
 	if !ok {
 		return routingapi.RoutingWalkRoute{}, false, nil
@@ -472,6 +469,9 @@ func parseMarketplaceRoutingMembers(raw string) ([]models.RoutingMember, error) 
 		return nil, errors.New("invalid routing members: members are empty")
 	}
 	for _, member := range members {
+		if member.Kind != models.RoutingMemberModel && member.Kind != models.RoutingMemberRouting {
+			return nil, errors.New("invalid routing member kind")
+		}
 		if strings.TrimSpace(member.Ref) == "" {
 			return nil, errors.New("empty routing member ref")
 		}

@@ -27,8 +27,8 @@ func TestResolve_FlatGlobal(t *testing.T) {
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "a", Priority: 0, Weight: 3},
-			{Ref: "b", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "a", Priority: 0, Weight: 3},
+			{Kind: "model", Ref: "b", Priority: 0, Weight: 1},
 		},
 	})
 	countA, countB := 0, 0
@@ -55,8 +55,8 @@ func TestResolve_PrioritySkip(t *testing.T) {
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "a", Priority: 10, Weight: 1},
-			{Ref: "b", Priority: 5, Weight: 1},
+			{Kind: "model", Ref: "a", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "b", Priority: 5, Weight: 1},
 		},
 	})
 	// 一直选 a（高 priority）
@@ -73,12 +73,12 @@ func TestResolve_AllExhausted(t *testing.T) {
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "a", Priority: 0, Weight: 1},
-			{Ref: "b", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "a", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "b", Priority: 0, Weight: 1},
 		},
 	})
 	ctx := NewResolveCtx()
-	ctx.excluded[1] = map[string]bool{"a": true, "b": true}
+	ctx.excluded[1] = map[string]bool{"model:a": true, "model:b": true}
 	if got := resolveToRealModel(s, "smart", 0, ctx); got != "" {
 		t.Errorf("all exhausted → empty, got %q", got)
 	}
@@ -89,15 +89,15 @@ func TestResolve_Nested(t *testing.T) {
 	s.SetGlobalRouting("cheap", &protocol.SyncedRouting{
 		ID: 1, Name: "cheap", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "deepseek", Priority: 0, Weight: 1},
-			{Ref: "qwen", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "deepseek", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "qwen", Priority: 0, Weight: 1},
 		},
 	})
 	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
 		"my": {
 			ID: 2, Name: "my", Scope: "user", UserID: 42, Enabled: true,
 			Members: []protocol.RoutingMember{
-				{Ref: "cheap", Priority: 0, Weight: 1},
+				{Kind: "routing", Ref: "cheap", Priority: 0, Weight: 1},
 			},
 		},
 	})
@@ -120,11 +120,11 @@ func TestResolve_CycleDefense(t *testing.T) {
 	// 直接绕过保存校验制造环：A → B → A
 	s.SetGlobalRouting("A", &protocol.SyncedRouting{
 		ID: 1, Name: "A", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "B", Priority: 0, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "routing", Ref: "B", Priority: 0, Weight: 1}},
 	})
 	s.SetGlobalRouting("B", &protocol.SyncedRouting{
 		ID: 2, Name: "B", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "A", Priority: 0, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "routing", Ref: "A", Priority: 0, Weight: 1}},
 	})
 	ctx := NewResolveCtx()
 	result := resolveToRealModel(s, "A", 0, ctx)
@@ -144,7 +144,7 @@ func TestResolve_DepthLimit(t *testing.T) {
 		}
 		s.SetGlobalRouting(name, &protocol.SyncedRouting{
 			ID: uint(i + 1), Name: name, Scope: "global", Enabled: true,
-			Members: []protocol.RoutingMember{{Ref: nextRef, Priority: 0, Weight: 1}},
+			Members: []protocol.RoutingMember{{Kind: "routing", Ref: nextRef, Priority: 0, Weight: 1}},
 		})
 	}
 	ctx := NewResolveCtx()
@@ -160,8 +160,8 @@ func TestResolve_AfterMarkExhausted(t *testing.T) {
 	s.SetGlobalRouting("smart", &protocol.SyncedRouting{
 		ID: 1, Name: "smart", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "a", Priority: 0, Weight: 1},
-			{Ref: "b", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "a", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "b", Priority: 0, Weight: 1},
 		},
 	})
 	ctx := NewResolveCtx()
@@ -181,15 +181,15 @@ func TestResolve_AfterMarkExhausted_Nested(t *testing.T) {
 	s.SetGlobalRouting("cheap", &protocol.SyncedRouting{
 		ID: 1, Name: "cheap", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "deepseek", Priority: 0, Weight: 1},
-			{Ref: "qwen", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "deepseek", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "qwen", Priority: 0, Weight: 1},
 		},
 	})
 	s.SetUserRoutings(42, map[string]*protocol.SyncedRouting{
 		"my": {
 			ID: 2, Name: "my", Scope: "user", UserID: 42, Enabled: true,
 			Members: []protocol.RoutingMember{
-				{Ref: "cheap", Priority: 0, Weight: 1},
+				{Kind: "routing", Ref: "cheap", Priority: 0, Weight: 1},
 			},
 		},
 	})
@@ -216,8 +216,8 @@ func TestResolve_SelfNameShadowsRealModel(t *testing.T) {
 	s.SetGlobalRouting("gpt-5.5", &protocol.SyncedRouting{
 		ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "gpt-5.5", Priority: 10, Weight: 1}, // 主：同名真实模型
-			{Ref: "gpt-4o", Priority: 0, Weight: 1},   // 降级
+			{Kind: "model", Ref: "gpt-5.5", Priority: 10, Weight: 1}, // 主：同名真实模型
+			{Kind: "model", Ref: "gpt-4o", Priority: 0, Weight: 1},   // 降级
 		},
 	})
 	ctx := NewResolveCtx()
@@ -226,9 +226,7 @@ func TestResolve_SelfNameShadowsRealModel(t *testing.T) {
 	}
 }
 
-// off-path 同名冲突：路由 outer 的成员 N 既是全局路由又有同名真实模型。
-// N 不在当前路径上 → 应展开为路由（routing wins），最终解析到 N 的成员 realM，
-// 而非短路成同名真实模型 N。这道防线防止有人把 HasRealModel 判断挪到 visited 检查之前。
+// Explicit routing member N expands its route even when real model N exists.
 func TestResolve_OffPathRoutingWinsOverSameNameModel(t *testing.T) {
 	s := newTestStore()
 	// channel 同时提供 "N" 和 "realM" 两个真实模型名
@@ -239,11 +237,11 @@ func TestResolve_OffPathRoutingWinsOverSameNameModel(t *testing.T) {
 	s.RebuildModelIndex()
 	s.SetGlobalRouting("N", &protocol.SyncedRouting{
 		ID: 1, Name: "N", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "realM", Priority: 0, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "model", Ref: "realM", Priority: 0, Weight: 1}},
 	})
 	s.SetGlobalRouting("outer", &protocol.SyncedRouting{
 		ID: 2, Name: "outer", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "N", Priority: 0, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "routing", Ref: "N", Priority: 0, Weight: 1}},
 	})
 	ctx := NewResolveCtx()
 	if got := resolveToRealModel(s, "outer", 0, ctx); got != "realM" {
@@ -262,8 +260,8 @@ func TestResolve_SelfNameFallbackAfterExhaust(t *testing.T) {
 	s.SetGlobalRouting("gpt-5.5", &protocol.SyncedRouting{
 		ID: 1, Name: "gpt-5.5", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "gpt-5.5", Priority: 10, Weight: 1},
-			{Ref: "gpt-4o", Priority: 0, Weight: 1},
+			{Kind: "model", Ref: "gpt-5.5", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "gpt-4o", Priority: 0, Weight: 1},
 		},
 	})
 	ctx := NewResolveCtx()

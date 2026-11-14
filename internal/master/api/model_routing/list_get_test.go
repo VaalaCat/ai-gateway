@@ -210,11 +210,11 @@ func TestModelRoutingList_ScopeGlobalOnly(t *testing.T) {
 	seedChannel(t, srv, jwt, "gpt-4o")
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "g1", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "us1", "scope": "user", "user_id": 1, "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	list := listRoutings(t, srv, jwt, "?scope=global")
 	if len(list) != 1 || list[0].Name != "g1" {
@@ -228,11 +228,11 @@ func TestModelRoutingList_QSearch(t *testing.T) {
 	seedChannel(t, srv, jwt, "gpt-4o")
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "smart-large", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	createRouting(t, srv, jwt, map[string]any{
 		"name": "cheap-pool", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	list := listRoutings(t, srv, jwt, "?q=smart")
 	if len(list) != 1 || list[0].Name != "smart-large" {
@@ -246,7 +246,7 @@ func TestGet_Found(t *testing.T) {
 	seedChannel(t, srv, jwt, "gpt-4o")
 	id := createRouting(t, srv, jwt, map[string]any{
 		"name": "x", "scope": "global", "enabled": true,
-		"members": []map[string]any{{"ref": "gpt-4o", "priority": 0, "weight": 1}},
+		"members": []map[string]any{{"kind": "model", "ref": "gpt-4o", "priority": 0, "weight": 1}},
 	})
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", fmt.Sprintf("/api/admin/model-routings/%d", id), nil)

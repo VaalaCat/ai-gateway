@@ -86,11 +86,20 @@ func (h *Handler) Preview(c *app.Context, req PreviewRequest) (PreviewResponse, 
 	}
 	rootMembers := make([]models.RoutingMember, len(req.Members))
 	for i, member := range req.Members {
-		rootMembers[i] = models.RoutingMember{Ref: member.Ref, Priority: member.Priority, Weight: member.Weight}
+		rootMembers[i] = models.RoutingMember{Kind: member.Kind, Ref: member.Ref, Priority: member.Priority, Weight: member.Weight}
 	}
 	rootRouteKey := ""
-	if existing := rIdx[req.SelfName]; existing != nil {
-		rootRouteKey = RoutingWalkKey(existing)
+	if req.SelfName != "" && (req.SelfScope == models.RoutingScopeGlobal || req.SelfScope == "") {
+		// Preview the proposed graph, not the saved version of the edited row.
+		candidate := &models.ModelRouting{Name: req.SelfName, Scope: models.RoutingScopeGlobal, Enabled: true}
+		if existing := rIdx[req.SelfName]; existing != nil {
+			candidate.ID = existing.ID
+		}
+		raw, _ := json.Marshal(rootMembers)
+		candidate.Members = string(raw)
+		rIdx[req.SelfName] = candidate
+		delete(disabledRIdx, req.SelfName)
+		rootRouteKey = RoutingWalkKey(candidate)
 	}
 	walked, err := WalkRoutingDestinations(RoutingWalkRequest{
 		RootRouteKey: rootRouteKey,

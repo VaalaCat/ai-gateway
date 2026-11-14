@@ -1604,6 +1604,7 @@
     "errors": {
       "duplicateName": "当前范围内已存在同名路由",
       "invalidRef": "引用 '{ref}' 不存在",
+      "invalidMemberKind": "成员类型必须是真实模型或路由",
       "cycleDetected": "检测到循环引用：{path}",
       "maxDepth": "嵌套深度超过 5 层",
       "cannotNestUser": "用户路由不能引用其他用户路由",
@@ -1614,7 +1615,7 @@
       "basic": "基本信息",
       "basicDesc": "名称、作用域、状态",
       "members": "成员",
-      "membersDesc": "聚合最多 32 个引用"
+      "membersDesc": "最多 32 个成员；明确选择真实模型或路由，真实模型不会继续展开"
     },
     "field": {
       "name": "名称",
@@ -1663,6 +1664,7 @@
       "collapse": "折叠",
       "unavailable": "不可用",
       "disabled": "已禁用",
+      "invalidKind": "成员类型无效",
       "cycle": "环依赖",
       "maxDepth": "深度超限",
       "empty": "添加成员后查看流量分布",

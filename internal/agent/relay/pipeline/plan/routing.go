@@ -16,9 +16,6 @@ const routingMaxDepth = 5
 type RoutingStore interface {
 	ResolveRouting(ctx context.Context, name string, owner protocol.RoutingOwner) *protocol.SyncedRouting
 	GetGlobalRouting(ctx context.Context, name string) *protocol.SyncedRouting
-	// HasRealModel 判断 name 是否有 channel 支撑的真实模型（不含 routing）。
-	// 用于：路由展开重遇自身/同名路由时，若存在同名真实模型则终结于它。
-	HasRealModel(name string) bool
 }
 
 // ResolveCtx 在单次请求内贯穿，记录已尝试成员、已访问 routing、深度、trace。
@@ -30,7 +27,7 @@ type ResolveCtx struct {
 	depth      int
 	trace      []string
 	lastChain  []uint // 上次成功 resolve 经过的 routing IDs（深→浅，resolveStep 成功路径自下而上 append）
-	pickMember func([]protocol.RoutingMember, map[string]bool) string
+	pickMember func([]protocol.RoutingMember, map[string]bool) *protocol.RoutingMember
 	// Inspection must keep exhausting a different routing path even when it
 	// converges on the same real model as the previous path. Online Relay keeps
 	// the historical stop-on-repeat behavior.
@@ -76,7 +73,7 @@ func (c *ResolveCtx) MarkMemberExhausted(realModel string) {
 		if c.excluded[routingID] == nil {
 			c.excluded[routingID] = make(map[string]bool)
 		}
-		c.excluded[routingID][realModel] = true
+		c.excluded[routingID]["model:"+realModel] = true
 	}
 	// visited/depth 已被 defer 清理，无需重置
 	// trace 不动，由调用方决定是否清空
@@ -91,18 +88,25 @@ func ResolveToRealModel(requestCtx context.Context, store RoutingStore, ref stri
 func resolveModel(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx) modelResolution {
 	walk.lastChain = walk.lastChain[:0] // 清空上轮路径，保留 cap
 	walk.topLevelRouting = false
-	model := resolveStep(requestCtx, store, ref, owner, walk, true /* topLevel */)
+	model := resolveStep(requestCtx, store, ref, owner, walk, "" /* topLevel */)
 	return modelResolution{model: model, topLevelRouting: walk.topLevelRouting}
 }
 
-func resolveStep(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx, topLevel bool) string {
+func resolveStep(requestCtx context.Context, store RoutingStore, ref string, owner protocol.RoutingOwner, walk *ResolveCtx, kind string) string {
+	if kind == "model" {
+		return ref
+	}
+	if kind != "" && kind != "routing" {
+		walk.trace = append(walk.trace, ref+":invalid_kind")
+		return ""
+	}
 	if walk.depth >= routingMaxDepth {
 		walk.trace = append(walk.trace, ref+":depth_exceeded")
 		return ""
 	}
 
 	var r *protocol.SyncedRouting
-	if topLevel {
+	if kind == "" {
 		r = store.ResolveRouting(requestCtx, ref, owner)
 		walk.topLevelRouting = r != nil
 	} else {
@@ -110,16 +114,13 @@ func resolveStep(requestCtx context.Context, store RoutingStore, ref string, own
 		r = store.GetGlobalRouting(requestCtx, ref)
 	}
 	if r == nil {
-		// 不是 routing 名 → 当真实 model 名返回（让上层走 channel 选择）
-		return ref
-	}
-	if walk.visited[r.ID] {
-		// 重遇已展开路由：若存在同名真实模型则终结于它（如路由 gpt-5.5 引用真实模型 gpt-5.5），
-		// 否则才是真环。
-		if store.HasRealModel(ref) {
-			walk.trace = append(walk.trace, ref+":model")
+		if kind == "" {
 			return ref
 		}
+		walk.trace = append(walk.trace, ref+":routing_not_found")
+		return ""
+	}
+	if walk.visited[r.ID] {
 		walk.trace = append(walk.trace, ref+":cycle")
 		return ""
 	}
@@ -142,31 +143,36 @@ func resolveStep(requestCtx context.Context, store RoutingStore, ref string, own
 			pickMember = selectRoutingMember
 		}
 		member := pickMember(r.Members, walk.excluded[r.ID])
-		if member == "" {
+		if member == nil {
 			return ""
 		}
-		result := resolveStep(requestCtx, store, member, owner, walk, false)
+		if member.Kind != "model" && member.Kind != "routing" {
+			walk.trace = append(walk.trace, member.Ref+":invalid_kind")
+			walk.excluded[r.ID][routingMemberKey(*member)] = true
+			continue
+		}
+		result := resolveStep(requestCtx, store, member.Ref, owner, walk, member.Kind)
 		if result != "" {
 			walk.lastChain = append(walk.lastChain, r.ID)
 			return result
 		}
 		// 递归失败：才把这个 member 加 excluded，成功路径不 mark
-		walk.excluded[r.ID][member] = true
+		walk.excluded[r.ID][routingMemberKey(*member)] = true
 	}
 }
 
 func selectDeterministicRoutingMember(
 	members []protocol.RoutingMember,
 	excluded map[string]bool,
-) string {
+) *protocol.RoutingMember {
 	candidates := make([]protocol.RoutingMember, 0, len(members))
 	for _, member := range members {
-		if !excluded[member.Ref] {
+		if !excluded[routingMemberKey(member)] {
 			candidates = append(candidates, member)
 		}
 	}
 	if len(candidates) == 0 {
-		return ""
+		return nil
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Priority != candidates[j].Priority {
@@ -174,21 +180,21 @@ func selectDeterministicRoutingMember(
 		}
 		return candidates[i].Ref < candidates[j].Ref
 	})
-	return candidates[0].Ref
+	return &candidates[0]
 }
 
 // selectRoutingMember 按 priority 分组取最高组、组内按 weight 加权随机选一个 ref。
 // excluded 中的 ref 跳过。
-func selectRoutingMember(members []protocol.RoutingMember, excluded map[string]bool) string {
+func selectRoutingMember(members []protocol.RoutingMember, excluded map[string]bool) *protocol.RoutingMember {
 	var candidates []protocol.RoutingMember
 	for _, m := range members {
-		if excluded[m.Ref] {
+		if excluded[routingMemberKey(m)] {
 			continue
 		}
 		candidates = append(candidates, m)
 	}
 	if len(candidates) == 0 {
-		return ""
+		return nil
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].Priority > candidates[j].Priority
@@ -204,7 +210,7 @@ func selectRoutingMember(members []protocol.RoutingMember, excluded map[string]b
 	return weightedRandomMember(group)
 }
 
-func weightedRandomMember(members []protocol.RoutingMember) string {
+func weightedRandomMember(members []protocol.RoutingMember) *protocol.RoutingMember {
 	total := 0
 	for _, m := range members {
 		w := m.Weight
@@ -222,8 +228,10 @@ func weightedRandomMember(members []protocol.RoutingMember) string {
 		}
 		r -= w
 		if r < 0 {
-			return m.Ref
+			return &m
 		}
 	}
-	return members[len(members)-1].Ref
+	return &members[len(members)-1]
 }
+
+func routingMemberKey(m protocol.RoutingMember) string { return m.Kind + ":" + m.Ref }

@@ -106,7 +106,8 @@ export function RoutingForm({ mode, apiMode = "admin", tokenId }: RoutingFormPro
     }
     if (code === "invalid_ref") {
       const ref = body.details?.ref as string | undefined;
-      const idx = form.getValues("members").findIndex((m) => m.ref === ref);
+      const kind = body.details?.kind;
+      const idx = form.getValues("members").findIndex((m) => m.ref === ref && (!kind || m.kind === kind));
       if (idx >= 0) {
         form.setError(`members.${idx}.ref` as const, {
           message: t(ROUTING_ERROR_KEYS[code] as never, body.details as never),

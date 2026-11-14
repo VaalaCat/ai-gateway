@@ -136,24 +136,24 @@ func TestModelOfferPlanFinderUsesDeterministicExhaustiveRoutingAndModes(t *testi
 		"route": {
 			ID: 101, Name: "route", Scope: "token", TokenID: 17, Enabled: true,
 			Members: []protocol.RoutingMember{
-				{Ref: "nested", Priority: 10, Weight: 100},
-				{Ref: "token-real", Priority: 10, Weight: 1},
+				{Kind: "routing", Ref: "nested", Priority: 10, Weight: 100},
+				{Kind: "model", Ref: "token-real", Priority: 10, Weight: 1},
 			},
 		},
 	})
 	store.SetUserRoutings(7, map[string]*protocol.SyncedRouting{
 		"route": {
 			ID: 102, Name: "route", Scope: "user", UserID: 7, Enabled: true,
-			Members: []protocol.RoutingMember{{Ref: "user-real", Priority: 1, Weight: 1}},
+			Members: []protocol.RoutingMember{{Kind: "model", Ref: "user-real", Priority: 1, Weight: 1}},
 		},
 	})
 	store.SetGlobalRouting("route", &protocol.SyncedRouting{
 		ID: 103, Name: "route", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "global-real", Priority: 1, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "model", Ref: "global-real", Priority: 1, Weight: 1}},
 	})
 	store.SetGlobalRouting("nested", &protocol.SyncedRouting{
 		ID: 104, Name: "nested", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "nested-real", Priority: 1, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "model", Ref: "nested-real", Priority: 1, Weight: 1}},
 	})
 	addPlanChannel(store, 1, "nested-real", true, models.ChannelCore{
 		PassthroughEnabled: true, SupportedAPITypes: `["chat_completions"]`, Type: consts.ChannelTypeOpenAI,
@@ -207,19 +207,19 @@ func TestModelOfferPlanFinderExhaustsConvergingRoutingBranches(t *testing.T) {
 	store.SetGlobalRouting("route", &protocol.SyncedRouting{
 		ID: 201, Name: "route", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "branch-a", Priority: 20, Weight: 1},
-			{Ref: "branch-b", Priority: 10, Weight: 1},
+			{Kind: "routing", Ref: "branch-a", Priority: 20, Weight: 1},
+			{Kind: "routing", Ref: "branch-b", Priority: 10, Weight: 1},
 		},
 	})
 	store.SetGlobalRouting("branch-a", &protocol.SyncedRouting{
 		ID: 202, Name: "branch-a", Scope: "global", Enabled: true,
-		Members: []protocol.RoutingMember{{Ref: "shared-model", Priority: 1, Weight: 1}},
+		Members: []protocol.RoutingMember{{Kind: "model", Ref: "shared-model", Priority: 1, Weight: 1}},
 	})
 	store.SetGlobalRouting("branch-b", &protocol.SyncedRouting{
 		ID: 203, Name: "branch-b", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "shared-model", Priority: 20, Weight: 1},
-			{Ref: "unique-model", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "shared-model", Priority: 20, Weight: 1},
+			{Kind: "model", Ref: "unique-model", Priority: 10, Weight: 1},
 		},
 	})
 	addPlanChannel(store, 1, "shared-model", true, models.ChannelCore{})
@@ -242,8 +242,8 @@ func TestModelOfferPlanFinderSameNameRoutingMatchesRelayCandidates(t *testing.T)
 	store.SetGlobalRouting("same", &protocol.SyncedRouting{
 		ID: 301, Name: "same", Scope: "global", Enabled: true,
 		Members: []protocol.RoutingMember{
-			{Ref: "same", Priority: 10, Weight: 1},
-			{Ref: "fallback-model", Priority: 1, Weight: 1},
+			{Kind: "model", Ref: "same", Priority: 10, Weight: 1},
+			{Kind: "model", Ref: "fallback-model", Priority: 1, Weight: 1},
 		},
 	})
 	addPlanChannel(store, 1, "same", true, models.ChannelCore{})

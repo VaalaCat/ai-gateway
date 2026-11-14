@@ -1604,6 +1604,7 @@
     "errors": {
       "duplicateName": "A routing with this name already exists in this scope",
       "invalidRef": "Reference '{ref}' does not exist",
+      "invalidMemberKind": "Member type must be model or routing",
       "cycleDetected": "Cycle detected: {path}",
       "maxDepth": "Nesting depth exceeds 5",
       "cannotNestUser": "User routings cannot reference other user routings",
@@ -1614,7 +1615,7 @@
       "basic": "Basic",
       "basicDesc": "Name, scope, visibility",
       "members": "Members",
-      "membersDesc": "Aggregate up to 32 references"
+      "membersDesc": "Up to 32 members. Choose a real model or routing explicitly; real models are terminal targets."
     },
     "field": {
       "name": "Name",
@@ -1663,6 +1664,7 @@
       "collapse": "Collapse",
       "unavailable": "Unavailable",
       "disabled": "Disabled",
+      "invalidKind": "Invalid member type",
       "cycle": "Cycle",
       "maxDepth": "max depth",
       "empty": "Add a member to see how traffic flows",

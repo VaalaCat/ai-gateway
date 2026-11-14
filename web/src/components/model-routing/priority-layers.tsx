@@ -174,6 +174,7 @@ const ERROR_BADGE: Record<
   not_found: { i18nKey: "unavailable", variant: "outline" },
   disabled: { i18nKey: "disabled", variant: "outline" },
   cycle: { i18nKey: "cycle", variant: "destructive" },
+  invalid_kind: { i18nKey: "invalidKind", variant: "destructive" },
   max_depth: { i18nKey: "maxDepth", variant: "destructive" },
 };
 

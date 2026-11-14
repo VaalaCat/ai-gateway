@@ -1583,7 +1583,7 @@ func TestAdminRoutingDTOIncludesRuleChainThatUserDTOCannotSerialize(t *testing.T
 	viewer := scopedMarketplaceViewer(7, 23)
 	query := &fakeRoutingModelQuery{routings: []models.ModelRouting{
 		routingRow(10, "smart", models.RoutingScopeToken, 0, 23, true,
-			routingMembers(member("pool", 10, 3))),
+			routingMembers(routeMember("pool", 10, 3))),
 		routingRow(20, "pool", models.RoutingScopeGlobal, 0, 0, true,
 			routingMembers(member("gpt-4o", 5, 1))),
 	}}

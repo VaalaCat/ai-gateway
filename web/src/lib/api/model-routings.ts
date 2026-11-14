@@ -14,6 +14,7 @@ export const ROUTING_ERROR_KEYS: Record<string, string> = {
   duplicate_name: "errors.duplicateName",
   invalid_ref: "errors.invalidRef",
   cycle_detected: "errors.cycleDetected",
+  invalid_member_kind: "errors.invalidMemberKind",
   max_depth: "errors.maxDepth",
   cannot_nest_user: "errors.cannotNestUser",
   name_contains_comma: "errors.nameContainsComma",
@@ -216,11 +217,11 @@ export function useRoutingCandidatesByToken(
       if (!tokenKey) {
         return { models: [], global_routings: [] };
       }
-      const res = await fetch("/v1/models", {
-        headers: {
-          Authorization: `Bearer ${tokenKey}`,
-        },
-      });
+      const [res, realRes] = await Promise.all([
+        fetch("/v1/models", { headers: { Authorization: `Bearer ${tokenKey}` } }),
+        fetch("/v1/models?include_routings=false", { headers: { Authorization: `Bearer ${tokenKey}` } }),
+      ]);
+      if (!realRes.ok) throw new Error(`/v1/models ${realRes.status}`);
       if (!res.ok) {
         throw new Error(`/v1/models ${res.status}`);
       }
@@ -228,10 +229,9 @@ export function useRoutingCandidatesByToken(
         data?: { id: string; owned_by?: string }[];
       };
       const visible = body.data ?? [];
+      const realBody = (await realRes.json()) as { data?: { id: string }[] };
       return {
-        models: visible
-          .filter((model) => model.owned_by !== "ai-gateway-routing")
-          .map((model) => model.id),
+        models: (realBody.data ?? []).map((model) => model.id),
         global_routings: routingNamesQuery.data?.names ?? [],
         visible_refs: visible.map((model) => model.id),
       };

@@ -1,6 +1,8 @@
 package dao
 
 import (
+	"errors"
+	"gorm.io/gorm"
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
@@ -106,7 +108,31 @@ func (q *adminModelRoutingQuery) ListByToken(tokenID uint) ([]models.ModelRoutin
 
 type adminModelRoutingMutation struct{ ctx *baseContext }
 
+// Validate and write against one SQLite snapshot. Concurrent graph edits cannot
+// both commit after observing stale edges; a conflicting writer fails closed.
+func (m *adminModelRoutingMutation) withRoutingTransaction(fn func(*adminModelRoutingMutation) *ValidateError) *ValidateError {
+	err := m.ctx.GetCoreDB().Transaction(func(tx *gorm.DB) error {
+		txm := &adminModelRoutingMutation{ctx: m.ctx.WithCoreTx(tx).(*baseContext)}
+		if ve := fn(txm); ve != nil {
+			return ve
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	var ve *ValidateError
+	if errors.As(err, &ve) {
+		return ve
+	}
+	return newErr(ErrCodeDBError, err.Error(), nil)
+}
+
 func (m *adminModelRoutingMutation) Create(r *models.ModelRouting) *ValidateError {
+	return m.withRoutingTransaction(func(txm *adminModelRoutingMutation) *ValidateError { return txm.create(r) })
+}
+
+func (m *adminModelRoutingMutation) create(r *models.ModelRouting) *ValidateError {
 	if e := ValidateRouting(r, &daoNameProvider{ctx: m.ctx}); e != nil {
 		return e
 	}
@@ -127,9 +153,18 @@ func (m *adminModelRoutingMutation) Create(r *models.ModelRouting) *ValidateErro
 }
 
 func (m *adminModelRoutingMutation) Update(id uint, updates map[string]any) *ValidateError {
+	return m.withRoutingTransaction(func(txm *adminModelRoutingMutation) *ValidateError { return txm.update(id, updates) })
+}
+
+func (m *adminModelRoutingMutation) update(id uint, updates map[string]any) *ValidateError {
 	var existing models.ModelRouting
 	if err := m.ctx.GetCoreDB().First(&existing, id).Error; err != nil {
 		return newErr(ErrCodeNotFound, "routing not found", nil)
+	}
+	if name, ok := updates["name"].(string); ok && name != existing.Name {
+		if e := ValidateDelete(&existing, &daoNameProvider{ctx: m.ctx}); e != nil {
+			return e
+		}
 	}
 	next := existing
 	allowed := make(map[string]any, 4)
@@ -171,6 +206,10 @@ func (m *adminModelRoutingMutation) Update(id uint, updates map[string]any) *Val
 }
 
 func (m *adminModelRoutingMutation) Delete(id uint) *ValidateError {
+	return m.withRoutingTransaction(func(txm *adminModelRoutingMutation) *ValidateError { return txm.delete(id) })
+}
+
+func (m *adminModelRoutingMutation) delete(id uint) *ValidateError {
 	var r models.ModelRouting
 	if err := m.ctx.GetCoreDB().First(&r, id).Error; err != nil {
 		return newErr(ErrCodeNotFound, "routing not found", nil)
@@ -232,6 +271,12 @@ func (p *daoNameProvider) GetGlobalRouting(name string) *models.ModelRouting {
 	}
 	p.routingCache[name] = &r
 	return &r
+}
+
+func (p *daoNameProvider) AllRoutings() []*models.ModelRouting {
+	var rows []*models.ModelRouting
+	p.ctx.GetCoreDB().Find(&rows)
+	return rows
 }
 
 func (p *daoNameProvider) AllGlobalRoutings() []*models.ModelRouting {

@@ -76,7 +76,7 @@ function routing(overrides: Partial<ModelRouting>): ModelRouting {
     scope: "token",
     user_id: 0,
     token_id: token.id,
-    members: [{ ref: "gpt-4.1", priority: 0, weight: 1 }],
+    members: [{ kind: "model", ref: "gpt-4.1", priority: 0, weight: 1 }],
     enabled: true,
     remark: "",
     created_at: 1,
@@ -99,8 +99,8 @@ describe("TokenModelRoutings", () => {
       data: {
         data: [
           routing({ members: JSON.stringify([
-            { ref: "gpt-4.1", priority: 0, weight: 1 },
-            { ref: "gpt-4o", priority: 1, weight: 1 },
+            { kind: "model", ref: "gpt-4.1", priority: 0, weight: 1 },
+            { kind: "model", ref: "gpt-4o", priority: 1, weight: 1 },
           ]) }),
           routing({ id: 2, name: "fallback", enabled: false }),
         ],

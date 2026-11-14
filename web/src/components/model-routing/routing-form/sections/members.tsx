@@ -28,7 +28,7 @@ export function MembersSection({
 
   function handleAdd() {
     if (fields.length >= 32) return;
-    append({ ref: "", priority: 0, weight: 1 });
+    append({ kind: "model", ref: "", priority: 0, weight: 1 });
   }
 
   return (
