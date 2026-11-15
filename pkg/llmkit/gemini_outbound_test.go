@@ -559,3 +559,120 @@ func TestGeminiResponsesToolResultKeepsAssistantTurnTogether(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiReplaysGoogleChatToolSignature(t *testing.T) {
+	codec := NewCodec()
+	body := []byte(`{"model":"m","messages":[
+		{"role":"assistant","tool_calls":[{"id":"native-id","type":"function","function":{"name":"read_powershell","arguments":"{}"},"extra_content":{"google":{"thought_signature":"opaque"},"other":{"value":true}}}]},
+		{"role":"tool","tool_call_id":"native-id","content":"done"}]}`)
+	decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: http.MethodPost, Path: "/v1/chat/completions", Body: body})
+	require.NoError(t, err)
+	encoded, err := codec.EncodeRequest(EncodeRequestInput{
+		Request: decoded.Request,
+		Target:  Target{Protocol: ProtocolGemini, Model: "m"},
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"contents":[
+		{"role":"model","parts":[{"functionCall":{"id":"native-id","name":"read_powershell","args":{}},"thoughtSignature":"opaque"}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"native-id","name":"read_powershell","response":{"result":"done"}}}]}]}`, string(encoded.Body))
+}
+
+func TestGeminiChatParallelToolRoundTrip(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "json"
+		if stream {
+			name = "sse"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			codec := NewCodec()
+			target := Target{Protocol: ProtocolGemini, Model: "gemini-4-argon"}
+			initial, err := codec.EncodeRequest(EncodeRequestInput{Target: target})
+			require.NoError(t, err)
+			reply := `{"candidates":[{"content":{"parts":[
+				{"functionCall":{"name":"lookup","id":"vertex-id","args":{"city":"Paris"}},"thoughtSignature":"opaque"},
+				{"functionCall":{"name":"lookup","args":{"city":"London"}}}
+			]},"finishReason":"STOP"}]}`
+			if stream {
+				reply = "data: " + strings.ReplaceAll(reply, "\n", "") + "\n\n"
+			}
+			events, err := codec.DecodeResponse(ctx, DecodeResponseInput{
+				Protocol: ProtocolGemini, State: initial.State, Body: strings.NewReader(reply), Stream: stream,
+			})
+			require.NoError(t, err)
+			chunks, err := codec.EncodeResponse(ctx, EncodeResponseInput{Protocol: ProtocolOpenAIChat, Stream: stream, Events: events})
+			require.NoError(t, err)
+
+			var ids []string
+			var finish string
+			for chunk := range chunks {
+				require.NoError(t, chunk.Err)
+				payload := strings.TrimSpace(string(chunk.Data))
+				if stream {
+					payload = strings.TrimPrefix(payload, "data: ")
+					if payload == "[DONE]" || payload == "" {
+						continue
+					}
+				}
+				type toolCall struct {
+					ID    string `json:"id"`
+					Extra struct {
+						Google struct {
+							Signature string `json:"thought_signature"`
+						} `json:"google"`
+					} `json:"extra_content"`
+				}
+				type message struct {
+					Calls []toolCall `json:"tool_calls"`
+				}
+				var frame struct {
+					Choices []struct {
+						Message message `json:"message"`
+						Delta   message `json:"delta"`
+						Finish  string  `json:"finish_reason"`
+					} `json:"choices"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(payload), &frame))
+				for _, choice := range frame.Choices {
+					if choice.Finish != "" {
+						finish = choice.Finish
+					}
+					for _, call := range append(choice.Message.Calls, choice.Delta.Calls...) {
+						if call.ID == "" {
+							continue
+						}
+						if len(ids) == 0 {
+							require.Equal(t, "opaque", call.Extra.Google.Signature)
+						} else {
+							require.Empty(t, call.Extra.Google.Signature)
+						}
+						ids = append(ids, call.ID)
+					}
+				}
+			}
+			require.Equal(t, "tool_calls", finish)
+			require.Len(t, ids, 2)
+			require.NotEqual(t, ids[0], ids[1])
+
+			// Replay only standard Chat fields with the tool results in completion order.
+			request := Request{Messages: []Message{
+				{Role: RoleAssistant, ToolCalls: []ToolCall{
+					{ID: ids[0], Name: "lookup", Arguments: `{"city":"Paris"}`},
+					{ID: ids[1], Name: "lookup", Arguments: `{"city":"London"}`},
+				}},
+				{Role: RoleTool, ToolCallID: ids[1], Content: []ContentBlock{{Type: ContentTypeText, Text: `["London",9007199254740993]`}}},
+				{Role: RoleTool, ToolCallID: ids[0], Content: []ContentBlock{{Type: ContentTypeText, Text: `{"city":"Paris","id":9007199254740993}`}}},
+			}}
+			next, err := codec.EncodeRequest(EncodeRequestInput{Request: request, Target: target})
+			require.NoError(t, err)
+			require.JSONEq(t, `{"contents":[
+				{"role":"model","parts":[
+					{"functionCall":{"name":"lookup","id":"vertex-id","args":{"city":"Paris"}},"thoughtSignature":"opaque"},
+					{"functionCall":{"name":"lookup","args":{"city":"London"}}}]},
+				{"role":"user","parts":[
+					{"functionResponse":{"name":"lookup","id":"vertex-id","response":{"city":"Paris","id":9007199254740993}}},
+					{"functionResponse":{"name":"lookup","response":{"result":["London",9007199254740993]}}}]}]}`, string(next.Body))
+			require.Equal(t, 2, strings.Count(string(next.Body), "9007199254740993"))
+		})
+	}
+}

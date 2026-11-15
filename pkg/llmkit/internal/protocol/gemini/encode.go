@@ -10,12 +10,44 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
+// omittedCallID marks a client-facing ID generated for an ID-less Gemini call.
+const omittedCallID = "omitted_call_id"
+
+type replayCall struct {
+	wireID string
+	name   string
+	order  int
+}
+
+type orderedResponse struct {
+	part  part
+	order int
+}
+
 // encodeRequest 把消息、工具与生成设置转换为 Gemini 主体。
 func encodeRequest(req *ir.Request, model string) ([]byte, error) {
-	// 1. 转换消息并通过调用 ID 关联函数结果。
+	if req.N > 1 {
+		return nil, fmt.Errorf("Gemini conversion supports one candidate per request")
+	}
+
 	var contents []content
 	var system []part
-	calls := map[string]ir.ToolCall{}
+	calls := map[string]replayCall{}
+	callOrder := 0
+	var pending []orderedResponse
+	flushResponses := func() {
+		if len(pending) == 0 {
+			return
+		}
+		sort.SliceStable(pending, func(i, j int) bool { return pending[i].order < pending[j].order })
+		parts := make([]part, len(pending))
+		for i, response := range pending {
+			parts[i] = response.part
+		}
+		contents = append(contents, content{Role: "user", Parts: parts})
+		pending = pending[:0]
+	}
+
 	var previousRole ir.Role
 	for _, message := range req.Messages {
 		previous := previousRole
@@ -25,38 +57,40 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 			if !ok {
 				return nil, fmt.Errorf("Gemini function response has no matching call: %s", message.ToolCallID)
 			}
-			var texts []string
-			var images []part
-			for _, block := range message.Content {
-				if block.Type == ir.ContentTypeText {
-					texts = append(texts, block.Text)
-				} else {
-					p, err := encodeBlock(block, model)
-					if err != nil {
-						return nil, err
-					}
-					images = append(images, p...)
-				}
+			response, err := encodeFunctionResponse(message, call, model)
+			if err != nil {
+				return nil, err
 			}
-			text := strings.Join(texts, "\n")
-			var result map[string]any
-			if json.Unmarshal([]byte(text), &result) != nil || result == nil {
-				result = map[string]any{"result": text}
-			}
-			p := part{FunctionResponse: &functionResponse{ID: call.ID, Name: call.Name, Response: result, Parts: images}}
-			if previous == ir.RoleTool {
-				contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, p)
-			} else {
-				contents = append(contents, content{Role: "user", Parts: []part{p}})
-			}
+			pending = append(pending, orderedResponse{part: response, order: call.order})
 			continue
 		}
+		flushResponses()
+
 		parts, err := encodeMessage(message, model)
 		if err != nil {
 			return nil, err
 		}
 		for _, call := range message.ToolCalls {
-			calls[call.ID] = call
+			wireID := call.ID
+			if call.ProviderData != nil && call.ProviderData.Protocol == ir.ProtocolGemini &&
+				string(call.ProviderData.Fields[omittedCallID]) == "true" {
+				wireID = ""
+			}
+			calls[call.ID] = replayCall{wireID: wireID, name: call.Name}
+		}
+		// Parts may have been reordered to match the original Gemini response.
+		for _, p := range parts {
+			if p.FunctionCall != nil {
+				id := p.FunctionCall.ID
+				call, ok := calls[id]
+				if !ok {
+					continue
+				}
+				call.order = callOrder
+				callOrder++
+				calls[id] = call
+				p.FunctionCall.ID = call.wireID
+			}
 		}
 		if message.Role == ir.RoleSystem || message.Role == ir.RoleDeveloper {
 			system = append(system, parts...)
@@ -75,12 +109,14 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 			contents = append(contents, content{Role: role, Parts: parts})
 		}
 	}
+	flushResponses()
 	body := map[string]any{"contents": contents}
 	if len(system) > 0 {
 		body["systemInstruction"] = content{Parts: system}
 	}
 	// 2. 映射通用生成参数、思考和工具。
 	generation := map[string]any{}
+	modelFamily := gemini4Family(model)
 	if req.MaxTokens != 0 {
 		generation["maxOutputTokens"] = req.MaxTokens
 	}
@@ -96,16 +132,16 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 	if req.Seed != nil {
 		generation["seed"] = *req.Seed
 	}
-	if req.N != 0 {
+	if req.N != 0 && modelFamily == "" {
 		generation["candidateCount"] = req.N
 	}
 	if len(req.StopWords) > 0 {
 		generation["stopSequences"] = req.StopWords
 	}
-	if req.FrequencyPenalty != nil {
+	if req.FrequencyPenalty != nil && modelFamily == "" {
 		generation["frequencyPenalty"] = *req.FrequencyPenalty
 	}
-	if req.PresencePenalty != nil {
+	if req.PresencePenalty != nil && modelFamily == "" {
 		generation["presencePenalty"] = *req.PresencePenalty
 	}
 	if req.Logprobs != nil {
@@ -114,20 +150,7 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 	if req.TopLogprobs != nil {
 		generation["logprobs"] = *req.TopLogprobs
 	}
-	thinking := map[string]any{}
-	switch {
-	case req.ThinkingBudget != nil:
-		thinking["thinkingBudget"] = *req.ThinkingBudget
-	case req.ThinkingEnabled != nil && !*req.ThinkingEnabled || req.ReasoningEffort == "none":
-		thinking["thinkingBudget"] = 0
-	case req.ReasoningEffort != "":
-		thinking["thinkingLevel"] = req.ReasoningEffort
-	case req.ThinkingEnabled != nil && *req.ThinkingEnabled:
-		thinking["thinkingBudget"] = -1
-	}
-	if req.IncludeThoughts != nil {
-		thinking["includeThoughts"] = *req.IncludeThoughts
-	}
+	thinking := thinkingConfig(req, modelFamily)
 	if len(thinking) > 0 {
 		generation["thinkingConfig"] = thinking
 	}
@@ -233,6 +256,79 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 	return json.Marshal(body)
 }
 
+// gemini4Family recognizes model IDs in both bare and fully qualified Vertex paths.
+func gemini4Family(model string) string {
+	model = model[strings.LastIndexByte(model, '/')+1:]
+	for _, family := range []string{"gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"} {
+		if model == family || strings.HasPrefix(model, family+"-") {
+			return family
+		}
+	}
+	return ""
+}
+
+func thinkingConfig(req *ir.Request, modelFamily string) map[string]any {
+	thinking := map[string]any{}
+	disabled := req.ThinkingEnabled != nil && !*req.ThinkingEnabled
+	if modelFamily != "" {
+		// Gemini 4 rejects token budgets and cannot turn thinking off.
+		level := strings.ToUpper(req.ReasoningEffort)
+		switch {
+		case disabled, level == "NONE", level == "MINIMAL",
+			level == "" && req.ThinkingBudget != nil && *req.ThinkingBudget == 0:
+			level = "LOW"
+		case level == "XHIGH" && modelFamily != "gemini-4-hydrogen":
+			level = "HIGH"
+		}
+		if level != "" {
+			thinking["thinkingLevel"] = level
+		}
+	} else {
+		switch {
+		case req.ThinkingBudget != nil:
+			thinking["thinkingBudget"] = *req.ThinkingBudget
+		case disabled || req.ReasoningEffort == "none":
+			thinking["thinkingBudget"] = 0
+		case req.ReasoningEffort != "":
+			thinking["thinkingLevel"] = req.ReasoningEffort
+		case req.ThinkingEnabled != nil && *req.ThinkingEnabled:
+			thinking["thinkingBudget"] = -1
+		}
+	}
+	if req.IncludeThoughts != nil {
+		thinking["includeThoughts"] = *req.IncludeThoughts
+	}
+	return thinking
+}
+
+func encodeFunctionResponse(message ir.Message, call replayCall, model string) (part, error) {
+	var texts []string
+	var media []part
+	for _, block := range message.Content {
+		if block.Type == ir.ContentTypeText {
+			texts = append(texts, block.Text)
+			continue
+		}
+		parts, err := encodeBlock(block, model)
+		if err != nil {
+			return part{}, err
+		}
+		media = append(media, parts...)
+	}
+	text := strings.Join(texts, "\n")
+	response := any(map[string]any{"result": text})
+	if raw := json.RawMessage(strings.TrimSpace(text)); json.Valid(raw) {
+		if raw[0] == '{' {
+			response = raw
+		} else {
+			response = map[string]json.RawMessage{"result": raw}
+		}
+	}
+	return part{FunctionResponse: &functionResponse{
+		ID: call.wireID, Name: call.name, Response: response, Parts: media,
+	}}, nil
+}
+
 // encodeMessage 转换内容和调用，并按可用的位置提示还原混合顺序。
 func encodeMessage(message ir.Message, model string) ([]part, error) {
 	// 1. 保留明确的内容数组顺序，收集调用和图片位置。
@@ -263,12 +359,12 @@ func encodeMessage(message ir.Message, model string) ([]part, error) {
 		}
 	}
 	for _, call := range message.ToolCalls {
-		args := json.RawMessage(call.Arguments)
-		if len(args) == 0 {
+		args := json.RawMessage(strings.TrimSpace(call.Arguments))
+		if len(args) == 0 || string(args) == "null" {
 			args = json.RawMessage(`{}`)
 		}
-		if !json.Valid(args) {
-			return nil, fmt.Errorf("invalid Gemini function arguments for %s", call.Name)
+		if args[0] != '{' || !json.Valid(args) {
+			return nil, fmt.Errorf("Gemini function %s requires JSON object arguments", call.Name)
 		}
 		p := part{FunctionCall: &functionCall{ID: call.ID, Name: call.Name, Args: args}, ThoughtSignature: signature(call.ProviderData)}
 		parts = append(parts, p)

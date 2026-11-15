@@ -117,3 +117,49 @@ func TestImageGenerationAndJSONSchema(t *testing.T) {
 	require.Equal(t, map[string]any{"type": "object"}, config["responseJsonSchema"])
 	require.NotContains(t, body, "tools")
 }
+
+func TestEncodeGemini4ReasoningSettings(t *testing.T) {
+	for _, tc := range []struct {
+		model   string
+		effort  string
+		budget  *int
+		enabled *bool
+		want    string
+	}{
+		{model: "gemini-4-argon", effort: "xhigh", want: "HIGH"},
+		{model: "google/gemini-4-argon", effort: "minimal", want: "LOW"},
+		{model: "gemini-4-argon-cyber-permissive", effort: "none", want: "LOW"},
+		{model: "publishers/google/models/gemini-4-carbon", effort: "medium", budget: ptr(512), want: "MEDIUM"},
+		{model: "gemini-4-carbon-cyber-permissive", effort: "xhigh", want: "HIGH"},
+		{model: "gemini-4-hydrogen", effort: "xhigh", want: "XHIGH"},
+		{model: "gemini-4-hydrogen", enabled: ptr(false), want: "LOW"},
+		{model: "gemini-4-argon", budget: ptr(0), want: "LOW"},
+		{model: "gemini-4-carbon", budget: ptr(512), want: ""},
+	} {
+		t.Run(tc.model+"/"+tc.effort, func(t *testing.T) {
+			body, err := encodeRequest(&ir.Request{
+				N: 1, ThinkingBudget: tc.budget, ThinkingEnabled: tc.enabled,
+				ReasoningEffort: tc.effort, IncludeThoughts: ptr(true),
+				FrequencyPenalty: ptr(0.0), PresencePenalty: ptr(0.0),
+			}, tc.model)
+			require.NoError(t, err)
+			var payload struct {
+				GenerationConfig map[string]any `json:"generationConfig"`
+			}
+			require.NoError(t, json.Unmarshal(body, &payload))
+			require.NotContains(t, payload.GenerationConfig, "candidateCount")
+			require.NotContains(t, payload.GenerationConfig, "frequencyPenalty")
+			require.NotContains(t, payload.GenerationConfig, "presencePenalty")
+			thinking := payload.GenerationConfig["thinkingConfig"].(map[string]any)
+			require.NotContains(t, thinking, "thinkingBudget")
+			require.Equal(t, true, thinking["includeThoughts"])
+			if tc.want == "" {
+				require.NotContains(t, thinking, "thinkingLevel")
+			} else {
+				require.Equal(t, tc.want, thinking["thinkingLevel"])
+			}
+		})
+	}
+	_, err := encodeRequest(&ir.Request{N: 2}, "gemini-4-argon")
+	require.ErrorContains(t, err, "supports one candidate")
+}
