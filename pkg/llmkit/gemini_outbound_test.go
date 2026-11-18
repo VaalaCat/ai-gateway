@@ -14,6 +14,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCodexResponsesRequestToGemini(t *testing.T) {
+	codec := NewCodec()
+	decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: "POST", Path: "/v1/responses", Body: []byte(`{
+		"model":"gemini-4-argon",
+		"input":"Read the file.",
+		"stream":true,
+		"tool_choice":"auto",
+		"client_metadata":{"x-codex-turn-metadata":"codex"},
+		"generationConfig":{"maxOutputTokens":100},
+		"tools":[
+			{"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"text"}},
+			{"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}
+		]
+	}`)})
+	require.NoError(t, err)
+	var dropped []DroppedTool
+	encoded, err := codec.EncodeRequest(EncodeRequestInput{
+		Request: decoded.Request,
+		Target:  Target{Protocol: ProtocolGemini, Model: "gemini-4-argon"},
+		Options: ConversionOptions{OnDroppedTools: func(tools []DroppedTool) { dropped = tools }},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse", encoded.Path)
+	require.JSONEq(t, `{
+		"contents":[{"role":"user","parts":[{"text":"Read the file."}]}],
+		"generationConfig":{"maxOutputTokens":100},
+		"tools":[{"functionDeclarations":[{"name":"read_file","description":"Read a file","parametersJsonSchema":{"type":"object","properties":{"path":{"type":"string"}}}}]}],
+		"toolConfig":{"functionCallingConfig":{"mode":"AUTO"}}
+	}`, string(encoded.Body))
+	require.Equal(t, []DroppedTool{{Type: "custom", Name: "apply_patch", Reason: convert.DroppedToolReasonCrossProtocolIncompatible}}, dropped)
+}
+
 func TestGeminiClientToolSignatureRoundTrip(t *testing.T) {
 	var upstreamBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
@@ -50,6 +51,9 @@ func (*handler) EncodeRequest(input protocol.EncodeRequestInput) (protocol.Encod
 		return protocol.EncodedRequest{}, nil, fmt.Errorf("nil Gemini request")
 	}
 	convert.FilterOptionalRequestFields(input.Request, input.Options.RequestFields)
+	if err := filterForeignTools(input.Request, input.Options.BuiltinToolFallback); err != nil {
+		return protocol.EncodedRequest{}, nil, err
+	}
 	prepared, err := convert.PrepareNamespacedFunctionsForChat(input.Request)
 	if err != nil {
 		return protocol.EncodedRequest{}, nil, err
@@ -76,4 +80,27 @@ func (*handler) EncodeRequest(input protocol.EncodeRequestInput) (protocol.Encod
 	}
 	headers := http.Header{"Content-Type": {"application/json"}, "X-Goog-Api-Key": {input.Target.APIKey}}
 	return protocol.EncodedRequest{Method: http.MethodPost, Path: path, Headers: protocol.MergeHeaders(headers, input.Target.Headers), Body: body}, conversionState{model: input.Target.Model, namespacedFunctions: convert.NamespacedFunctionBindings(input.Request)}, nil
+}
+
+func filterForeignTools(req *ir.Request, policy convert.BuiltinToolFallbackPolicy) error {
+	if req.InboundProtocol == "" || req.InboundProtocol == ir.ProtocolGemini {
+		return nil
+	}
+	var dropped []convert.DroppedTool
+	req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(tool ir.Tool) bool {
+		switch tool.Type {
+		case "", "function", "image_generation", "web_search", "web_search_preview":
+			return false
+		default:
+			dropped = append(dropped, convert.DroppedTool{
+				Type: tool.Type, Name: tool.Name, Reason: convert.DroppedToolReasonCrossProtocolIncompatible,
+			})
+			return true
+		}
+	})
+	if len(dropped) > 0 && policy == convert.BuiltinToolFallbackError {
+		return fmt.Errorf("%w: %s", convert.ErrBuiltinToolUnsupported, dropped[0].Type)
+	}
+	convert.RecordDroppedTools(req, dropped)
+	return nil
 }

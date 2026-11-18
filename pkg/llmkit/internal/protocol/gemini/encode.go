@@ -212,7 +212,7 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 	if len(tools) > 0 {
 		body["tools"] = tools
 	}
-	if req.ToolChoice != nil {
+	if req.ToolChoice != nil && len(tools) > 0 {
 		mode := "AUTO"
 		config := map[string]any{}
 		switch req.ToolChoice.Type {
@@ -227,7 +227,7 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 		config["mode"] = mode
 		body["toolConfig"] = map[string]any{"functionCallingConfig": config}
 	}
-	// 3. 保留目标原生扩展，明确 generationConfig 逐字段覆盖映射值。
+	// 3. 保留 Gemini 扩展，避免把源协议的未知字段发给 Gemini。
 	for key, value := range req.Extras {
 		switch key {
 		case "generationConfig":
@@ -246,8 +246,12 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 				}
 			}
 		case "model", "messages", "input", "stream", "max_tokens", "max_completion_tokens", "reasoning", "reasoning_effort", "response_format", "text", "stream_options", "metadata", "store", "include", "prompt_cache_key", "reasoning_summary", "tool_choice", "parallel_tool_calls":
-		default:
+		case "safetySettings", "cachedContent", "toolConfig", "systemInstruction", "labels":
 			body[key] = value
+		default:
+			if req.InboundProtocol == "" || req.InboundProtocol == ir.ProtocolGemini {
+				body[key] = value
+			}
 		}
 	}
 	if len(generation) > 0 {
