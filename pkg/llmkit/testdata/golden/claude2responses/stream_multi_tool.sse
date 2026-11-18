@@ -5,7 +5,7 @@ event: response.in_progress
 data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_542d11de218fdb2b7d3a1eeb","object":"response","status":"in_progress","output":[]}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"message","id":"msg_542d11de218fdb2b7d3a1eeb","status":"in_progress","role":"assistant"},"output_index":0}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"message","id":"msg_542d11de218fdb2b7d3a1eeb","status":"in_progress","role":"assistant","content":[]},"output_index":0}
 
 event: response.content_part.added
 data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"output_text","annotations":[]},"output_index":0,"content_index":0,"item_id":"msg_542d11de218fdb2b7d3a1eeb"}
@@ -23,7 +23,7 @@ event: response.output_item.done
 data: {"type":"response.output_item.done","sequence_number":7,"item":{"type":"message","id":"msg_542d11de218fdb2b7d3a1eeb","status":"completed","role":"assistant","content":[{"type":"output_text","text":"I'll check both.","annotations":[]}]},"output_index":0}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":8,"item":{"type":"function_call","id":"fc_toolu_01AAA","status":"in_progress","call_id":"toolu_01AAA","name":"get_weather"},"output_index":1}
+data: {"type":"response.output_item.added","sequence_number":8,"item":{"type":"function_call","id":"fc_toolu_01AAA","status":"in_progress","call_id":"toolu_01AAA","name":"get_weather","arguments":""},"output_index":1}
 
 event: response.function_call_arguments.delta
 data: {"delta":"","item_id":"fc_toolu_01AAA","output_index":1,"sequence_number":9,"type":"response.function_call_arguments.delta"}
@@ -38,7 +38,7 @@ event: response.output_item.done
 data: {"type":"response.output_item.done","sequence_number":12,"item":{"type":"function_call","id":"fc_toolu_01AAA","status":"completed","call_id":"toolu_01AAA","name":"get_weather","arguments":"{\"location\": \"SF\"}"},"output_index":1}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":13,"item":{"type":"function_call","id":"fc_toolu_01BBB","status":"in_progress","call_id":"toolu_01BBB","name":"get_weather"},"output_index":2}
+data: {"type":"response.output_item.added","sequence_number":13,"item":{"type":"function_call","id":"fc_toolu_01BBB","status":"in_progress","call_id":"toolu_01BBB","name":"get_weather","arguments":""},"output_index":2}
 
 event: response.function_call_arguments.delta
 data: {"delta":"","item_id":"fc_toolu_01BBB","output_index":2,"sequence_number":14,"type":"response.function_call_arguments.delta"}
