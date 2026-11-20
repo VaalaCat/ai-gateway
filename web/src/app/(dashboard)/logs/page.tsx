@@ -505,6 +505,7 @@ function LogsPageContent() {
           <DataTableColumnHeader column={column} title={t("cacheWriteTokens")} />
         ),
       },
+      buildCacheHitRateColumn<UsageLog>(tc("cacheHitRate")),
       {
         accessorKey: "created_at",
         header: ({ column }) => (
@@ -512,7 +513,6 @@ function LogsPageContent() {
         ),
         cell: ({ row }) => <DateCell timestamp={row.original.created_at} />,
       },
-      buildCacheHitRateColumn<UsageLog>(tc("cacheHitRate")),
     );
 
     return cols;

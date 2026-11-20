@@ -147,12 +147,13 @@ it("moves the shared date range into the page header without granularity", () =>
   expect(state.filterStateSpec).toHaveProperty("time");
 });
 
-it("shows cache hit rate as the rightmost default column", () => {
+it("shows cache hit rate immediately before the creation time by default", () => {
   render(<LogsPage />);
 
-  const columns = state.dataTableProps?.columns as AccessorFnColumnDef<UsageLog>[];
-  const column = columns.at(-1)!;
+  const columns = state.dataTableProps?.columns as (AccessorFnColumnDef<UsageLog> & { accessorKey?: string })[];
+  const column = columns.at(-2)!;
   expect(column.id).toBe("cache_hit_rate");
+  expect(columns.at(-1)?.accessorKey).toBe("created_at");
   expect(state.dataTableProps?.defaultColumnVisibility).not.toHaveProperty("cache_hit_rate", false);
   const row = { prompt_tokens: 20, cache_read_tokens: 80, cache_write_tokens: 10, completion_tokens: 50 } as UsageLog;
   expect(column.accessorFn(row, 0)).toBe(0.8);
