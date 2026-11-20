@@ -41,7 +41,7 @@ interface BillingOverview {
 }
 
 interface BillingList {
-  data: unknown[];
+  data: { prompt_tokens: number; cache_read_tokens: number }[];
   total: number;
 }
 
@@ -713,7 +713,10 @@ test("billing token filters and trend Top N remain isolated across real user ses
   await expect(tokenTable).toContainText("Alice trend token A");
   await expect(tokenTable).not.toContainText("Alice trend token B");
   await expect(tokenTable.getByRole("columnheader", { name: /Cache Hit Rate|缓存命中率/ })).toBeVisible();
-  await expect(tokenTable).toContainText("16.7%");
+  const { prompt_tokens, cache_read_tokens } = tokens.body.data[0];
+  expect(cache_read_tokens).toBeGreaterThan(0);
+  const expectedHitRate = 100 * cache_read_tokens / (prompt_tokens + cache_read_tokens);
+  await expect(tokenTable.getByRole("cell", { name: `${expectedHitRate.toFixed(1)}%`, exact: true })).toBeVisible();
   const billingFrames = await readFrameSizes(page);
   const topN = page.getByRole("combobox", { name: /Top N|前 N 项/ });
   expect(filtered.url.searchParams.get("top_n")).toBe("5");
