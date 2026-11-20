@@ -299,7 +299,9 @@ async function openDashboardPage(page: Page, path: string) {
 }
 
 async function loginFixtureUser(page: Page, username: "fixture-alice" | "fixture-bob") {
+  const providers = waitForJson(page, "/api/oauth/providers");
   await page.goto("/login", { waitUntil: "domcontentloaded" });
+  await providers;
   await page.locator("#username").fill(username);
   await page.locator("#password").fill(fixtureUserPassword);
   const loginResponse = page.waitForResponse((candidate) =>
