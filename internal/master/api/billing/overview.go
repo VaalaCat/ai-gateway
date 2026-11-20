@@ -14,6 +14,10 @@ func (h *Handler) Overview(c *app.Context, req OverviewRequest) (*dao.BillingOve
 	if err != nil {
 		return nil, api.BadRequestError("invalid user_id", err)
 	}
+	tokenID, err := parseOptionalUint(req.TokenID)
+	if err != nil {
+		return nil, api.BadRequestError("invalid token_id", err)
+	}
 	startDate, endDate, err := normalizeDateRange(req.StartDate, req.EndDate)
 	if err != nil {
 		return nil, api.BadRequestError("invalid date range", err)
@@ -25,6 +29,7 @@ func (h *Handler) Overview(c *app.Context, req OverviewRequest) (*dao.BillingOve
 	q := dao.NewAdminQuery(daoCtx)
 	overview, err := q.Billing().GetBillingOverview(dao.TokenBillingListFilter{
 		UserID:    filterUserID,
+		TokenID:   tokenID,
 		StartDate: startDate,
 		EndDate:   endDate,
 	})

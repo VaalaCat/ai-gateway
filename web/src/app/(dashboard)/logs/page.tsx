@@ -49,6 +49,7 @@ import { RateLimitSection } from "@/components/business/rate-limit-section";
 import { EntityLabel } from "@/components/business/entity-label";
 import { KpiGrid } from "@/components/business/kpi-grid";
 import { ObservabilityHeader } from "@/components/business/observability-header";
+import { buildCacheHitRateColumn } from "@/components/business/token-breakdown-columns";
 import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { ColumnVisibility } from "@/components/data-table/column-visibility";
 
@@ -511,6 +512,7 @@ function LogsPageContent() {
         ),
         cell: ({ row }) => <DateCell timestamp={row.original.created_at} />,
       },
+      buildCacheHitRateColumn<UsageLog>(tc("cacheHitRate")),
     );
 
     return cols;

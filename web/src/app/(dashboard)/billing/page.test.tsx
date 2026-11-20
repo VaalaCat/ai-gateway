@@ -6,7 +6,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import BillingPage from "./page";
 
 const state = vi.hoisted(() => ({
-  query: "token_id=11&trend_token_id=22&model=gpt-5",
+  query: "token_id=11&model=gpt-5",
   replace: vi.fn(),
   insights: vi.fn(),
   overview: vi.fn(),
@@ -140,7 +140,7 @@ vi.mock("@/components/business/chart-option-select", () => ({
 }));
 
 beforeEach(() => {
-  state.query = "token_id=11&trend_token_id=22&model=gpt-5";
+  state.query = "token_id=11&model=gpt-5";
   state.replace.mockReset();
   state.insights.mockReset();
   state.overview.mockReset();
@@ -171,41 +171,37 @@ it("renders the billing trend model filter at the compact toolbar height", () =>
   expect(screen.getByRole("button", { name: "model" })).toHaveAttribute("data-size", "sm");
 });
 
-it("applies the API token and top n only to billing trend queries", () => {
+it("applies the token filter to the overview, trends, and token list", () => {
   render(<BillingPage />);
 
   expect(state.insights).toHaveBeenCalledWith(expect.objectContaining({
-    token_id: 22,
+    token_id: 11,
     top_n: 10,
   }));
-  expect(state.overview.mock.calls[0][0]).not.toHaveProperty("token_id");
+  expect(state.overview).toHaveBeenCalledWith(expect.objectContaining({ token_id: 11 }));
   expect(state.tokenBilling).toHaveBeenCalledWith(expect.objectContaining({ token_id: 11 }));
   expect(state.channelBilling.mock.calls[0][0]).not.toHaveProperty("token_id");
 });
 
-it("clears only the trend token query param when the trend picker is emptied", () => {
+it("reads legacy trend links and clears the legacy filter from the page picker", () => {
+  state.query = "trend_token_id=22&model=gpt-5";
   render(<BillingPage />);
 
-  const trendTokenPicker = screen
-    .getAllByRole("button", { name: "token" })
-    .find((button) => button.getAttribute("data-value") === "22");
-  expect(trendTokenPicker).toBeDefined();
-  fireEvent.click(trendTokenPicker!);
+  const tokenPicker = screen.getByRole("button", { name: "token" });
+  expect(tokenPicker).toHaveAttribute("data-value", "22");
+  expect(state.insights).toHaveBeenCalledWith(expect.objectContaining({ token_id: 22 }));
+  fireEvent.click(tokenPicker);
 
-  const replaced = state.replace.mock.calls.find(([url]) =>
-    String(url).includes("token_id=11") && !String(url).includes("trend_token_id"),
-  );
-  expect(replaced).toEqual(["/billing?token_id=11&model=gpt-5", { scroll: false }]);
+  expect(state.replace).toHaveBeenCalledWith("/billing?model=gpt-5", { scroll: false });
 });
 
-it("scopes trend tokens to the selected owner and clears the token when owner changes", () => {
+it("scopes token options to the selected owner and clears the token when owner changes", () => {
   state.query = "user_id=42&token_id=11&trend_token_id=22&model=gpt-5";
   render(<BillingPage />);
 
-  const trendTokenPicker = screen
-    .getAllByRole("button", { name: "token" })
-    .find((button) => button.getAttribute("data-value") === "22");
-  expect(trendTokenPicker).toHaveAttribute("data-owner-user-id", "42");
+  const tokenPicker = screen.getByRole("button", { name: "token" });
+  expect(tokenPicker).toHaveAttribute("data-owner-user-id", "42");
+  expect(tokenPicker).toHaveAttribute("data-value", "11");
   expect(state.insights.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ user_id: 42 }));
   expect(state.overview.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ user_id: 42 }));
   expect(state.tokenBilling.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ user_id: 42 }));
@@ -217,7 +213,7 @@ it("scopes trend tokens to the selected owner and clears the token when owner ch
   fireEvent.click(userPicker!);
 
   expect(state.replace).toHaveBeenCalledWith(
-    "/billing?token_id=11&model=gpt-5",
+    "/billing?model=gpt-5",
     { scroll: false },
   );
 });
@@ -230,27 +226,27 @@ it("ignores a stale user filter for ordinary billing queries and token ownership
   expect(state.insights.mock.calls.at(-1)?.[0]).not.toHaveProperty("user_id");
   expect(state.overview.mock.calls.at(-1)?.[0]).not.toHaveProperty("user_id");
   expect(state.tokenBilling.mock.calls.at(-1)?.[0]).not.toHaveProperty("user_id");
-  const trendTokenPicker = screen
-    .getAllByRole("button", { name: "token" })
-    .find((button) => button.getAttribute("data-value") === "22");
-  expect(trendTokenPicker).not.toHaveAttribute("data-owner-user-id");
+  expect(screen.getByRole("button", { name: "token" })).not.toHaveAttribute("data-owner-user-id");
 });
 
-it("keeps only the admin user filter in the page scope rail", () => {
+it("renders the admin user and token filters in the page scope rail", () => {
   state.query = "user_id=42&token_id=11&trend_token_id=22&model=gpt-5";
   const { container } = render(<BillingPage />);
 
   const rail = container.querySelector('[data-slot="page-scope-rail"]');
   expect(rail).toHaveTextContent("filters");
   expect(rail?.querySelector('[data-entity="user"]')).toHaveAttribute("data-value", "42");
+  expect(rail?.querySelector('[data-entity="token"]')).toHaveAttribute("data-value", "11");
   expect(rail).not.toHaveTextContent("prefix.topN");
 });
 
-it("does not render a page scope rail for a non-admin billing user", () => {
+it("renders the token filter in the page scope rail for ordinary users", () => {
   state.isAdmin = false;
   const { container } = render(<BillingPage />);
 
-  expect(container.querySelector('[data-slot="page-scope-rail"]')).not.toBeInTheDocument();
+  const rail = container.querySelector('[data-slot="page-scope-rail"]');
+  expect(rail?.querySelector('[data-entity="token"]')).toBeInTheDocument();
+  expect(rail?.querySelector('[data-entity="user"]')).not.toBeInTheDocument();
 });
 
 it("opens the existing rebuild confirmation from the header actions menu", async () => {
@@ -282,12 +278,12 @@ it("renders rebuild as a keyboard-navigable dropdown menu item", async () => {
   expect(await screen.findByRole("menuitem")).toHaveTextContent("rebuild");
 });
 
-it("renders model, API token, and top N only in the trend scope controls", () => {
+it("keeps model and top N in the trend scope controls", () => {
   const { container } = render(<BillingPage />);
 
   const scope = container.querySelector('[data-slot="chart-scope-controls"]');
   expect(scope?.querySelector('[data-entity="model"]')).toBeInTheDocument();
-  expect(scope?.querySelector('[data-entity="token"]')).toBeInTheDocument();
+  expect(scope?.querySelector('[data-entity="token"]')).not.toBeInTheDocument();
   expect(within(scope as HTMLElement).getByRole("button", { name: "prefix.topN" })).toBeInTheDocument();
   expect(container.querySelector('[data-slot="page-scope-rail"]')).not.toHaveTextContent("prefix.topN");
 });

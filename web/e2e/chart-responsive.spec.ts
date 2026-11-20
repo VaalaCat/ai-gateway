@@ -86,10 +86,6 @@ async function waitForJson<T>(
   return { url: new URL(response.url()), body: await response.json() as T };
 }
 
-function normalizedText(value: string) {
-  return value.replace(/\s+/g, " ").trim();
-}
-
 async function assertResponsiveLayout(
 	page: Page,
 	expectCharts: boolean,
@@ -684,7 +680,7 @@ test(`Dashboard interactions preserve chart frames at ${viewport.name}`, async (
 });
 }
 
-test("billing trend token and Top N remain isolated across real user sessions", async ({ page }, testInfo) => {
+test("billing token filters and trend Top N remain isolated across real user sessions", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   await loginFixtureUser(page, "fixture-alice");
   const initialInsights = waitForJson<BillingInsights>(page, "/api/billing/insights");
@@ -696,33 +692,28 @@ test("billing trend token and Top N remain isolated across real user sessions", 
   expect(aliceOverview.body.request_count).toBeGreaterThan(0);
   expect(aliceBilling.body.total).toBe(2);
   expect(aliceBilling.body.data.length).toBe(2);
-  const kpisBefore = await page.locator("main").last().locator(".text-display").allTextContents();
   const tokenTable = page.locator("main").last().getByRole("table");
-  const tokenTableBefore = normalizedText(await tokenTable.innerText());
-  expect(tokenTableBefore).toContain("Alice trend token A");
-  expect(tokenTableBefore).toContain("Alice trend token B");
-  expect(tokenTableBefore).not.toContain("Bob trend token A");
+  await expect(tokenTable).toContainText("Alice trend token A");
+  await expect(tokenTable).toContainText("Alice trend token B");
+  await expect(tokenTable).not.toContainText("Bob trend token A");
 
-  const requested: string[] = [];
-  page.on("request", (candidate) => {
-    if (candidate.url().includes("/api/")) requested.push(candidate.url());
-  });
   const tokenPicker = page.getByRole("combobox").filter({ hasText: /Select token|选择令牌/ }).first();
-  const filteredPromise = waitForJson<BillingInsights>(page, "/api/billing/insights", (url) =>
-    url.searchParams.get("token_id") === "1",
-  );
+  const selectedToken = (url: URL) => url.searchParams.get("token_id") === "1";
+  const filteredInsights = waitForJson<BillingInsights>(page, "/api/billing/insights", selectedToken);
+  const filteredOverview = waitForJson<BillingOverview>(page, "/api/billing/overview", selectedToken);
+  const filteredTokens = waitForJson<BillingList>(page, "/api/billing/tokens", selectedToken);
   await chooseEntity(page, tokenPicker, "Alice trend token A");
-  const filtered = await filteredPromise;
-  await expect(page).toHaveURL(/trend_token_id=1/);
+  const [filtered, overview, tokens] = await Promise.all([filteredInsights, filteredOverview, filteredTokens]);
+  await expect(page).toHaveURL(/[?&]token_id=1\b/);
   expect(filtered.body.trend).not.toEqual(aliceInsights.body.trend);
   expect(filtered.body.cost_trend_stacked).not.toEqual(aliceInsights.body.cost_trend_stacked);
-  expect(filtered.body.cache_saving).toEqual(aliceInsights.body.cache_saving);
-  expect(await page.locator("main").last().locator(".text-display").allTextContents()).toEqual(kpisBefore);
-  expect(normalizedText(await tokenTable.innerText())).toBe(tokenTableBefore);
-  expect(requested.some((url) => url.includes("/api/billing/insights") && url.includes("token_id=1"))).toBe(true);
-  for (const raw of requested.filter((candidate) => !candidate.includes("/api/billing/insights"))) {
-    expect(new URL(raw).searchParams.has("token_id")).toBe(false);
-  }
+  expect(overview.body.request_count).toBeGreaterThan(0);
+  expect(overview.body.request_count).toBeLessThan(aliceOverview.body.request_count);
+  expect(tokens.body.total).toBe(1);
+  await expect(tokenTable).toContainText("Alice trend token A");
+  await expect(tokenTable).not.toContainText("Alice trend token B");
+  await expect(tokenTable.getByRole("columnheader", { name: /Cache Hit Rate|缓存命中率/ })).toBeVisible();
+  await expect(tokenTable).toContainText("16.7%");
   const billingFrames = await readFrameSizes(page);
   const topN = page.getByRole("combobox", { name: /Top N|前 N 项/ });
   expect(filtered.url.searchParams.get("top_n")).toBe("5");
@@ -747,7 +738,7 @@ test("billing trend token and Top N remain isolated across real user sessions", 
   );
   await openDashboardPage(page, "/billing");
   await bobInsights;
-  await expect(page).not.toHaveURL(/trend_token_id/);
+  await expect(page).not.toHaveURL(/[?&]token_id=/);
   await expect(page.getByRole("combobox", { name: /Top N|前 N 项/ })).toContainText("5");
   expect(await readStoredChartTopN(page, 3)).toBeNull();
   const bobTokenPicker = page.getByRole("combobox").filter({ hasText: /Select token|选择令牌/ }).first();
@@ -763,7 +754,7 @@ test("billing trend token and Top N remain isolated across real user sessions", 
   );
   await openDashboardPage(page, "/billing");
   await restoredAliceInsights;
-  await expect(page).not.toHaveURL(/trend_token_id/);
+  await expect(page).not.toHaveURL(/[?&]token_id=/);
   await expect(page.getByRole("combobox", { name: /Top N|前 N 项/ })).toContainText("20");
   const restoredAliceTokenPicker = page.getByRole("combobox").filter({ hasText: /Select token|选择令牌/ }).first();
   await restoredAliceTokenPicker.click();

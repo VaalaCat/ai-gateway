@@ -4,6 +4,8 @@ import { beforeEach, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/client";
 import { buildCompleteDateRange, dateStrToTs, tsToDateStr } from "@/lib/utils/date-range";
+import type { UsageLog } from "@/lib/types";
+import type { AccessorFnColumnDef } from "@tanstack/react-table";
 import LogsPage from "./page";
 
 const state = vi.hoisted(() => ({
@@ -143,6 +145,19 @@ it("moves the shared date range into the page header without granularity", () =>
   });
   expect(state.filterableToolbarProps?.spec).not.toHaveProperty("time");
   expect(state.filterStateSpec).toHaveProperty("time");
+});
+
+it("shows cache hit rate as the rightmost default column", () => {
+  render(<LogsPage />);
+
+  const columns = state.dataTableProps?.columns as AccessorFnColumnDef<UsageLog>[];
+  const column = columns.at(-1)!;
+  expect(column.id).toBe("cache_hit_rate");
+  expect(state.dataTableProps?.defaultColumnVisibility).not.toHaveProperty("cache_hit_rate", false);
+  const row = { prompt_tokens: 20, cache_read_tokens: 80, cache_write_tokens: 10, completion_tokens: 50 } as UsageLog;
+  expect(column.accessorFn(row, 0)).toBe(0.8);
+  expect(column.accessorFn({ ...row, cache_read_tokens: 0 }, 0)).toBe(0);
+  expect(column.accessorFn({ ...row, prompt_tokens: 0, cache_read_tokens: 0 }, 0)).toBeUndefined();
 });
 
 it("writes a header date change as one atomic exclusive filter range", () => {
