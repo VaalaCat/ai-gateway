@@ -855,6 +855,7 @@ export interface BillingOverviewQueryParams {
   start_date?: string;
   end_date?: string;
   user_id?: number;
+  token_id?: number;
 }
 
 export interface BillingTokenQueryParams {

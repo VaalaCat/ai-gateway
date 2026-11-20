@@ -63,7 +63,7 @@ import { formatMoneyCompact, formatSuccessRate, formatTokensCompact } from "@/li
 import { MoneyCell } from "@/components/business/money-cell";
 import { EntityLabel } from "@/components/business/entity-label";
 import { EntityPicker } from "@/components/business/entity-picker/entity-picker";
-import { buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
+import { buildCacheHitRateColumn, buildTokenBreakdownColumns } from "@/components/business/token-breakdown-columns";
 import { ChannelModelBreakdown } from "@/components/business/channel-model-breakdown";
 import { ChartOptionSelect } from "@/components/business/chart-option-select";
 import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
@@ -126,8 +126,7 @@ function BillingPageContent() {
   const channelType = searchParams.get("channel_type") ?? "";
   const search = searchParams.get("q") ?? "";
   const minTokens = searchParams.get("min_tokens") ?? "";
-  const tokenId = searchParams.get("token_id") ?? "";
-  const trendTokenId = searchParams.get("trend_token_id") ?? "";
+  const tokenId = searchParams.get("token_id") ?? searchParams.get("trend_token_id") ?? "";
   const selectedUserId = isAdmin && userId ? Number(userId) : undefined;
   const [topN, setTopN] = useChartTopN(user?.user_id ?? 0, pathname);
   const setParams = (updates: Record<string, string>) => {
@@ -140,7 +139,7 @@ function BillingPageContent() {
   };
   const setParam = (key: string, value: string) => setParams({ [key]: value });
   const setUserFilter = (v: string) => {
-    setParams({ user_id: v, trend_token_id: "" });
+    setParams({ user_id: v, token_id: "", trend_token_id: "" });
     setTokenPage(1);
   };
   const setModel = (v: string) => setParam("model", v);
@@ -148,8 +147,10 @@ function BillingPageContent() {
   const setChannelType = (v: string) => { setParam("channel_type", v); setChannelPage(1); };
   const setSearch = (v: string) => { setParam("q", v); setTokenPage(1); setChannelPage(1); };
   const setMinTokens = (v: string) => { setParam("min_tokens", v); setTokenPage(1); setChannelPage(1); };
-  const setTokenIdFilter = (v: string) => { setParam("token_id", v); setTokenPage(1); };
-  const setTrendTokenId = (v: string) => setParam("trend_token_id", v);
+  const setTokenIdFilter = (v: string) => {
+    setParams({ token_id: v, trend_token_id: "" });
+    setTokenPage(1);
+  };
 
   // 统一时间窗 + gran (day/hour) 控制所有数据源 (KPI / trend / token-list / channel-list).
   // useObsRange 默认 24h, 24h 配 gran=day 会出"1 个点", 这里仅在 URL 没显式 start 时
@@ -173,7 +174,7 @@ function BillingPageContent() {
       gran: range.gran,
       ...(model ? { model } : {}),
       ...(selectedUserId ? { user_id: selectedUserId } : {}),
-      ...(trendTokenId ? { token_id: Number(trendTokenId) } : {}),
+      ...(tokenId ? { token_id: Number(tokenId) } : {}),
       top_n: topN,
     },
     { enabled: !loading, refetchKey: refreshKey },
@@ -182,14 +183,13 @@ function BillingPageContent() {
   const tokenUserId = selectedUserId;
   const channelFilterId = channelId ? Number(channelId) : undefined;
 
-  // 注意:model 筛选「只作用于趋势图」(useBillingInsights)。
-  // 顶部 KPI 卡与下方 token/channel 表来自日账汇总表(token_daily_billings / channel_daily_billings),
-  // 这些表没有 model_name 列,无法按模型拆;故它们只跟随 user 筛选,不接收 model。这是设计如此,勿"修复"。
+  // 模型筛选使用趋势图数据源。计费概览和列表使用日账汇总。
   const overview = useBillingOverview(
     {
       start_date: startDateStr,
       end_date: endDateStr,
       ...(tokenUserId ? { user_id: tokenUserId } : {}),
+      ...(tokenId ? { token_id: Number(tokenId) } : {}),
     },
     { enabled: !loading }
   );
@@ -289,6 +289,7 @@ function BillingPageContent() {
           ),
       },
       ...buildTokenBreakdownColumns<BillingTokenRow>(t),
+      buildCacheHitRateColumn<BillingTokenRow>(tc("cacheHitRate")),
       {
         accessorKey: "last_used_at",
         header: ({ column }) => (
@@ -324,7 +325,7 @@ function BillingPageContent() {
     );
 
     return cols;
-  }, [isAdmin, t]);
+  }, [isAdmin, t, tc]);
 
   const channelColumns = useMemo<ColumnDef<BillingChannelRow>[]>(
     () => [
@@ -372,6 +373,7 @@ function BillingPageContent() {
           ),
       },
       ...buildTokenBreakdownColumns<BillingChannelRow>(t),
+      buildCacheHitRateColumn<BillingChannelRow>(tc("cacheHitRate")),
       {
         accessorKey: "last_used_at",
         header: ({ column }) => (
@@ -400,7 +402,7 @@ function BillingPageContent() {
         enableHiding: false,
       },
     ],
-    [channelTypeMap, t]
+    [channelTypeMap, t, tc]
   );
 
   const renderChannelExpandedRow = (row: Row<BillingChannelRow>) => (
@@ -420,16 +422,6 @@ function BillingPageContent() {
 
   const tokenFilters = (
     <FilterBar className="gap-2">
-      <FilterField label={t("filterLabelToken")}>
-        <EntityPicker
-          entity="token"
-          size="sm"
-          value={tokenId}
-          onChange={setTokenIdFilter}
-          placeholder={t("filterTokenPick")}
-          className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
-        />
-      </FilterField>
       <FilterField label={t("filterLabelSearch")}>
         <DebouncedSearchInput
           value={search}
@@ -518,17 +510,30 @@ function BillingPageContent() {
         onRefresh={refresh}
         refreshing={insights.isFetching || overview.isFetching}
         showGranularity
-        scopeLabel={isAdmin ? tc("filters") : undefined}
-        scopeControls={isAdmin ? (
-          <EntityPicker
-            entity="user"
-            size="sm"
-            value={userId}
-            onChange={setUserFilter}
-            placeholder={tcf("filter.user")}
-            className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
-          />
-        ) : undefined}
+        scopeLabel={tc("filters")}
+        scopeControls={
+          <>
+            {isAdmin && (
+              <EntityPicker
+                entity="user"
+                size="sm"
+                value={userId}
+                onChange={setUserFilter}
+                placeholder={tcf("filter.user")}
+                className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
+              />
+            )}
+            <EntityPicker
+              entity="token"
+              size="sm"
+              value={tokenId}
+              onChange={setTokenIdFilter}
+              ownerUserId={selectedUserId}
+              defaultAdminScope="all"
+              className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
+            />
+          </>
+        }
         headerActions={isAdmin ? (
           <DropdownMenu open={headerMenuOpen} onOpenChange={setHeaderMenuOpen}>
             <TooltipProvider>
@@ -627,7 +632,7 @@ function BillingPageContent() {
         defaultMetric="tokens"
         title={t("usageTrend")}
         loading={insights.isLoading}
-        scopeActiveCount={(model ? 1 : 0) + (trendTokenId ? 1 : 0) + (topN !== 5 ? 1 : 0)}
+        scopeActiveCount={(model ? 1 : 0) + (topN !== 5 ? 1 : 0)}
         scopeControls={
           <>
             <EntityPicker
@@ -636,15 +641,6 @@ function BillingPageContent() {
               value={model}
               onChange={setModel}
               placeholder={tcf("filter.model")}
-              className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
-            />
-            <EntityPicker
-              entity="token"
-              size="sm"
-              value={trendTokenId}
-              onChange={setTrendTokenId}
-              {...(selectedUserId ? { ownerUserId: selectedUserId } : {})}
-              placeholder={t("filterTokenPick")}
               className="w-full [&_[data-slot=button]]:h-9 sm:w-40 sm:[&_[data-slot=button]]:h-8"
             />
             <ChartOptionSelect
@@ -689,6 +685,7 @@ function BillingPageContent() {
             />
           </TabsContent>
           <TabsContent value="channel" className="space-y-4">
+            {tokenId && <p className="text-sm text-muted-foreground">{t("channelTotalsAllTokens")}</p>}
             {channelFilters}
             <DataTable
               columns={channelColumns}

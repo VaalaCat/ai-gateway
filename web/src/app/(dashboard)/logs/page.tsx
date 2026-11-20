@@ -49,6 +49,7 @@ import { RateLimitSection } from "@/components/business/rate-limit-section";
 import { EntityLabel } from "@/components/business/entity-label";
 import { KpiGrid } from "@/components/business/kpi-grid";
 import { ObservabilityHeader } from "@/components/business/observability-header";
+import { buildCacheHitRateColumn } from "@/components/business/token-breakdown-columns";
 import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { ColumnVisibility } from "@/components/data-table/column-visibility";
 
@@ -504,6 +505,7 @@ function LogsPageContent() {
           <DataTableColumnHeader column={column} title={t("cacheWriteTokens")} />
         ),
       },
+      buildCacheHitRateColumn<UsageLog>(tc("cacheHitRate")),
       {
         accessorKey: "created_at",
         header: ({ column }) => (

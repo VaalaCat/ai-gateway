@@ -333,7 +333,7 @@ func TestBillingInsightsRejectsInvalidTopN(t *testing.T) {
 	}
 }
 
-func TestBillingTokenFilterOnlyChangesTrendSeriesAndHidesForeignTokens(t *testing.T) {
+func TestBillingTokenFilterScopesTrendsAndCacheSavingAndHidesForeignTokens(t *testing.T) {
 	h, db, application := newInsightsTestCtx(t)
 	start, end := insightsDayRange()
 	for _, token := range []models.Token{
@@ -365,9 +365,8 @@ func TestBillingTokenFilterOnlyChangesTrendSeriesAndHidesForeignTokens(t *testin
 	if got := filtered.CostTrendStacked.SeriesOrder; !reflect.DeepEqual(got, []string{"model-a"}) {
 		t.Fatalf("filtered cost series = %v", got)
 	}
-	if got := filtered.CacheSaving.SavedTokens; got != 5 {
-		t.Fatalf("cache saving = %d, want unfiltered 5", got)
-	}
+	require.Equal(t, int64(2), filtered.CacheSaving.SavedTokens)
+	require.InDelta(t, 2.0/12, filtered.CacheSaving.HitRatio, 0.000001)
 
 	other, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, Gran: "hour", TokenID: 12, TopN: 10})
 	if err != nil {
@@ -376,6 +375,7 @@ func TestBillingTokenFilterOnlyChangesTrendSeriesAndHidesForeignTokens(t *testin
 	if got := other.CostTrendStacked.SeriesOrder; !reflect.DeepEqual(got, []string{"model-b"}) {
 		t.Fatalf("second cost series = %v; cache key omitted token_id/top_n", got)
 	}
+	require.Equal(t, int64(3), other.CacheSaving.SavedTokens)
 
 	for _, tokenID := range []uint{21, 999} {
 		_, err := h.Insights(ctx, InsightsRequest{Start: start, End: end, TokenID: tokenID})
