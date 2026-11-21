@@ -187,9 +187,10 @@ func (d *responseDecoder) frame(raw []byte) error {
 					id := call.ID
 					if id == "" {
 						id = callID()
+						pdata.Fields[omittedCallID] = json.RawMessage("true")
 					}
 					args := string(call.Args)
-					if args == "" {
+					if args == "" || args == "null" {
 						args = "{}"
 					}
 					d.calls = append(d.calls, pendingCall{Call: ir.StreamingToolCall{CallID: id, Name: call.Name, Arguments: args, Index: len(d.calls), ProviderData: pdata}, PartIndex: index})

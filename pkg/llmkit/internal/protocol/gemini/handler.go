@@ -54,7 +54,7 @@ func (*handler) EncodeRequest(input protocol.EncodeRequestInput) (protocol.Encod
 	if err != nil {
 		return protocol.EncodedRequest{}, nil, err
 	}
-	body, err := encodeRequest(prepared, input.Target.Model)
+	body, err := encodeRequest(prepared, input.Target.Model, input.Options.BuiltinToolFallback)
 	if err != nil {
 		return protocol.EncodedRequest{}, nil, err
 	}
