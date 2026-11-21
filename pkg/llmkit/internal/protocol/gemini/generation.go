@@ -11,16 +11,14 @@ import (
 func (capabilities generationCapabilities) thinkingConfig(req *ir.Request) map[string]any {
 	thinking := map[string]any{}
 	disabled := req.ThinkingEnabled != nil && !*req.ThinkingEnabled
-	effort := req.ReasoningEffort
-	if strings.EqualFold(effort, "XHIGH") && capabilities.XHighLevel != "" {
-		effort = capabilities.XHighLevel
-	}
-	if capabilities.MinimumThinkingLevel != "" {
-		level := strings.ToUpper(effort)
+	if capabilities.minimumThinkingLevel != "" {
+		level := strings.ToUpper(req.ReasoningEffort)
 		switch {
 		case disabled, level == "NONE", level == "MINIMAL",
 			level == "" && req.ThinkingBudget != nil && *req.ThinkingBudget == 0:
-			level = capabilities.MinimumThinkingLevel
+			level = capabilities.minimumThinkingLevel
+		case level == "XHIGH" && capabilities.xhighLevel != "":
+			level = capabilities.xhighLevel
 		}
 		if level != "" {
 			thinking["thinkingLevel"] = level
@@ -32,7 +30,7 @@ func (capabilities generationCapabilities) thinkingConfig(req *ir.Request) map[s
 		case disabled || req.ReasoningEffort == "none":
 			thinking["thinkingBudget"] = 0
 		case req.ReasoningEffort != "":
-			thinking["thinkingLevel"] = effort
+			thinking["thinkingLevel"] = req.ReasoningEffort
 		case req.ThinkingEnabled != nil && *req.ThinkingEnabled:
 			thinking["thinkingBudget"] = -1
 		}
@@ -66,10 +64,10 @@ func (capabilities generationCapabilities) generationConfig(req *ir.Request) map
 	if len(req.StopWords) > 0 {
 		generation["stopSequences"] = req.StopWords
 	}
-	if req.FrequencyPenalty != nil && !capabilities.OmitPenalties {
+	if req.FrequencyPenalty != nil && !capabilities.omitPenalties {
 		generation["frequencyPenalty"] = *req.FrequencyPenalty
 	}
-	if req.PresencePenalty != nil && !capabilities.OmitPenalties {
+	if req.PresencePenalty != nil && !capabilities.omitPenalties {
 		generation["presencePenalty"] = *req.PresencePenalty
 	}
 	if req.Logprobs != nil {
@@ -122,7 +120,7 @@ func (capabilities generationCapabilities) mergeNativeConfig(generation, extras 
 		if err == nil && n > 1 {
 			return fmt.Errorf("Gemini conversion supports one candidate per request")
 		}
-		if capabilities.OmitSingleCandidate && n == 1 {
+		if capabilities.omitSingleCandidate && n == 1 {
 			delete(generation, "candidateCount")
 		}
 	}

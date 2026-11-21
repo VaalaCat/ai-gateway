@@ -198,11 +198,6 @@ export function sanitizeOtherSettingsForSubmit(
       sanitized.model_thinking_passthrough = cleaned;
     }
   }
-  if (sanitized.model_gemini_generation) {
-    const rules = sanitized.model_gemini_generation.filter(rule => rule.model_pattern);
-    if (rules.length) sanitized.model_gemini_generation = rules;
-    else delete sanitized.model_gemini_generation;
-  }
   if (sanitized.model_tool_schema_compatibility) {
     const cleaned = sanitized.model_tool_schema_compatibility.filter((rule) => {
       return !!rule.model_pattern && (rule.profile === "gemini_compat" || rule.profile === "none") &&

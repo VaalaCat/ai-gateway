@@ -109,7 +109,7 @@ func validateToolCompatibilityCtx(c ValidatorCtx) error {
 		return nil
 	}
 	otherSettings, _ := c.Req["other_settings"].(string)
-	if err := models.ValidateModelCompatibility(otherSettings); err != nil {
+	if err := models.ValidateToolCompatibility(otherSettings); err != nil {
 		return api.BadRequestError(err.Error(), err)
 	}
 	return nil

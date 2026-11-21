@@ -138,7 +138,6 @@ func (c *codecImpl) EncodeRequest(input EncodeRequestInput) (EncodedRequest, err
 			Model: input.Target.Model, Headers: input.Target.Headers,
 		},
 		Options: convert.Options{
-			GeminiGeneration:    input.Options.GeminiGeneration,
 			BuiltinToolFallback: input.Options.BuiltinToolFallback,
 			RequestFields:       input.Options.RequestFields,
 		},

@@ -200,19 +200,3 @@ it("shows only the base rule controls and keeps the gemini signature fallback af
   expectCompatibilityCardControls();
   expect(screen.getByRole("combobox", { name: "toolCompatibilitySignatureLabel" })).toHaveTextContent("toolCompatibilitySignatureFallback");
 });
-
-it("saves ordered Gemini generation rules alongside existing channel settings", async () => {
-  const user = userEvent.setup();
-  const existing = { model_pattern: "^endpoint", omit_penalties: true };
-  render(<ToolCompatibilityForm initialSettings={JSON.stringify({ custom_setting: "keep", model_gemini_generation: [existing] })} />);
-  await user.click(screen.getByRole("button", { name: "geminiGeneration" }));
-  await user.click(screen.getByRole("button", { name: "+ geminiAddRule" }));
-  await user.type(screen.getAllByRole("textbox", { name: "toolCompatibilityModelLabel" })[1], "(?i)^future");
-  await user.type(screen.getAllByRole("textbox", { name: "geminiXhighLevel" })[1], "HIGH");
-  await user.click(screen.getAllByRole("switch", { name: "geminiOmitCandidate" })[1]);
-  await user.click(screen.getByRole("button", { name: "Save channel" }));
-  expect(JSON.parse(screen.getByTestId("saved-settings").textContent!)).toEqual({
-    custom_setting: "keep",
-    model_gemini_generation: [existing, { model_pattern: "(?i)^future", xhigh_level: "HIGH", omit_single_candidate: true }],
-  });
-});

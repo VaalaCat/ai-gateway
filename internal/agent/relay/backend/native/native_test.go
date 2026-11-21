@@ -105,49 +105,6 @@ func TestBuildCallOptionsMatchesBothModelNames(t *testing.T) {
 	}
 }
 
-func TestGeminiGenerationRulesReachOutboundEncoding(t *testing.T) {
-	channel := makeNativeChannel("")
-	channel.OtherSettings = `{"model_gemini_generation":[
-  {"model_pattern":"^override$","xhigh_level":"CUSTOM"},
-  {"model_pattern":"^ep-","minimum_thinking_level":"LOW","omit_single_candidate":true},
-  {"model_pattern":"^gemini-4-argon$"}
- ]}`
-	for _, tc := range []struct {
-		original, mapped, level string
-		omitCount               bool
-	}{
-		{"override", "ep-1", "CUSTOM", false},
-		{"alias", "ep-1", "XHIGH", true},
-		{"alias", "gemini-4-argon", "xhigh", false},
-		{"alias", "gemini-4-carbon", "HIGH", true},
-	} {
-		t.Run(tc.original+"/"+tc.mapped, func(t *testing.T) {
-			relay, _ := newNativeTestCtx(t, nil, llmkit.ProtocolOpenAIChat, false)
-			opts := (&Backend{}).buildCallOptions(relay, state.Attempt{Channel: channel, RealModel: tc.original}, llmkit.ProtocolOpenAIChat, llmkit.ProtocolGemini, &upstream.ChannelConfig{}, tc.mapped)
-			encoded, err := llmkit.NewCodec().EncodeRequest(llmkit.EncodeRequestInput{
-				Request: llmkit.Request{Model: tc.original, ReasoningEffort: "xhigh", N: 1},
-				Target:  llmkit.Target{Model: tc.mapped, Protocol: llmkit.ProtocolGemini}, Options: opts.Conversion,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var payload struct {
-				GenerationConfig struct {
-					CandidateCount *int
-					ThinkingConfig struct{ ThinkingLevel string }
-				}
-			}
-			if err := json.Unmarshal(encoded.Body, &payload); err != nil {
-				t.Fatal(err)
-			}
-			cfg := payload.GenerationConfig
-			if cfg.ThinkingConfig.ThinkingLevel != tc.level || (cfg.CandidateCount == nil) != tc.omitCount {
-				t.Fatalf("unexpected generation config: %+v", cfg)
-			}
-		})
-	}
-}
-
 type recordingLLMKitClient struct {
 	calls   int
 	request llmkit.Request

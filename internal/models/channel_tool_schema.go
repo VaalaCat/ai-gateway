@@ -8,14 +8,6 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
 
-// ValidateModelCompatibility checks the channel's ordered model rules before saving.
-func ValidateModelCompatibility(otherSettings string) error {
-	if _, err := ParseGeminiGenerationRules(otherSettings); err != nil {
-		return err
-	}
-	return ValidateToolCompatibility(otherSettings)
-}
-
 // ValidateToolCompatibility 校验渠道工具兼容规则的模型正则和兼容方式。
 func ValidateToolCompatibility(otherSettings string) error {
 	// 1. 读取工具兼容规则。

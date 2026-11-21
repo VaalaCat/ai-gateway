@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 	"github.com/stretchr/testify/require"
@@ -56,7 +55,7 @@ func TestEncodeThinkingPermissive(t *testing.T) {
 		{"native conflict preserved", ir.Request{Extras: map[string]any{"generationConfig": map[string]any{"thinkingConfig": map[string]any{"thinkingLevel": "future", "thinkingBudget": -99}}}}, map[string]any{"thinkingLevel": "future", "thinkingBudget": float64(-99)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := encodeRequest(&tc.req, "m", convert.Options{})
+			raw, err := encodeRequest(&tc.req, "m", "")
 			require.NoError(t, err)
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(raw, &body))
@@ -108,7 +107,7 @@ func TestEncodeImagePositionAndSignature(t *testing.T) {
 
 func TestImageGenerationAndJSONSchema(t *testing.T) {
 	req := &ir.Request{Tools: []ir.Tool{{Type: "image_generation"}}, ResponseFormat: map[string]any{"type": "json_schema", "json_schema": map[string]any{"schema": map[string]any{"type": "object"}}}, Extras: map[string]any{"modalities": []string{"image", "text"}}}
-	raw, err := encodeRequest(req, "m", convert.Options{})
+	raw, err := encodeRequest(req, "m", "")
 	require.NoError(t, err)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(raw, &body))
@@ -147,7 +146,7 @@ func TestEncodeGemini4ReasoningSettings(t *testing.T) {
 				N: 1, ThinkingBudget: tc.budget, ThinkingEnabled: tc.enabled,
 				ReasoningEffort: tc.effort, IncludeThoughts: ptr(true),
 				FrequencyPenalty: ptr(0.0), PresencePenalty: ptr(0.0),
-			}, tc.model, convert.Options{})
+			}, tc.model, "")
 			require.NoError(t, err)
 			var payload struct {
 				GenerationConfig map[string]any `json:"generationConfig"`
@@ -166,16 +165,16 @@ func TestEncodeGemini4ReasoningSettings(t *testing.T) {
 			}
 		})
 	}
-	_, err := encodeRequest(&ir.Request{N: 2}, "gemini-4-argon", convert.Options{})
+	_, err := encodeRequest(&ir.Request{N: 2}, "gemini-4-argon", "")
 	require.ErrorContains(t, err, "supports one candidate")
 }
 
 func TestEncodeUnlistedModelGenerationConfig(t *testing.T) {
-	for _, model := range []string{"gemini-3.1-pro", "gemini-40-argon", "custom-4.1-carbon"} {
+	for _, model := range []string{"gemini-3.1-pro", "gemini-40-argon", "gemini-5-new-model", "gemini-4-argon/models/custom", "custom-4.1-carbon"} {
 		t.Run(model, func(t *testing.T) {
 			raw, err := encodeRequest(&ir.Request{
 				N: 1, ThinkingBudget: ptr(32), FrequencyPenalty: ptr(0.5), PresencePenalty: ptr(0.25),
-			}, model, convert.Options{})
+			}, model, "")
 			require.NoError(t, err)
 			var body struct {
 				GenerationConfig json.RawMessage `json:"generationConfig"`
