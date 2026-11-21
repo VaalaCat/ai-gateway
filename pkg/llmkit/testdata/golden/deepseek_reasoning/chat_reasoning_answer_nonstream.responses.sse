@@ -5,7 +5,7 @@ event: response.in_progress
 data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_e01632042a93678e58be8b0d","object":"response","model":"deepseek-reasoner","status":"in_progress","output":[]}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_e01632042a93678e58be8b0d0","status":"in_progress"},"output_index":0}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_e01632042a93678e58be8b0d0","status":"in_progress","summary":[]},"output_index":0}
 
 event: response.reasoning_summary_text.delta
 data: {"delta":"Need inspect files.","item_id":"rs_e01632042a93678e58be8b0d0","output_index":0,"sequence_number":3,"summary_index":0,"type":"response.reasoning_summary_text.delta"}

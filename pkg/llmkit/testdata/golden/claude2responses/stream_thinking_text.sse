@@ -5,7 +5,7 @@ event: response.in_progress
 data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_d7ecb49e675321a9207b85b1","object":"response","status":"in_progress","output":[]}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_d7ecb49e675321a9207b85b10","status":"in_progress"},"output_index":0}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_d7ecb49e675321a9207b85b10","status":"in_progress","summary":[]},"output_index":0}
 
 event: response.content_part.added
 data: {"type":"response.content_part.added","sequence_number":3,"part":{"type":"reasoning_text"},"output_index":0,"content_index":0,"item_id":"rs_d7ecb49e675321a9207b85b10"}

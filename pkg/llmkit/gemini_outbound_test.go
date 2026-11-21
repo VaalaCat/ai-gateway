@@ -708,3 +708,88 @@ func TestGeminiChatParallelToolRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiChatGenerationExtensions(t *testing.T) {
+	codec := NewCodec()
+	for _, tc := range []struct {
+		name, model, fields, generation string
+		wantError                       bool
+	}{
+		{"Neon disabled", "models/gemini-4-neon", `"reasoning_effort":"none"`, `{"thinkingConfig":{"thinkingLevel":"LOW"}}`, false},
+		{"new variant", "gemini-4-future-preview", `"reasoning_effort":"xhigh","n":1,"presence_penalty":0`, `{"thinkingConfig":{"thinkingLevel":"XHIGH"}}`, false},
+		{"earlier model", "gemini-2.5-flash", `"reasoning_effort":"none","n":1`, `{"thinkingConfig":{"thinkingBudget":0},"candidateCount":1}`, false},
+		{"multiple native candidates", "gemini-2.5-flash", `"n":1,"generationConfig":{"candidateCount":2}`, "", true},
+		{"protobuf field names", "gemini-4-neon", `"generation_config":{"candidate_count":2}`, "", true},
+		{"effective single candidate", "gemini-2.5-flash", `"n":2,"generationConfig":{"candidateCount":1}`, `{"candidateCount":1}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"messages":[{"role":"user","content":"hi"}],"modelArmorConfig":{"promptTemplateName":"templates/test"},"future_extension":{"value":17},` + tc.fields + `}`
+			decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: "POST", Path: "/v1/chat/completions", Body: []byte(body)})
+			require.NoError(t, err)
+			encoded, err := codec.EncodeRequest(EncodeRequestInput{Request: decoded.Request, Target: Target{Protocol: ProtocolGemini, Model: tc.model}})
+			if tc.wantError {
+				require.ErrorContains(t, err, "one candidate")
+				return
+			}
+			require.NoError(t, err)
+			var wire map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded.Body, &wire))
+			require.JSONEq(t, tc.generation, string(wire["generationConfig"]))
+			require.JSONEq(t, `{"promptTemplateName":"templates/test"}`, string(wire["modelArmorConfig"]))
+			require.JSONEq(t, `{"value":17}`, string(wire["future_extension"]))
+		})
+	}
+}
+
+func TestGeminiToolFallbackAndChoice(t *testing.T) {
+	const fileSearch = `{"type":"file_search","vector_store_ids":["vs_test"]}`
+	const function = `{"type":"function","name":"lookup"}`
+	const custom = `{"type":"custom","name":"edit"}`
+	codec := NewCodec()
+	for _, tc := range []struct {
+		name                                           string
+		policy                                         BuiltinToolFallbackPolicy
+		tools, choice, wantTools, wantMode, dropReason string
+		wantError                                      bool
+	}{
+		{"drop optional", BuiltinToolFallbackDrop, fileSearch, `"auto"`, "", "", DroppedToolReasonCrossProtocolIncompatible, false},
+		{"drop required", BuiltinToolFallbackDrop, fileSearch, `"required"`, "", "", "", true},
+		{"another tool satisfies required", BuiltinToolFallbackDrop, fileSearch + "," + function, `"required"`, `[{"functionDeclarations":[{"name":"lookup","description":""}]}]`, "ANY", DroppedToolReasonCrossProtocolIncompatible, false},
+		{"dropped selected tool", BuiltinToolFallbackDrop, custom + "," + function, `{"type":"custom","name":"edit"}`, "", "", "", true},
+		{"preserve raw tool", BuiltinToolFallbackPassthrough, fileSearch, `"auto"`, "[" + fileSearch + "]", "AUTO", "", false},
+		{"error policy", BuiltinToolFallbackError, fileSearch, `"auto"`, "", "", "", true},
+		{"function fallback unsupported", BuiltinToolFallbackFunction, fileSearch, `"none"`, "", "", DroppedToolReasonFunctionFallbackUnsupported, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := `{"input":"hi","tools":[` + tc.tools + `],"tool_choice":` + tc.choice + `}`
+			decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: "POST", Path: "/v1/responses", Body: []byte(request)})
+			require.NoError(t, err)
+			var dropped []DroppedTool
+			encoded, err := codec.EncodeRequest(EncodeRequestInput{
+				Request: decoded.Request, Target: Target{Protocol: ProtocolGemini, Model: "m"},
+				Options: ConversionOptions{BuiltinToolFallback: tc.policy, OnDroppedTools: func(tools []DroppedTool) { dropped = tools }},
+			})
+			if tc.wantError {
+				require.ErrorIs(t, err, convert.ErrBuiltinToolUnsupported)
+				return
+			}
+			require.NoError(t, err)
+			var wire struct {
+				Tools      json.RawMessage
+				ToolConfig struct{ FunctionCallingConfig struct{ Mode string } }
+			}
+			require.NoError(t, json.Unmarshal(encoded.Body, &wire))
+			if tc.wantTools == "" {
+				require.Empty(t, wire.Tools)
+			} else {
+				require.JSONEq(t, tc.wantTools, string(wire.Tools))
+			}
+			require.Equal(t, tc.wantMode, wire.ToolConfig.FunctionCallingConfig.Mode)
+			if tc.dropReason != "" {
+				require.Equal(t, []DroppedTool{{Type: "file_search", Reason: tc.dropReason}}, dropped)
+			} else {
+				require.Empty(t, dropped)
+			}
+		})
+	}
+}

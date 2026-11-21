@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
@@ -25,11 +26,7 @@ type orderedResponse struct {
 }
 
 // encodeRequest 把消息、工具与生成设置转换为 Gemini 主体。
-func encodeRequest(req *ir.Request, model string) ([]byte, error) {
-	if req.N > 1 {
-		return nil, fmt.Errorf("Gemini conversion supports one candidate per request")
-	}
-
+func encodeRequest(req *ir.Request, model string, policy convert.BuiltinToolFallbackPolicy) ([]byte, error) {
 	var contents []content
 	var system []part
 	calls := map[string]replayCall{}
@@ -115,125 +112,16 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 		body["systemInstruction"] = content{Parts: system}
 	}
 	// 2. 映射通用生成参数、思考和工具。
-	generation := map[string]any{}
-	modelFamily := gemini4Family(model)
-	if req.MaxTokens != 0 {
-		generation["maxOutputTokens"] = req.MaxTokens
+	capabilities := generationCapabilitiesFor(model)
+	generation := capabilities.generationConfig(req)
+	if err := encodeTools(req, policy, body, generation); err != nil {
+		return nil, err
 	}
-	if req.Temperature != nil {
-		generation["temperature"] = *req.Temperature
-	}
-	if req.TopP != nil {
-		generation["topP"] = *req.TopP
-	}
-	if req.TopK != nil {
-		generation["topK"] = *req.TopK
-	}
-	if req.Seed != nil {
-		generation["seed"] = *req.Seed
-	}
-	if req.N != 0 && modelFamily == "" {
-		generation["candidateCount"] = req.N
-	}
-	if len(req.StopWords) > 0 {
-		generation["stopSequences"] = req.StopWords
-	}
-	if req.FrequencyPenalty != nil && modelFamily == "" {
-		generation["frequencyPenalty"] = *req.FrequencyPenalty
-	}
-	if req.PresencePenalty != nil && modelFamily == "" {
-		generation["presencePenalty"] = *req.PresencePenalty
-	}
-	if req.Logprobs != nil {
-		generation["responseLogprobs"] = *req.Logprobs
-	}
-	if req.TopLogprobs != nil {
-		generation["logprobs"] = *req.TopLogprobs
-	}
-	thinking := thinkingConfig(req, modelFamily)
-	if len(thinking) > 0 {
-		generation["thinkingConfig"] = thinking
-	}
-	format := object(req.ResponseFormat)
-	if len(format) == 0 {
-		format = object(object(req.Extras["text"])["format"])
-	}
-	if format["type"] == "json_object" {
-		generation["responseMimeType"] = "application/json"
-	}
-	if format["type"] == "json_schema" {
-		generation["responseMimeType"] = "application/json"
-		schema := object(format["json_schema"])
-		if schema["schema"] != nil {
-			generation["responseJsonSchema"] = schema["schema"]
-		} else if format["schema"] != nil {
-			generation["responseJsonSchema"] = format["schema"]
-		}
-	}
-	var declarations []any
-	var tools []any
-	for _, tool := range req.Tools {
-		switch tool.Type {
-		case "", "function":
-			declaration := map[string]any{"name": tool.Name, "description": tool.Description}
-			if tool.InputSchema != nil {
-				declaration["parametersJsonSchema"] = tool.InputSchema
-			}
-			declarations = append(declarations, declaration)
-		case "image_generation":
-			generation["responseModalities"] = []string{"TEXT", "IMAGE"}
-			raw := object(tool.RawConfig)
-			imageConfig := map[string]any{}
-			if ratio, ok := raw["aspect_ratio"]; ok {
-				imageConfig["aspectRatio"] = ratio
-			}
-			if size, ok := raw["image_size"]; ok {
-				imageConfig["imageSize"] = size
-			}
-			if config, ok := raw["imageConfig"]; ok {
-				for key, value := range object(config) {
-					imageConfig[key] = value
-				}
-			}
-			if len(imageConfig) > 0 {
-				generation["imageConfig"] = imageConfig
-			}
-		case "web_search", "web_search_preview":
-			tools = append(tools, map[string]any{"googleSearch": map[string]any{}})
-		default:
-			if tool.RawConfig != nil {
-				tools = append(tools, tool.RawConfig)
-			}
-		}
-	}
-	if len(declarations) > 0 {
-		tools = append(tools, map[string]any{"functionDeclarations": declarations})
-	}
-	if len(tools) > 0 {
-		body["tools"] = tools
-	}
-	if req.ToolChoice != nil && len(tools) > 0 {
-		mode := "AUTO"
-		config := map[string]any{}
-		switch req.ToolChoice.Type {
-		case "none":
-			mode = "NONE"
-		case "required":
-			mode = "ANY"
-		case "function":
-			mode = "ANY"
-			config["allowedFunctionNames"] = []string{req.ToolChoice.Name}
-		}
-		config["mode"] = mode
-		body["toolConfig"] = map[string]any{"functionCallingConfig": config}
-	}
-	// 3. 保留 Gemini 扩展，避免把源协议的未知字段发给 Gemini。
+	// Forward extension fields after translating the source protocol controls.
 	for key, value := range req.Extras {
 		switch key {
-		case "generationConfig":
-			for k, v := range object(value) {
-				generation[k] = v
-			}
+		case "generationConfig", "generation_config":
+			// Native generation settings take precedence after translation.
 		case "modalities":
 			data, _ := json.Marshal(value)
 			var modalities []string
@@ -241,68 +129,24 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 				for i := range modalities {
 					modalities[i] = strings.ToUpper(modalities[i])
 				}
-				if _, explicit := object(req.Extras["generationConfig"])["responseModalities"]; !explicit {
-					generation["responseModalities"] = modalities
-				}
+				generation["responseModalities"] = modalities
 			}
-		case "model", "messages", "input", "stream", "max_tokens", "max_completion_tokens", "reasoning", "reasoning_effort", "response_format", "text", "stream_options", "metadata", "store", "include", "prompt_cache_key", "reasoning_summary", "tool_choice", "parallel_tool_calls":
-		case "safetySettings", "cachedContent", "toolConfig", "systemInstruction", "labels":
-			body[key] = value
+		case "model", "messages", "input", "stream", "max_tokens", "max_completion_tokens",
+			"reasoning", "reasoning_effort", "response_format", "text", "stream_options",
+			"metadata", "store", "include", "prompt_cache_key", "reasoning_summary",
+			"tool_choice", "parallel_tool_calls", "client_metadata", "previous_response_id", "truncation":
+			// Source protocol controls have no native generateContent field.
 		default:
-			if req.InboundProtocol == "" || req.InboundProtocol == ir.ProtocolGemini {
-				body[key] = value
-			}
+			body[key] = value
 		}
+	}
+	if err := capabilities.mergeNativeConfig(generation, req.Extras); err != nil {
+		return nil, err
 	}
 	if len(generation) > 0 {
 		body["generationConfig"] = generation
 	}
 	return json.Marshal(body)
-}
-
-// gemini4Family recognizes model IDs in both bare and fully qualified Vertex paths.
-func gemini4Family(model string) string {
-	model = model[strings.LastIndexByte(model, '/')+1:]
-	for _, family := range []string{"gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"} {
-		if model == family || strings.HasPrefix(model, family+"-") {
-			return family
-		}
-	}
-	return ""
-}
-
-func thinkingConfig(req *ir.Request, modelFamily string) map[string]any {
-	thinking := map[string]any{}
-	disabled := req.ThinkingEnabled != nil && !*req.ThinkingEnabled
-	if modelFamily != "" {
-		// Gemini 4 rejects token budgets and cannot turn thinking off.
-		level := strings.ToUpper(req.ReasoningEffort)
-		switch {
-		case disabled, level == "NONE", level == "MINIMAL",
-			level == "" && req.ThinkingBudget != nil && *req.ThinkingBudget == 0:
-			level = "LOW"
-		case level == "XHIGH" && modelFamily != "gemini-4-hydrogen":
-			level = "HIGH"
-		}
-		if level != "" {
-			thinking["thinkingLevel"] = level
-		}
-	} else {
-		switch {
-		case req.ThinkingBudget != nil:
-			thinking["thinkingBudget"] = *req.ThinkingBudget
-		case disabled || req.ReasoningEffort == "none":
-			thinking["thinkingBudget"] = 0
-		case req.ReasoningEffort != "":
-			thinking["thinkingLevel"] = req.ReasoningEffort
-		case req.ThinkingEnabled != nil && *req.ThinkingEnabled:
-			thinking["thinkingBudget"] = -1
-		}
-	}
-	if req.IncludeThoughts != nil {
-		thinking["includeThoughts"] = *req.IncludeThoughts
-	}
-	return thinking
 }
 
 func encodeFunctionResponse(message ir.Message, call replayCall, model string) (part, error) {

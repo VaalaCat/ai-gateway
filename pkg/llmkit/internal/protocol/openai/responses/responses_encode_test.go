@@ -471,7 +471,7 @@ func TestResponsesEncodeStream_CodexWireSchema(t *testing.T) {
 	}
 	textDone := find("response.output_text.done")
 	var messageID string
-	var functionStarted bool
+	var reasoningStarted, functionStarted bool
 	for _, event := range events {
 		if event.Event != "response.output_item.added" {
 			continue
@@ -480,12 +480,18 @@ func TestResponsesEncodeStream_CodexWireSchema(t *testing.T) {
 			Item struct {
 				Type      string             `json:"type"`
 				ID        string             `json:"id"`
+				Summary   []respContentBlock `json:"summary"`
 				Content   []respContentBlock `json:"content"`
 				Arguments *string            `json:"arguments"`
 			} `json:"item"`
 		}
 		_ = json.Unmarshal([]byte(event.Data), &data)
 		switch data.Item.Type {
+		case "reasoning":
+			reasoningStarted = true
+			if data.Item.Summary == nil || len(data.Item.Summary) != 0 {
+				t.Errorf("reasoning item added with summary %#v, want []", data.Item.Summary)
+			}
 		case "message":
 			messageID = data.Item.ID
 			if data.Item.Content == nil || len(data.Item.Content) != 0 {
@@ -497,6 +503,9 @@ func TestResponsesEncodeStream_CodexWireSchema(t *testing.T) {
 				t.Errorf("function call item added without empty arguments string: %s", event.Data)
 			}
 		}
+	}
+	if !reasoningStarted {
+		t.Error("missing reasoning output_item.added")
 	}
 	if !functionStarted {
 		t.Error("missing function_call output_item.added")

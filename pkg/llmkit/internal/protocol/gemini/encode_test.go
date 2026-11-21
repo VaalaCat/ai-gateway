@@ -55,7 +55,7 @@ func TestEncodeThinkingPermissive(t *testing.T) {
 		{"native conflict preserved", ir.Request{Extras: map[string]any{"generationConfig": map[string]any{"thinkingConfig": map[string]any{"thinkingLevel": "future", "thinkingBudget": -99}}}}, map[string]any{"thinkingLevel": "future", "thinkingBudget": float64(-99)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := encodeRequest(&tc.req, "m")
+			raw, err := encodeRequest(&tc.req, "m", "")
 			require.NoError(t, err)
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(raw, &body))
@@ -107,7 +107,7 @@ func TestEncodeImagePositionAndSignature(t *testing.T) {
 
 func TestImageGenerationAndJSONSchema(t *testing.T) {
 	req := &ir.Request{Tools: []ir.Tool{{Type: "image_generation"}}, ResponseFormat: map[string]any{"type": "json_schema", "json_schema": map[string]any{"schema": map[string]any{"type": "object"}}}, Extras: map[string]any{"modalities": []string{"image", "text"}}}
-	raw, err := encodeRequest(req, "m")
+	raw, err := encodeRequest(req, "m", "")
 	require.NoError(t, err)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(raw, &body))
@@ -141,7 +141,7 @@ func TestEncodeGemini4ReasoningSettings(t *testing.T) {
 				N: 1, ThinkingBudget: tc.budget, ThinkingEnabled: tc.enabled,
 				ReasoningEffort: tc.effort, IncludeThoughts: ptr(true),
 				FrequencyPenalty: ptr(0.0), PresencePenalty: ptr(0.0),
-			}, tc.model)
+			}, tc.model, "")
 			require.NoError(t, err)
 			var payload struct {
 				GenerationConfig map[string]any `json:"generationConfig"`
@@ -160,6 +160,6 @@ func TestEncodeGemini4ReasoningSettings(t *testing.T) {
 			}
 		})
 	}
-	_, err := encodeRequest(&ir.Request{N: 2}, "gemini-4-argon")
+	_, err := encodeRequest(&ir.Request{N: 2}, "gemini-4-argon", "")
 	require.ErrorContains(t, err, "supports one candidate")
 }

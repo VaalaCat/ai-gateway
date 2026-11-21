@@ -133,6 +133,11 @@ func (item respOutputItem) MarshalJSON() ([]byte, error) {
 			wireItem
 			Content []respContentBlock `json:"content"`
 		}{wireItem(item), []respContentBlock{}})
+	case item.Type == "reasoning" && len(item.Summary) == 0:
+		return json.Marshal(struct {
+			wireItem
+			Summary []respContentBlock `json:"summary"`
+		}{wireItem(item), []respContentBlock{}})
 	case item.Type == "function_call" && item.Arguments == "":
 		return json.Marshal(struct {
 			wireItem
