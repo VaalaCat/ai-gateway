@@ -8,39 +8,17 @@ import (
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
-type generationCapabilities struct {
-	gemini4    bool
-	limitXHigh bool
-}
-
-func generationCapabilitiesFor(model string) generationCapabilities {
-	id := model[strings.LastIndexByte(model, '/')+1:]
-	name, ok := strings.CutPrefix(id, "gemini-")
-	version, variant, _ := strings.Cut(name, "-")
-	major, _, _ := strings.Cut(version, ".")
-	if !ok || major != "4" {
-		return generationCapabilities{}
-	}
-	family, _, _ := strings.Cut(variant, "-")
-	return generationCapabilities{
-		gemini4: true,
-		// Argon and Carbon accept HIGH as their highest reasoning level.
-		limitXHigh: family == "argon" || family == "carbon",
-	}
-}
-
 func (capabilities generationCapabilities) thinkingConfig(req *ir.Request) map[string]any {
 	thinking := map[string]any{}
 	disabled := req.ThinkingEnabled != nil && !*req.ThinkingEnabled
-	if capabilities.gemini4 {
-		// Gemini 4 rejects token budgets and cannot turn thinking off.
+	if capabilities.minimumThinkingLevel != "" {
 		level := strings.ToUpper(req.ReasoningEffort)
 		switch {
 		case disabled, level == "NONE", level == "MINIMAL",
 			level == "" && req.ThinkingBudget != nil && *req.ThinkingBudget == 0:
-			level = "LOW"
-		case level == "XHIGH" && capabilities.limitXHigh:
-			level = "HIGH"
+			level = capabilities.minimumThinkingLevel
+		case level == "XHIGH" && capabilities.xhighLevel != "":
+			level = capabilities.xhighLevel
 		}
 		if level != "" {
 			thinking["thinkingLevel"] = level
@@ -86,10 +64,10 @@ func (capabilities generationCapabilities) generationConfig(req *ir.Request) map
 	if len(req.StopWords) > 0 {
 		generation["stopSequences"] = req.StopWords
 	}
-	if req.FrequencyPenalty != nil && !capabilities.gemini4 {
+	if req.FrequencyPenalty != nil && !capabilities.omitPenalties {
 		generation["frequencyPenalty"] = *req.FrequencyPenalty
 	}
-	if req.PresencePenalty != nil && !capabilities.gemini4 {
+	if req.PresencePenalty != nil && !capabilities.omitPenalties {
 		generation["presencePenalty"] = *req.PresencePenalty
 	}
 	if req.Logprobs != nil {
@@ -142,7 +120,7 @@ func (capabilities generationCapabilities) mergeNativeConfig(generation, extras 
 		if err == nil && n > 1 {
 			return fmt.Errorf("Gemini conversion supports one candidate per request")
 		}
-		if capabilities.gemini4 && n == 1 {
+		if capabilities.omitSingleCandidate && n == 1 {
 			delete(generation, "candidateCount")
 		}
 	}

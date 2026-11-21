@@ -132,6 +132,11 @@ func TestEncodeGemini4ReasoningSettings(t *testing.T) {
 		{model: "publishers/google/models/gemini-4-carbon", effort: "medium", budget: ptr(512), want: "MEDIUM"},
 		{model: "gemini-4-carbon-cyber-permissive", effort: "xhigh", want: "HIGH"},
 		{model: "gemini-4-hydrogen", effort: "xhigh", want: "XHIGH"},
+		{model: "gemini-4-neon", effort: "xhigh", want: "XHIGH"},
+		{model: "gemini-4-unknown-preview-001", effort: "future", want: "FUTURE"},
+		{model: "gemini-4-argonite", effort: "xhigh", want: "XHIGH"},
+		{model: "publishers/google/models/gemini-4.1-argon-preview-001", effort: "xhigh", want: "HIGH"},
+		{model: "gemini-4.1-unknown", effort: "xhigh", want: "XHIGH"},
 		{model: "gemini-4-hydrogen", enabled: ptr(false), want: "LOW"},
 		{model: "gemini-4-argon", budget: ptr(0), want: "LOW"},
 		{model: "gemini-4-carbon", budget: ptr(512), want: ""},
@@ -162,4 +167,20 @@ func TestEncodeGemini4ReasoningSettings(t *testing.T) {
 	}
 	_, err := encodeRequest(&ir.Request{N: 2}, "gemini-4-argon", "")
 	require.ErrorContains(t, err, "supports one candidate")
+}
+
+func TestEncodeUnlistedModelGenerationConfig(t *testing.T) {
+	for _, model := range []string{"gemini-3.1-pro", "gemini-40-argon", "custom-4.1-carbon"} {
+		t.Run(model, func(t *testing.T) {
+			raw, err := encodeRequest(&ir.Request{
+				N: 1, ThinkingBudget: ptr(32), FrequencyPenalty: ptr(0.5), PresencePenalty: ptr(0.25),
+			}, model, "")
+			require.NoError(t, err)
+			var body struct {
+				GenerationConfig json.RawMessage `json:"generationConfig"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &body))
+			require.JSONEq(t, `{"candidateCount":1,"frequencyPenalty":0.5,"presencePenalty":0.25,"thinkingConfig":{"thinkingBudget":32}}`, string(body.GenerationConfig))
+		})
+	}
 }
