@@ -223,6 +223,13 @@ export interface ChannelOtherSettings {
     model_pattern: string;
     send_back_thinking: boolean;
   }>;
+  model_gemini_generation?: Array<{
+    model_pattern: string;
+    minimum_thinking_level?: string;
+    xhigh_level?: string;
+    omit_penalties?: boolean;
+    omit_single_candidate?: boolean;
+  }>;
   model_tool_schema_compatibility?: Array<{
     model_pattern: string;
     profile: "gemini_compat" | "none";

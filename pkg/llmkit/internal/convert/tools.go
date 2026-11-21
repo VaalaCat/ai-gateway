@@ -64,7 +64,16 @@ type RequestFieldPermissions struct {
 	AllowIncludeObfuscation bool `json:"allow_include_obfuscation,omitempty"`
 }
 
+// GeminiGenerationConfig describes how to translate generation fields for an outbound model.
+type GeminiGenerationConfig struct {
+	MinimumThinkingLevel string `json:"minimum_thinking_level,omitempty"`
+	XHighLevel           string `json:"xhigh_level,omitempty"`
+	OmitPenalties        bool   `json:"omit_penalties,omitempty"`
+	OmitSingleCandidate  bool   `json:"omit_single_candidate,omitempty"`
+}
+
 type Options struct {
+	GeminiGeneration    *GeminiGenerationConfig
 	BuiltinToolFallback BuiltinToolFallbackPolicy
 	RequestFields       RequestFieldPermissions
 }

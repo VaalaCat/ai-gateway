@@ -1,6 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -57,6 +58,10 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
     enabledOutbounds.push({ value: "openai_responses", label: "openai_responses" });
   if (protos.claude) enabledOutbounds.push({ value: "claude", label: "claude" });
   if (protos.gemini) enabledOutbounds.push({ value: "gemini", label: "Gemini" });
+
+  const generationRules = otherSettings.model_gemini_generation ?? [];
+  const setGenerationRules = (rules: typeof generationRules) =>
+    updateOtherSettings({ model_gemini_generation: rules.length ? rules : undefined });
 
   const overrideMap = otherSettings.protocol_override || {};
 
@@ -136,6 +141,37 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
               onCheckedChange={(v) => setForm({ ...form, passthrough_enabled: v })}
             />
           </div>
+        </AccordionContent>
+      </AccordionItem>
+
+      <AccordionItem value="gemini-generation">
+        <AccordionTrigger className="px-3">{t("geminiGeneration")}</AccordionTrigger>
+        <AccordionContent className="space-y-3 px-3 pb-3">
+          <p className="text-xs text-muted-foreground">{t("geminiGenerationTip")}</p>
+          {generationRules.map((rule, index) => {
+            const update = (patch: Partial<typeof rule>) => setGenerationRules(
+              generationRules.map((current, i) => i === index ? { ...current, ...patch } : current)
+            );
+            return (
+              <div key={index} className="space-y-3 rounded-md border p-3">
+                <Label>{t("toolCompatibilityModelLabel")}
+                  <Input value={rule.model_pattern} onChange={e => update({ model_pattern: e.target.value })} />
+                </Label>
+                <Label>{t("geminiMinimumLevel")}
+                  <Input placeholder="LOW" value={rule.minimum_thinking_level ?? ""} onChange={e => update({ minimum_thinking_level: e.target.value || undefined })} />
+                </Label>
+                <Label>{t("geminiXhighLevel")}
+                  <Input placeholder="HIGH" value={rule.xhigh_level ?? ""} onChange={e => update({ xhigh_level: e.target.value || undefined })} />
+                </Label>
+                <Label><Switch checked={!!rule.omit_penalties} onCheckedChange={v => update({ omit_penalties: v })} />{t("geminiOmitPenalties")}</Label>
+                <Label><Switch checked={!!rule.omit_single_candidate} onCheckedChange={v => update({ omit_single_candidate: v })} />{t("geminiOmitCandidate")}</Label>
+                <Button type="button" size="sm" variant="ghost" onClick={() => setGenerationRules(generationRules.filter((_, i) => i !== index))}>{t("delete")}</Button>
+              </div>
+            );
+          })}
+          <Button type="button" size="sm" variant="outline" onClick={() => setGenerationRules([...generationRules, { model_pattern: "" }])}>
+            + {t("geminiAddRule")}
+          </Button>
         </AccordionContent>
       </AccordionItem>
 

@@ -34,3 +34,9 @@ func TestValidateToolCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateGeminiGenerationRules(t *testing.T) {
+	for _, rule := range []string{`{"model_pattern":"["}`, `{}`, `{"model_pattern":""}`, `{"model_pattern":"^m","omit_penalties":"yes"}`} {
+		require.ErrorContains(t, ValidateModelCompatibility(`{"model_gemini_generation":[`+rule+`]}`), "model_gemini_generation")
+	}
+}

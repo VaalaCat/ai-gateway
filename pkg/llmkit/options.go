@@ -31,7 +31,10 @@ func DefaultRequestFieldPermissions() RequestFieldPermissions {
 	return convert.DefaultRequestFieldPermissions()
 }
 
+type GeminiGenerationConfig = convert.GeminiGenerationConfig
+
 type ConversionOptions struct {
+	GeminiGeneration      *GeminiGenerationConfig
 	ToolSignatureFallback ToolSignatureFallback // 这一轮没有可用签名时补什么：none / gemini
 	BuiltinToolFallback   BuiltinToolFallbackPolicy
 	RequestFields         RequestFieldPermissions
