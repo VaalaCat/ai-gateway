@@ -203,17 +203,18 @@ it("shows only the base rule controls and keeps the gemini signature fallback af
 
 it("saves ordered Gemini generation rules alongside existing channel settings", async () => {
   const user = userEvent.setup();
-  const existing = { model_pattern: "^endpoint", omit_penalties: true };
+  const existing = { model_pattern: "^endpoint", mode: "budget" };
   render(<ToolCompatibilityForm initialSettings={JSON.stringify({ custom_setting: "keep", model_gemini_generation: [existing] })} />);
-  await user.click(screen.getByRole("button", { name: "geminiGeneration" }));
+  await user.click(screen.getByRole("button", { name: /sectionProtocolBehavior/ }));
   await user.click(screen.getByRole("button", { name: "+ geminiAddRule" }));
   await user.type(screen.getAllByRole("textbox", { name: "toolCompatibilityModelLabel" })[1], "(?i)^future");
-  await user.type(screen.getAllByRole("textbox", { name: "geminiXhighLevel" })[1], "HIGH");
-  await user.click(screen.getAllByRole("switch", { name: "geminiOmitCandidate" })[1]);
+  await user.click(screen.getAllByRole("button", {name:"+ addThinkingMapping"})[1]);
+  await user.type(screen.getByRole("textbox", { name: "effortInput" }), "xhigh");
+  await user.type(screen.getByRole("textbox", { name: "thinkingLevel" }), "HIGH");
   await user.click(screen.getAllByRole("button", { name: "geminiMoveUp" })[1]);
   await user.click(screen.getByRole("button", { name: "Save channel" }));
   expect(JSON.parse(screen.getByTestId("saved-settings").textContent!)).toEqual({
     custom_setting: "keep",
-    model_gemini_generation: [{ model_pattern: "(?i)^future", xhigh_level: "HIGH", omit_single_candidate: true }, existing],
+    model_gemini_generation: [{ model_pattern: "(?i)^future", mode: "level", mappings: [{from:"xhigh",to:"HIGH"}] }, existing],
   });
 });

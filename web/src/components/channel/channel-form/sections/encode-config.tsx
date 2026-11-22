@@ -111,6 +111,7 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
   const behaviorOnCount = [
     otherSettings.builtin_tool_fallback && otherSettings.builtin_tool_fallback !== "drop",
     form.system_prompt_in_input,
+    generationRules.length > 0,
   ].filter(Boolean).length;
   const behaviorSummary = t("encodeSummaryBehavior", { count: behaviorOnCount });
 
@@ -144,45 +145,7 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
         </AccordionContent>
       </AccordionItem>
 
-      <AccordionItem value="gemini-generation">
-        <AccordionTrigger className="px-3">{t("geminiGeneration")}</AccordionTrigger>
-        <AccordionContent className="space-y-3 px-3 pb-3">
-          <p className="text-xs text-muted-foreground">{t("geminiGenerationTip")}</p>
-          {generationRules.map((rule, index) => {
-            const update = (patch: Partial<typeof rule>) => setGenerationRules(
-              generationRules.map((current, i) => i === index ? { ...current, ...patch } : current)
-            );
-            const move = (to: number) => {
-              const next = [...generationRules];
-              [next[index], next[to]] = [next[to], next[index]];
-              setGenerationRules(next);
-            };
-            return (
-              <div key={index} className="space-y-3 rounded-md border p-3">
-                <Label>{t("toolCompatibilityModelLabel")}
-                  <Input value={rule.model_pattern} onChange={e => update({ model_pattern: e.target.value })} />
-                </Label>
-                <Label>{t("geminiMinimumLevel")}
-                  <Input placeholder="LOW" value={rule.minimum_thinking_level ?? ""} onChange={e => update({ minimum_thinking_level: e.target.value || undefined })} />
-                </Label>
-                <Label>{t("geminiXhighLevel")}
-                  <Input placeholder="HIGH" value={rule.xhigh_level ?? ""} onChange={e => update({ xhigh_level: e.target.value || undefined })} />
-                </Label>
-                <Label><Switch checked={!!rule.omit_penalties} onCheckedChange={v => update({ omit_penalties: v })} />{t("geminiOmitPenalties")}</Label>
-                <Label><Switch checked={!!rule.omit_single_candidate} onCheckedChange={v => update({ omit_single_candidate: v })} />{t("geminiOmitCandidate")}</Label>
-                <div className="flex gap-2">
-                  <Button type="button" size="sm" variant="outline" disabled={index === 0} onClick={() => move(index - 1)}>{t("geminiMoveUp")}</Button>
-                  <Button type="button" size="sm" variant="outline" disabled={index === generationRules.length - 1} onClick={() => move(index + 1)}>{t("geminiMoveDown")}</Button>
-                  <Button type="button" size="sm" variant="ghost" onClick={() => setGenerationRules(generationRules.filter((_, i) => i !== index))}>{t("delete")}</Button>
-                </div>
-              </div>
-            );
-          })}
-          <Button type="button" size="sm" variant="outline" onClick={() => setGenerationRules([...generationRules, { model_pattern: "" }])}>
-            + {t("geminiAddRule")}
-          </Button>
-        </AccordionContent>
-      </AccordionItem>
+
 
       {/* ── Group 2: Protocol Override ── */}
       <AccordionItem value="protocol-override">
@@ -295,6 +258,50 @@ export function EncodeConfigSection({ form, setForm }: EncodeConfigSectionProps)
               onCheckedChange={(v) => setForm({ ...form, system_prompt_in_input: v })}
             />
           </div>
+          <section className="space-y-3 border-t pt-3">
+            <h3 className="text-sm font-medium">{t("geminiGeneration")}</h3>
+            <p className="text-xs text-muted-foreground">{t("geminiGenerationTip")}</p>
+          {generationRules.map((rule, index) => {
+            const update = (patch: Partial<typeof rule>) => setGenerationRules(
+              generationRules.map((current, i) => i === index ? { ...current, ...patch } : current)
+            );
+            const move = (to: number) => {
+              const next = [...generationRules];
+              [next[index], next[to]] = [next[to], next[index]];
+              setGenerationRules(next);
+            };
+            return (
+              <div key={index} className="space-y-3 rounded-md border p-3">
+                <Label>{t("toolCompatibilityModelLabel")}
+                  <Input value={rule.model_pattern} onChange={e => update({ model_pattern: e.target.value })} />
+                </Label>
+                <Label>{t("thinkingMode")}
+                  <select className="rounded-md border bg-background px-2 py-1" value={rule.mode} onChange={e => update({ mode: e.target.value as typeof rule.mode })}>
+                    <option value="level">{t("thinkingLevel")}</option>
+                    <option value="budget">{t("thinkingBudget")}</option>
+                  </select>
+                </Label>
+                {(rule.mappings ?? []).map((pair, i, pairs) => {
+                  const edit = (patch: Partial<typeof pair>) => update({ mappings: pairs.map((p, j) => i === j ? { ...p, ...patch } : p) });
+                  return <div key={i} className="flex items-end gap-2">
+                    <Label className="flex-1 flex-col items-start">{t("effortInput")}<Input value={pair.from} onChange={e => edit({ from: e.target.value })} /></Label>
+                    <Label className="flex-1 flex-col items-start">{rule.mode === "budget" ? t("thinkingBudget") : t("thinkingLevel")}<Input value={pair.to} onChange={e => edit({ to: e.target.value })} /></Label>
+                    <Button type="button" size="sm" variant="ghost" aria-label={t("removeThinkingMapping")} onClick={() => update({ mappings: pairs.filter((_, j) => i !== j) })}>×</Button>
+                  </div>;
+                })}
+                <Button type="button" size="sm" variant="outline" onClick={() => update({ mappings: [...(rule.mappings ?? []), { from: "", to: "" }] })}>+ {t("addThinkingMapping")}</Button>
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" variant="outline" disabled={index === 0} onClick={() => move(index - 1)}>{t("geminiMoveUp")}</Button>
+                  <Button type="button" size="sm" variant="outline" disabled={index === generationRules.length - 1} onClick={() => move(index + 1)}>{t("geminiMoveDown")}</Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => setGenerationRules(generationRules.filter((_, i) => i !== index))}>{t("delete")}</Button>
+                </div>
+              </div>
+            );
+          })}
+          <Button type="button" size="sm" variant="outline" onClick={() => setGenerationRules([...generationRules, { model_pattern: "", mode: "level", mappings: [] }])}>
+            + {t("geminiAddRule")}
+          </Button>
+          </section>
         </AccordionContent>
       </AccordionItem>
     </Accordion>

@@ -225,10 +225,8 @@ export interface ChannelOtherSettings {
   }>;
   model_gemini_generation?: Array<{
     model_pattern: string;
-    minimum_thinking_level?: string;
-    xhigh_level?: string;
-    omit_penalties?: boolean;
-    omit_single_candidate?: boolean;
+    mode: "level" | "budget";
+    mappings?: Array<{ from: string; to: string }>;
   }>;
   model_tool_schema_compatibility?: Array<{
     model_pattern: string;

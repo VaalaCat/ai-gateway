@@ -66,10 +66,13 @@ type RequestFieldPermissions struct {
 
 // GeminiGenerationConfig describes how to translate generation fields for an outbound model.
 type GeminiGenerationConfig struct {
-	MinimumThinkingLevel string `json:"minimum_thinking_level,omitempty"`
-	XHighLevel           string `json:"xhigh_level,omitempty"`
-	OmitPenalties        bool   `json:"omit_penalties,omitempty"`
-	OmitSingleCandidate  bool   `json:"omit_single_candidate,omitempty"`
+	Mode     string                 `json:"mode,omitempty"`
+	Mappings []ThinkingLevelMapping `json:"mappings,omitempty"`
+}
+
+type ThinkingLevelMapping struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 type Options struct {

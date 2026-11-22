@@ -716,11 +716,11 @@ func TestGeminiChatGenerationExtensions(t *testing.T) {
 		wantError                       bool
 	}{
 		{"Neon disabled", "models/gemini-4-neon", `"reasoning_effort":"none"`, `{"thinkingConfig":{"thinkingBudget":0}}`, false},
-		{"new variant", "gemini-4-future-preview", `"reasoning_effort":"xhigh","n":1,"presence_penalty":0`, `{"thinkingConfig":{"thinkingLevel":"xhigh"},"candidateCount":1,"presencePenalty":0}`, false},
-		{"earlier model", "gemini-2.5-flash", `"reasoning_effort":"none","n":1`, `{"thinkingConfig":{"thinkingBudget":0},"candidateCount":1}`, false},
+		{"new variant", "gemini-4-future-preview", `"reasoning_effort":"xhigh","n":1,"presence_penalty":0`, `{"thinkingConfig":{"thinkingLevel":"xhigh"},"presencePenalty":0}`, false},
+		{"earlier model", "gemini-2.5-flash", `"reasoning_effort":"none","n":1`, `{"thinkingConfig":{"thinkingBudget":0}}`, false},
 		{"multiple native candidates", "gemini-2.5-flash", `"n":1,"generationConfig":{"candidateCount":2}`, "", true},
 		{"protobuf field names", "gemini-4-neon", `"generation_config":{"candidate_count":2}`, "", true},
-		{"effective single candidate", "gemini-2.5-flash", `"n":2,"generationConfig":{"candidateCount":1}`, `{"candidateCount":1}`, false},
+		{"effective single candidate", "gemini-2.5-flash", `"n":2,"generationConfig":{"candidateCount":1,"maxOutputTokens":128}`, `{"maxOutputTokens":128}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `{"messages":[{"role":"user","content":"hi"}],"modelArmorConfig":{"promptTemplateName":"templates/test"},"future_extension":{"value":17},` + tc.fields + `}`

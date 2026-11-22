@@ -121,7 +121,7 @@ func TestImageGenerationAndJSONSchema(t *testing.T) {
 
 func TestEncodeConfiguredGenerationSettings(t *testing.T) {
 	options := convert.Options{GeminiGeneration: convert.GeminiGenerationConfig{
-		MinimumThinkingLevel: "LOW", XHighLevel: "HIGH", OmitPenalties: true, OmitSingleCandidate: true,
+		Mode: "level", Mappings: []convert.ThinkingLevelMapping{{From: "none", To: "LOW"}, {From: "minimal", To: "LOW"}, {From: "xhigh", To: "HIGH"}},
 	}}
 	for _, tc := range []struct {
 		name, effort string
@@ -148,8 +148,8 @@ func TestEncodeConfiguredGenerationSettings(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(body, &payload))
 			require.NotContains(t, payload.GenerationConfig, "candidateCount")
-			require.NotContains(t, payload.GenerationConfig, "frequencyPenalty")
-			require.NotContains(t, payload.GenerationConfig, "presencePenalty")
+			require.Equal(t, float64(0), payload.GenerationConfig["frequencyPenalty"])
+			require.Equal(t, float64(0), payload.GenerationConfig["presencePenalty"])
 			thinking := payload.GenerationConfig["thinkingConfig"].(map[string]any)
 			require.NotContains(t, thinking, "thinkingBudget")
 			require.Equal(t, true, thinking["includeThoughts"])
@@ -175,7 +175,14 @@ func TestEncodeUnconfiguredModelGenerationConfig(t *testing.T) {
 				GenerationConfig json.RawMessage `json:"generationConfig"`
 			}
 			require.NoError(t, json.Unmarshal(raw, &body))
-			require.JSONEq(t, `{"candidateCount":1,"frequencyPenalty":0.5,"presencePenalty":0.25,"thinkingConfig":{"thinkingBudget":32}}`, string(body.GenerationConfig))
+			require.JSONEq(t, `{"frequencyPenalty":0.5,"presencePenalty":0.25,"thinkingConfig":{"thinkingBudget":32}}`, string(body.GenerationConfig))
 		})
 	}
+}
+
+func TestThinkingBudgetMapping(t *testing.T) {
+	cfg := generationCapabilities{Mode: "budget", Mappings: []convert.ThinkingLevelMapping{{From: "high", To: "2048"}}}
+	require.Equal(t, 2048, cfg.thinkingConfig(&ir.Request{ReasoningEffort: "HIGH"})["thinkingBudget"])
+	require.Equal(t, 64, cfg.thinkingConfig(&ir.Request{ReasoningEffort: "HIGH", ThinkingBudget: ptr(64)})["thinkingBudget"])
+	require.Empty(t, cfg.thinkingConfig(&ir.Request{}))
 }

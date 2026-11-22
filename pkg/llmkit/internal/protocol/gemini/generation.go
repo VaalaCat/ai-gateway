@@ -15,26 +15,43 @@ func (capabilities generationCapabilities) thinkingConfig(req *ir.Request) map[s
 	thinking := map[string]any{}
 	disabled := req.ThinkingEnabled != nil && !*req.ThinkingEnabled
 	effort := req.ReasoningEffort
-	if strings.EqualFold(effort, "XHIGH") && capabilities.XHighLevel != "" {
-		effort = capabilities.XHighLevel
+	if disabled {
+		effort = "none"
 	}
-	if capabilities.MinimumThinkingLevel != "" {
-		level := strings.ToUpper(effort)
-		switch {
-		case disabled, level == "NONE", level == "MINIMAL",
-			level == "" && req.ThinkingBudget != nil && *req.ThinkingBudget == 0:
-			level = capabilities.MinimumThinkingLevel
+	switch capabilities.Mode {
+	case "level":
+		if effort == "" && req.ThinkingBudget != nil && *req.ThinkingBudget == 0 {
+			effort = "none"
 		}
-		if level != "" {
+		if effort != "" {
+			level := strings.ToUpper(effort)
+			if mapped, ok := capabilities.lookup(effort); ok {
+				level = mapped
+			}
 			thinking["thinkingLevel"] = level
 		}
-	} else {
+	case "budget":
 		switch {
 		case req.ThinkingBudget != nil:
 			thinking["thinkingBudget"] = *req.ThinkingBudget
-		case disabled || req.ReasoningEffort == "none":
+		default:
+			if mapped, ok := capabilities.lookup(effort); ok {
+				if budget, err := strconv.Atoi(mapped); err == nil && budget >= -1 {
+					thinking["thinkingBudget"] = budget
+				}
+			} else if effort == "none" {
+				thinking["thinkingBudget"] = 0
+			} else if req.ThinkingEnabled != nil && *req.ThinkingEnabled {
+				thinking["thinkingBudget"] = -1
+			}
+		}
+	default:
+		switch {
+		case req.ThinkingBudget != nil:
+			thinking["thinkingBudget"] = *req.ThinkingBudget
+		case effort == "none":
 			thinking["thinkingBudget"] = 0
-		case req.ReasoningEffort != "":
+		case effort != "":
 			thinking["thinkingLevel"] = effort
 		case req.ThinkingEnabled != nil && *req.ThinkingEnabled:
 			thinking["thinkingBudget"] = -1
@@ -44,6 +61,15 @@ func (capabilities generationCapabilities) thinkingConfig(req *ir.Request) map[s
 		thinking["includeThoughts"] = *req.IncludeThoughts
 	}
 	return thinking
+}
+
+func (capabilities generationCapabilities) lookup(effort string) (string, bool) {
+	for _, mapping := range capabilities.Mappings {
+		if strings.EqualFold(mapping.From, effort) {
+			return mapping.To, true
+		}
+	}
+	return "", false
 }
 
 func (capabilities generationCapabilities) generationConfig(req *ir.Request) map[string]any {
@@ -69,10 +95,10 @@ func (capabilities generationCapabilities) generationConfig(req *ir.Request) map
 	if len(req.StopWords) > 0 {
 		generation["stopSequences"] = req.StopWords
 	}
-	if req.FrequencyPenalty != nil && !capabilities.OmitPenalties {
+	if req.FrequencyPenalty != nil {
 		generation["frequencyPenalty"] = *req.FrequencyPenalty
 	}
-	if req.PresencePenalty != nil && !capabilities.OmitPenalties {
+	if req.PresencePenalty != nil {
 		generation["presencePenalty"] = *req.PresencePenalty
 	}
 	if req.Logprobs != nil {
@@ -125,7 +151,7 @@ func (capabilities generationCapabilities) mergeNativeConfig(generation, extras 
 		if err == nil && n > 1 {
 			return fmt.Errorf("Gemini conversion supports one candidate per request")
 		}
-		if capabilities.OmitSingleCandidate && n == 1 {
+		if n == 1 {
 			delete(generation, "candidateCount")
 		}
 	}

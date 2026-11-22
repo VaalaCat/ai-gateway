@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
 )
@@ -31,6 +33,23 @@ func ParseGeminiGenerationRules(settings string) (GeminiGenerationRules, error) 
 	for i, rule := range rules {
 		if rule.ModelPattern == nil || rule.ModelPattern.String() == "" {
 			return nil, fmt.Errorf("model_gemini_generation rule %d: model_pattern is required", i+1)
+		}
+		if rule.Mode != "level" && rule.Mode != "budget" {
+			return nil, fmt.Errorf("model_gemini_generation rule %d: select level or budget mode", i+1)
+		}
+		seen := map[string]bool{}
+		for _, pair := range rule.Mappings {
+			key := strings.ToLower(strings.TrimSpace(pair.From))
+			if strings.TrimSpace(pair.From) != pair.From || strings.TrimSpace(pair.To) != pair.To || key == "" || strings.TrimSpace(pair.To) == "" || seen[key] {
+				return nil, fmt.Errorf("model_gemini_generation rule %d: enter a unique input effort and a target value", i+1)
+			}
+			seen[key] = true
+			if rule.Mode == "budget" {
+				n, err := strconv.Atoi(pair.To)
+				if err != nil || n < -1 {
+					return nil, fmt.Errorf("model_gemini_generation rule %d: budget must be an integer of -1 or greater", i+1)
+				}
+			}
 		}
 	}
 	return rules, nil

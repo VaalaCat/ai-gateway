@@ -108,18 +108,18 @@ func TestBuildCallOptionsMatchesBothModelNames(t *testing.T) {
 func TestGeminiGenerationRulesReachOutboundEncoding(t *testing.T) {
 	channel := makeNativeChannel("")
 	channel.OtherSettings = `{"model_gemini_generation":[
-  {"model_pattern":"^override$","xhigh_level":"CUSTOM"},
-  {"model_pattern":"^ep-","minimum_thinking_level":"LOW","omit_single_candidate":true},
-  {"model_pattern":"^gemini-4-argon$"}
+  {"model_pattern":"^override$","mode":"level","mappings":[{"from":"xhigh","to":"CUSTOM"}]},
+  {"model_pattern":"^ep-","mode":"level"},
+  {"model_pattern":"^budget$","mode":"budget","mappings":[{"from":"xhigh","to":"1024"}]}
  ]}`
 	for _, tc := range []struct {
 		original, mapped, level string
 		omitCount               bool
 	}{
-		{"override", "ep-1", "CUSTOM", false},
+		{"override", "ep-1", "CUSTOM", true},
 		{"alias", "ep-1", "XHIGH", true},
-		{"alias", "gemini-4-argon", "xhigh", false},
-		{"alias", "gemini-4-carbon", "xhigh", false},
+		{"alias", "gemini-4-argon", "xhigh", true},
+		{"alias", "gemini-4-carbon", "xhigh", true},
 	} {
 		t.Run(tc.original+"/"+tc.mapped, func(t *testing.T) {
 			relay, _ := newNativeTestCtx(t, nil, llmkit.ProtocolOpenAIChat, false)
