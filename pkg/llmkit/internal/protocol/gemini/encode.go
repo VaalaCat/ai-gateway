@@ -26,7 +26,7 @@ type orderedResponse struct {
 }
 
 // encodeRequest 把消息、工具与生成设置转换为 Gemini 主体。
-func encodeRequest(req *ir.Request, model string, policy convert.BuiltinToolFallbackPolicy) ([]byte, error) {
+func encodeRequest(req *ir.Request, model string, options convert.Options) ([]byte, error) {
 	var contents []content
 	var system []part
 	calls := map[string]replayCall{}
@@ -112,9 +112,9 @@ func encodeRequest(req *ir.Request, model string, policy convert.BuiltinToolFall
 		body["systemInstruction"] = content{Parts: system}
 	}
 	// 2. 映射通用生成参数、思考和工具。
-	capabilities := generationCapabilitiesFor(model)
+	capabilities := generationCapabilities(options.GeminiGeneration)
 	generation := capabilities.generationConfig(req)
-	if err := encodeTools(req, policy, body, generation); err != nil {
+	if err := encodeTools(req, options.BuiltinToolFallback, body, generation); err != nil {
 		return nil, err
 	}
 	// Forward extension fields after translating the source protocol controls.

@@ -243,7 +243,7 @@ func validateFinalChannel(channel *models.Channel) error {
 	if err := models.ValidateChannelAuth(channel.Auth.Data()); err != nil {
 		return err
 	}
-	return models.ValidateToolCompatibility(channel.OtherSettings)
+	return models.ValidateModelCompatibility(channel.OtherSettings)
 }
 
 // behavior change: mutable patch values are copied at every ownership boundary.
