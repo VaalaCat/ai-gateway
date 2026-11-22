@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
+	"github.com/VaalaCat/llmkit"
+	"github.com/VaalaCat/llmkit/endpoint"
 )
 
 var legacyEndpointAliases = map[string]string{

@@ -3,7 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
+	"github.com/VaalaCat/llmkit/endpoint"
 	"net/http"
 	"strings"
 	"time"

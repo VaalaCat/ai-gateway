@@ -34,7 +34,7 @@ func TestUsageDurationHistogram_MigrateAndUniqueDim(t *testing.T) {
 func TestUsageDurationHistogram_DistinctDimsCoexist(t *testing.T) {
 	db := newMigratedDB(t)
 	a := UsageDurationHistogram{Date: "2026-07-08", Hour: 8, ChannelID: 5, ModelName: "gpt-4o", AgentID: "a1"}
-	b := UsageDurationHistogram{Date: "2026-07-08", Hour: 9, ChannelID: 5, ModelName: "gpt-4o", AgentID: "a1"} // 只差 hour
+	b := UsageDurationHistogram{Date: "2026-07-08", Hour: 9, ChannelID: 5, ModelName: "gpt-4o", AgentID: "a1"}                      // 只差 hour
 	c := UsageDurationHistogram{Date: "2026-07-08", Hour: 8, ChannelID: 0, PrivateChannelID: 7, ModelName: "gpt-4o", AgentID: "a1"} // BYOK 行
 	for _, r := range []*UsageDurationHistogram{&a, &b, &c} {
 		if err := db.Create(r).Error; err != nil {

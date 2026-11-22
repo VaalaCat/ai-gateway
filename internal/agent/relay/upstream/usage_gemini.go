@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 // GeminiUsageObserver 从原生 JSON、JSON 数组和 SSE 中提取用量，不保存图片内容。

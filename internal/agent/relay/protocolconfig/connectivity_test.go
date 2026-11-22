@@ -3,7 +3,7 @@ package protocolconfig
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 func TestNormalizeEndpointType(t *testing.T) {

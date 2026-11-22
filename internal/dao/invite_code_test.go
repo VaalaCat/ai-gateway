@@ -27,7 +27,7 @@ func TestInviteCode_CountActiveExcludesUsedUpAndExpired(t *testing.T) {
 	ctx, db := setupAdminContext(t)
 	q := NewAdminQuery(ctx).InviteCode()
 	now := int64(1000)
-	db.Create(&models.InviteCode{Code: "A", CreatorID: 1, MaxUses: 2, UsedCount: 1, ExpiresAt: 0})  // active
+	db.Create(&models.InviteCode{Code: "A", CreatorID: 1, MaxUses: 2, UsedCount: 1, ExpiresAt: 0})   // active
 	db.Create(&models.InviteCode{Code: "B", CreatorID: 1, MaxUses: 1, UsedCount: 1})                 // used up
 	db.Create(&models.InviteCode{Code: "C", CreatorID: 1, MaxUses: 5, UsedCount: 0, ExpiresAt: 500}) // expired
 	db.Create(&models.InviteCode{Code: "D", CreatorID: 2, MaxUses: 1, UsedCount: 0})                 // other creator

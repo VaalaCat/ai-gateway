@@ -9,12 +9,12 @@ import (
 
 func TestResolveRequestOrigin(t *testing.T) {
 	cases := []struct {
-		name      string
-		host      string
-		tlsOn     bool
-		xfHost    string
-		xfProto   string
-		want      string
+		name    string
+		host    string
+		tlsOn   bool
+		xfHost  string
+		xfProto string
+		want    string
 	}{
 		{"plain http", "foo:8140", false, "", "", "http://foo:8140"},
 		{"plain https via TLS", "foo:8443", true, "", "", "https://foo:8443"},

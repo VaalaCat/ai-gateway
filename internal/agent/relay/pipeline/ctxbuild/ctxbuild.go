@@ -27,8 +27,8 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/agentproxy"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
+	"github.com/VaalaCat/llmkit"
+	"github.com/VaalaCat/llmkit/endpoint"
 )
 
 // computeRequestID 取请求 ID：优先用 X-Request-Id 头，缺省回退到时间戳。

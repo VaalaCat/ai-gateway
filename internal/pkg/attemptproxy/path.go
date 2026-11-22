@@ -1,7 +1,7 @@
 package attemptproxy
 
 import (
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
+	"github.com/VaalaCat/llmkit/endpoint"
 	"net/http"
 	"net/url"
 	"strings"

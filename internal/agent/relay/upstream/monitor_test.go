@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 func TestMonitorEvents_FinalSnapshotAfterNaturalDrain(t *testing.T) {

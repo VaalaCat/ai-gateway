@@ -3,7 +3,7 @@ package transform
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 func TestParseRoleMapping(t *testing.T) {

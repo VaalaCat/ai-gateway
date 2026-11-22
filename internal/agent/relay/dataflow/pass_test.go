@@ -3,7 +3,7 @@ package dataflow
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 func TestCloneRequest_Independent(t *testing.T) {

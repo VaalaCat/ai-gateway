@@ -1,6 +1,6 @@
 package transform
 
-import "github.com/VaalaCat/ai-gateway/pkg/llmkit"
+import "github.com/VaalaCat/llmkit"
 
 // ApplyThinkingPassthrough 给带工具调用但无 thinking 的 assistant 消息补空 thinking。
 func ApplyThinkingPassthrough(messages []llmkit.Message) {

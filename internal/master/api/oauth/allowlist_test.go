@@ -24,9 +24,9 @@ func TestNewAllowlist_Valid(t *testing.T) {
 
 func TestNewAllowlist_RejectsInvalid(t *testing.T) {
 	cases := [][]string{
-		{"foo.example.com"},                                   // 缺 scheme
-		{"ftp://foo.example.com"},                             // 非 http/https
-		{"http://"},                                           // 缺 host
+		{"foo.example.com"},       // 缺 scheme
+		{"ftp://foo.example.com"}, // 非 http/https
+		{"http://"},               // 缺 host
 		{"https://foo.example.com", "https://FOO.example.com"}, // 规范化后撞车
 	}
 	for _, in := range cases {

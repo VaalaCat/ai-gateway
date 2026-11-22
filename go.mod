@@ -35,6 +35,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/DmitriyVTitov/size v1.5.0 // indirect
+	github.com/VaalaCat/llmkit v0.0.1
 	github.com/abema/go-mp4 v1.4.1 // indirect
 	github.com/anknown/ahocorasick v0.0.0-20190904063843-d75dbd5169c0 // indirect
 	github.com/anknown/darts v0.0.0-20151216065714-83ff685239e6 // indirect

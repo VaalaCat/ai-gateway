@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 // runClaudeToOpenAIChat decodes a Claude inbound request, applies IR transformers,

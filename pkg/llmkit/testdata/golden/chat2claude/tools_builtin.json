@@ -1,3 +1,0 @@
-[
-  {"name":"get_weather","description":"get weather","input_schema":{"type":"object","properties":{"location":{"type":"string"}}}}
-]

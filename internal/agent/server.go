@@ -53,7 +53,7 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/pkg/protocol"
 	pkgtunnel "github.com/VaalaCat/ai-gateway/internal/pkg/tunnel"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/ws"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
+	"github.com/VaalaCat/llmkit/endpoint"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sourcegraph/conc"

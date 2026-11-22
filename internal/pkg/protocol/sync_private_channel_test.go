@@ -19,9 +19,13 @@ func TestSyncedPrivateChannel_RoundTripJSON(t *testing.T) {
 		ModelMapping: map[string]string{"front": "back"},
 	}
 	b, err := json.Marshal(pc)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got SyncedPrivateChannel
-	if err := json.Unmarshal(b, &got); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
 	if got.KeyPlaintext != "sk-test" || got.Models[0] != "gpt-4o" {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
@@ -43,7 +47,9 @@ func TestVisiblePrivateChannelSet_EmptyChannels(t *testing.T) {
 	set := VisiblePrivateChannelSet{UserID: 7, Channels: nil}
 	b, _ := json.Marshal(set)
 	var got VisiblePrivateChannelSet
-	if err := json.Unmarshal(b, &got); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
 	if got.UserID != 7 {
 		t.Fatalf("user_id roundtrip failed: %+v", got)
 	}

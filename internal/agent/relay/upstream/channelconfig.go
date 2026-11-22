@@ -5,7 +5,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/models"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 // ChannelConfig 是 ai-gateway 的产品级 channel 设置，不属于公共 llmkit 协议层。

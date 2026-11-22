@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 func TestStepModelMapping_Hit(t *testing.T) {

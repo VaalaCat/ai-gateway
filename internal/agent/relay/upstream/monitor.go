@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 type EventSnapshot struct {

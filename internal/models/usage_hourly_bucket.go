@@ -13,12 +13,12 @@ package models
 type UsageHourlyBucket struct {
 	ID uint `gorm:"primaryKey" json:"id"`
 
-	Date             string `gorm:"size:10;uniqueIndex:idx_uhb_bucket" json:"date"`              // YYYY-MM-DD UTC
-	Hour             int    `gorm:"uniqueIndex:idx_uhb_bucket" json:"hour"`                      // 0..23 UTC
-	ChannelID        uint   `gorm:"uniqueIndex:idx_uhb_bucket;index" json:"channel_id"`          // 0 = BYOK
+	Date             string `gorm:"size:10;uniqueIndex:idx_uhb_bucket" json:"date"`                       // YYYY-MM-DD UTC
+	Hour             int    `gorm:"uniqueIndex:idx_uhb_bucket" json:"hour"`                               // 0..23 UTC
+	ChannelID        uint   `gorm:"uniqueIndex:idx_uhb_bucket;index" json:"channel_id"`                   // 0 = BYOK
 	PrivateChannelID uint   `gorm:"uniqueIndex:idx_uhb_bucket;index;default:0" json:"private_channel_id"` // 0 = admin
-	ModelName        string `gorm:"size:128;uniqueIndex:idx_uhb_bucket;index" json:"model_name"` // e.g. "gpt-4o"
-	AgentID          string `gorm:"size:64;uniqueIndex:idx_uhb_bucket;index" json:"agent_id"`    // e.g. "cn-1"
+	ModelName        string `gorm:"size:128;uniqueIndex:idx_uhb_bucket;index" json:"model_name"`          // e.g. "gpt-4o"
+	AgentID          string `gorm:"size:64;uniqueIndex:idx_uhb_bucket;index" json:"agent_id"`             // e.g. "cn-1"
 
 	OwnerType   string `gorm:"size:8;default:'admin'" json:"owner_type"`
 	ChannelName string `gorm:"size:64" json:"channel_name"`
@@ -39,7 +39,7 @@ type UsageHourlyBucket struct {
 	// 速度累计 (仅 stream + success + completion_tokens > 0 才入)
 	StreamRequestCount        int64 `json:"stream_request_count"`
 	SumFirstResponseMs        int64 `json:"sum_first_response_ms"`
-	SumGenerationMs           int64 `json:"sum_generation_ms"`          // = Duration − FirstResponseMs
+	SumGenerationMs           int64 `json:"sum_generation_ms"` // = Duration − FirstResponseMs
 	SumStreamCompletionTokens int64 `json:"sum_stream_completion_tokens"`
 
 	// 五段延迟累计 (仅成功)

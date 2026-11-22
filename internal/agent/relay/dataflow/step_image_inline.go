@@ -9,7 +9,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/settings"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 // imageFetchFn = upstream.FetchInlineImage 的签名(测试可注入 fake)。

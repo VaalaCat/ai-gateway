@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 	"go.uber.org/zap"
 )
 

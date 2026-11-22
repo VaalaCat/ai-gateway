@@ -34,8 +34,9 @@ type TrendBlock struct {
 
 // EntityMeta 是 entity 自身的描述信息。
 // 字段语义按 type 不同:
-//   agent:   ID=agent_id, Name=agent.Name, Online/LastSeen 由 agents 表填
-//   其它:   暂未实现 (stub)
+//
+//	agent:   ID=agent_id, Name=agent.Name, Online/LastSeen 由 agents 表填
+//	其它:   暂未实现 (stub)
 type EntityMeta struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -58,8 +59,10 @@ type SummaryKpis struct {
 }
 
 // Breakdown 是 entity 的下钻维度。不同 provider 填不同子集:
-//   agent provider → ByModel + ByChannel (一个 agent 内 model 用量、channel 用量)
-//   其它 provider → 自行选择
+//
+//	agent provider → ByModel + ByChannel (一个 agent 内 model 用量、channel 用量)
+//	其它 provider → 自行选择
+//
 // 空 slice 用 omitempty 隐藏。
 type Breakdown struct {
 	ByModel   []dao.LeaderRow `json:"by_model,omitempty"`

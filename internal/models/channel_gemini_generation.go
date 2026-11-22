@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 type GeminiGenerationRule struct {

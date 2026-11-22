@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/transform"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 func TestStepRoleMapping_KeysOnOriginalModel(t *testing.T) {

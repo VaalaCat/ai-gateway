@@ -6,7 +6,7 @@ import (
 
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/upstream"
 	"github.com/VaalaCat/ai-gateway/internal/models"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 )
 
 func mkThinkingRules(t *testing.T, pattern string, sendBack bool) upstream.ThinkingRules {

@@ -171,7 +171,7 @@ func TestOAuthProviderAdmin_Protocol_Invalid(t *testing.T) {
 	w := doJSON(t, srv, jwt, "POST", "/api/admin/oauth-providers", map[string]any{
 		"name": "bad", "display_name": "Bad", "protocol": "dingding",
 		"authorization_endpoint": "https://x/a", "token_endpoint": "https://x/t",
-		"userinfo_endpoint":      "https://x/u", "client_id": "c", "client_secret": "s",
+		"userinfo_endpoint": "https://x/u", "client_id": "c", "client_secret": "s",
 	})
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid protocol: want 400, got %d %s", w.Code, w.Body.String())

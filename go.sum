@@ -6,6 +6,8 @@ github.com/Masterminds/semver/v3 v3.2.1 h1:RN9w6+7QoMeJVGyfmbcgs28Br8cvmnucEXnY0
 github.com/Masterminds/semver/v3 v3.2.1/go.mod h1:qvl/7zhW3nngYb5+80sSMF+FG2BjYrf8m9wsX0PNOMQ=
 github.com/QuantumNous/new-api v0.13.2 h1:ueyjrvvhKly0SNXdb5F1227eiOGe9oIs1LcFokY+idY=
 github.com/QuantumNous/new-api v0.13.2/go.mod h1:BMLF2ud38X+5rZKSdrZbXjGrAqB+MKGEXMQZ++FClhA=
+github.com/VaalaCat/llmkit v0.0.1 h1:A7Bc3q39wI7fdADSd5RGaDWnKdGlmtBfNybKJMbQ5sI=
+github.com/VaalaCat/llmkit v0.0.1/go.mod h1:ywJEu2NzmgisxlrKWP+13MJDL6YMKkrFI8OukuMdkII=
 github.com/abema/go-mp4 v1.4.1 h1:YoS4VRqd+pAmddRPLFf8vMk74kuGl6ULSjzhsIqwr6M=
 github.com/abema/go-mp4 v1.4.1/go.mod h1:vPl9t5ZK7K0x68jh12/+ECWBCXoWuIDtNgPtU2f04ws=
 github.com/anknown/ahocorasick v0.0.0-20190904063843-d75dbd5169c0 h1:onfun1RA+KcxaMk1lfrRnwCd1UUuOjJM/lri5eM1qMs=

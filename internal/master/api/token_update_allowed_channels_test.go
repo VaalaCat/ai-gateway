@@ -160,4 +160,3 @@ func TestTokenUpdate_Admin_WritesAllowedChannelIDs(t *testing.T) {
 		t.Fatalf("admin update did not persist whitelist; resp=%s", wU2.Body.String())
 	}
 }
-

@@ -3,7 +3,7 @@ package upstream
 import (
 	"testing"
 
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )

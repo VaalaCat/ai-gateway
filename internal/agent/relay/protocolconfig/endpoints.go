@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/consts"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit/endpoint"
+	"github.com/VaalaCat/llmkit"
+	"github.com/VaalaCat/llmkit/endpoint"
 	"go.uber.org/zap"
 )
 

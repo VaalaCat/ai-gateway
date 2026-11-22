@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/VaalaCat/ai-gateway/internal/models"
-	"github.com/VaalaCat/ai-gateway/pkg/llmkit"
+	"github.com/VaalaCat/llmkit"
 	"golang.org/x/net/http/httpguts"
 )
 
