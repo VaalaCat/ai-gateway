@@ -30,6 +30,7 @@ type OverviewRequest struct {
 	StartDate string `form:"start_date"`
 	EndDate   string `form:"end_date"`
 	UserID    string `form:"user_id"`
+	TokenID   string `form:"token_id"`
 }
 
 type TokenDailyResponse struct {

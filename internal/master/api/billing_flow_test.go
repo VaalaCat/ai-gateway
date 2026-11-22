@@ -92,6 +92,10 @@ func TestBillingTokenScope(t *testing.T) {
 	if int(adminData[0].(map[string]any)["user_id"].(float64)) != bobUserID {
 		t.Fatalf("admin row user_id = %v, want %d", adminData[0].(map[string]any)["user_id"], bobUserID)
 	}
+
+	w = doAlice("GET", "/api/billing/overview?token_id=4&user_id="+itoa(bobUserID), nil)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.Zero(t, jsonBody(t, w)["request_count"])
 }
 
 func TestBillingOverview(t *testing.T) {
@@ -140,6 +144,13 @@ func TestBillingOverview(t *testing.T) {
 	if _, ok := overview["success_rate"]; !ok {
 		t.Fatalf("overview missing success_rate: %#v", overview)
 	}
+
+	w = doUser("GET", "/api/billing/overview?token_id=2", nil)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.EqualValues(t, 300, jsonBody(t, w)["total_cost"])
+
+	w = doUser("GET", "/api/billing/overview?token_id=invalid", nil)
+	require.Equal(t, 400, w.Code, w.Body.String())
 }
 
 func TestBillingTokenDailyOwnership(t *testing.T) {

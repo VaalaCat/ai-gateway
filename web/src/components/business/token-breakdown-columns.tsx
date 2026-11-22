@@ -4,7 +4,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { useTranslations } from "next-intl";
 import { DataTableColumnHeader } from "@/components/data-table/column-header";
 import { TokensCell } from "@/components/business/tokens-cell";
-import { totalTokens } from "@/lib/utils/format";
+import { formatPercent, totalTokens } from "@/lib/utils/format";
 
 /**
  * 任何含 {prompt,completion,cache_read,cache_write}_tokens 的 row 类型都可用。
@@ -15,6 +15,23 @@ export interface TokenBreakdownRow {
   completion_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+export function buildCacheHitRateColumn<R extends Pick<TokenBreakdownRow, "prompt_tokens" | "cache_read_tokens">>(
+  title: string,
+): ColumnDef<R> {
+  return {
+    id: "cache_hit_rate",
+    accessorFn: ({ prompt_tokens, cache_read_tokens }) => {
+      const input = prompt_tokens + cache_read_tokens;
+      return input > 0 ? cache_read_tokens / input : undefined;
+    },
+    header: ({ column }) => <DataTableColumnHeader column={column} title={title} />,
+    cell: ({ getValue }) => {
+      const rate = getValue<number | undefined>();
+      return <span className="tabular-nums">{rate === undefined ? "—" : formatPercent(rate)}</span>;
+    },
+  };
 }
 
 /**

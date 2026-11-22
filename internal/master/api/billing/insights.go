@@ -66,8 +66,7 @@ func (h *Handler) Insights(c *app.Context, req InsightsRequest) (InsightsRespons
 	if err := validateInsightsToken(c, s, req.TokenID); err != nil {
 		return InsightsResponse{}, err
 	}
-	// 缓存命中卡不跟模型(spec §4):只吃 user。
-	cacheFilter := dao.ObsFilter{UserID: filter.UserID}
+	cacheFilter := dao.ObsFilter{UserID: filter.UserID, TokenID: filter.TokenID}
 	load := func(ctx context.Context) (any, error) {
 		return h.loadInsights(ctx, c, r, s, topN, filter, cacheFilter)
 	}
