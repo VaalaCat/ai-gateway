@@ -7,15 +7,44 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 )
 
+// omittedCallID marks a client-facing ID generated for an ID-less Gemini call.
+const omittedCallID = "omitted_call_id"
+
+type replayCall struct {
+	wireID string
+	name   string
+	order  int
+}
+
+type orderedResponse struct {
+	part  part
+	order int
+}
+
 // encodeRequest 把消息、工具与生成设置转换为 Gemini 主体。
-func encodeRequest(req *ir.Request, model string) ([]byte, error) {
-	// 1. 转换消息并通过调用 ID 关联函数结果。
+func encodeRequest(req *ir.Request, model string, options convert.Options) ([]byte, error) {
 	var contents []content
 	var system []part
-	calls := map[string]ir.ToolCall{}
+	calls := map[string]replayCall{}
+	callOrder := 0
+	var pending []orderedResponse
+	flushResponses := func() {
+		if len(pending) == 0 {
+			return
+		}
+		sort.SliceStable(pending, func(i, j int) bool { return pending[i].order < pending[j].order })
+		parts := make([]part, len(pending))
+		for i, response := range pending {
+			parts[i] = response.part
+		}
+		contents = append(contents, content{Role: "user", Parts: parts})
+		pending = pending[:0]
+	}
+
 	var previousRole ir.Role
 	for _, message := range req.Messages {
 		previous := previousRole
@@ -25,38 +54,40 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 			if !ok {
 				return nil, fmt.Errorf("Gemini function response has no matching call: %s", message.ToolCallID)
 			}
-			var texts []string
-			var images []part
-			for _, block := range message.Content {
-				if block.Type == ir.ContentTypeText {
-					texts = append(texts, block.Text)
-				} else {
-					p, err := encodeBlock(block, model)
-					if err != nil {
-						return nil, err
-					}
-					images = append(images, p...)
-				}
+			response, err := encodeFunctionResponse(message, call, model)
+			if err != nil {
+				return nil, err
 			}
-			text := strings.Join(texts, "\n")
-			var result map[string]any
-			if json.Unmarshal([]byte(text), &result) != nil || result == nil {
-				result = map[string]any{"result": text}
-			}
-			p := part{FunctionResponse: &functionResponse{ID: call.ID, Name: call.Name, Response: result, Parts: images}}
-			if previous == ir.RoleTool {
-				contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, p)
-			} else {
-				contents = append(contents, content{Role: "user", Parts: []part{p}})
-			}
+			pending = append(pending, orderedResponse{part: response, order: call.order})
 			continue
 		}
+		flushResponses()
+
 		parts, err := encodeMessage(message, model)
 		if err != nil {
 			return nil, err
 		}
 		for _, call := range message.ToolCalls {
-			calls[call.ID] = call
+			wireID := call.ID
+			if call.ProviderData != nil && call.ProviderData.Protocol == ir.ProtocolGemini &&
+				string(call.ProviderData.Fields[omittedCallID]) == "true" {
+				wireID = ""
+			}
+			calls[call.ID] = replayCall{wireID: wireID, name: call.Name}
+		}
+		// Parts may have been reordered to match the original Gemini response.
+		for _, p := range parts {
+			if p.FunctionCall != nil {
+				id := p.FunctionCall.ID
+				call, ok := calls[id]
+				if !ok {
+					continue
+				}
+				call.order = callOrder
+				callOrder++
+				calls[id] = call
+				p.FunctionCall.ID = call.wireID
+			}
 		}
 		if message.Role == ir.RoleSystem || message.Role == ir.RoleDeveloper {
 			system = append(system, parts...)
@@ -75,142 +106,22 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 			contents = append(contents, content{Role: role, Parts: parts})
 		}
 	}
+	flushResponses()
 	body := map[string]any{"contents": contents}
 	if len(system) > 0 {
 		body["systemInstruction"] = content{Parts: system}
 	}
 	// 2. 映射通用生成参数、思考和工具。
-	generation := map[string]any{}
-	if req.MaxTokens != 0 {
-		generation["maxOutputTokens"] = req.MaxTokens
+	capabilities := generationCapabilities(options.GeminiGeneration)
+	generation := capabilities.generationConfig(req)
+	if err := encodeTools(req, options.BuiltinToolFallback, body, generation); err != nil {
+		return nil, err
 	}
-	if req.Temperature != nil {
-		generation["temperature"] = *req.Temperature
-	}
-	if req.TopP != nil {
-		generation["topP"] = *req.TopP
-	}
-	if req.TopK != nil {
-		generation["topK"] = *req.TopK
-	}
-	if req.Seed != nil {
-		generation["seed"] = *req.Seed
-	}
-	if req.N != 0 {
-		generation["candidateCount"] = req.N
-	}
-	if len(req.StopWords) > 0 {
-		generation["stopSequences"] = req.StopWords
-	}
-	if req.FrequencyPenalty != nil {
-		generation["frequencyPenalty"] = *req.FrequencyPenalty
-	}
-	if req.PresencePenalty != nil {
-		generation["presencePenalty"] = *req.PresencePenalty
-	}
-	if req.Logprobs != nil {
-		generation["responseLogprobs"] = *req.Logprobs
-	}
-	if req.TopLogprobs != nil {
-		generation["logprobs"] = *req.TopLogprobs
-	}
-	thinking := map[string]any{}
-	switch {
-	case req.ThinkingBudget != nil:
-		thinking["thinkingBudget"] = *req.ThinkingBudget
-	case req.ThinkingEnabled != nil && !*req.ThinkingEnabled || req.ReasoningEffort == "none":
-		thinking["thinkingBudget"] = 0
-	case req.ReasoningEffort != "":
-		thinking["thinkingLevel"] = req.ReasoningEffort
-	case req.ThinkingEnabled != nil && *req.ThinkingEnabled:
-		thinking["thinkingBudget"] = -1
-	}
-	if req.IncludeThoughts != nil {
-		thinking["includeThoughts"] = *req.IncludeThoughts
-	}
-	if len(thinking) > 0 {
-		generation["thinkingConfig"] = thinking
-	}
-	format := object(req.ResponseFormat)
-	if len(format) == 0 {
-		format = object(object(req.Extras["text"])["format"])
-	}
-	if format["type"] == "json_object" {
-		generation["responseMimeType"] = "application/json"
-	}
-	if format["type"] == "json_schema" {
-		generation["responseMimeType"] = "application/json"
-		schema := object(format["json_schema"])
-		if schema["schema"] != nil {
-			generation["responseJsonSchema"] = schema["schema"]
-		} else if format["schema"] != nil {
-			generation["responseJsonSchema"] = format["schema"]
-		}
-	}
-	var declarations []any
-	var tools []any
-	for _, tool := range req.Tools {
-		switch tool.Type {
-		case "", "function":
-			declaration := map[string]any{"name": tool.Name, "description": tool.Description}
-			if tool.InputSchema != nil {
-				declaration["parametersJsonSchema"] = tool.InputSchema
-			}
-			declarations = append(declarations, declaration)
-		case "image_generation":
-			generation["responseModalities"] = []string{"TEXT", "IMAGE"}
-			raw := object(tool.RawConfig)
-			imageConfig := map[string]any{}
-			if ratio, ok := raw["aspect_ratio"]; ok {
-				imageConfig["aspectRatio"] = ratio
-			}
-			if size, ok := raw["image_size"]; ok {
-				imageConfig["imageSize"] = size
-			}
-			if config, ok := raw["imageConfig"]; ok {
-				for key, value := range object(config) {
-					imageConfig[key] = value
-				}
-			}
-			if len(imageConfig) > 0 {
-				generation["imageConfig"] = imageConfig
-			}
-		case "web_search", "web_search_preview":
-			tools = append(tools, map[string]any{"googleSearch": map[string]any{}})
-		default:
-			if tool.RawConfig != nil {
-				tools = append(tools, tool.RawConfig)
-			}
-		}
-	}
-	if len(declarations) > 0 {
-		tools = append(tools, map[string]any{"functionDeclarations": declarations})
-	}
-	if len(tools) > 0 {
-		body["tools"] = tools
-	}
-	if req.ToolChoice != nil {
-		mode := "AUTO"
-		config := map[string]any{}
-		switch req.ToolChoice.Type {
-		case "none":
-			mode = "NONE"
-		case "required":
-			mode = "ANY"
-		case "function":
-			mode = "ANY"
-			config["allowedFunctionNames"] = []string{req.ToolChoice.Name}
-		}
-		config["mode"] = mode
-		body["toolConfig"] = map[string]any{"functionCallingConfig": config}
-	}
-	// 3. 保留目标原生扩展，明确 generationConfig 逐字段覆盖映射值。
+	// Forward extension fields after translating the source protocol controls.
 	for key, value := range req.Extras {
 		switch key {
-		case "generationConfig":
-			for k, v := range object(value) {
-				generation[k] = v
-			}
+		case "generationConfig", "generation_config":
+			// Native generation settings take precedence after translation.
 		case "modalities":
 			data, _ := json.Marshal(value)
 			var modalities []string
@@ -218,19 +129,52 @@ func encodeRequest(req *ir.Request, model string) ([]byte, error) {
 				for i := range modalities {
 					modalities[i] = strings.ToUpper(modalities[i])
 				}
-				if _, explicit := object(req.Extras["generationConfig"])["responseModalities"]; !explicit {
-					generation["responseModalities"] = modalities
-				}
+				generation["responseModalities"] = modalities
 			}
-		case "model", "messages", "input", "stream", "max_tokens", "max_completion_tokens", "reasoning", "reasoning_effort", "response_format", "text", "stream_options", "metadata", "store", "include", "prompt_cache_key", "reasoning_summary", "tool_choice", "parallel_tool_calls":
+		case "model", "messages", "input", "stream", "max_tokens", "max_completion_tokens",
+			"reasoning", "reasoning_effort", "response_format", "text", "stream_options",
+			"metadata", "store", "include", "prompt_cache_key", "reasoning_summary",
+			"tool_choice", "parallel_tool_calls", "client_metadata", "previous_response_id", "truncation":
+			// Source protocol controls have no native generateContent field.
 		default:
 			body[key] = value
 		}
+	}
+	if err := capabilities.mergeNativeConfig(generation, req.Extras); err != nil {
+		return nil, err
 	}
 	if len(generation) > 0 {
 		body["generationConfig"] = generation
 	}
 	return json.Marshal(body)
+}
+
+func encodeFunctionResponse(message ir.Message, call replayCall, model string) (part, error) {
+	var texts []string
+	var media []part
+	for _, block := range message.Content {
+		if block.Type == ir.ContentTypeText {
+			texts = append(texts, block.Text)
+			continue
+		}
+		parts, err := encodeBlock(block, model)
+		if err != nil {
+			return part{}, err
+		}
+		media = append(media, parts...)
+	}
+	text := strings.Join(texts, "\n")
+	response := any(map[string]any{"result": text})
+	if raw := json.RawMessage(strings.TrimSpace(text)); json.Valid(raw) {
+		if raw[0] == '{' {
+			response = raw
+		} else {
+			response = map[string]json.RawMessage{"result": raw}
+		}
+	}
+	return part{FunctionResponse: &functionResponse{
+		ID: call.wireID, Name: call.name, Response: response, Parts: media,
+	}}, nil
 }
 
 // encodeMessage 转换内容和调用，并按可用的位置提示还原混合顺序。
@@ -263,12 +207,12 @@ func encodeMessage(message ir.Message, model string) ([]part, error) {
 		}
 	}
 	for _, call := range message.ToolCalls {
-		args := json.RawMessage(call.Arguments)
-		if len(args) == 0 {
+		args := json.RawMessage(strings.TrimSpace(call.Arguments))
+		if len(args) == 0 || string(args) == "null" {
 			args = json.RawMessage(`{}`)
 		}
-		if !json.Valid(args) {
-			return nil, fmt.Errorf("invalid Gemini function arguments for %s", call.Name)
+		if args[0] != '{' || !json.Valid(args) {
+			return nil, fmt.Errorf("Gemini function %s requires JSON object arguments", call.Name)
 		}
 		p := part{FunctionCall: &functionCall{ID: call.ID, Name: call.Name, Args: args}, ThoughtSignature: signature(call.ProviderData)}
 		parts = append(parts, p)

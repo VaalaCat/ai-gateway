@@ -5,7 +5,7 @@ event: response.in_progress
 data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_c7ff99a07a4281dcefe4325d","object":"response","status":"in_progress","output":[]}}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_c7ff99a07a4281dcefe4325d0","status":"in_progress"},"output_index":0}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_c7ff99a07a4281dcefe4325d0","status":"in_progress","summary":[]},"output_index":0}
 
 event: response.reasoning_summary_text.delta
 data: {"delta":"Need run a command.","item_id":"rs_c7ff99a07a4281dcefe4325d0","output_index":0,"sequence_number":3,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
@@ -26,7 +26,7 @@ event: response.output_item.done
 data: {"item":{"content":[{"text":"Need run a command.","type":"reasoning_text"}],"encrypted_content":"llmkit:v1:eyJwcm90b2NvbCI6Im9wZW5haV9jaGF0IiwiZGF0YSI6eyJyZWFzb25pbmdfY29udGVudCI6Ik5lZWQgcnVuIGEgY29tbWFuZC4ifX0","id":"rs_c7ff99a07a4281dcefe4325d0","status":"completed","summary":[{"text":"Need run a command.","type":"summary_text"}],"type":"reasoning"},"output_index":0,"sequence_number":8,"type":"response.output_item.done"}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":9,"item":{"type":"function_call","id":"fc_call_deepseek_1","status":"in_progress","call_id":"call_deepseek_1","name":"exec_command"},"output_index":1}
+data: {"type":"response.output_item.added","sequence_number":9,"item":{"type":"function_call","id":"fc_call_deepseek_1","status":"in_progress","call_id":"call_deepseek_1","name":"exec_command","arguments":""},"output_index":1}
 
 event: response.function_call_arguments.delta
 data: {"delta":"{\"cmd\":","item_id":"fc_call_deepseek_1","output_index":1,"sequence_number":10,"type":"response.function_call_arguments.delta"}

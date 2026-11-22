@@ -387,7 +387,10 @@ func (c *handler) encodeNonStream(events <-chan ir.Event, w http.ResponseWriter)
 			if !exists {
 				index = len(toolCalls)
 				toolIndexes[ev.ToolCall.CallID] = index
-				toolCalls = append(toolCalls, oaiToolCall{ID: ev.ToolCall.CallID, Type: "function", Index: index})
+				toolCalls = append(toolCalls, oaiToolCall{
+					ID: ev.ToolCall.CallID, Type: "function", Index: index,
+					ExtraContent: convert.GeminiToolCallChatExtra(ev.ToolCall.CallID),
+				})
 			}
 			call := &toolCalls[index]
 			if ev.ToolCall.Name != "" {
@@ -612,9 +615,10 @@ func (c *handler) encodeStream(events <-chan ir.Event, w http.ResponseWriter) er
 						Delta: &oaiRespDelta{
 							ToolCalls: []oaiToolCall{
 								{
-									Index: idx,
-									ID:    callID,
-									Type:  string(ir.ContentTypeFunction),
+									Index:        idx,
+									ID:           callID,
+									Type:         string(ir.ContentTypeFunction),
+									ExtraContent: convert.GeminiToolCallChatExtra(callID),
 									Function: oaiToolFunction{
 										Name:      ev.ToolCall.Name,
 										Arguments: "",

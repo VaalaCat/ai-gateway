@@ -34,3 +34,9 @@ func TestValidateToolCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateGeminiGenerationRules(t *testing.T) {
+	for _, rule := range []string{`{"model_pattern":"["}`, `{}`, `{"model_pattern":""}`, `{"model_pattern":"^m","mode":"other"}`, `{"model_pattern":"^m","mode":"budget","mappings":[{"from":"xhigh","to":"HIGH"}]}`, `{"model_pattern":"^m","mode":"level","mappings":[{"from":"high","to":"HIGH"},{"from":"HIGH","to":"LOW"}]}`} {
+		require.ErrorContains(t, ValidateModelCompatibility(`{"model_gemini_generation":[`+rule+`]}`), "model_gemini_generation")
+	}
+}

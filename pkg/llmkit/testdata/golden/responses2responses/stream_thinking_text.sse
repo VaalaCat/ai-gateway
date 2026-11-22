@@ -5,7 +5,7 @@ event: response.in_progress
 data: {"type":"response.in_progress","response":{"id":"resp_04","object":"response","created_at":1700000000,"status":"in_progress","output":[]},"sequence_number":1}
 
 event: response.output_item.added
-data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_01","status":"in_progress"},"output_index":0}
+data: {"type":"response.output_item.added","sequence_number":2,"item":{"type":"reasoning","id":"rs_01","status":"in_progress","summary":[]},"output_index":0}
 
 event: response.output_item.done
 data: {"item":{"content":[],"id":"rs_01","status":"completed","summary":[{"text":"The user is asking for a joke.","type":"summary_text"}],"type":"reasoning"},"output_index":0,"sequence_number":3,"type":"response.output_item.done"}

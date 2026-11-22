@@ -124,6 +124,30 @@ type respOutputItem struct {
 	ProviderData     *ir.ProviderData   `json:"provider_data,omitempty"`
 }
 
+func (item respOutputItem) MarshalJSON() ([]byte, error) {
+	type wireItem respOutputItem
+	// Clients need these fields to decode output_item.added before any deltas.
+	switch {
+	case item.Type == "message" && len(item.Content) == 0:
+		return json.Marshal(struct {
+			wireItem
+			Content []respContentBlock `json:"content"`
+		}{wireItem(item), []respContentBlock{}})
+	case item.Type == "reasoning" && len(item.Summary) == 0:
+		return json.Marshal(struct {
+			wireItem
+			Summary []respContentBlock `json:"summary"`
+		}{wireItem(item), []respContentBlock{}})
+	case item.Type == "function_call" && item.Arguments == "":
+		return json.Marshal(struct {
+			wireItem
+			Arguments string `json:"arguments"`
+		}{wireItem(item), item.Arguments})
+	default:
+		return json.Marshal(wireItem(item))
+	}
+}
+
 // respFunctionCallOutputInput represents a function_call_output input item.
 type respFunctionCallOutputInput struct {
 	Type   string `json:"type"` // "function_call_output"

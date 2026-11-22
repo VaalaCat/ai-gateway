@@ -215,12 +215,47 @@ func upstreamToolCall(rawID string, data *ir.ToolCallProviderData, targetProtoco
 	}
 }
 
-// nativeToolCallProviderData 在目标协议就是产生字段的协议时，返回只带字段的 ProviderData 交给编码器写回；否则返回 nil。
+// nativeToolCallProviderData returns the provider fields accepted by the target encoder.
 func nativeToolCallProviderData(data *ir.ToolCallProviderData, targetProtocol ir.Protocol) *ir.ToolCallProviderData {
-	if data.Protocol != targetProtocol || len(data.Fields) == 0 {
+	if data.Protocol == targetProtocol && len(data.Fields) > 0 {
+		return &ir.ToolCallProviderData{Protocol: data.Protocol, Fields: data.Fields}
+	}
+	if data.Protocol == ir.ProtocolOpenAIChat && targetProtocol == ir.ProtocolGemini {
+		var extra googleToolCallExtra
+		if json.Unmarshal(data.Fields["extra_content"], &extra) == nil && hasThoughtSignature(extra.Google.Signature) {
+			return &ir.ToolCallProviderData{
+				Protocol: ir.ProtocolGemini,
+				Fields:   map[string]json.RawMessage{"thoughtSignature": extra.Google.Signature},
+			}
+		}
+	}
+	return nil
+}
+
+type googleToolCallExtra struct {
+	Google struct {
+		Signature json.RawMessage `json:"thought_signature"`
+	} `json:"google"`
+}
+
+// GeminiToolCallChatExtra exposes a native Gemini signature in Google's Chat format.
+// The packed ID still carries the Gemini metadata for clients that replay only standard fields.
+func GeminiToolCallChatExtra(id string) map[string]json.RawMessage {
+	_, data := UnpackToolCallID(id)
+	if data == nil || data.Protocol != ir.ProtocolGemini {
 		return nil
 	}
-	return &ir.ToolCallProviderData{Protocol: data.Protocol, Fields: data.Fields}
+	signature := data.Fields["thoughtSignature"]
+	if !hasThoughtSignature(signature) {
+		return nil
+	}
+	google, _ := json.Marshal(map[string]json.RawMessage{"thought_signature": signature})
+	return map[string]json.RawMessage{"google": google}
+}
+
+func hasThoughtSignature(raw json.RawMessage) bool {
+	var signature string
+	return json.Unmarshal(raw, &signature) == nil && signature != ""
 }
 
 // UnpackToolCallEvents 拆开上游响应事件里的包，并给 ProviderData 追加本层模型名。

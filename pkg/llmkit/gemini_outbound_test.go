@@ -14,6 +14,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCodexResponsesRequestToGemini(t *testing.T) {
+	codec := NewCodec()
+	decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: "POST", Path: "/v1/responses", Body: []byte(`{
+		"model":"gemini-4-argon",
+		"input":"Read the file.",
+		"stream":true,
+		"tool_choice":"auto",
+		"client_metadata":{"x-codex-turn-metadata":"codex"},
+		"generationConfig":{"maxOutputTokens":100},
+		"tools":[
+			{"type":"custom","name":"apply_patch","description":"Apply a patch","format":{"type":"text"}},
+			{"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}
+		]
+	}`)})
+	require.NoError(t, err)
+	var dropped []DroppedTool
+	encoded, err := codec.EncodeRequest(EncodeRequestInput{
+		Request: decoded.Request,
+		Target:  Target{Protocol: ProtocolGemini, Model: "gemini-4-argon"},
+		Options: ConversionOptions{OnDroppedTools: func(tools []DroppedTool) { dropped = tools }},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse", encoded.Path)
+	require.JSONEq(t, `{
+		"contents":[{"role":"user","parts":[{"text":"Read the file."}]}],
+		"generationConfig":{"maxOutputTokens":100},
+		"tools":[{"functionDeclarations":[{"name":"read_file","description":"Read a file","parametersJsonSchema":{"type":"object","properties":{"path":{"type":"string"}}}}]}],
+		"toolConfig":{"functionCallingConfig":{"mode":"AUTO"}}
+	}`, string(encoded.Body))
+	require.Equal(t, []DroppedTool{{Type: "custom", Name: "apply_patch", Reason: convert.DroppedToolReasonCrossProtocolIncompatible}}, dropped)
+}
+
 func TestGeminiClientToolSignatureRoundTrip(t *testing.T) {
 	var upstreamBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -556,6 +588,208 @@ func TestGeminiResponsesToolResultKeepsAssistantTurnTogether(t *testing.T) {
 			require.Equal(t, "user", body.Contents[1].Role)
 			require.Len(t, body.Contents[1].Parts, 1)
 			require.Equal(t, "read", body.Contents[1].Parts[0]["functionResponse"].(map[string]any)["name"])
+		})
+	}
+}
+
+func TestGeminiReplaysGoogleChatToolSignature(t *testing.T) {
+	codec := NewCodec()
+	body := []byte(`{"model":"m","messages":[
+		{"role":"assistant","tool_calls":[{"id":"native-id","type":"function","function":{"name":"read_powershell","arguments":"{}"},"extra_content":{"google":{"thought_signature":"opaque"},"other":{"value":true}}}]},
+		{"role":"tool","tool_call_id":"native-id","content":"done"}]}`)
+	decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: http.MethodPost, Path: "/v1/chat/completions", Body: body})
+	require.NoError(t, err)
+	encoded, err := codec.EncodeRequest(EncodeRequestInput{
+		Request: decoded.Request,
+		Target:  Target{Protocol: ProtocolGemini, Model: "m"},
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"contents":[
+		{"role":"model","parts":[{"functionCall":{"id":"native-id","name":"read_powershell","args":{}},"thoughtSignature":"opaque"}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"native-id","name":"read_powershell","response":{"result":"done"}}}]}]}`, string(encoded.Body))
+}
+
+func TestGeminiChatParallelToolRoundTrip(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "json"
+		if stream {
+			name = "sse"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			codec := NewCodec()
+			target := Target{Protocol: ProtocolGemini, Model: "gemini-4-argon"}
+			initial, err := codec.EncodeRequest(EncodeRequestInput{Target: target})
+			require.NoError(t, err)
+			reply := `{"candidates":[{"content":{"parts":[
+				{"functionCall":{"name":"lookup","id":"vertex-id","args":{"city":"Paris"}},"thoughtSignature":"opaque"},
+				{"functionCall":{"name":"lookup","args":{"city":"London"}}}
+			]},"finishReason":"STOP"}]}`
+			if stream {
+				reply = "data: " + strings.ReplaceAll(reply, "\n", "") + "\n\n"
+			}
+			events, err := codec.DecodeResponse(ctx, DecodeResponseInput{
+				Protocol: ProtocolGemini, State: initial.State, Body: strings.NewReader(reply), Stream: stream,
+			})
+			require.NoError(t, err)
+			chunks, err := codec.EncodeResponse(ctx, EncodeResponseInput{Protocol: ProtocolOpenAIChat, Stream: stream, Events: events})
+			require.NoError(t, err)
+
+			var ids []string
+			var finish string
+			for chunk := range chunks {
+				require.NoError(t, chunk.Err)
+				payload := strings.TrimSpace(string(chunk.Data))
+				if stream {
+					payload = strings.TrimPrefix(payload, "data: ")
+					if payload == "[DONE]" || payload == "" {
+						continue
+					}
+				}
+				type toolCall struct {
+					ID    string `json:"id"`
+					Extra struct {
+						Google struct {
+							Signature string `json:"thought_signature"`
+						} `json:"google"`
+					} `json:"extra_content"`
+				}
+				type message struct {
+					Calls []toolCall `json:"tool_calls"`
+				}
+				var frame struct {
+					Choices []struct {
+						Message message `json:"message"`
+						Delta   message `json:"delta"`
+						Finish  string  `json:"finish_reason"`
+					} `json:"choices"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(payload), &frame))
+				for _, choice := range frame.Choices {
+					if choice.Finish != "" {
+						finish = choice.Finish
+					}
+					for _, call := range append(choice.Message.Calls, choice.Delta.Calls...) {
+						if call.ID == "" {
+							continue
+						}
+						if len(ids) == 0 {
+							require.Equal(t, "opaque", call.Extra.Google.Signature)
+						} else {
+							require.Empty(t, call.Extra.Google.Signature)
+						}
+						ids = append(ids, call.ID)
+					}
+				}
+			}
+			require.Equal(t, "tool_calls", finish)
+			require.Len(t, ids, 2)
+			require.NotEqual(t, ids[0], ids[1])
+
+			// Replay only standard Chat fields with the tool results in completion order.
+			request := Request{Messages: []Message{
+				{Role: RoleAssistant, ToolCalls: []ToolCall{
+					{ID: ids[0], Name: "lookup", Arguments: `{"city":"Paris"}`},
+					{ID: ids[1], Name: "lookup", Arguments: `{"city":"London"}`},
+				}},
+				{Role: RoleTool, ToolCallID: ids[1], Content: []ContentBlock{{Type: ContentTypeText, Text: `["London",9007199254740993]`}}},
+				{Role: RoleTool, ToolCallID: ids[0], Content: []ContentBlock{{Type: ContentTypeText, Text: `{"city":"Paris","id":9007199254740993}`}}},
+			}}
+			next, err := codec.EncodeRequest(EncodeRequestInput{Request: request, Target: target})
+			require.NoError(t, err)
+			require.JSONEq(t, `{"contents":[
+				{"role":"model","parts":[
+					{"functionCall":{"name":"lookup","id":"vertex-id","args":{"city":"Paris"}},"thoughtSignature":"opaque"},
+					{"functionCall":{"name":"lookup","args":{"city":"London"}}}]},
+				{"role":"user","parts":[
+					{"functionResponse":{"name":"lookup","id":"vertex-id","response":{"city":"Paris","id":9007199254740993}}},
+					{"functionResponse":{"name":"lookup","response":{"result":["London",9007199254740993]}}}]}]}`, string(next.Body))
+			require.Equal(t, 2, strings.Count(string(next.Body), "9007199254740993"))
+		})
+	}
+}
+
+func TestGeminiChatGenerationExtensions(t *testing.T) {
+	codec := NewCodec()
+	for _, tc := range []struct {
+		name, model, fields, generation string
+		wantError                       bool
+	}{
+		{"Neon disabled", "models/gemini-4-neon", `"reasoning_effort":"none"`, `{"thinkingConfig":{"thinkingBudget":0}}`, false},
+		{"new variant", "gemini-4-future-preview", `"reasoning_effort":"xhigh","n":1,"presence_penalty":0`, `{"thinkingConfig":{"thinkingLevel":"xhigh"},"presencePenalty":0}`, false},
+		{"earlier model", "gemini-2.5-flash", `"reasoning_effort":"none","n":1`, `{"thinkingConfig":{"thinkingBudget":0}}`, false},
+		{"multiple native candidates", "gemini-2.5-flash", `"n":1,"generationConfig":{"candidateCount":2}`, "", true},
+		{"protobuf field names", "gemini-4-neon", `"generation_config":{"candidate_count":2}`, "", true},
+		{"effective single candidate", "gemini-2.5-flash", `"n":2,"generationConfig":{"candidateCount":1,"maxOutputTokens":128}`, `{"maxOutputTokens":128}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"messages":[{"role":"user","content":"hi"}],"modelArmorConfig":{"promptTemplateName":"templates/test"},"future_extension":{"value":17},` + tc.fields + `}`
+			decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: "POST", Path: "/v1/chat/completions", Body: []byte(body)})
+			require.NoError(t, err)
+			encoded, err := codec.EncodeRequest(EncodeRequestInput{Request: decoded.Request, Target: Target{Protocol: ProtocolGemini, Model: tc.model}})
+			if tc.wantError {
+				require.ErrorContains(t, err, "one candidate")
+				return
+			}
+			require.NoError(t, err)
+			var wire map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded.Body, &wire))
+			require.JSONEq(t, tc.generation, string(wire["generationConfig"]))
+			require.JSONEq(t, `{"promptTemplateName":"templates/test"}`, string(wire["modelArmorConfig"]))
+			require.JSONEq(t, `{"value":17}`, string(wire["future_extension"]))
+		})
+	}
+}
+
+func TestGeminiToolFallbackAndChoice(t *testing.T) {
+	const fileSearch = `{"type":"file_search","vector_store_ids":["vs_test"]}`
+	const function = `{"type":"function","name":"lookup"}`
+	const custom = `{"type":"custom","name":"edit"}`
+	codec := NewCodec()
+	for _, tc := range []struct {
+		name                                           string
+		policy                                         BuiltinToolFallbackPolicy
+		tools, choice, wantTools, wantMode, dropReason string
+		wantError                                      bool
+	}{
+		{"drop optional", BuiltinToolFallbackDrop, fileSearch, `"auto"`, "", "", DroppedToolReasonCrossProtocolIncompatible, false},
+		{"drop required", BuiltinToolFallbackDrop, fileSearch, `"required"`, "", "", "", true},
+		{"another tool satisfies required", BuiltinToolFallbackDrop, fileSearch + "," + function, `"required"`, `[{"functionDeclarations":[{"name":"lookup","description":""}]}]`, "ANY", DroppedToolReasonCrossProtocolIncompatible, false},
+		{"dropped selected tool", BuiltinToolFallbackDrop, custom + "," + function, `{"type":"custom","name":"edit"}`, "", "", "", true},
+		{"preserve raw tool", BuiltinToolFallbackPassthrough, fileSearch, `"auto"`, "[" + fileSearch + "]", "AUTO", "", false},
+		{"error policy", BuiltinToolFallbackError, fileSearch, `"auto"`, "", "", "", true},
+		{"function fallback unsupported", BuiltinToolFallbackFunction, fileSearch, `"none"`, "", "", DroppedToolReasonFunctionFallbackUnsupported, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := `{"input":"hi","tools":[` + tc.tools + `],"tool_choice":` + tc.choice + `}`
+			decoded, err := codec.DecodeRequest(DecodeRequestInput{Method: "POST", Path: "/v1/responses", Body: []byte(request)})
+			require.NoError(t, err)
+			var dropped []DroppedTool
+			encoded, err := codec.EncodeRequest(EncodeRequestInput{
+				Request: decoded.Request, Target: Target{Protocol: ProtocolGemini, Model: "m"},
+				Options: ConversionOptions{BuiltinToolFallback: tc.policy, OnDroppedTools: func(tools []DroppedTool) { dropped = tools }},
+			})
+			if tc.wantError {
+				require.ErrorIs(t, err, convert.ErrBuiltinToolUnsupported)
+				return
+			}
+			require.NoError(t, err)
+			var wire struct {
+				Tools      json.RawMessage
+				ToolConfig struct{ FunctionCallingConfig struct{ Mode string } }
+			}
+			require.NoError(t, json.Unmarshal(encoded.Body, &wire))
+			if tc.wantTools == "" {
+				require.Empty(t, wire.Tools)
+			} else {
+				require.JSONEq(t, tc.wantTools, string(wire.Tools))
+			}
+			require.Equal(t, tc.wantMode, wire.ToolConfig.FunctionCallingConfig.Mode)
+			if tc.dropReason != "" {
+				require.Equal(t, []DroppedTool{{Type: "file_search", Reason: tc.dropReason}}, dropped)
+			} else {
+				require.Empty(t, dropped)
+			}
 		})
 	}
 }

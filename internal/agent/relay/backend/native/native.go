@@ -139,6 +139,15 @@ func (backend *Backend) buildCallOptions(
 	mappedModel string,
 ) llmkit.CallOptions {
 	compatibility := upstream.NewToolCompatibilityRules(attempt.Channel).Match(attempt.RealModel, mappedModel)
+	var generation llmkit.GeminiGenerationConfig
+	if outbound == llmkit.ProtocolGemini && attempt.Channel != nil {
+		rules, err := models.ParseGeminiGenerationRules(attempt.Channel.OtherSettings)
+		if err != nil {
+			zap.L().Warn("invalid Gemini generation rules", zap.Uint("channel_id", attempt.Channel.ID), zap.Error(err))
+		} else {
+			generation = rules.Match(attempt.RealModel, mappedModel)
+		}
+	}
 	policy := llmkit.NormalizeBuiltinToolFallback(config.BuiltinToolFallback)
 	return llmkit.CallOptions{
 		HTTPClient: &attemptHTTPDoer{
@@ -146,6 +155,7 @@ func (backend *Backend) buildCallOptions(
 			attempt: attempt, protocol: outbound, recorder: relay.State.Recorder,
 		},
 		Conversion: llmkit.ConversionOptions{
+			GeminiGeneration:      generation,
 			ToolSignatureFallback: compatibility.SignatureFallback,
 			BuiltinToolFallback:   policy,
 			RequestFields:         config.RequestFieldPermissions,

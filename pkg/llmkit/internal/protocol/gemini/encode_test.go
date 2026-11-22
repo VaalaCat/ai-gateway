@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/convert"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/internal/protocol"
 	"github.com/VaalaCat/ai-gateway/pkg/llmkit/ir"
 	"github.com/stretchr/testify/require"
@@ -55,7 +56,7 @@ func TestEncodeThinkingPermissive(t *testing.T) {
 		{"native conflict preserved", ir.Request{Extras: map[string]any{"generationConfig": map[string]any{"thinkingConfig": map[string]any{"thinkingLevel": "future", "thinkingBudget": -99}}}}, map[string]any{"thinkingLevel": "future", "thinkingBudget": float64(-99)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := encodeRequest(&tc.req, "m")
+			raw, err := encodeRequest(&tc.req, "m", convert.Options{})
 			require.NoError(t, err)
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(raw, &body))
@@ -107,7 +108,7 @@ func TestEncodeImagePositionAndSignature(t *testing.T) {
 
 func TestImageGenerationAndJSONSchema(t *testing.T) {
 	req := &ir.Request{Tools: []ir.Tool{{Type: "image_generation"}}, ResponseFormat: map[string]any{"type": "json_schema", "json_schema": map[string]any{"schema": map[string]any{"type": "object"}}}, Extras: map[string]any{"modalities": []string{"image", "text"}}}
-	raw, err := encodeRequest(req, "m")
+	raw, err := encodeRequest(req, "m", convert.Options{})
 	require.NoError(t, err)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(raw, &body))
@@ -116,4 +117,72 @@ func TestImageGenerationAndJSONSchema(t *testing.T) {
 	require.Equal(t, "application/json", config["responseMimeType"])
 	require.Equal(t, map[string]any{"type": "object"}, config["responseJsonSchema"])
 	require.NotContains(t, body, "tools")
+}
+
+func TestEncodeConfiguredGenerationSettings(t *testing.T) {
+	options := convert.Options{GeminiGeneration: convert.GeminiGenerationConfig{
+		Mode: "level", Mappings: []convert.ThinkingLevelMapping{{From: "none", To: "LOW"}, {From: "minimal", To: "LOW"}, {From: "xhigh", To: "HIGH"}},
+	}}
+	for _, tc := range []struct {
+		name, effort string
+		budget       *int
+		enabled      *bool
+		want         string
+	}{
+		{"remapped effort", "xhigh", nil, nil, "HIGH"},
+		{"minimal effort", "minimal", nil, nil, "LOW"},
+		{"disabled", "", nil, ptr(false), "LOW"},
+		{"future effort", "future", nil, nil, "FUTURE"},
+		{"zero budget", "", ptr(0), nil, "LOW"},
+		{"positive budget", "", ptr(512), nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := encodeRequest(&ir.Request{
+				N: 1, ThinkingBudget: tc.budget, ThinkingEnabled: tc.enabled,
+				ReasoningEffort: tc.effort, IncludeThoughts: ptr(true),
+				FrequencyPenalty: ptr(0.0), PresencePenalty: ptr(0.0),
+			}, "custom-endpoint", options)
+			require.NoError(t, err)
+			var payload struct {
+				GenerationConfig map[string]any `json:"generationConfig"`
+			}
+			require.NoError(t, json.Unmarshal(body, &payload))
+			require.NotContains(t, payload.GenerationConfig, "candidateCount")
+			require.Equal(t, float64(0), payload.GenerationConfig["frequencyPenalty"])
+			require.Equal(t, float64(0), payload.GenerationConfig["presencePenalty"])
+			thinking := payload.GenerationConfig["thinkingConfig"].(map[string]any)
+			require.NotContains(t, thinking, "thinkingBudget")
+			require.Equal(t, true, thinking["includeThoughts"])
+			if tc.want == "" {
+				require.NotContains(t, thinking, "thinkingLevel")
+			} else {
+				require.Equal(t, tc.want, thinking["thinkingLevel"])
+			}
+		})
+	}
+	_, err := encodeRequest(&ir.Request{N: 2}, "gemini-4-argon", convert.Options{})
+	require.ErrorContains(t, err, "supports one candidate")
+}
+
+func TestEncodeUnconfiguredModelGenerationConfig(t *testing.T) {
+	for _, model := range []string{"gemini-3.1-pro", "gemini-4-argon", "gemini-4-carbon", "gemini-5-new-model", "custom-4.1-carbon"} {
+		t.Run(model, func(t *testing.T) {
+			raw, err := encodeRequest(&ir.Request{
+				N: 1, ThinkingBudget: ptr(32), FrequencyPenalty: ptr(0.5), PresencePenalty: ptr(0.25),
+			}, model, convert.Options{})
+			require.NoError(t, err)
+			var body struct {
+				GenerationConfig json.RawMessage `json:"generationConfig"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &body))
+			require.JSONEq(t, `{"frequencyPenalty":0.5,"presencePenalty":0.25,"thinkingConfig":{"thinkingBudget":32}}`, string(body.GenerationConfig))
+		})
+	}
+}
+
+func TestThinkingBudgetMapping(t *testing.T) {
+	cfg := generationCapabilities{Mode: "budget", Mappings: []convert.ThinkingLevelMapping{{From: "high", To: "2048"}}}
+	require.Equal(t, 2048, cfg.thinkingConfig(&ir.Request{ReasoningEffort: "HIGH"})["thinkingBudget"])
+	require.Equal(t, 64, cfg.thinkingConfig(&ir.Request{ReasoningEffort: "HIGH", ThinkingBudget: ptr(64)})["thinkingBudget"])
+	require.Empty(t, cfg.thinkingConfig(&ir.Request{}))
 }
