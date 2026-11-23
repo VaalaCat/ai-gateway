@@ -41,6 +41,7 @@ export interface LegacyChannelFormProps {
   showStatus?: boolean;
   nameReadOnlyInEdit?: boolean;
   agentId?: string;
+  agentTag?: string;
   channelId?: number;
 }
 
@@ -51,6 +52,7 @@ export function LegacyChannelForm({
   showStatus,
   nameReadOnlyInEdit,
   agentId,
+  agentTag,
   channelId,
 }: LegacyChannelFormProps) {
   const t = useTranslations("channels");
@@ -139,6 +141,7 @@ export function LegacyChannelForm({
             endpoints={form.endpoints}
             proxyUrl={form.proxy_url || setting.proxy}
             agentId={agentId}
+            agentTag={agentTag}
             existingModels={form.models ? form.models.split(",").map(s => s.trim()).filter(Boolean) : []}
             onModelsSelected={(models) => setForm({ ...form, models: models.join(",") })}
           />

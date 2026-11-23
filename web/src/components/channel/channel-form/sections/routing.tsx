@@ -24,6 +24,7 @@ export interface RoutingSectionProps {
   form: ChannelForm;
   setForm: (next: ChannelForm) => void;
   agentId?: string;
+  agentTag?: string;
   useModelsCatalog?: () => { data: string[] | undefined };
   hiddenFields?: ReadonlySet<keyof ChannelForm>;
   showStatus?: boolean;
@@ -38,6 +39,7 @@ export function RoutingSection({
   form,
   setForm,
   agentId,
+  agentTag,
   useModelsCatalog,
   hiddenFields,
   showStatus,
@@ -81,7 +83,7 @@ export function RoutingSection({
           {useModelsCatalog ? (
             <CatalogModelsListBlock form={form} setForm={setForm} useModelsCatalog={useModelsCatalog} />
           ) : (
-            <AdminModelsListBlock form={form} setForm={setForm} agentId={agentId} />
+            <AdminModelsListBlock form={form} setForm={setForm} agentId={agentId} agentTag={agentTag} />
           )}
         </AccordionContent>
       </AccordionItem>
@@ -183,9 +185,10 @@ interface AdminModelsListBlockProps {
   form: ChannelForm;
   setForm: (next: ChannelForm) => void;
   agentId?: string;
+  agentTag?: string;
 }
 
-function AdminModelsListBlock({ form, setForm, agentId }: AdminModelsListBlockProps) {
+function AdminModelsListBlock({ form, setForm, agentId, agentTag }: AdminModelsListBlockProps) {
   const t = useTranslations("channels");
   const setting = parseSetting(form.setting);
 
@@ -200,6 +203,7 @@ function AdminModelsListBlock({ form, setForm, agentId }: AdminModelsListBlockPr
           endpoints={form.endpoints}
           proxyUrl={form.proxy_url || setting.proxy}
           agentId={agentId}
+          agentTag={agentTag}
           existingModels={splitModels(form.models)}
           onModelsSelected={(models) => setForm({ ...form, models: models.join(",") })}
         />

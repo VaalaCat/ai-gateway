@@ -109,6 +109,7 @@ type FetchModelsRequest struct {
 	Endpoints string `json:"endpoints"`
 	ProxyURL  string `json:"proxy_url"`
 	AgentID   string `json:"agent_id"`
+	AgentTag  string `json:"agent_tag"`
 }
 
 type TestRequest struct {

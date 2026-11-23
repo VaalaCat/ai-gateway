@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	newAPIConstant "github.com/QuantumNous/new-api/constant"
@@ -13,11 +15,22 @@ import (
 	"github.com/VaalaCat/ai-gateway/internal/agent/relay/protocolconfig"
 	"github.com/VaalaCat/ai-gateway/internal/consts"
 	"github.com/VaalaCat/ai-gateway/internal/dao"
+	"github.com/VaalaCat/ai-gateway/internal/master/api"
+	"github.com/VaalaCat/ai-gateway/internal/models"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/app"
 	"github.com/VaalaCat/ai-gateway/internal/pkg/httputil"
 )
 
+// embeddedAgentID is the agent running inside the master process (see
+// master.embeddedAgentID). Calls targeting it never leave the process.
+const embeddedAgentID = "embedded"
+
 func (h *Handler) FetchModels(c *app.Context, req FetchModelsRequest) (FetchModelsResponse, error) {
+	tag := strings.TrimSpace(req.AgentTag)
+	if req.AgentID != "" && tag != "" {
+		return FetchModelsResponse{}, api.BadRequestError("agent_id and agent_tag must be set exactly one", nil)
+	}
+
 	baseURL := req.BaseURL
 	if baseURL == "" {
 		if req.Type > 0 && req.Type < len(newAPIConstant.ChannelBaseURLs) {
@@ -35,12 +48,29 @@ func (h *Handler) FetchModels(c *app.Context, req FetchModelsRequest) (FetchMode
 	}
 	resolved := httputil.ResolveProxyURL(req.ProxyURL, dbProxy, c.Settings.Master.ProxyURL)
 
-	// Route to remote agent via WS RPC
-	if req.AgentID != "" && req.AgentID != "embedded" {
+	// agent_id names the fetching agent. A channel routed by tag sends agent_tag
+	// instead, which has to be resolved to a member of that tag first.
+	agentID := req.AgentID
+	if agentID == "" && tag != "" {
 		if h.Hub == nil {
 			return FetchModelsResponse{Models: []string{}, Error: "hub not available"}, nil
 		}
-		if !h.Hub.IsOnline(req.AgentID) {
+		agents, err := dao.NewAdminQuery(dao.NewContextWithContext(c.App, c.RequestContext())).Agent().ListActive("")
+		if err != nil {
+			return FetchModelsResponse{}, api.InternalError("list tagged agents failed", err)
+		}
+		agentID, err = pickTaggedAgent(agents, tag, h.Hub.IsOnline)
+		if err != nil {
+			return FetchModelsResponse{Models: []string{}, Error: err.Error()}, nil
+		}
+	}
+
+	// Route to remote agent via WS RPC
+	if agentID != "" && agentID != embeddedAgentID {
+		if h.Hub == nil {
+			return FetchModelsResponse{Models: []string{}, Error: "hub not available"}, nil
+		}
+		if !h.Hub.IsOnline(agentID) {
 			return FetchModelsResponse{Models: []string{}, Error: "agent not connected"}, nil
 		}
 		params := map[string]any{
@@ -50,7 +80,7 @@ func (h *Handler) FetchModels(c *app.Context, req FetchModelsRequest) (FetchMode
 			"endpoints": req.Endpoints,
 			"proxy_url": resolved,
 		}
-		result, err := h.Hub.Call(req.AgentID, consts.RPCChannelFetchModels, params, 20*time.Second)
+		result, err := h.Hub.Call(agentID, consts.RPCChannelFetchModels, params, 20*time.Second)
 		if err != nil {
 			return FetchModelsResponse{Models: []string{}, Error: fmt.Sprintf("agent rpc failed: %v", err)}, nil
 		}
@@ -63,6 +93,50 @@ func (h *Handler) FetchModels(c *app.Context, req FetchModelsRequest) (FetchMode
 
 	// Local execution
 	return doFetchModels(req.Type, baseURL, req.Key, req.Endpoints, resolved)
+}
+
+// pickTaggedAgent returns the agent that serves a call for a tag-targeted route;
+// empty means the master serves it itself. agents are the enabled agents.
+//
+// It mirrors relay routing (see exec.attemptRouteBuilder.targetsForAgentTag): the
+// embedded agent runs the call in-process when it carries the tag, otherwise an
+// online member serves it. A tag that cannot be served is an error rather than an
+// empty result, because the local path bypasses agent routing and would reach the
+// upstream from the master's own network.
+func pickTaggedAgent(agents []models.Agent, tag string, online func(string) bool) (string, error) {
+	onlineIDs := make([]string, 0, len(agents))
+	members := 0
+	for _, agent := range agents {
+		if !hasTag(agent.Tags, tag) {
+			continue
+		}
+		members++
+		if agent.AgentID == embeddedAgentID {
+			return "", nil
+		}
+		if online(agent.AgentID) {
+			onlineIDs = append(onlineIDs, agent.AgentID)
+		}
+	}
+	switch {
+	case members == 0:
+		return "", fmt.Errorf("agent tag %q matches no enabled agent", tag)
+	case len(onlineIDs) == 0:
+		return "", fmt.Errorf("agent tag %q has no online agent", tag)
+	}
+	// Prefer a stable member so repeated calls for one channel behave alike.
+	sort.Strings(onlineIDs)
+	return onlineIDs[0], nil
+}
+
+// hasTag reports whether a comma-separated tag list carries tag as a whole member.
+func hasTag(tags, tag string) bool {
+	for member := range strings.SplitSeq(tags, ",") {
+		if strings.TrimSpace(member) == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // doFetchModels performs the actual HTTP call to fetch models from upstream.

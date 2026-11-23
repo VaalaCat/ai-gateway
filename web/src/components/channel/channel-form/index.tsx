@@ -27,6 +27,7 @@ export interface ChannelFormProps<Entity = unknown> {
   mode: ChannelFormMode;
   adapter: ChannelFormAdapter<Entity>;
   agentId?: string;
+  agentTag?: string;
 }
 
 const STAGES: ReadonlyArray<{ id: SectionId; titleKey: string; descKey: string }> = [
@@ -40,7 +41,7 @@ const STAGES: ReadonlyArray<{ id: SectionId; titleKey: string; descKey: string }
   { id: "usage", titleKey: "stageUsage", descKey: "stageUsageDesc" },
 ];
 
-export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps<Entity>) {
+export function ChannelForm<Entity>({ mode, adapter, agentId, agentTag }: ChannelFormProps<Entity>) {
   const t = useTranslations("channels");
   const router = useRouter();
   const { data: channelTypes = [] } = adapter.useTypes();
@@ -74,7 +75,7 @@ export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps
         <Alert><AlertDescription>{t("upstreamAuthLegacyWarning")}</AlertDescription></Alert>
         <div className="overflow-hidden rounded-lg border bg-background shadow-sm">
           <div className="p-6">
-            <LegacyChannelForm form={state.form} setForm={state.setForm} channelTypes={channelTypes} showStatus={mode.kind === "edit"} nameReadOnlyInEdit={mode.kind === "edit" && adapter.nameReadOnlyInEdit} agentId={agentId} channelId={mode.kind === "edit" ? mode.id : undefined} />
+            <LegacyChannelForm form={state.form} setForm={state.setForm} channelTypes={channelTypes} showStatus={mode.kind === "edit"} nameReadOnlyInEdit={mode.kind === "edit" && adapter.nameReadOnlyInEdit} agentId={agentId} agentTag={agentTag} channelId={mode.kind === "edit" ? mode.id : undefined} />
           </div>
         </div>
         <SaveBar isDirty={state.isDirty} dirtyFieldCount={state.dirtyFieldCount} saving={state.saving} onSave={state.submit} onCancel={state.cancel} />
@@ -88,7 +89,7 @@ export function ChannelForm<Entity>({ mode, adapter, agentId }: ChannelFormProps
       case "meta":
         return <MetaSection<Entity> form={state.form} setForm={state.setForm} channelTypes={channelTypes} hiddenFields={adapter.hiddenFields} nameReadOnlyInEdit={mode.kind === "edit" && adapter.nameReadOnlyInEdit} keyFieldHelpText={adapter.keyFieldHelpText} entity={state.entity} />;
       case "routing":
-        return <RoutingSection form={state.form} setForm={state.setForm} agentId={agentId} useModelsCatalog={adapter.useModelsCatalog} hiddenFields={adapter.hiddenFields} showStatus={mode.kind === "edit"} channelId={channelId} />;
+        return <RoutingSection form={state.form} setForm={state.setForm} agentId={agentId} agentTag={agentTag} useModelsCatalog={adapter.useModelsCatalog} hiddenFields={adapter.hiddenFields} showStatus={mode.kind === "edit"} channelId={channelId} />;
       case "affinity":
         return <AffinitySection form={state.form} setForm={state.setForm} />;
       case "processing":
