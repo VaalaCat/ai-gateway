@@ -36,11 +36,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { agentIdForTarget, defaultAgentRouteTarget } from "@/components/agent-route-target";
 import { ModelName } from "@/components/business/model-name";
 import { API_TYPES } from "@/lib/constants";
 import { useDebounce } from "@/hooks/use-debounce";
 import type { ChannelTestResponse } from "@/lib/types";
 import { useAgentRoutes } from "@/lib/api/agent-routes";
+import { useOnlineAgents } from "@/lib/api/agents";
 import { OnlineAgentSelect } from "@/components/business/online-agent-select";
 
 type TestStatus = "pending" | "testing" | "success" | "failed";
@@ -128,7 +130,15 @@ export function ChannelTestDialog({
     { source_type: "channel", source_id: channelLike.id },
     { enabled: agentSourceType === "channel" },
   );
-  const defaultAgentId = (channelRoutes?.data ?? []).find(r => !r.model)?.agent_id;
+  // 兜底规则指向标签时没有唯一的 agent,按在线成员换算成选择器里的一项。
+  // BYOK 用户无权访问 /admin/agents/online,用 enabled 守卫避免 401;弹窗关闭时也不必轮询。
+  const { data: onlineAgents } = useOnlineAgents({
+    enabled: open && agentSourceType === "channel",
+  });
+  const defaultAgentId = agentIdForTarget(
+    defaultAgentRouteTarget(channelRoutes?.data),
+    onlineAgents,
+  );
   useEffect(() => {
     if (defaultAgentId && !agentId) {
       setAgentId(defaultAgentId);

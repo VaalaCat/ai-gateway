@@ -26,6 +26,7 @@ interface FetchModelsButtonProps {
   endpoints?: string;
   proxyUrl?: string;
   agentId?: string;
+  agentTag?: string;
   existingModels: string[];
   onModelsSelected: (models: string[]) => void;
 }
@@ -37,6 +38,7 @@ export function FetchModelsButton({
   endpoints,
   proxyUrl,
   agentId,
+  agentTag,
   existingModels,
   onModelsSelected,
 }: FetchModelsButtonProps) {
@@ -84,6 +86,7 @@ export function FetchModelsButton({
         endpoints,
         proxy_url: proxyUrl,
         agent_id: agentId,
+        agent_tag: agentTag,
       });
       if (result.error) {
         toast.error(result.error);

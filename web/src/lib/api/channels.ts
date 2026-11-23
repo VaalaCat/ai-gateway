@@ -63,7 +63,7 @@ export function useBatchEditChannels() {
 
 export function useFetchUpstreamModels() {
   return useMutation({
-    mutationFn: (body: { base_url: string; key: string; type: number; endpoints?: string; proxy_url?: string; agent_id?: string }) =>
+    mutationFn: (body: { base_url: string; key: string; type: number; endpoints?: string; proxy_url?: string; agent_id?: string; agent_tag?: string }) =>
       api.post<{ models: string[]; error?: string }>("/admin/channels/fetch-models", body),
   });
 }

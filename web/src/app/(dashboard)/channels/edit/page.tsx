@@ -8,6 +8,7 @@ import { PageLayout } from "@/components/layout/page-layout";
 import { PageLayoutSkeleton } from "@/components/layout/page-layout-skeleton";
 import { ChannelForm } from "@/components/channel/channel-form";
 import { adminChannelAdapter } from "@/components/channel/channel-form/adapters/admin";
+import { defaultAgentRouteTarget } from "@/components/agent-route-target";
 import { useAgentRoutes } from "@/lib/api/agent-routes";
 
 function EditChannelPageSkeleton() {
@@ -41,9 +42,7 @@ function EditChannelContent() {
   const { data: agentRoutes } = useAgentRoutes(
     idValid ? { source_type: "channel" as const, source_id: id } : {}
   );
-  const defaultAgentId = idValid
-    ? (agentRoutes?.data ?? []).find((r) => !r.model)?.agent_id
-    : undefined;
+  const routeTarget = defaultAgentRouteTarget(idValid ? agentRoutes?.data : undefined);
 
   useEffect(() => {
     if (!idValid) {
@@ -75,7 +74,8 @@ function EditChannelContent() {
       <ChannelForm
         mode={{ kind: "edit", id }}
         adapter={adminChannelAdapter}
-        agentId={defaultAgentId}
+        agentId={routeTarget.agentId}
+        agentTag={routeTarget.agentTag}
       />
     </PageLayout>
   );
